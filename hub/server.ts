@@ -1,0 +1,402 @@
+/**
+ * HTTP listener for the target hub: JSON API + the UI's static page.
+ *
+ * Routes:
+ *   GET    /health                                   → liveness
+ *   GET    /api/workflows                             → list (with progress %)
+ *   POST   /api/workflows                             → create (admin token) — makes the awb hook too
+ *   GET    /api/workflows/:id                          → detail + steps
+ *   GET    /api/workflows/:id/transcript                → harness + live conversation of the current/last session
+ *   DELETE /api/workflows/:id                          → remove (admin token)
+ *   POST   /api/workflows/:id/steps                    → add a step (admin token)
+ *   PATCH  /api/workflows/:id/steps/:stepId             → edit a step's description (admin token)
+ *   DELETE /api/workflows/:id/steps/:stepId             → remove a pending step (admin token)
+ *   POST   /api/workflows/:id/start                    → begin/continue sequential dispatch (admin token)
+ *   POST   /api/workflows/:id/pause                    → stop dispatching further steps (admin token)
+ *   POST   /api/workflows/:id/resume                   → undo pause (admin token)
+ *   POST   /api/workflows/:id/restart                  → reset all steps, start over (admin token)
+ *   POST   /api/steps/:id/result                       → awb's result callback (?token=<per-step token>)
+ *   GET    /                                           → ui/index.html
+ */
+import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as http from "node:http";
+import * as os from "node:os";
+import * as path from "node:path";
+import { hookRuntime, PUBLISHABLE_PERMISSION_MODES, type PublishablePermissionMode } from "./awb.ts";
+import type { HubConfig } from "./config.ts";
+import { getWorkflow, listSteps, listWorkflows, stepProgress, type Step, type Workflow } from "./db.ts";
+import type { Logger } from "./runner.ts";
+import { readTranscript } from "./transcript.ts";
+import {
+	addStep,
+	createWorkflow,
+	editStep,
+	expireStale,
+	onStepResult,
+	pauseWorkflow,
+	removeStep,
+	restartWorkflow,
+	resumeWorkflow,
+	startWorkflow,
+	WorkflowError,
+} from "./workflow.ts";
+import { deleteWorkflow, getStep } from "./db.ts";
+
+const UI_FILE = path.join(import.meta.dirname, "ui", "index.html");
+
+function timingSafeEqualStr(a: string, b: string): boolean {
+	const ab = Buffer.from(a);
+	const bb = Buffer.from(b);
+	if (ab.length !== bb.length) return false;
+	return crypto.timingSafeEqual(ab, bb);
+}
+
+function bearerToken(headers: http.IncomingHttpHeaders): string {
+	return String(headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+}
+
+function isAdmin(cfg: HubConfig, headers: http.IncomingHttpHeaders): boolean {
+	const provided = bearerToken(headers);
+	return provided.length > 0 && timingSafeEqualStr(provided, cfg.adminToken);
+}
+
+function publicWorkflow(workflow: Workflow): Record<string, unknown> {
+	const runtime = hookRuntime(workflow.hookUrl);
+	return {
+		id: workflow.id,
+		name: workflow.name,
+		agentName: workflow.agentName,
+		status: workflow.status,
+		lastSessionId: workflow.lastSessionId,
+		mdPath: workflow.mdPath,
+		workdir: runtime.workdir,
+		harness: runtime.harness,
+		progress: stepProgress(workflow.id),
+		createdAt: workflow.createdAt,
+		updatedAt: workflow.updatedAt,
+	};
+}
+
+function publicStep(step: Step): Record<string, unknown> {
+	return {
+		id: step.id,
+		workflowId: step.workflowId,
+		orderIndex: step.orderIndex,
+		description: step.description,
+		status: step.status,
+		result: step.result,
+		error: step.error,
+		sessionId: step.sessionId,
+		createdAt: step.createdAt,
+		startedAt: step.startedAt,
+		finishedAt: step.finishedAt,
+	};
+}
+
+function sendJson(res: http.ServerResponse, status: number, payload: unknown): void {
+	res.writeHead(status, { "content-type": "application/json" });
+	res.end(JSON.stringify(payload));
+}
+
+function readJsonBody(
+	req: http.IncomingMessage,
+	res: http.ServerResponse,
+	maxBytes: number,
+	onBody: (body: Record<string, unknown>) => void,
+): void {
+	const chunks: Buffer[] = [];
+	let size = 0;
+	let aborted = false;
+	req.on("data", (chunk: Buffer) => {
+		if (aborted) return;
+		size += chunk.length;
+		if (size > maxBytes) {
+			aborted = true;
+			sendJson(res, 413, { error: "payload_too_large" });
+			req.destroy();
+			return;
+		}
+		chunks.push(chunk);
+	});
+	req.on("end", () => {
+		if (aborted) return;
+		try {
+			const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+			if (typeof body !== "object" || body === null) throw new Error("not an object");
+			onBody(body as Record<string, unknown>);
+		} catch {
+			sendJson(res, 400, { error: "invalid_json" });
+		}
+	});
+	req.on("error", () => {
+		if (!aborted) sendJson(res, 400, { error: "bad_request" });
+	});
+}
+
+export function createServer(cfg: HubConfig, log: Logger): http.Server {
+	return http.createServer((req, res) => {
+		try {
+			handleRequest(cfg, log, req, res);
+		} catch (err) {
+			log(`request handler error: ${String(err)}`, "error");
+			if (!res.headersSent) sendJson(res, 400, { error: "bad_request" });
+			else res.end();
+		}
+	});
+}
+
+function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, res: http.ServerResponse): void {
+	const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+	const parts = url.pathname.split("/").filter(Boolean);
+
+	if (req.method === "GET" && url.pathname === "/health") {
+		sendJson(res, 200, { ok: true, workflows: listWorkflows().length });
+		return;
+	}
+
+	if (req.method === "GET" && url.pathname === "/") {
+		try {
+			const html = fs.readFileSync(UI_FILE);
+			res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+			res.end(html);
+		} catch {
+			res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+			res.end("target-hub is running. The web UI isn't built yet — use the API.");
+		}
+		return;
+	}
+
+	if (parts[0] !== "api") {
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
+	// --- /api/steps/:id/result (awb callback; per-step token, no admin) ---
+
+	if (parts[1] === "steps" && parts[2] && parts[3] === "result" && req.method === "POST") {
+		const step = getStep(parts[2]);
+		const token = url.searchParams.get("token") ?? "";
+		if (!step || !token || !timingSafeEqualStr(token, step.callbackToken)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		readJsonBody(req, res, 4 * 1024 * 1024, (body) => {
+			const ok = body.ok === true;
+			const result =
+				body.result == null
+					? undefined
+					: typeof body.result === "string"
+						? body.result
+						: JSON.stringify(body.result);
+			const error = ok
+				? undefined
+				: String(body.error ?? (body.exitCode != null ? `exit ${body.exitCode}` : "run failed"));
+			void onStepResult(
+				step.id,
+				{ ok, result, error, sessionId: typeof body.session_id === "string" ? body.session_id : undefined },
+				cfg,
+				log,
+			);
+			log(`step ${step.id} ${ok ? "done" : `failed (${error})`}`);
+			sendJson(res, 200, { ok: true });
+		});
+		return;
+	}
+
+	if (parts[1] !== "workflows") {
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
+	// --- /api/workflows ---
+
+	if (!parts[2]) {
+		if (req.method === "GET") {
+			expireStale(cfg, log);
+			sendJson(res, 200, { workflows: listWorkflows().map(publicWorkflow) });
+			return;
+		}
+		if (req.method === "POST") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				const name = typeof body.name === "string" ? body.name : "";
+				const workdir =
+					typeof body.workdir === "string" && body.workdir.trim() !== ""
+						? body.workdir.trim().replace(/^~(?=\/|$)/, os.homedir())
+						: undefined;
+				let permissionMode: PublishablePermissionMode | undefined;
+				if (typeof body.permissionMode === "string" && body.permissionMode !== "") {
+					if (!PUBLISHABLE_PERMISSION_MODES.includes(body.permissionMode as PublishablePermissionMode)) {
+						sendJson(res, 400, {
+							error: `invalid permissionMode (allowed: ${PUBLISHABLE_PERMISSION_MODES.join(", ")})`,
+						});
+						return;
+					}
+					// bypassPermissions gives every step of this workflow arbitrary
+					// command execution on this machine; it must be opted into
+					// explicitly, not just selected.
+					if (body.permissionMode === "bypassPermissions" && body.acceptBypassRisk !== true) {
+						sendJson(res, 400, {
+							error:
+								"bypassPermissions disables every permission check for this workflow's steps. Send acceptBypassRisk: true to confirm you want that.",
+						});
+						return;
+					}
+					permissionMode = body.permissionMode as PublishablePermissionMode;
+				}
+				try {
+					const workflow = createWorkflow(name, { workdir, permissionMode });
+					log(`workflow '${workflow.name}' (${workflow.id}) created — agent '${workflow.agentName}'`);
+					sendJson(res, 200, { workflow: publicWorkflow(workflow) });
+				} catch (err) {
+					sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				}
+			});
+			return;
+		}
+	}
+
+	const workflowId = parts[2];
+
+	if (workflowId && !parts[3] && req.method === "GET") {
+		expireStale(cfg, log);
+		const workflow = getWorkflow(workflowId);
+		if (!workflow) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		sendJson(res, 200, { workflow: publicWorkflow(workflow), steps: listSteps(workflowId).map(publicStep) });
+		return;
+	}
+
+	if (workflowId && !parts[3] && req.method === "DELETE") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		if (!deleteWorkflow(workflowId)) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		log(`workflow ${workflowId} deleted`);
+		sendJson(res, 200, { ok: true });
+		return;
+	}
+
+	// --- /api/workflows/:id/transcript ---
+	//
+	// Shows the actual Claude conversation happening inside the workflow's
+	// running/last session — not just each step's final result. Only readable
+	// once a session id exists: the very first step of a fresh (or just
+	// restarted) workflow doesn't have one yet while it's still running,
+	// because awb only reports it in the completion callback.
+
+	if (workflowId && parts[3] === "transcript" && !parts[4] && req.method === "GET") {
+		const workflow = getWorkflow(workflowId);
+		if (!workflow) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		const runtime = hookRuntime(workflow.hookUrl);
+		if (!workflow.lastSessionId || !runtime.workdir) {
+			sendJson(res, 200, {
+				sessionId: workflow.lastSessionId,
+				harness: runtime.harness,
+				entries: [],
+				note:
+					workflow.lastSessionId == null
+						? "No session yet: the id is only known once the first step finishes."
+						: undefined,
+			});
+			return;
+		}
+		sendJson(res, 200, {
+			sessionId: workflow.lastSessionId,
+			harness: runtime.harness,
+			entries: readTranscript(runtime.workdir, workflow.lastSessionId),
+		});
+		return;
+	}
+
+	// --- /api/workflows/:id/steps ---
+
+	if (workflowId && parts[3] === "steps" && !parts[4] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const description = typeof body.description === "string" ? body.description : "";
+			try {
+				const step = addStep(workflowId, description);
+				sendJson(res, 200, { step: publicStep(step) });
+			} catch (err) {
+				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		});
+		return;
+	}
+
+	if (workflowId && parts[3] === "steps" && parts[4] && req.method === "PATCH") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const description = typeof body.description === "string" ? body.description : "";
+			try {
+				const step = editStep(workflowId, parts[4], description);
+				sendJson(res, 200, { step: publicStep(step) });
+			} catch (err) {
+				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		});
+		return;
+	}
+
+	if (workflowId && parts[3] === "steps" && parts[4] && req.method === "DELETE") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		try {
+			removeStep(workflowId, parts[4]);
+			sendJson(res, 200, { ok: true });
+		} catch (err) {
+			sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+		}
+		return;
+	}
+
+	// --- /api/workflows/:id/{start,pause,resume,restart} ---
+
+	if (workflowId && ["start", "pause", "resume", "restart"].includes(parts[3]) && !parts[4] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		const action = parts[3] as "start" | "pause" | "resume" | "restart";
+		(async () => {
+			try {
+				const workflow =
+					action === "start"
+						? await startWorkflow(workflowId, cfg, log)
+						: action === "pause"
+							? pauseWorkflow(workflowId)
+							: action === "resume"
+								? await resumeWorkflow(workflowId, cfg, log)
+								: await restartWorkflow(workflowId, cfg, log);
+				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
+			} catch (err) {
+				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		})();
+		return;
+	}
+
+	sendJson(res, 404, { error: "not_found" });
+}

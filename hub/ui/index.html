@@ -1,0 +1,665 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Target — workflows</title>
+    <style>
+      /* Same palette/typography family as agentmesh's hub UI. */
+      :root{
+        --bg: #0e1416;
+        --surface: #141c1f;
+        --surface-2: #182124;
+        --border: #253034;
+        --text: #e6edee;
+        --muted: #8ea1a6;
+        --faint: #5d7378;
+        --accent: #5ed6a4;
+        --accent-dim: #2f6b54;
+        --warn: #e7b563;
+        --fail: #e77a63;
+        --mono: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      *{ box-sizing: border-box; }
+      body{
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
+        line-height: 1.55;
+      }
+      a{ color: var(--accent); }
+      button{ font-family: var(--mono); cursor: pointer; }
+      button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-visible{
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      .shell{ max-width: 1080px; margin: 0 auto; padding: 2.4rem 1.5rem 4rem; }
+
+      header.hero{ margin-bottom: 2rem; }
+      .eyebrow{
+        font-family: var(--mono);
+        font-size: 0.74rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--accent);
+        display: flex;
+        align-items: center;
+        gap: 0.6em;
+        margin-bottom: 0.5rem;
+      }
+      .eyebrow::before{
+        content: "";
+        width: 6px; height: 6px;
+        background: var(--accent);
+        border-radius: 50%;
+        box-shadow: 0 0 0 3px var(--accent-dim);
+      }
+      h1{
+        font-family: var(--mono);
+        font-size: clamp(1.4rem, 3.5vw, 1.9rem);
+        font-weight: 600;
+        margin: 0 0 0.4rem;
+      }
+      .tagline{ color: var(--muted); margin: 0; max-width: 62ch; }
+
+      .layout{ display: grid; grid-template-columns: 340px 1fr; gap: 1.4rem; align-items: start; }
+      @media (max-width: 860px){ .layout{ grid-template-columns: 1fr; } }
+
+      section.panel{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.1rem 1.2rem 1.3rem;
+      }
+      h2{
+        font-family: var(--mono);
+        font-size: 0.85rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--muted);
+        font-weight: 600;
+        margin: 0 0 0.9rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .wf-list{ display: grid; gap: 0.6rem; margin-bottom: 1rem; }
+      .wf-card{
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.7rem 0.8rem;
+        cursor: pointer;
+      }
+      .wf-card.selected{ border-color: var(--accent); }
+      .wf-card h3{
+        font-family: var(--mono);
+        font-size: 0.9rem;
+        margin: 0 0 0.3rem;
+        color: var(--accent);
+        overflow-wrap: anywhere;
+      }
+      .wf-meta{ font-size: 0.75rem; color: var(--faint); display: flex; gap: 0.6rem; margin-bottom: 0.4rem; }
+      .badge{
+        border-radius: 999px;
+        padding: 0.05rem 0.55rem;
+        font-size: 0.7rem;
+        border: 1px solid var(--border);
+      }
+      .badge.draft{ color: var(--muted); }
+      .badge.running{ color: var(--accent); border-color: var(--accent-dim); }
+      .badge.paused{ color: var(--warn); border-color: var(--warn); }
+      .badge.completed{ color: var(--accent); border-color: var(--accent-dim); }
+      .badge.failed{ color: var(--fail); border-color: var(--fail); }
+
+      .progress-bar{
+        height: 8px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        overflow: hidden;
+        margin: 0.3rem 0;
+      }
+      .progress-fill{ height: 100%; background: var(--accent); transition: width 0.3s ease; }
+      .progress-fill.failed{ background: var(--fail); }
+      .progress-pct{ font-family: var(--mono); font-size: 0.72rem; color: var(--muted); }
+
+      form{ display: grid; gap: 0.6rem; }
+      label{
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: var(--faint);
+      }
+      input[type="text"], input[type="password"], textarea, select{
+        width: 100%;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--text);
+        font-family: var(--sans);
+        font-size: 0.92rem;
+        padding: 0.5rem 0.65rem;
+      }
+      textarea{ min-height: 4.5rem; resize: vertical; }
+
+      .btn{
+        background: none;
+        border: 1px solid var(--accent-dim);
+        border-radius: 6px;
+        color: var(--accent);
+        font-size: 0.78rem;
+        padding: 0.4rem 0.8rem;
+      }
+      .btn:hover{ border-color: var(--accent); }
+      .btn:disabled{ opacity: 0.4; cursor: not-allowed; }
+      .btn.small{ padding: 0.25rem 0.55rem; font-size: 0.72rem; }
+      .btn.danger{ border-color: var(--fail); color: var(--fail); }
+      .btn.warn{ border-color: var(--warn); color: var(--warn); }
+      .btn-row{ display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 0.7rem 0 1rem; }
+
+      .wf-empty, .msg{ font-size: 0.85rem; color: var(--muted); margin: 0.6rem 0; }
+      .msg.error{ color: var(--fail); }
+
+      .detail-head{ display: flex; align-items: baseline; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; }
+      .detail-head h3{ font-family: var(--mono); font-size: 1.05rem; margin: 0; color: var(--text); }
+      .detail-sub{ font-size: 0.76rem; color: var(--faint); font-family: var(--mono); margin: 0.2rem 0 0.8rem; overflow-wrap: anywhere; }
+
+      ol.steps{ list-style: none; margin: 0; padding: 0; display: grid; gap: 0.55rem; }
+      .step{
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.65rem 0.8rem;
+      }
+      .step-head{ display: flex; align-items: baseline; gap: 0.55rem; justify-content: space-between; }
+      .step-idx{ font-family: var(--mono); color: var(--faint); font-size: 0.78rem; flex-shrink: 0; }
+      .step-desc{ flex: 1; font-size: 0.9rem; overflow-wrap: anywhere; }
+      .step-status{ font-family: var(--mono); font-size: 0.72rem; flex-shrink: 0; }
+      .step-status.pending{ color: var(--faint); }
+      .step-status.running{ color: var(--accent); }
+      .step-status.done{ color: var(--accent); }
+      .step-status.failed{ color: var(--fail); }
+      .step-error{ font-size: 0.78rem; color: var(--fail); margin-top: 0.3rem; }
+      .step-actions{ display: flex; gap: 0.4rem; margin-top: 0.4rem; }
+
+      .convo-block{ margin: 1.2rem 0; }
+      .convo-block h2{ margin-bottom: 0.4rem; }
+      .convo-meta{
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        color: var(--faint);
+        margin: 0 0 0.5rem;
+      }
+      .convo-log{
+        max-height: 340px;
+        overflow-y: auto;
+        display: grid;
+        gap: 0.45rem;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.7rem 0.8rem;
+      }
+      .convo-empty{ font-size: 0.82rem; color: var(--faint); }
+      .turn{ font-size: 0.85rem; overflow-wrap: anywhere; white-space: pre-wrap; }
+      .turn .turn-label{
+        font-family: var(--mono);
+        font-size: 0.68rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin-right: 0.4rem;
+      }
+      .turn.prompt{ color: var(--muted); }
+      .turn.prompt .turn-label{ color: var(--muted); }
+      .turn.text{ color: var(--text); }
+      .turn.text .turn-label{ color: var(--accent); }
+      .turn.thinking{ color: var(--faint); font-style: italic; }
+      .turn.tool_use .turn-label{ color: var(--warn); }
+      .turn.tool_result{ color: var(--faint); }
+      .turn.tool_result .turn-label{ color: var(--faint); }
+
+      details.new-wf > summary, details.add-step > summary{
+        cursor: pointer;
+        font-family: var(--mono);
+        font-size: 0.82rem;
+        color: var(--muted);
+        padding: 0.5rem 0;
+      }
+      details[open] > summary{ margin-bottom: 0.5rem; }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div class="eyebrow">Target</div>
+        <h1>Workflows</h1>
+        <p class="tagline">
+          A workflow creates a dedicated agent + hook; its steps are launched as sequential jobs on the same Claude session.
+        </p>
+      </header>
+
+      <div class="layout">
+        <section class="panel" id="wf-list-panel">
+          <h2>Workflow</h2>
+          <div class="wf-list" id="wf-list"></div>
+          <p class="wf-empty" id="wf-list-msg"></p>
+
+          <details class="new-wf">
+            <summary>+ New workflow</summary>
+            <form id="new-wf-form">
+              <div>
+                <label for="new-wf-name">Name</label>
+                <input type="text" id="new-wf-name" required placeholder="e.g. release-notes" />
+              </div>
+              <div>
+                <label for="new-wf-workdir">Working directory ⓘ</label>
+                <input type="text" id="new-wf-workdir"
+                  title="Which folder this workflow's agent will work in — same as a hook's workdir in agentmesh. If left empty, a dedicated sandbox is created at ~/.target/sandboxes/<agent>."
+                  placeholder="~/my-project (default: dedicated sandbox at ~/.target/sandboxes/...)" />
+              </div>
+              <div>
+                <label for="new-wf-perm">Agent permissions ⓘ</label>
+                <select id="new-wf-perm" title="With nothing selected, the agent can answer but can't write files or run commands (safe default). acceptEdits enables writing files inside the workflow's sandbox.">
+                  <option value="">(default) read-only — no writes, no execution</option>
+                  <option value="acceptEdits">acceptEdits — can write files in its sandbox</option>
+                  <option value="auto">auto</option>
+                  <option value="dontAsk">dontAsk</option>
+                  <option value="plan">plan</option>
+                  <option value="bypassPermissions">bypassPermissions — no restrictions at all (risky)</option>
+                </select>
+              </div>
+              <div>
+                <label for="new-wf-token">Admin token ⓘ</label>
+                <input type="password" id="new-wf-token" required autocomplete="off"
+                  placeholder="Printed by the hub on startup (~/.target/config.json)" />
+              </div>
+              <button type="submit" class="btn">Create workflow</button>
+              <p class="msg" id="new-wf-msg"></p>
+            </form>
+          </details>
+        </section>
+
+        <section class="panel" id="detail-panel">
+          <h2>Detail</h2>
+          <div id="detail-empty" class="wf-empty">Pick a workflow on the left, or create a new one.</div>
+          <div id="detail" style="display:none">
+            <div class="detail-head">
+              <h3 id="d-name"></h3>
+              <span class="badge" id="d-badge"></span>
+            </div>
+            <p class="detail-sub" id="d-sub"></p>
+            <div class="progress-bar"><div class="progress-fill" id="d-progress-fill"></div></div>
+            <span class="progress-pct" id="d-progress-pct"></span>
+
+            <div class="btn-row">
+              <button class="btn" id="btn-start">Start</button>
+              <button class="btn warn" id="btn-pause">Pause</button>
+              <button class="btn" id="btn-resume">Resume</button>
+              <button class="btn danger" id="btn-restart">Restart</button>
+            </div>
+            <p class="msg" id="d-action-msg"></p>
+
+            <ol class="steps" id="steps-list"></ol>
+
+            <div class="convo-block">
+              <h2>Conversation</h2>
+              <p class="convo-meta" id="convo-meta"></p>
+              <div class="convo-log" id="convo-log"></div>
+            </div>
+
+            <details class="add-step">
+              <summary>+ Add step</summary>
+              <form id="add-step-form">
+                <div>
+                  <label for="step-desc">Task description for the agent</label>
+                  <textarea id="step-desc" required placeholder="What the agent should do in this step..."></textarea>
+                </div>
+                <button type="submit" class="btn">Add step</button>
+                <p class="msg" id="add-step-msg"></p>
+              </form>
+            </details>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      let selectedId = null;
+      let editingStepId = null;
+
+      function adminToken() {
+        return (localStorage.getItem("targetAdminToken") || "").trim();
+      }
+      function rememberToken(token) {
+        localStorage.setItem("targetAdminToken", token);
+      }
+      function authHeaders() {
+        return { authorization: `Bearer ${adminToken()}` };
+      }
+
+      function badgeClass(status) {
+        return `badge ${status}`;
+      }
+
+      function renderWorkflowList(workflows) {
+        const list = $("wf-list");
+        const msg = $("wf-list-msg");
+        list.innerHTML = "";
+        if (workflows.length === 0) {
+          msg.textContent = "No workflows yet. Create one below.";
+          return;
+        }
+        msg.textContent = "";
+        for (const w of workflows) {
+          const card = document.createElement("div");
+          card.className = "wf-card" + (w.id === selectedId ? " selected" : "");
+          card.innerHTML = `
+            <h3>${escapeHtml(w.name)}</h3>
+            <div class="wf-meta">
+              <span class="${badgeClass(w.status)}">${w.status}</span>
+              <span>${w.progress.done}/${w.progress.total} steps</span>
+            </div>
+            <div class="progress-bar"><div class="progress-fill${w.progress.failed ? " failed" : ""}" style="width:${w.progress.pct}%"></div></div>
+            <span class="progress-pct">${w.progress.pct}%</span>
+          `;
+          card.addEventListener("click", () => selectWorkflow(w.id));
+          list.appendChild(card);
+        }
+      }
+
+      function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+      }
+
+      async function loadWorkflows() {
+        try {
+          const res = await fetch("/api/workflows");
+          const { workflows } = await res.json();
+          renderWorkflowList(workflows);
+        } catch (err) {
+          $("wf-list-msg").textContent = `Could not load the list: ${err}`;
+        }
+      }
+
+      function renderStep(step) {
+        const editable = step.status !== "running";
+        const li = document.createElement("li");
+        li.className = "step";
+        if (editingStepId === step.id) {
+          li.innerHTML = `
+            <div class="step-head">
+              <span class="step-idx">#${step.orderIndex + 1}</span>
+              <span class="step-status ${step.status}">${step.status}</span>
+            </div>
+            <textarea id="edit-desc-${step.id}">${escapeHtml(step.description)}</textarea>
+            <div class="step-actions">
+              <button class="btn small" data-save="${step.id}">Save</button>
+              <button class="btn small" data-cancel="${step.id}">Cancel</button>
+            </div>
+          `;
+        } else {
+          li.innerHTML = `
+            <div class="step-head">
+              <span class="step-idx">#${step.orderIndex + 1}</span>
+              <span class="step-desc">${escapeHtml(step.description)}</span>
+              <span class="step-status ${step.status}">${step.status}</span>
+            </div>
+            ${step.error ? `<div class="step-error">${escapeHtml(step.error)}</div>` : ""}
+            <div class="step-actions">
+              <button class="btn small" data-edit="${step.id}" ${editable ? "" : "disabled"}>Edit</button>
+              <button class="btn small danger" data-remove="${step.id}" ${step.status === "pending" ? "" : "disabled"}>Remove</button>
+            </div>
+          `;
+        }
+        return li;
+      }
+
+      function turnLabel(entry) {
+        return { prompt: "Prompt", thinking: "Thinking", text: "Agent", tool_use: `→ ${entry.name}`, tool_result: "← result" }[entry.kind];
+      }
+
+      function renderTranscript(data) {
+        $("convo-meta").textContent = `harness: ${data.harness ?? "?"} · session: ${data.sessionId ?? "(none yet)"}`;
+        const log = $("convo-log");
+        if (data.note) {
+          log.innerHTML = `<p class="convo-empty">${escapeHtml(data.note)}</p>`;
+          return;
+        }
+        if (!data.entries || data.entries.length === 0) {
+          log.innerHTML = `<p class="convo-empty">No activity yet.</p>`;
+          return;
+        }
+        const wasAtBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
+        log.innerHTML = data.entries
+          .map((entry) => {
+            if (entry.kind === "thinking") {
+              return `<div class="turn thinking"><span class="turn-label">${turnLabel(entry)}</span>…</div>`;
+            }
+            const text = entry.kind === "tool_use" || entry.kind === "tool_result" ? entry.summary : entry.text;
+            return `<div class="turn ${entry.kind}"><span class="turn-label">${turnLabel(entry)}</span>${escapeHtml(text || "")}</div>`;
+          })
+          .join("");
+        if (wasAtBottom) log.scrollTop = log.scrollHeight;
+      }
+
+      async function loadTranscript(workflowId) {
+        try {
+          const res = await fetch(`/api/workflows/${workflowId}/transcript`);
+          if (!res.ok) return;
+          renderTranscript(await res.json());
+        } catch {
+          // Best-effort — the steps list already reflects real status either way.
+        }
+      }
+
+      function renderDetail(workflow, steps) {
+        $("detail-empty").style.display = "none";
+        $("detail").style.display = "block";
+        $("d-name").textContent = workflow.name;
+        $("d-badge").className = badgeClass(workflow.status);
+        $("d-badge").textContent = workflow.status;
+        $("d-sub").textContent = `${workflow.id} · agent ${workflow.agentName} · workdir ${workflow.workdir ?? "(unknown)"} · ${workflow.mdPath}`;
+        $("d-progress-fill").className = "progress-fill" + (workflow.progress.failed ? " failed" : "");
+        $("d-progress-fill").style.width = `${workflow.progress.pct}%`;
+        $("d-progress-pct").textContent = `${workflow.progress.done}/${workflow.progress.total} steps — ${workflow.progress.pct}%`;
+
+        $("btn-start").disabled = !(workflow.status === "draft" || workflow.status === "paused");
+        $("btn-pause").disabled = workflow.status !== "running";
+        $("btn-resume").disabled = workflow.status !== "paused";
+        $("btn-restart").disabled = workflow.status === "running";
+
+        const list = $("steps-list");
+        list.innerHTML = "";
+        for (const step of steps) list.appendChild(renderStep(step));
+
+        list.querySelectorAll("[data-edit]").forEach((btn) =>
+          btn.addEventListener("click", () => {
+            editingStepId = btn.getAttribute("data-edit");
+            renderDetail(workflow, steps);
+          }),
+        );
+        list.querySelectorAll("[data-cancel]").forEach((btn) =>
+          btn.addEventListener("click", () => {
+            editingStepId = null;
+            renderDetail(workflow, steps);
+          }),
+        );
+        list.querySelectorAll("[data-save]").forEach((btn) =>
+          btn.addEventListener("click", async () => {
+            const stepId = btn.getAttribute("data-save");
+            const description = $(`edit-desc-${stepId}`).value.trim();
+            if (!description) return;
+            const res = await fetch(`/api/workflows/${selectedId}/steps/${stepId}`, {
+              method: "PATCH",
+              headers: { "content-type": "application/json", ...authHeaders() },
+              body: JSON.stringify({ description }),
+            });
+            if (res.ok) {
+              editingStepId = null;
+              await selectWorkflow(selectedId);
+            } else {
+              const data = await res.json().catch(() => ({}));
+              alert(`Could not edit the step: ${data.error ?? res.status}`);
+            }
+          }),
+        );
+        list.querySelectorAll("[data-remove]").forEach((btn) =>
+          btn.addEventListener("click", async () => {
+            const stepId = btn.getAttribute("data-remove");
+            const res = await fetch(`/api/workflows/${selectedId}/steps/${stepId}`, {
+              method: "DELETE",
+              headers: authHeaders(),
+            });
+            if (res.ok) await selectWorkflow(selectedId);
+            else {
+              const data = await res.json().catch(() => ({}));
+              alert(`Could not remove the step: ${data.error ?? res.status}`);
+            }
+          }),
+        );
+      }
+
+      async function selectWorkflow(id) {
+        selectedId = id;
+        editingStepId = null;
+        try {
+          const res = await fetch(`/api/workflows/${id}`);
+          if (!res.ok) throw new Error(String(res.status));
+          const { workflow, steps } = await res.json();
+          renderDetail(workflow, steps);
+          await loadTranscript(id);
+          await loadWorkflows();
+        } catch (err) {
+          $("d-action-msg").textContent = `Could not load the workflow: ${err}`;
+        }
+      }
+
+      async function runAction(action) {
+        if (!selectedId) return;
+        const msg = $("d-action-msg");
+        msg.textContent = "";
+        msg.classList.remove("error");
+        const token = adminToken() || prompt("Admin token — printed by the hub on startup (~/.target/config.json):");
+        if (!token) return;
+        rememberToken(token);
+        try {
+          const res = await fetch(`/api/workflows/${selectedId}/${action}`, {
+            method: "POST",
+            headers: authHeaders(),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            msg.textContent = data.error ?? `error ${res.status}`;
+            msg.classList.add("error");
+            return;
+          }
+          await selectWorkflow(selectedId);
+        } catch (err) {
+          msg.textContent = String(err);
+          msg.classList.add("error");
+        }
+      }
+
+      $("btn-start").addEventListener("click", () => runAction("start"));
+      $("btn-pause").addEventListener("click", () => runAction("pause"));
+      $("btn-resume").addEventListener("click", () => runAction("resume"));
+      $("btn-restart").addEventListener("click", () => {
+        if (confirm("This resets ALL steps to pending and discards previous results. Continue?")) {
+          runAction("restart");
+        }
+      });
+
+      $("new-wf-form").addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const name = $("new-wf-name").value.trim();
+        const workdir = $("new-wf-workdir").value.trim();
+        const token = $("new-wf-token").value.trim() || adminToken();
+        const permissionMode = $("new-wf-perm").value;
+        const msg = $("new-wf-msg");
+        if (!name || !token) return;
+        let acceptBypassRisk = false;
+        if (permissionMode === "bypassPermissions") {
+          acceptBypassRisk = confirm(
+            "bypassPermissions disables every permission check: any step of this workflow will be able to run arbitrary commands on this machine. Confirm?",
+          );
+          if (!acceptBypassRisk) return;
+        }
+        try {
+          const res = await fetch("/api/workflows", {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+            body: JSON.stringify({
+              name,
+              ...(workdir ? { workdir } : {}),
+              ...(permissionMode ? { permissionMode } : {}),
+              ...(acceptBypassRisk ? { acceptBypassRisk: true } : {}),
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            msg.textContent = data.error ?? `error ${res.status}`;
+            msg.classList.add("error");
+            return;
+          }
+          rememberToken(token);
+          $("new-wf-name").value = "";
+          $("new-wf-workdir").value = "";
+          msg.textContent = "";
+          msg.classList.remove("error");
+          await loadWorkflows();
+          await selectWorkflow(data.workflow.id);
+        } catch (err) {
+          msg.textContent = String(err);
+          msg.classList.add("error");
+        }
+      });
+
+      $("add-step-form").addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        if (!selectedId) return;
+        const description = $("step-desc").value.trim();
+        const msg = $("add-step-msg");
+        if (!description) return;
+        const token = adminToken() || prompt("Admin token — printed by the hub on startup (~/.target/config.json):");
+        if (!token) return;
+        rememberToken(token);
+        try {
+          const res = await fetch(`/api/workflows/${selectedId}/steps`, {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+            body: JSON.stringify({ description }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            msg.textContent = data.error ?? `error ${res.status}`;
+            msg.classList.add("error");
+            return;
+          }
+          $("step-desc").value = "";
+          msg.textContent = "";
+          msg.classList.remove("error");
+          await selectWorkflow(selectedId);
+        } catch (err) {
+          msg.textContent = String(err);
+          msg.classList.add("error");
+        }
+      });
+
+      // Local single-user tool: poll every 2s so sequential dispatch and the
+      // progress bar update live without a manual refresh.
+      loadWorkflows();
+      setInterval(() => {
+        loadWorkflows();
+        if (selectedId && editingStepId === null) selectWorkflow(selectedId);
+      }, 2000);
+    </script>
+  </body>
+</html>

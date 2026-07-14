@@ -1,0 +1,21 @@
+{
+  "name": "target-hub",
+  "version": "0.1.0",
+  "description": "Target hub: define workflows made of sequential steps; each step runs as a job against one dedicated agent+hook (agent-webhook-bridge), reusing the same Claude session across steps.",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "target": "./cli.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node daemon.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "typescript": "^7.0.2"
+  }
+}
