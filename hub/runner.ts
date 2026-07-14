@@ -17,7 +17,7 @@
  */
 import type { HubConfig } from "./config.ts";
 import type { Step, Workflow } from "./db.ts";
-import { completeStep, markStepRunning } from "./db.ts";
+import { completeIsolatedRun, completeStep, markStepRunning } from "./db.ts";
 
 export type Logger = (message: string, type?: "info" | "warning" | "error") => void;
 
@@ -53,5 +53,49 @@ export async function dispatchStep(step: Step, workflow: Workflow, cfg: HubConfi
 	} catch (err) {
 		completeStep(step.id, { ok: false, error: `hook unreachable: ${String(err)}` });
 		log(`step ${step.id} (workflow ${workflow.id}) -> '${workflow.agentName}' unreachable: ${String(err)}`, "error");
+	}
+}
+
+/**
+ * Dispatches a step's job in isolation: same hook/agent, but never the
+ * `sessionid` header (isolated runs always start a fresh Claude session, no
+ * resume) and a different callback route so the outcome never touches the
+ * step's normal status/result/error/sessionId. Unlike `dispatchStep`, the
+ * caller (workflow.ts) already flipped the isolated run to `running` via
+ * `startIsolatedRun` before calling this, so on rejection/unreachable we
+ * revert that here — same pattern `dispatchStep` uses for its own row.
+ */
+export async function dispatchStepIsolated(
+	step: Step,
+	workflow: Workflow,
+	callbackToken: string,
+	cfg: HubConfig,
+	log: Logger,
+): Promise<boolean> {
+	const callbackUrl = `http://${cfg.host}:${cfg.port}/api/steps/${step.id}/isolated-result?token=${callbackToken}`;
+	const input = `${step.description}${SUBAGENT_SUFFIX}`;
+	try {
+		const res = await fetch(workflow.hookUrl, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				"x-webhook-secret": workflow.secret,
+				// Deliberately no `sessionid` header: an isolated run never resumes
+				// the workflow's shared session.
+			},
+			body: JSON.stringify({ jobId: step.id, input, callbackUrl }),
+			signal: AbortSignal.timeout(DISPATCH_TIMEOUT_MS),
+		});
+		if (res.ok) {
+			log(`isolated run of step ${step.id} (workflow ${workflow.id}) -> '${workflow.agentName}' accepted`);
+			return true;
+		}
+		completeIsolatedRun(step.id, { ok: false, error: `hook answered ${res.status}` });
+		log(`isolated run of step ${step.id} (workflow ${workflow.id}) -> '${workflow.agentName}' rejected (${res.status})`, "error");
+		return false;
+	} catch (err) {
+		completeIsolatedRun(step.id, { ok: false, error: `hook unreachable: ${String(err)}` });
+		log(`isolated run of step ${step.id} (workflow ${workflow.id}) -> '${workflow.agentName}' unreachable: ${String(err)}`, "error");
+		return false;
 	}
 }
