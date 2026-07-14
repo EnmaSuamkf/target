@@ -69,3 +69,8 @@ habilita ejecución de comandos sin restricciones.
 
 Necesita `agent-webhook-bridge` corriendo (`awb start`) — es quien realmente
 spawnea `claude -p` / `claude --resume` para cada step.
+
+## Estado del proyecto
+
+Este repo está en etapas iniciales. Los issues de GitHub se usan para
+trackear bugs y features pendientes; los PRs deben apuntar a `main`.
