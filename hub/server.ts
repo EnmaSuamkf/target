@@ -11,13 +11,12 @@
  *   POST   /api/workflows/:id/steps                    → add a step (admin token)
  *   PATCH  /api/workflows/:id/steps/:stepId             → edit a step's description (admin token)
  *   DELETE /api/workflows/:id/steps/:stepId             → remove a pending step (admin token)
- *   POST   /api/workflows/:id/steps/:stepId/run         → run one step in isolation, outside the sequential engine (admin token)
+ *   POST   /api/workflows/:id/steps/:stepId/run         → run one step now, outside the sequential order (admin token)
  *   POST   /api/workflows/:id/start                    → begin/continue sequential dispatch (admin token)
  *   POST   /api/workflows/:id/pause                    → stop dispatching further steps (admin token)
  *   POST   /api/workflows/:id/resume                   → undo pause (admin token)
  *   POST   /api/workflows/:id/restart                  → reset all steps, start over (admin token)
  *   POST   /api/steps/:id/result                       → awb's result callback (?token=<per-step token>)
- *   POST   /api/steps/:id/isolated-result               → awb's callback for an isolated run (?token=<isolated callback token>)
  *   GET    /                                           → ui/index.html
  */
 import * as crypto from "node:crypto";
@@ -35,14 +34,13 @@ import {
 	createWorkflow,
 	editStep,
 	expireStale,
-	onIsolatedStepResult,
 	onStepResult,
 	pauseWorkflow,
 	removeStep,
 	removeWorkflow,
 	restartWorkflow,
 	resumeWorkflow,
-	runStepIsolated,
+	runStep,
 	startWorkflow,
 	WorkflowError,
 } from "./workflow.ts";
@@ -96,11 +94,7 @@ function publicStep(step: Step): Record<string, unknown> {
 		createdAt: step.createdAt,
 		startedAt: step.startedAt,
 		finishedAt: step.finishedAt,
-		isolatedStatus: step.isolated?.status ?? null,
-		isolatedResult: step.isolated?.result ?? null,
-		isolatedError: step.isolated?.error ?? null,
-		isolatedStartedAt: step.isolated?.startedAt ?? null,
-		isolatedFinishedAt: step.isolated?.finishedAt ?? null,
+		manualRun: step.manualRun,
 	};
 }
 
@@ -209,36 +203,6 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				log,
 			);
 			log(`step ${step.id} ${ok ? "done" : `failed (${error})`}`);
-			sendJson(res, 200, { ok: true });
-		});
-		return;
-	}
-
-	// --- /api/steps/:id/isolated-result (awb callback for an isolated run; per-run token, no admin) ---
-
-	if (parts[1] === "steps" && parts[2] && parts[3] === "isolated-result" && req.method === "POST") {
-		const step = getStep(parts[2]);
-		const token = url.searchParams.get("token") ?? "";
-		if (!step || !step.isolated?.callbackToken || !token || !timingSafeEqualStr(token, step.isolated.callbackToken)) {
-			sendJson(res, 401, { error: "unauthorized" });
-			return;
-		}
-		readJsonBody(req, res, 4 * 1024 * 1024, (body) => {
-			const ok = body.ok === true;
-			const result =
-				body.result == null
-					? undefined
-					: typeof body.result === "string"
-						? body.result
-						: JSON.stringify(body.result);
-			const error = ok
-				? undefined
-				: String(body.error ?? (body.exitCode != null ? `exit ${body.exitCode}` : "run failed"));
-			onIsolatedStepResult(
-				step.id,
-				{ ok, result, error, sessionId: typeof body.session_id === "string" ? body.session_id : undefined },
-				log,
-			);
 			sendJson(res, 200, { ok: true });
 		});
 		return;
@@ -413,7 +377,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		return;
 	}
 
-	// --- /api/workflows/:id/steps/:stepId/run (isolated run, outside the sequential engine) ---
+	// --- /api/workflows/:id/steps/:stepId/run (run this step now, outside the sequential order) ---
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "run" && !parts[6] && req.method === "POST") {
 		if (!isAdmin(cfg, req.headers)) {
@@ -423,7 +387,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		const stepId = parts[4];
 		(async () => {
 			try {
-				await runStepIsolated(workflowId, stepId, cfg, log);
+				await runStep(workflowId, stepId, cfg, log);
 				const step = getStep(stepId);
 				if (!step) {
 					sendJson(res, 404, { error: "unknown_step" });

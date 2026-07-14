@@ -11,7 +11,6 @@ import * as path from "node:path";
 import { createAwbHook, deleteAwbHook, type HookOptions } from "./awb.ts";
 import { targetDir, type HubConfig } from "./config.ts";
 import {
-	completeIsolatedRun,
 	completeStep,
 	deleteStep,
 	deleteWorkflow,
@@ -26,13 +25,13 @@ import {
 	setWorkflowSessionId,
 	setWorkflowStatus,
 	slugify,
-	startIsolatedRun,
+	startManualRun,
 	stepProgress,
 	updateStepDescription,
 	type Step,
 	type Workflow,
 } from "./db.ts";
-import { dispatchStep, dispatchStepIsolated, type Logger } from "./runner.ts";
+import { dispatchStep, type Logger } from "./runner.ts";
 
 export class WorkflowError extends Error {}
 
@@ -129,8 +128,14 @@ export function removeWorkflow(workflowId: string): void {
 export function addStep(workflowId: string, description: string): Step {
 	const trimmed = description.trim();
 	if (!trimmed) throw new WorkflowError("description is required");
-	if (!getWorkflow(workflowId)) throw new WorkflowError("unknown workflow");
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
 	const step = insertStep(workflowId, trimmed);
+	// A workflow that had already reached a terminal state gets a fresh
+	// pending step here — back to draft so the badge/progress stay honest and
+	// "Start" dispatches just the new step, instead of leaving it stuck
+	// "completed"/"failed" forever (advance() only ever runs while `running`).
+	if (workflow.status === "completed" || workflow.status === "failed") setWorkflowStatus(workflowId, "draft");
 	writeStatusMd(workflowId);
 	return step;
 }
@@ -153,7 +158,28 @@ export function removeStep(workflowId: string, stepId: string): void {
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
 	if (step.status !== "pending") throw new WorkflowError("only a pending step can be removed");
 	deleteStep(stepId);
+	maybeMarkCompleted(workflowId);
 	writeStatusMd(workflowId);
+}
+
+/**
+ * A `draft`/`paused` workflow whose steps are all `done` (none pending,
+ * none failed) has nothing left to do — flip it to `completed` so the badge
+ * matches reality. Steps can reach "all done" without ever going through
+ * `advance()` (on-demand ▶ runs deliberately don't touch workflow status, and
+ * removing the last pending step doesn't either), so this is the one place
+ * that reconciles it after the fact instead of duplicating the check at every
+ * call site. Leaves `running` alone (that's `advance()`'s own job) and
+ * `failed`/`completed` alone (already terminal).
+ */
+function maybeMarkCompleted(workflowId: string, log?: Logger): void {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow || (workflow.status !== "draft" && workflow.status !== "paused")) return;
+	const progress = stepProgress(workflowId);
+	if (progress.total > 0 && progress.done === progress.total) {
+		setWorkflowStatus(workflowId, "completed");
+		log?.(`workflow ${workflowId} completed`);
+	}
 }
 
 /**
@@ -236,9 +262,13 @@ export async function restartWorkflow(workflowId: string, cfg: HubConfig, log: L
 
 /**
  * Applies a step's job outcome (called from the /api/steps/:id/result
- * callback route) and, if the workflow is still running, dispatches the next
- * step. A failed step stops the workflow (`status: failed`) instead of
- * silently skipping ahead.
+ * callback route). For a normal sequential-engine step, that also chains its
+ * session into `workflow.lastSessionId` and, if the workflow is still
+ * running, dispatches the next step — a failure stops the workflow instead
+ * of silently skipping ahead. An on-demand run (`runStep`, below) writes the
+ * same status/result/error so the step and the progress bar reflect the real
+ * outcome, but stops right there: no session chaining, no workflow status
+ * change, no `advance()` — it's still outside the sequential engine.
  */
 export async function onStepResult(
 	stepId: string,
@@ -248,7 +278,14 @@ export async function onStepResult(
 ): Promise<void> {
 	const step = getStep(stepId);
 	if (!step) return;
+	const manualRun = step.manualRun;
 	completeStep(stepId, outcome);
+	if (manualRun) {
+		maybeMarkCompleted(step.workflowId, log);
+		writeStatusMd(step.workflowId);
+		log(`step ${stepId} (on-demand run) ${outcome.ok ? "done" : `failed (${outcome.error})`}`);
+		return;
+	}
 	if (outcome.ok && outcome.sessionId) setWorkflowSessionId(step.workflowId, outcome.sessionId);
 	writeStatusMd(step.workflowId);
 	if (!outcome.ok) {
@@ -261,35 +298,24 @@ export async function onStepResult(
 }
 
 /**
- * Runs a single step's job in isolation — a fresh Claude session, dispatched
- * to the same agent/hook, but completely outside the sequential engine: it
- * never calls `advance()`, never touches `workflow.status` or
- * `lastSessionId`. Meant for "try this step" without committing it to the
- * workflow's real history.
+ * Runs a single step's job right now (the ▶ button) instead of waiting for
+ * the sequential engine to reach it in order: dispatched to the same
+ * agent/hook, always a fresh Claude session (never resumes
+ * `workflow.lastSessionId`, and its own session never becomes the new one
+ * either — see `dispatchStep`'s `resumeSession: false`). Blocked while any
+ * step of the workflow is already running, sequential or on-demand, since
+ * they'd otherwise fight over the same hook/session.
  */
-export async function runStepIsolated(workflowId: string, stepId: string, cfg: HubConfig, log: Logger): Promise<void> {
+export async function runStep(workflowId: string, stepId: string, cfg: HubConfig, log: Logger): Promise<void> {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
-	const token = startIsolatedRun(stepId);
-	if (!token) throw new WorkflowError("an isolated run is already in progress for this step");
-	await dispatchStepIsolated(step, workflow, token, cfg, log);
-}
-
-/**
- * Applies an isolated run's outcome (from /api/steps/:id/isolated-result).
- * Deliberately minimal compared to `onStepResult`: no `advance()`, no
- * workflow status change, no progress markdown rewrite — the .md file is the
- * sequential engine's, isolated runs don't belong in it.
- */
-export function onIsolatedStepResult(
-	stepId: string,
-	outcome: { ok: boolean; result?: string; error?: string; sessionId?: string },
-	log: Logger,
-): void {
-	const step = getStep(stepId);
-	if (!step) return;
-	completeIsolatedRun(stepId, outcome);
-	log(`isolated run of step ${stepId} ${outcome.ok ? "done" : `failed (${outcome.error})`}`);
+	if (listSteps(workflowId).some((s) => s.status === "running")) {
+		throw new WorkflowError("a step is already running for this workflow");
+	}
+	if (!startManualRun(stepId)) throw new WorkflowError("this step is already running");
+	writeStatusMd(workflowId);
+	await dispatchStep(step, workflow, cfg, log, { resumeSession: false });
+	writeStatusMd(workflowId);
 }

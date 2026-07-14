@@ -187,9 +187,8 @@
       .step-status.done{ color: var(--accent); }
       .step-status.failed{ color: var(--fail); }
       .step-error{ font-size: 0.78rem; color: var(--fail); margin-top: 0.3rem; }
+      .step-result{ font-size: 0.76rem; color: var(--muted); margin-top: 0.35rem; }
       .step-actions{ display: flex; gap: 0.4rem; margin-top: 0.4rem; }
-      .isolated-note{ font-size: 0.76rem; color: var(--muted); margin-top: 0.35rem; }
-      .isolated-note .faint{ color: var(--faint); }
 
       .convo-block{ margin: 1.2rem 0; }
       .convo-block h2{ margin-bottom: 0.4rem; }
@@ -397,15 +396,9 @@
         return s.length > n ? `${s.slice(0, n)}…` : s;
       }
 
-      function isolatedNoteHtml(step) {
-        if (!step.isolatedStatus) return "";
-        const detail = step.isolatedStatus === "failed" ? step.isolatedError : step.isolatedResult;
-        return `<div class="isolated-note">Isolated run: <span class="faint">${step.isolatedStatus}</span>${detail ? ` — ${escapeHtml(truncate(detail, 240))}` : ""}</div>`;
-      }
-
       function renderStep(step) {
         const editable = step.status !== "running";
-        const running = step.isolatedStatus === "running";
+        const running = step.status === "running";
         const li = document.createElement("li");
         li.className = "step";
         if (editingStepId === step.id) {
@@ -428,7 +421,7 @@
               <span class="step-status ${step.status}">${step.status}</span>
             </div>
             ${step.error ? `<div class="step-error">${escapeHtml(step.error)}</div>` : ""}
-            ${isolatedNoteHtml(step)}
+            ${step.status === "done" && step.result ? `<div class="step-result">${escapeHtml(truncate(step.result, 240))}</div>` : ""}
             <div class="step-actions">
               <button class="btn small" data-run="${step.id}" ${running ? "disabled" : ""}>${running ? "running…" : "▶ Run"}</button>
               <button class="btn small" data-edit="${step.id}" ${editable ? "" : "disabled"}>Edit</button>
