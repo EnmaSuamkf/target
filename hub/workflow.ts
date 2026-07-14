@@ -8,11 +8,13 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { createAwbHook, type HookOptions } from "./awb.ts";
+import { createAwbHook, deleteAwbHook, type HookOptions } from "./awb.ts";
 import { targetDir, type HubConfig } from "./config.ts";
 import {
+	completeIsolatedRun,
 	completeStep,
 	deleteStep,
+	deleteWorkflow,
 	expireStaleSteps,
 	getStep,
 	getWorkflow,
@@ -24,12 +26,13 @@ import {
 	setWorkflowSessionId,
 	setWorkflowStatus,
 	slugify,
+	startIsolatedRun,
 	stepProgress,
 	updateStepDescription,
 	type Step,
 	type Workflow,
 } from "./db.ts";
-import { dispatchStep, type Logger } from "./runner.ts";
+import { dispatchStep, dispatchStepIsolated, type Logger } from "./runner.ts";
 
 export class WorkflowError extends Error {}
 
@@ -107,6 +110,20 @@ export function createWorkflow(
 	const workflow = insertWorkflow({ id, name: trimmed, agentName, hookUrl: hook.hookUrl, secret: hook.secret, mdPath });
 	writeStatusMd(workflow.id);
 	return workflow;
+}
+
+/**
+ * Tears down a workflow entirely: its awb hook (so it doesn't linger in
+ * hooks.json pointing at a workdir nobody uses anymore), its progress
+ * markdown file, and finally its DB rows. db.ts stays a pure storage layer —
+ * this orchestration lives here, not there.
+ */
+export function removeWorkflow(workflowId: string): void {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	deleteAwbHook(workflow.agentName);
+	fs.rmSync(workflow.mdPath, { force: true });
+	deleteWorkflow(workflowId);
 }
 
 export function addStep(workflowId: string, description: string): Step {
@@ -241,4 +258,38 @@ export async function onStepResult(
 		return;
 	}
 	await advance(step.workflowId, cfg, log);
+}
+
+/**
+ * Runs a single step's job in isolation — a fresh Claude session, dispatched
+ * to the same agent/hook, but completely outside the sequential engine: it
+ * never calls `advance()`, never touches `workflow.status` or
+ * `lastSessionId`. Meant for "try this step" without committing it to the
+ * workflow's real history.
+ */
+export async function runStepIsolated(workflowId: string, stepId: string, cfg: HubConfig, log: Logger): Promise<void> {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	const step = getStep(stepId);
+	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
+	const token = startIsolatedRun(stepId);
+	if (!token) throw new WorkflowError("an isolated run is already in progress for this step");
+	await dispatchStepIsolated(step, workflow, token, cfg, log);
+}
+
+/**
+ * Applies an isolated run's outcome (from /api/steps/:id/isolated-result).
+ * Deliberately minimal compared to `onStepResult`: no `advance()`, no
+ * workflow status change, no progress markdown rewrite — the .md file is the
+ * sequential engine's, isolated runs don't belong in it.
+ */
+export function onIsolatedStepResult(
+	stepId: string,
+	outcome: { ok: boolean; result?: string; error?: string; sessionId?: string },
+	log: Logger,
+): void {
+	const step = getStep(stepId);
+	if (!step) return;
+	completeIsolatedRun(stepId, outcome);
+	log(`isolated run of step ${stepId} ${outcome.ok ? "done" : `failed (${outcome.error})`}`);
 }

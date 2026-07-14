@@ -188,6 +188,8 @@
       .step-status.failed{ color: var(--fail); }
       .step-error{ font-size: 0.78rem; color: var(--fail); margin-top: 0.3rem; }
       .step-actions{ display: flex; gap: 0.4rem; margin-top: 0.4rem; }
+      .isolated-note{ font-size: 0.76rem; color: var(--muted); margin-top: 0.35rem; }
+      .isolated-note .faint{ color: var(--faint); }
 
       .convo-block{ margin: 1.2rem 0; }
       .convo-block h2{ margin-bottom: 0.4rem; }
@@ -303,6 +305,7 @@
               <button class="btn warn" id="btn-pause">Pause</button>
               <button class="btn" id="btn-resume">Resume</button>
               <button class="btn danger" id="btn-restart">Restart</button>
+              <button class="btn danger" id="btn-delete">Delete</button>
             </div>
             <p class="msg" id="d-action-msg"></p>
 
@@ -389,8 +392,20 @@
         }
       }
 
+      function truncate(s, n) {
+        s = String(s ?? "");
+        return s.length > n ? `${s.slice(0, n)}…` : s;
+      }
+
+      function isolatedNoteHtml(step) {
+        if (!step.isolatedStatus) return "";
+        const detail = step.isolatedStatus === "failed" ? step.isolatedError : step.isolatedResult;
+        return `<div class="isolated-note">Isolated run: <span class="faint">${step.isolatedStatus}</span>${detail ? ` — ${escapeHtml(truncate(detail, 240))}` : ""}</div>`;
+      }
+
       function renderStep(step) {
         const editable = step.status !== "running";
+        const running = step.isolatedStatus === "running";
         const li = document.createElement("li");
         li.className = "step";
         if (editingStepId === step.id) {
@@ -413,7 +428,9 @@
               <span class="step-status ${step.status}">${step.status}</span>
             </div>
             ${step.error ? `<div class="step-error">${escapeHtml(step.error)}</div>` : ""}
+            ${isolatedNoteHtml(step)}
             <div class="step-actions">
+              <button class="btn small" data-run="${step.id}" ${running ? "disabled" : ""}>${running ? "running…" : "▶ Run"}</button>
               <button class="btn small" data-edit="${step.id}" ${editable ? "" : "disabled"}>Edit</button>
               <button class="btn small danger" data-remove="${step.id}" ${step.status === "pending" ? "" : "disabled"}>Remove</button>
             </div>
@@ -525,6 +542,23 @@
             }
           }),
         );
+        list.querySelectorAll("[data-run]").forEach((btn) =>
+          btn.addEventListener("click", async () => {
+            const stepId = btn.getAttribute("data-run");
+            const token = adminToken() || prompt("Admin token — printed by the hub on startup (~/.target/config.json):");
+            if (!token) return;
+            rememberToken(token);
+            const res = await fetch(`/api/workflows/${selectedId}/steps/${stepId}/run`, {
+              method: "POST",
+              headers: { authorization: `Bearer ${token}` },
+            });
+            if (res.ok) await selectWorkflow(selectedId);
+            else {
+              const data = await res.json().catch(() => ({}));
+              alert(`Could not run the step in isolation: ${data.error ?? res.status}`);
+            }
+          }),
+        );
       }
 
       async function selectWorkflow(id) {
@@ -574,6 +608,38 @@
       $("btn-restart").addEventListener("click", () => {
         if (confirm("This resets ALL steps to pending and discards previous results. Continue?")) {
           runAction("restart");
+        }
+      });
+
+      $("btn-delete").addEventListener("click", async () => {
+        if (!selectedId) return;
+        const msg = $("d-action-msg");
+        msg.textContent = "";
+        msg.classList.remove("error");
+        const name = $("d-name").textContent;
+        if (!confirm(`Delete workflow '${name}'? This cannot be undone.`)) return;
+        const token = adminToken() || prompt("Admin token — printed by the hub on startup (~/.target/config.json):");
+        if (!token) return;
+        rememberToken(token);
+        try {
+          const res = await fetch(`/api/workflows/${selectedId}`, {
+            method: "DELETE",
+            headers: { authorization: `Bearer ${token}` },
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            msg.textContent = data.error ?? `error ${res.status}`;
+            msg.classList.add("error");
+            return;
+          }
+          selectedId = null;
+          editingStepId = null;
+          $("detail").style.display = "none";
+          $("detail-empty").style.display = "block";
+          await loadWorkflows();
+        } catch (err) {
+          msg.textContent = String(err);
+          msg.classList.add("error");
         }
       });
 

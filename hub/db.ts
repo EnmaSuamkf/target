@@ -18,6 +18,7 @@ import { dbFile } from "./config.ts";
 
 export type WorkflowStatus = "draft" | "running" | "paused" | "completed" | "failed";
 export type StepStatus = "pending" | "running" | "done" | "failed";
+export type IsolatedStatus = "running" | "done" | "failed";
 
 export interface Workflow {
 	id: string;
@@ -49,6 +50,24 @@ export interface Step {
 	/** Per-step token that authenticates awb's POST to /api/steps/:id/result. */
 	callbackToken: string;
 	createdAt: string;
+	startedAt: string | null;
+	finishedAt: string | null;
+	/**
+	 * One-off "try this step now" run, fully separate from the sequential
+	 * engine's status/result/error/sessionId above: it never touches those,
+	 * never resumes the workflow's session, and never advances the workflow.
+	 * `null` until the step has been run in isolation at least once.
+	 */
+	isolated: IsolatedRun | null;
+}
+
+export interface IsolatedRun {
+	status: IsolatedStatus;
+	result: string | null;
+	error: string | null;
+	sessionId: string | null;
+	/** Token that authenticates awb's POST to /api/steps/:id/isolated-result. */
+	callbackToken: string | null;
 	startedAt: string | null;
 	finishedAt: string | null;
 }
@@ -86,10 +105,34 @@ function open(): DatabaseSync {
 			callback_token TEXT NOT NULL,
 			created_at TEXT NOT NULL,
 			started_at TEXT,
-			finished_at TEXT
+			finished_at TEXT,
+			isolated_status TEXT,
+			isolated_result TEXT,
+			isolated_error TEXT,
+			isolated_session_id TEXT,
+			isolated_callback_token TEXT,
+			isolated_started_at TEXT,
+			isolated_finished_at TEXT
 		);
 		CREATE INDEX IF NOT EXISTS idx_steps_workflow ON steps(workflow_id, order_index);
 	`);
+	// `CREATE TABLE IF NOT EXISTS` above is a no-op on a `steps` table that
+	// already existed before the isolated_* columns were added (any DB from
+	// before this feature) — add them here so upgrades don't need a fresh DB.
+	const existingColumns = new Set(
+		(db.prepare("PRAGMA table_info(steps)").all() as Record<string, unknown>[]).map((c) => String(c.name)),
+	);
+	for (const column of [
+		"isolated_status",
+		"isolated_result",
+		"isolated_error",
+		"isolated_session_id",
+		"isolated_callback_token",
+		"isolated_started_at",
+		"isolated_finished_at",
+	]) {
+		if (!existingColumns.has(column)) db.exec(`ALTER TABLE steps ADD COLUMN ${column} TEXT;`);
+	}
 	return db;
 }
 
@@ -203,6 +246,18 @@ function rowToStep(row: Record<string, unknown>): Step {
 		createdAt: String(row.created_at),
 		startedAt: row.started_at == null ? null : String(row.started_at),
 		finishedAt: row.finished_at == null ? null : String(row.finished_at),
+		isolated:
+			row.isolated_status == null
+				? null
+				: {
+						status: row.isolated_status as IsolatedStatus,
+						result: row.isolated_result == null ? null : String(row.isolated_result),
+						error: row.isolated_error == null ? null : String(row.isolated_error),
+						sessionId: row.isolated_session_id == null ? null : String(row.isolated_session_id),
+						callbackToken: row.isolated_callback_token == null ? null : String(row.isolated_callback_token),
+						startedAt: row.isolated_started_at == null ? null : String(row.isolated_started_at),
+						finishedAt: row.isolated_finished_at == null ? null : String(row.isolated_finished_at),
+					},
 	};
 }
 
@@ -225,6 +280,7 @@ export function insertStep(workflowId: string, description: string): Step {
 		createdAt: new Date().toISOString(),
 		startedAt: null,
 		finishedAt: null,
+		isolated: null,
 	};
 	database
 		.prepare(
@@ -284,6 +340,46 @@ export function completeStep(
 			outcome.sessionId ?? null,
 			new Date().toISOString(),
 			id,
+		);
+}
+
+/**
+ * Starts a one-off isolated run for a step: generates a fresh callback token,
+ * marks it `running`, and clears any prior isolated result/error. No-op if an
+ * isolated run is already `running` for this step. Returns the new token, or
+ * `null` if the no-op guard fired (the DB is the source of truth for "is one
+ * already in flight", so the caller doesn't need to inspect raw SQL results).
+ */
+export function startIsolatedRun(stepId: string): string | null {
+	const token = crypto.randomBytes(24).toString("hex");
+	const now = new Date().toISOString();
+	const changes = open()
+		.prepare(
+			`UPDATE steps SET isolated_status = 'running', isolated_result = NULL, isolated_error = NULL,
+			 isolated_session_id = NULL, isolated_callback_token = ?, isolated_started_at = ?, isolated_finished_at = NULL
+			 WHERE id = ? AND (isolated_status IS NULL OR isolated_status != 'running')`,
+		)
+		.run(token, now, stepId).changes;
+	return changes > 0 ? token : null;
+}
+
+/** Records the outcome of an isolated run; only applies while it's still `running` (mirrors completeStep). */
+export function completeIsolatedRun(
+	stepId: string,
+	outcome: { ok: boolean; result?: string; error?: string; sessionId?: string },
+): void {
+	open()
+		.prepare(
+			`UPDATE steps SET isolated_status = ?, isolated_result = ?, isolated_error = ?, isolated_session_id = ?, isolated_finished_at = ?
+			 WHERE id = ? AND isolated_status = 'running'`,
+		)
+		.run(
+			outcome.ok ? "done" : "failed",
+			outcome.result ?? null,
+			outcome.error ?? null,
+			outcome.sessionId ?? null,
+			new Date().toISOString(),
+			stepId,
 		);
 }
 

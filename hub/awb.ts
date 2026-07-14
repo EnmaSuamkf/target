@@ -154,3 +154,23 @@ export function createAwbHook(
 
 	return { hookUrl: `http://${cfg.host}:${cfg.port}/hook/${encodeURIComponent(name)}`, secret };
 }
+
+/**
+ * Removes a hook from awb's hooks.json, e.g. when its owning workflow is
+ * deleted. Best-effort: never throws, just reports whether it found (and
+ * removed) the hook, so a workflow whose hook is already gone can still be
+ * deleted cleanly.
+ */
+export function deleteAwbHook(name: string): boolean {
+	try {
+		const cfg = loadAwbConfig();
+		if (!cfg.hooks[name]) return false;
+		delete cfg.hooks[name];
+		const file = awbConfigFile();
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, `${JSON.stringify(cfg, null, 2)}\n`);
+		return true;
+	} catch {
+		return false;
+	}
+}
