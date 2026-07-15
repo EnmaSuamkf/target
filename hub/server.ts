@@ -24,7 +24,7 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
-import { hookRuntime, PUBLISHABLE_PERMISSION_MODES, type PublishablePermissionMode } from "./awb.ts";
+import { harnessResumeCommand, hookRuntime, PUBLISHABLE_PERMISSION_MODES, type PublishablePermissionMode } from "./awb.ts";
 import type { HubConfig } from "./config.ts";
 import { getWorkflow, latestStepSession, listSteps, listWorkflows, stepProgress, type Step, type Workflow } from "./db.ts";
 import type { Logger } from "./runner.ts";
@@ -330,6 +330,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			sendJson(res, 200, {
 				sessionId,
 				harness: runtime.harness,
+				resumeCommand: harnessResumeCommand(runtime.harness, sessionId),
 				entries: [],
 				note:
 					sessionId == null
@@ -341,6 +342,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		sendJson(res, 200, {
 			sessionId,
 			harness: runtime.harness,
+			resumeCommand: harnessResumeCommand(runtime.harness, sessionId),
 			entries: readTranscript(runtime.workdir, sessionId),
 		});
 		return;

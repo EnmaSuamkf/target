@@ -110,6 +110,27 @@ export function hookRuntime(hookUrl: string): HookRuntime {
 }
 
 /**
+ * Shell command that reopens a harness session in a terminal, keyed by the
+ * harness name `hookRuntime` reports. awb only ships the `spawn:claude`
+ * adapter today (broker/dispatch.ts), so claude is the only entry we can fill
+ * in without guessing another CLI's flags; add a harness here when awb learns
+ * to spawn it.
+ */
+const HARNESS_RESUME_COMMANDS: Record<string, (sessionId: string) => string> = {
+	claude: (sessionId) => `claude --resume ${sessionId}`,
+};
+
+/**
+ * The command to resume `sessionId` under `harness`, or null when either is
+ * unknown — callers must hide the offer rather than show a command that would
+ * fail (or resume the wrong conversation) if pasted.
+ */
+export function harnessResumeCommand(harness: string | null, sessionId: string | null): string | null {
+	if (!harness || !sessionId) return null;
+	return HARNESS_RESUME_COMMANDS[harness]?.(sessionId) ?? null;
+}
+
+/**
  * Permission modes the hub is willing to write into a hook — the full awb
  * list. `bypassPermissions` lets anyone who can submit a job run arbitrary
  * Bash on the operator's machine, so the publish endpoint only accepts it
