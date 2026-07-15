@@ -34,6 +34,7 @@ import {
 	updateStepDescription,
 	type Step,
 	type Workflow,
+	type WorkflowStatus,
 } from "./db.ts";
 import { dispatchStep, type Logger } from "./runner.ts";
 
@@ -189,28 +190,33 @@ export function removeStep(workflowId: string, stepId: string): void {
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
 	if (step.status !== "pending") throw new WorkflowError("only a pending step can be removed");
 	deleteStep(stepId);
-	maybeMarkCompleted(workflowId);
+	reconcileStatus(workflowId);
 	writeStatusMd(workflowId);
 }
 
 /**
- * A `draft`/`paused` workflow whose steps are all `done` (none pending,
- * none failed) has nothing left to do — flip it to `completed` so the badge
- * matches reality. Steps can reach "all done" without ever going through
- * `advance()` (on-demand ▶ runs deliberately don't touch workflow status, and
- * removing the last pending step doesn't either), so this is the one place
- * that reconciles it after the fact instead of duplicating the check at every
- * call site. Leaves `running` alone (that's `advance()`'s own job) and
- * `failed`/`completed` alone (already terminal).
+ * Derives a non-`running` workflow's status from the CURRENT state of its
+ * steps: every step `done` → `completed`, any step still `failed` → `failed`,
+ * anything left to run → back to `draft` so "Start" picks up where it left off.
+ * Steps change outside `advance()` (on-demand ▶ runs deliberately don't touch
+ * workflow status, and removing a step doesn't either), so this is the one
+ * place that reconciles it after the fact instead of duplicating the check at
+ * every call site. Nothing here is sticky: re-running a step that had failed
+ * until it succeeds clears the workflow's `failed` badge, since only the last
+ * attempt of each step counts. Leaves `running` alone (that's `advance()`'s own
+ * job) and never downgrades a deliberate `paused` to `draft`.
  */
-function maybeMarkCompleted(workflowId: string, log?: Logger): void {
+function reconcileStatus(workflowId: string, log?: Logger): void {
 	const workflow = getWorkflow(workflowId);
-	if (!workflow || (workflow.status !== "draft" && workflow.status !== "paused")) return;
+	if (!workflow || workflow.status === "running") return;
 	const progress = stepProgress(workflowId);
-	if (progress.total > 0 && progress.done === progress.total) {
-		setWorkflowStatus(workflowId, "completed");
-		log?.(`workflow ${workflowId} completed`);
-	}
+	if (progress.total === 0) return;
+	const derived: WorkflowStatus =
+		progress.failed > 0 ? "failed" : progress.done === progress.total ? "completed" : "draft";
+	if (derived === workflow.status) return;
+	if (derived === "draft" && workflow.status === "paused") return;
+	setWorkflowStatus(workflowId, derived);
+	log?.(`workflow ${workflowId} ${derived}`);
 }
 
 /**
@@ -377,7 +383,7 @@ export async function onStepResult(
 	// On-demand ▶ run: outside the engine and the judge entirely — unchanged.
 	if (step.manualRun) {
 		completeStep(stepId, outcome);
-		maybeMarkCompleted(step.workflowId, log);
+		reconcileStatus(step.workflowId, log);
 		writeStatusMd(step.workflowId);
 		log(`step ${stepId} (on-demand run) ${outcome.ok ? "done" : `failed (${outcome.error})`}`);
 		return;

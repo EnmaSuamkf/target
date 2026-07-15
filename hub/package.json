@@ -12,6 +12,7 @@
   },
   "scripts": {
     "start": "node daemon.ts",
+    "test": "node --test",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
