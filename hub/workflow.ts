@@ -11,15 +11,18 @@ import * as path from "node:path";
 import { createAwbHook, deleteAwbHook, type HookOptions } from "./awb.ts";
 import { targetDir, type HubConfig } from "./config.ts";
 import {
+	beginRetry,
 	completeStep,
 	deleteStep,
 	deleteWorkflow,
 	expireStaleSteps,
+	finishStepDone,
 	getStep,
 	getWorkflow,
 	insertStep,
 	insertWorkflow,
 	listSteps,
+	markStepJudging,
 	nextPendingStep,
 	resetSteps,
 	setWorkflowSessionId,
@@ -27,6 +30,7 @@ import {
 	slugify,
 	startManualRun,
 	stepProgress,
+	updateStepConfig,
 	updateStepDescription,
 	type Step,
 	type Workflow,
@@ -75,7 +79,12 @@ export function writeStatusMd(workflowId: string): void {
 		lines.push("_No steps yet._");
 	}
 	for (const step of steps) {
-		lines.push(`${step.orderIndex + 1}. [${statusMark(step.status)}] ${step.description} — **${step.status}**`);
+		const phaseNote = step.status === "running" && step.phase === "judge" ? " _(evaluando)_" : "";
+		lines.push(`${step.orderIndex + 1}. [${statusMark(step.status)}] ${step.description} — **${step.status}**${phaseNote}`);
+		if (step.acceptanceCriteria) {
+			lines.push(`   - Criterio de aceptación: ${step.acceptanceCriteria}`);
+			lines.push(`   - Reintentos: ${step.retryCount}/${step.maxRetries}`);
+		}
 		if (step.startedAt) lines.push(`   - Started: ${step.startedAt}`);
 		if (step.finishedAt) lines.push(`   - Finished: ${step.finishedAt}`);
 		if (step.result) lines.push(`   - Result: ${step.result.slice(0, 500)}${step.result.length > 500 ? "…" : ""}`);
@@ -125,12 +134,16 @@ export function removeWorkflow(workflowId: string): void {
 	deleteWorkflow(workflowId);
 }
 
-export function addStep(workflowId: string, description: string): Step {
+export function addStep(
+	workflowId: string,
+	description: string,
+	options: { acceptanceCriteria?: string | null; maxRetries?: number } = {},
+): Step {
 	const trimmed = description.trim();
 	if (!trimmed) throw new WorkflowError("description is required");
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
-	const step = insertStep(workflowId, trimmed);
+	const step = insertStep(workflowId, trimmed, options);
 	// A workflow that had already reached a terminal state gets a fresh
 	// pending step here — back to draft so the badge/progress stay honest and
 	// "Start" dispatches just the new step, instead of leaving it stuck
@@ -140,13 +153,26 @@ export function addStep(workflowId: string, description: string): Step {
 	return step;
 }
 
-export function editStep(workflowId: string, stepId: string, description: string): Step {
+export function editStep(
+	workflowId: string,
+	stepId: string,
+	description: string,
+	options: { acceptanceCriteria?: string | null; maxRetries?: number } = {},
+): Step {
 	const trimmed = description.trim();
 	if (!trimmed) throw new WorkflowError("description is required");
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
 	if (step.status === "running") throw new WorkflowError("cannot edit a step while its job is running");
 	updateStepDescription(stepId, trimmed);
+	// Only touch the judge config when the caller actually sent fields — a plain
+	// description edit shouldn't silently wipe an existing criterion.
+	if (options.acceptanceCriteria !== undefined || options.maxRetries !== undefined) {
+		updateStepConfig(stepId, {
+			acceptanceCriteria: options.acceptanceCriteria ?? step.acceptanceCriteria,
+			maxRetries: options.maxRetries ?? step.maxRetries,
+		});
+	}
 	writeStatusMd(workflowId);
 	const updated = getStep(stepId);
 	if (!updated) throw new WorkflowError("step disappeared");
@@ -260,15 +286,75 @@ export async function restartWorkflow(workflowId: string, cfg: HubConfig, log: L
 	return updated;
 }
 
+function truncateText(s: string | undefined, n = 200): string {
+	const t = String(s ?? "");
+	return t.length > n ? `${t.slice(0, n)}…` : t;
+}
+
+/**
+ * Extracts the judge's verdict from its free-form answer. The prompt asks for
+ * a bare `{"ok": bool, "reason": string}`, but LLMs wrap or annotate it, so we
+ * try the whole text first and then the first `{...}` block, and also accept a
+ * `{"verdict": "ok"|"fail"}` shape. Returns null when nothing parses — the
+ * caller treats that as "can't evaluate" and fails the workflow rather than
+ * looping on a guess.
+ */
+function parseJudgeVerdict(text: string | undefined): { ok: boolean; reason: string } | null {
+	if (!text) return null;
+	const candidates = [text];
+	const match = text.match(/\{[\s\S]*\}/);
+	if (match) candidates.push(match[0]);
+	for (const candidate of candidates) {
+		try {
+			const obj = JSON.parse(candidate) as Record<string, unknown>;
+			if (obj && typeof obj === "object") {
+				const reason = typeof obj.reason === "string" ? obj.reason : "";
+				if (typeof obj.ok === "boolean") return { ok: obj.ok, reason };
+				if (typeof obj.verdict === "string") {
+					return { ok: /^(ok|pass|passed|true|si|sí|aprob)/i.test(obj.verdict.trim()), reason };
+				}
+			}
+		} catch {
+			// try the next candidate
+		}
+	}
+	return null;
+}
+
+/** Fails a workflow at a step with a message, keeping the .md and log in sync. Used by every judge-path dead end. */
+function failWorkflowAt(stepId: string, workflowId: string, error: string, log: Logger): void {
+	completeStep(stepId, { ok: false, error });
+	setWorkflowStatus(workflowId, "failed");
+	writeStatusMd(workflowId);
+	log(`workflow ${workflowId} failed at step ${stepId}: ${error}`, "error");
+}
+
+/**
+ * Re-reads a step right after dispatching it and, if the dispatch failed
+ * synchronously (hook rejected/unreachable → `dispatchStep` already marked the
+ * step `failed`), fails the workflow instead of leaving it stuck `running`
+ * with nothing in flight.
+ */
+function failWorkflowIfDispatchDied(stepId: string, workflowId: string, what: string, log: Logger): void {
+	const after = getStep(stepId);
+	if (after?.status === "failed") {
+		setWorkflowStatus(workflowId, "failed");
+		log(`workflow ${workflowId} failed: ${what} for step ${stepId} could not be dispatched (${after.error})`, "error");
+	}
+	writeStatusMd(workflowId);
+}
+
 /**
  * Applies a step's job outcome (called from the /api/steps/:id/result
- * callback route). For a normal sequential-engine step, that also chains its
- * session into `workflow.lastSessionId` and, if the workflow is still
- * running, dispatches the next step — a failure stops the workflow instead
- * of silently skipping ahead. An on-demand run (`runStep`, below) writes the
- * same status/result/error so the step and the progress bar reflect the real
- * outcome, but stops right there: no session chaining, no workflow status
- * change, no `advance()` — it's still outside the sequential engine.
+ * callback route). Three shapes of callback land here:
+ *
+ *  - on-demand ▶ runs (`manualRun`): recorded as-is, no engine involvement.
+ *  - the `judge` phase: the payload is a self-evaluation verdict, not a
+ *    result — routed to `onJudgeVerdict`.
+ *  - the `exec` phase (a normal sequential step's work): on failure the
+ *    workflow stops; on success it chains the session and then either runs the
+ *    judge (if the step has acceptance criteria) or, with no criteria, behaves
+ *    exactly as before — mark done and `advance()` to the next step.
  */
 export async function onStepResult(
 	stepId: string,
@@ -278,23 +364,105 @@ export async function onStepResult(
 ): Promise<void> {
 	const step = getStep(stepId);
 	if (!step) return;
-	const manualRun = step.manualRun;
-	completeStep(stepId, outcome);
-	if (manualRun) {
+
+	// On-demand ▶ run: outside the engine and the judge entirely — unchanged.
+	if (step.manualRun) {
+		completeStep(stepId, outcome);
 		maybeMarkCompleted(step.workflowId, log);
 		writeStatusMd(step.workflowId);
 		log(`step ${stepId} (on-demand run) ${outcome.ok ? "done" : `failed (${outcome.error})`}`);
 		return;
 	}
-	if (outcome.ok && outcome.sessionId) setWorkflowSessionId(step.workflowId, outcome.sessionId);
-	writeStatusMd(step.workflowId);
+
+	// This callback is the self-evaluation verdict, not the step's result.
+	if (step.phase === "judge") {
+		await onJudgeVerdict(step, outcome, cfg, log);
+		return;
+	}
+
+	// --- exec phase: the step's actual work finished ---
 	if (!outcome.ok) {
+		completeStep(stepId, outcome);
 		setWorkflowStatus(step.workflowId, "failed");
 		writeStatusMd(step.workflowId);
 		log(`workflow ${step.workflowId} failed at step ${stepId}: ${outcome.error}`, "error");
 		return;
 	}
-	await advance(step.workflowId, cfg, log);
+	// Chain the session now — the judge (and any retry) resumes this same one.
+	if (outcome.sessionId) setWorkflowSessionId(step.workflowId, outcome.sessionId);
+
+	// No acceptance criteria → no judge; accept the result as before.
+	if (!step.acceptanceCriteria) {
+		completeStep(stepId, outcome);
+		writeStatusMd(step.workflowId);
+		await advance(step.workflowId, cfg, log);
+		return;
+	}
+
+	// Keep the result, move into the judge phase, and dispatch the self-eval.
+	markStepJudging(stepId, { result: outcome.result, sessionId: outcome.sessionId });
+	writeStatusMd(step.workflowId);
+	const workflow = getWorkflow(step.workflowId);
+	const judging = getStep(stepId);
+	if (!workflow || !judging) return;
+	log(`step ${stepId} done, dispatching judge`);
+	await dispatchStep(judging, workflow, cfg, log, { mode: "judge" });
+	failWorkflowIfDispatchDied(stepId, step.workflowId, "judge", log);
+}
+
+/**
+ * Handles the self-evaluation verdict for a step in its `judge` phase: accept
+ * and advance, or re-run the same step with the judge's feedback until its
+ * retry budget is spent, then fail. The judge's own session is chained so the
+ * conversation stays continuous into the next step or the retry.
+ */
+async function onJudgeVerdict(
+	step: Step,
+	outcome: { ok: boolean; result?: string; error?: string; sessionId?: string },
+	cfg: HubConfig,
+	log: Logger,
+): Promise<void> {
+	if (outcome.sessionId) setWorkflowSessionId(step.workflowId, outcome.sessionId);
+
+	// The judge job itself couldn't run — we can't evaluate, so stop.
+	if (!outcome.ok) {
+		failWorkflowAt(step.id, step.workflowId, `judge run failed: ${outcome.error ?? "unknown"}`, log);
+		return;
+	}
+
+	const verdict = parseJudgeVerdict(outcome.result);
+	if (!verdict) {
+		failWorkflowAt(step.id, step.workflowId, `judge verdict unparseable: ${truncateText(outcome.result)}`, log);
+		return;
+	}
+
+	if (verdict.ok) {
+		finishStepDone(step.id);
+		writeStatusMd(step.workflowId);
+		log(`step ${step.id} passed the judge`);
+		await advance(step.workflowId, cfg, log);
+		return;
+	}
+
+	// Rejected. Out of retries → fail; otherwise re-run the same step with feedback.
+	if (step.retryCount >= step.maxRetries) {
+		failWorkflowAt(
+			step.id,
+			step.workflowId,
+			`rechazado por el juez tras ${step.retryCount} reintento(s): ${verdict.reason || "(sin motivo)"}`,
+			log,
+		);
+		return;
+	}
+
+	beginRetry(step.id);
+	writeStatusMd(step.workflowId);
+	log(`step ${step.id} rejected by judge (retry ${step.retryCount + 1}/${step.maxRetries}): ${verdict.reason}`);
+	const workflow = getWorkflow(step.workflowId);
+	const retried = getStep(step.id);
+	if (!workflow || !retried) return;
+	await dispatchStep(retried, workflow, cfg, log, { resumeSession: true, retryReason: verdict.reason });
+	failWorkflowIfDispatchDied(step.id, step.workflowId, "retry", log);
 }
 
 /**

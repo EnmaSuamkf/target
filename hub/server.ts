@@ -95,7 +95,23 @@ function publicStep(step: Step): Record<string, unknown> {
 		startedAt: step.startedAt,
 		finishedAt: step.finishedAt,
 		manualRun: step.manualRun,
+		acceptanceCriteria: step.acceptanceCriteria,
+		maxRetries: step.maxRetries,
+		retryCount: step.retryCount,
+		phase: step.phase,
 	};
+}
+
+/** Reads the optional judge config (acceptance criteria + retry budget) from a step create/edit body. */
+function readStepConfig(body: Record<string, unknown>): { acceptanceCriteria?: string | null; maxRetries?: number } {
+	const config: { acceptanceCriteria?: string | null; maxRetries?: number } = {};
+	if ("acceptanceCriteria" in body) {
+		config.acceptanceCriteria = typeof body.acceptanceCriteria === "string" ? body.acceptanceCriteria : null;
+	}
+	if (body.maxRetries != null && Number.isFinite(Number(body.maxRetries))) {
+		config.maxRetries = Math.max(0, Math.floor(Number(body.maxRetries)));
+	}
+	return config;
 }
 
 function sendJson(res: http.ServerResponse, status: number, payload: unknown): void {
@@ -337,7 +353,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
 			const description = typeof body.description === "string" ? body.description : "";
 			try {
-				const step = addStep(workflowId, description);
+				const step = addStep(workflowId, description, readStepConfig(body));
 				sendJson(res, 200, { step: publicStep(step) });
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
@@ -354,7 +370,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
 			const description = typeof body.description === "string" ? body.description : "";
 			try {
-				const step = editStep(workflowId, parts[4], description);
+				const step = editStep(workflowId, parts[4], description, readStepConfig(body));
 				sendJson(res, 200, { step: publicStep(step) });
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });

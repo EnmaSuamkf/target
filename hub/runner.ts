@@ -27,22 +27,65 @@ const SUBAGENT_SUFFIX =
 	"\n\nImportante: ejecutá este step delegando el trabajo a un subagente (herramienta Task) en lugar de resolverlo vos directamente en este hilo — esta misma sesión se reutiliza secuencialmente para todos los steps del workflow, y delegar mantiene el hilo principal liviano.";
 
 /**
+ * Builds the input for a re-run of a step the judge rejected: the same task
+ * plus the judge's reason, so the agent knows what to fix instead of blindly
+ * repeating itself.
+ */
+function retryNote(reason: string): string {
+	const trimmed = reason.trim();
+	return `\n\nNota: un intento anterior de este step no pasó la evaluación de aceptación${
+		trimmed ? `. Motivo: "${trimmed}"` : ""
+	}. Corregí eso y rehacé el step para cumplir el criterio.`;
+}
+
+/**
+ * Builds the input for the self-evaluation ("judge") pass: the same agent,
+ * resuming the same session, is asked to grade its own previous result against
+ * the step's acceptance criteria and answer with a strict JSON verdict.
+ * Deliberately omits SUBAGENT_SUFFIX — the verdict must come straight back on
+ * this thread, not from a subagent whose summary we'd then have to parse.
+ */
+export function judgeInput(criteria: string): string {
+	return [
+		"Evaluá tu propio resultado del step anterior de este workflow contra el siguiente criterio de aceptación:",
+		"",
+		`"${criteria.trim()}"`,
+		"",
+		'Respondé ÚNICAMENTE con un objeto JSON en una sola línea, sin ningún otro texto, con esta forma exacta: {"ok": true|false, "reason": "<explicación breve>"}',
+		'"ok" es true solo si el resultado cumple el criterio. Si no lo cumple, poné "ok": false y en "reason" explicá concretamente qué falta o qué corregir.',
+	].join("\n");
+}
+
+/**
  * Dispatches one workflow step to its workflow's awb hook. By default it
  * resumes `workflow.lastSessionId` (the sequential engine's case — every
  * step after the first continues the same Claude session). An on-demand run
  * (workflow.ts's `runStep`) passes `resumeSession: false` so it always starts
  * a fresh session instead of forking the shared one.
+ *
+ * `mode: "judge"` dispatches the self-evaluation pass instead of the step's
+ * work: it always resumes the session (the agent must remember what it just
+ * did), sends the verdict prompt, and does NOT flip the step's phase/status
+ * (workflow.ts already moved it into the judge phase before calling this).
+ * A rejected step's retry passes `retryReason` so the re-run carries the
+ * judge's feedback.
  */
 export async function dispatchStep(
 	step: Step,
 	workflow: Workflow,
 	cfg: HubConfig,
 	log: Logger,
-	options: { resumeSession?: boolean } = {},
+	options: { resumeSession?: boolean; mode?: "exec" | "judge"; retryReason?: string } = {},
 ): Promise<void> {
-	const resumeSession = options.resumeSession ?? true;
+	const mode = options.mode ?? "exec";
+	// The judge must always see what it produced, so it resumes regardless of
+	// the caller's preference.
+	const resumeSession = mode === "judge" ? true : (options.resumeSession ?? true);
 	const callbackUrl = `http://${cfg.host}:${cfg.port}/api/steps/${step.id}/result?token=${step.callbackToken}`;
-	const input = `${step.description}${SUBAGENT_SUFFIX}`;
+	const input =
+		mode === "judge"
+			? judgeInput(step.acceptanceCriteria ?? "")
+			: `${step.description}${SUBAGENT_SUFFIX}${options.retryReason ? retryNote(options.retryReason) : ""}`;
 	try {
 		const res = await fetch(workflow.hookUrl, {
 			method: "POST",
@@ -58,8 +101,11 @@ export async function dispatchStep(
 			signal: AbortSignal.timeout(DISPATCH_TIMEOUT_MS),
 		});
 		if (res.ok) {
+			// In judge mode the step is already `running` in its judge phase, so
+			// this is a no-op (it only fires on a `pending` step) — the exec dispatch
+			// is what it's really for.
 			markStepRunning(step.id);
-			log(`step ${step.id} (workflow ${workflow.id}) -> '${workflow.agentName}' accepted`);
+			log(`step ${step.id} (workflow ${workflow.id}, ${mode}) -> '${workflow.agentName}' accepted`);
 		} else {
 			completeStep(step.id, { ok: false, error: `hook answered ${res.status}` });
 			log(`step ${step.id} (workflow ${workflow.id}) -> '${workflow.agentName}' rejected (${res.status})`, "error");

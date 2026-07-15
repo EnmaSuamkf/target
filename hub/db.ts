@@ -18,6 +18,13 @@ import { dbFile } from "./config.ts";
 
 export type WorkflowStatus = "draft" | "running" | "paused" | "completed" | "failed";
 export type StepStatus = "pending" | "running" | "done" | "failed";
+/**
+ * Which job a `running` step is currently waiting on: its own execution
+ * (`exec`) or the self-evaluation that runs afterwards (`judge`). Both come
+ * back through the same result callback, so the phase is what tells
+ * `onStepResult` how to interpret the payload. Meaningless while not running.
+ */
+export type StepPhase = "exec" | "judge";
 
 export interface Workflow {
 	id: string;
@@ -53,6 +60,18 @@ export interface Step {
 	finishedAt: string | null;
 	/** Whether the current/last run was triggered on demand (the ▶ button) rather than by the sequential engine. */
 	manualRun: boolean;
+	/**
+	 * Acceptance criteria the agent self-evaluates its result against after
+	 * running this step. Empty/null means no judge — the step is accepted as
+	 * soon as it runs, exactly like before this feature existed.
+	 */
+	acceptanceCriteria: string | null;
+	/** How many times the judge may reject this step and re-run it before the workflow is failed. 0 = no retries (one shot, then fail if rejected). */
+	maxRetries: number;
+	/** Retries already consumed on the current attempt cycle; reset by restart. */
+	retryCount: number;
+	/** Which job the step's in-flight callback belongs to (see StepPhase). */
+	phase: StepPhase;
 }
 
 let db: DatabaseSync | null = null;
@@ -89,20 +108,31 @@ function open(): DatabaseSync {
 			created_at TEXT NOT NULL,
 			started_at TEXT,
 			finished_at TEXT,
-			is_manual_run INTEGER NOT NULL DEFAULT 0
+			is_manual_run INTEGER NOT NULL DEFAULT 0,
+			acceptance_criteria TEXT,
+			max_retries INTEGER NOT NULL DEFAULT 0,
+			retry_count INTEGER NOT NULL DEFAULT 0,
+			phase TEXT NOT NULL DEFAULT 'exec'
 		);
 		CREATE INDEX IF NOT EXISTS idx_steps_workflow ON steps(workflow_id, order_index);
 	`);
 	// `CREATE TABLE IF NOT EXISTS` above is a no-op on a `steps` table that
-	// already existed before this column was added — add it here so upgrades
-	// don't need a fresh DB. (Older DBs may still carry now-unused isolated_*
-	// columns from an earlier iteration of this feature; harmless to leave.)
+	// already existed before these columns were added — add any that are missing
+	// here so upgrades don't need a fresh DB. (Older DBs may still carry
+	// now-unused isolated_* columns from an earlier iteration of this feature;
+	// harmless to leave.)
+	const database = db;
 	const existingColumns = new Set(
-		(db.prepare("PRAGMA table_info(steps)").all() as Record<string, unknown>[]).map((c) => String(c.name)),
+		(database.prepare("PRAGMA table_info(steps)").all() as Record<string, unknown>[]).map((c) => String(c.name)),
 	);
-	if (!existingColumns.has("is_manual_run")) {
-		db.exec(`ALTER TABLE steps ADD COLUMN is_manual_run INTEGER NOT NULL DEFAULT 0;`);
-	}
+	const addColumn = (name: string, ddl: string) => {
+		if (!existingColumns.has(name)) database.exec(`ALTER TABLE steps ADD COLUMN ${ddl};`);
+	};
+	addColumn("is_manual_run", "is_manual_run INTEGER NOT NULL DEFAULT 0");
+	addColumn("acceptance_criteria", "acceptance_criteria TEXT");
+	addColumn("max_retries", "max_retries INTEGER NOT NULL DEFAULT 0");
+	addColumn("retry_count", "retry_count INTEGER NOT NULL DEFAULT 0");
+	addColumn("phase", "phase TEXT NOT NULL DEFAULT 'exec'");
 	return db;
 }
 
@@ -217,15 +247,25 @@ function rowToStep(row: Record<string, unknown>): Step {
 		startedAt: row.started_at == null ? null : String(row.started_at),
 		finishedAt: row.finished_at == null ? null : String(row.finished_at),
 		manualRun: Number(row.is_manual_run ?? 0) === 1,
+		acceptanceCriteria: row.acceptance_criteria == null ? null : String(row.acceptance_criteria),
+		maxRetries: Number(row.max_retries ?? 0),
+		retryCount: Number(row.retry_count ?? 0),
+		phase: (row.phase as StepPhase) ?? "exec",
 	};
 }
 
-export function insertStep(workflowId: string, description: string): Step {
+export function insertStep(
+	workflowId: string,
+	description: string,
+	options: { acceptanceCriteria?: string | null; maxRetries?: number } = {},
+): Step {
 	const database = open();
 	const maxRow = database
 		.prepare("SELECT COALESCE(MAX(order_index), -1) AS maxIdx FROM steps WHERE workflow_id = ?")
 		.get(workflowId) as Record<string, unknown>;
 	const orderIndex = Number(maxRow.maxIdx) + 1;
+	const acceptanceCriteria = options.acceptanceCriteria?.trim() || null;
+	const maxRetries = Math.max(0, Math.floor(options.maxRetries ?? 0));
 	const step: Step = {
 		id: crypto.randomUUID(),
 		workflowId,
@@ -240,13 +280,27 @@ export function insertStep(workflowId: string, description: string): Step {
 		startedAt: null,
 		finishedAt: null,
 		manualRun: false,
+		acceptanceCriteria,
+		maxRetries,
+		retryCount: 0,
+		phase: "exec",
 	};
 	database
 		.prepare(
-			`INSERT INTO steps (id, workflow_id, order_index, description, status, callback_token, created_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO steps (id, workflow_id, order_index, description, status, callback_token, created_at, acceptance_criteria, max_retries)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
-		.run(step.id, step.workflowId, step.orderIndex, step.description, step.status, step.callbackToken, step.createdAt);
+		.run(
+			step.id,
+			step.workflowId,
+			step.orderIndex,
+			step.description,
+			step.status,
+			step.callbackToken,
+			step.createdAt,
+			step.acceptanceCriteria,
+			step.maxRetries,
+		);
 	return step;
 }
 
@@ -273,14 +327,61 @@ export function updateStepDescription(id: string, description: string): void {
 	open().prepare("UPDATE steps SET description = ? WHERE id = ?").run(description, id);
 }
 
+/** Updates a step's judge config (acceptance criteria + retry budget). Editing a step is the only place these change after creation. */
+export function updateStepConfig(id: string, config: { acceptanceCriteria: string | null; maxRetries: number }): void {
+	open()
+		.prepare("UPDATE steps SET acceptance_criteria = ?, max_retries = ? WHERE id = ?")
+		.run(config.acceptanceCriteria?.trim() || null, Math.max(0, Math.floor(config.maxRetries)), id);
+}
+
 export function deleteStep(id: string): boolean {
 	return open().prepare("DELETE FROM steps WHERE id = ?").run(id).changes > 0;
 }
 
 export function markStepRunning(id: string): void {
 	open()
-		.prepare("UPDATE steps SET status = 'running', started_at = ?, is_manual_run = 0 WHERE id = ? AND status = 'pending'")
+		.prepare(
+			"UPDATE steps SET status = 'running', started_at = ?, is_manual_run = 0, phase = 'exec' WHERE id = ? AND status = 'pending'",
+		)
 		.run(new Date().toISOString(), id);
+}
+
+/**
+ * Records an exec run's successful result but keeps the step `running` and
+ * flips it into the `judge` phase — the self-evaluation job is about to be
+ * dispatched, and its verdict (not this result) decides whether the step is
+ * finally `done`. `started_at` is reset so the stale-step timeout is measured
+ * against the judge run now in flight, not the exec run that already answered.
+ */
+export function markStepJudging(id: string, outcome: { result?: string; sessionId?: string }): void {
+	open()
+		.prepare(
+			`UPDATE steps SET result = ?, session_id = ?, phase = 'judge', started_at = ?, error = NULL
+			 WHERE id = ? AND status = 'running'`,
+		)
+		.run(outcome.result ?? null, outcome.sessionId ?? null, new Date().toISOString(), id);
+}
+
+/** Marks a judge-accepted step `done`, preserving the exec result already stored by `markStepJudging`. */
+export function finishStepDone(id: string): void {
+	open()
+		.prepare("UPDATE steps SET status = 'done', finished_at = ? WHERE id = ? AND status = 'running'")
+		.run(new Date().toISOString(), id);
+}
+
+/**
+ * Puts a judge-rejected step back to `pending` for another exec attempt and
+ * bumps its retry counter, clearing the prior result/error. The next dispatch
+ * re-runs it (with the judge's feedback) exactly like a first run.
+ */
+export function beginRetry(id: string): void {
+	open()
+		.prepare(
+			`UPDATE steps SET status = 'pending', phase = 'exec', retry_count = retry_count + 1,
+			 result = NULL, error = NULL, session_id = NULL, started_at = NULL, finished_at = NULL
+			 WHERE id = ?`,
+		)
+		.run(id);
 }
 
 export function completeStep(
@@ -314,7 +415,7 @@ export function startManualRun(stepId: string): boolean {
 	const changes = open()
 		.prepare(
 			`UPDATE steps SET status = 'running', result = NULL, error = NULL, session_id = NULL,
-			 started_at = ?, finished_at = NULL, is_manual_run = 1
+			 started_at = ?, finished_at = NULL, is_manual_run = 1, phase = 'exec', retry_count = 0
 			 WHERE id = ? AND status != 'running'`,
 		)
 		.run(now, stepId).changes;
@@ -341,7 +442,8 @@ export function resetSteps(workflowId: string): void {
 	open()
 		.prepare(
 			`UPDATE steps SET status = 'pending', result = NULL, error = NULL, session_id = NULL,
-			 started_at = NULL, finished_at = NULL, is_manual_run = 0 WHERE workflow_id = ?`,
+			 started_at = NULL, finished_at = NULL, is_manual_run = 0, phase = 'exec', retry_count = 0
+			 WHERE workflow_id = ?`,
 		)
 		.run(workflowId);
 }
