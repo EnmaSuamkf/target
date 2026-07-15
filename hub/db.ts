@@ -323,6 +323,25 @@ export function nextPendingStep(workflowId: string): Step | null {
 	return row ? rowToStep(row as Record<string, unknown>) : null;
 }
 
+/**
+ * Session id of the step that ran most recently (by `started_at`) and produced
+ * a session — i.e. the conversation the user most likely wants to watch. For a
+ * sequential run this is the shared session (every step reports the same one,
+ * which also equals `workflow.lastSessionId`); for an on-demand ▶ run it's that
+ * run's own fresh session, which `lastSessionId` deliberately never tracks.
+ * Null if no step has produced a session yet.
+ */
+export function latestStepSession(workflowId: string): string | null {
+	const row = open()
+		.prepare(
+			`SELECT session_id FROM steps
+			 WHERE workflow_id = ? AND session_id IS NOT NULL
+			 ORDER BY started_at DESC LIMIT 1`,
+		)
+		.get(workflowId) as Record<string, unknown> | undefined;
+	return row?.session_id == null ? null : String(row.session_id);
+}
+
 export function updateStepDescription(id: string, description: string): void {
 	open().prepare("UPDATE steps SET description = ? WHERE id = ?").run(description, id);
 }

@@ -26,7 +26,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { hookRuntime, PUBLISHABLE_PERMISSION_MODES, type PublishablePermissionMode } from "./awb.ts";
 import type { HubConfig } from "./config.ts";
-import { getWorkflow, listSteps, listWorkflows, stepProgress, type Step, type Workflow } from "./db.ts";
+import { getWorkflow, latestStepSession, listSteps, listWorkflows, stepProgress, type Step, type Workflow } from "./db.ts";
 import type { Logger } from "./runner.ts";
 import { readTranscript } from "./transcript.ts";
 import {
@@ -310,11 +310,13 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 
 	// --- /api/workflows/:id/transcript ---
 	//
-	// Shows the actual Claude conversation happening inside the workflow's
-	// running/last session — not just each step's final result. Only readable
-	// once a session id exists: the very first step of a fresh (or just
-	// restarted) workflow doesn't have one yet while it's still running,
-	// because awb only reports it in the completion callback.
+	// Shows the actual Claude conversation of whichever step ran most recently
+	// — not just each step's final result. That's the shared session for a
+	// sequential run, but for an on-demand ▶ run it's that run's own fresh
+	// session (which `lastSessionId` never tracks), so we resolve it from the
+	// steps rather than only from `lastSessionId`. Only readable once a session
+	// id exists: a step still on its first run doesn't have one yet, because awb
+	// only reports it in the completion callback.
 
 	if (workflowId && parts[3] === "transcript" && !parts[4] && req.method === "GET") {
 		const workflow = getWorkflow(workflowId);
@@ -323,22 +325,23 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			return;
 		}
 		const runtime = hookRuntime(workflow.hookUrl);
-		if (!workflow.lastSessionId || !runtime.workdir) {
+		const sessionId = latestStepSession(workflowId) ?? workflow.lastSessionId;
+		if (!sessionId || !runtime.workdir) {
 			sendJson(res, 200, {
-				sessionId: workflow.lastSessionId,
+				sessionId,
 				harness: runtime.harness,
 				entries: [],
 				note:
-					workflow.lastSessionId == null
-						? "No session yet: the id is only known once the first step finishes."
+					sessionId == null
+						? "No session yet: the id is only known once a step finishes running."
 						: undefined,
 			});
 			return;
 		}
 		sendJson(res, 200, {
-			sessionId: workflow.lastSessionId,
+			sessionId,
 			harness: runtime.harness,
-			entries: readTranscript(runtime.workdir, workflow.lastSessionId),
+			entries: readTranscript(runtime.workdir, sessionId),
 		});
 		return;
 	}
