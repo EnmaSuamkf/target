@@ -68,6 +68,8 @@ export interface Step {
 	acceptanceCriteria: string | null;
 	/** How many times the judge may reject this step and re-run it before the workflow is failed. 0 = no retries (one shot, then fail if rejected). */
 	maxRetries: number;
+	/** Seconds to wait before each re-run after a judge reject. 0 = retry immediately. */
+	retryIntervalSeconds: number;
 	/** Retries already consumed on the current attempt cycle; reset by restart. */
 	retryCount: number;
 	/** Which job the step's in-flight callback belongs to (see StepPhase). */
@@ -111,6 +113,7 @@ function open(): DatabaseSync {
 			is_manual_run INTEGER NOT NULL DEFAULT 0,
 			acceptance_criteria TEXT,
 			max_retries INTEGER NOT NULL DEFAULT 0,
+			retry_interval_seconds INTEGER NOT NULL DEFAULT 0,
 			retry_count INTEGER NOT NULL DEFAULT 0,
 			phase TEXT NOT NULL DEFAULT 'exec'
 		);
@@ -131,6 +134,7 @@ function open(): DatabaseSync {
 	addColumn("is_manual_run", "is_manual_run INTEGER NOT NULL DEFAULT 0");
 	addColumn("acceptance_criteria", "acceptance_criteria TEXT");
 	addColumn("max_retries", "max_retries INTEGER NOT NULL DEFAULT 0");
+	addColumn("retry_interval_seconds", "retry_interval_seconds INTEGER NOT NULL DEFAULT 0");
 	addColumn("retry_count", "retry_count INTEGER NOT NULL DEFAULT 0");
 	addColumn("phase", "phase TEXT NOT NULL DEFAULT 'exec'");
 	return db;
@@ -249,6 +253,7 @@ function rowToStep(row: Record<string, unknown>): Step {
 		manualRun: Number(row.is_manual_run ?? 0) === 1,
 		acceptanceCriteria: row.acceptance_criteria == null ? null : String(row.acceptance_criteria),
 		maxRetries: Number(row.max_retries ?? 0),
+		retryIntervalSeconds: Number(row.retry_interval_seconds ?? 0),
 		retryCount: Number(row.retry_count ?? 0),
 		phase: (row.phase as StepPhase) ?? "exec",
 	};
@@ -257,7 +262,7 @@ function rowToStep(row: Record<string, unknown>): Step {
 export function insertStep(
 	workflowId: string,
 	description: string,
-	options: { acceptanceCriteria?: string | null; maxRetries?: number } = {},
+	options: { acceptanceCriteria?: string | null; maxRetries?: number; retryIntervalSeconds?: number } = {},
 ): Step {
 	const database = open();
 	const maxRow = database
@@ -266,6 +271,7 @@ export function insertStep(
 	const orderIndex = Number(maxRow.maxIdx) + 1;
 	const acceptanceCriteria = options.acceptanceCriteria?.trim() || null;
 	const maxRetries = Math.max(0, Math.floor(options.maxRetries ?? 0));
+	const retryIntervalSeconds = Math.max(0, Math.floor(options.retryIntervalSeconds ?? 0));
 	const step: Step = {
 		id: crypto.randomUUID(),
 		workflowId,
@@ -282,13 +288,14 @@ export function insertStep(
 		manualRun: false,
 		acceptanceCriteria,
 		maxRetries,
+		retryIntervalSeconds,
 		retryCount: 0,
 		phase: "exec",
 	};
 	database
 		.prepare(
-			`INSERT INTO steps (id, workflow_id, order_index, description, status, callback_token, created_at, acceptance_criteria, max_retries)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO steps (id, workflow_id, order_index, description, status, callback_token, created_at, acceptance_criteria, max_retries, retry_interval_seconds)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			step.id,
@@ -300,6 +307,7 @@ export function insertStep(
 			step.createdAt,
 			step.acceptanceCriteria,
 			step.maxRetries,
+			step.retryIntervalSeconds,
 		);
 	return step;
 }
@@ -346,11 +354,19 @@ export function updateStepDescription(id: string, description: string): void {
 	open().prepare("UPDATE steps SET description = ? WHERE id = ?").run(description, id);
 }
 
-/** Updates a step's judge config (acceptance criteria + retry budget). Editing a step is the only place these change after creation. */
-export function updateStepConfig(id: string, config: { acceptanceCriteria: string | null; maxRetries: number }): void {
+/** Updates a step's judge config (acceptance criteria + retry budget + retry wait). Editing a step is the only place these change after creation. */
+export function updateStepConfig(
+	id: string,
+	config: { acceptanceCriteria: string | null; maxRetries: number; retryIntervalSeconds: number },
+): void {
 	open()
-		.prepare("UPDATE steps SET acceptance_criteria = ?, max_retries = ? WHERE id = ?")
-		.run(config.acceptanceCriteria?.trim() || null, Math.max(0, Math.floor(config.maxRetries)), id);
+		.prepare("UPDATE steps SET acceptance_criteria = ?, max_retries = ?, retry_interval_seconds = ? WHERE id = ?")
+		.run(
+			config.acceptanceCriteria?.trim() || null,
+			Math.max(0, Math.floor(config.maxRetries)),
+			Math.max(0, Math.floor(config.retryIntervalSeconds)),
+			id,
+		);
 }
 
 export function deleteStep(id: string): boolean {

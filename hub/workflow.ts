@@ -137,7 +137,7 @@ export function removeWorkflow(workflowId: string): void {
 export function addStep(
 	workflowId: string,
 	description: string,
-	options: { acceptanceCriteria?: string | null; maxRetries?: number } = {},
+	options: { acceptanceCriteria?: string | null; maxRetries?: number; retryIntervalSeconds?: number } = {},
 ): Step {
 	const trimmed = description.trim();
 	if (!trimmed) throw new WorkflowError("description is required");
@@ -157,7 +157,7 @@ export function editStep(
 	workflowId: string,
 	stepId: string,
 	description: string,
-	options: { acceptanceCriteria?: string | null; maxRetries?: number } = {},
+	options: { acceptanceCriteria?: string | null; maxRetries?: number; retryIntervalSeconds?: number } = {},
 ): Step {
 	const trimmed = description.trim();
 	if (!trimmed) throw new WorkflowError("description is required");
@@ -167,10 +167,15 @@ export function editStep(
 	updateStepDescription(stepId, trimmed);
 	// Only touch the judge config when the caller actually sent fields — a plain
 	// description edit shouldn't silently wipe an existing criterion.
-	if (options.acceptanceCriteria !== undefined || options.maxRetries !== undefined) {
+	if (
+		options.acceptanceCriteria !== undefined ||
+		options.maxRetries !== undefined ||
+		options.retryIntervalSeconds !== undefined
+	) {
 		updateStepConfig(stepId, {
 			acceptanceCriteria: options.acceptanceCriteria ?? step.acceptanceCriteria,
 			maxRetries: options.maxRetries ?? step.maxRetries,
+			retryIntervalSeconds: options.retryIntervalSeconds ?? step.retryIntervalSeconds,
 		});
 	}
 	writeStatusMd(workflowId);
@@ -289,6 +294,10 @@ export async function restartWorkflow(workflowId: string, cfg: HubConfig, log: L
 function truncateText(s: string | undefined, n = 200): string {
 	const t = String(s ?? "");
 	return t.length > n ? `${t.slice(0, n)}…` : t;
+}
+
+function wait(seconds: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, seconds * 1000));
 }
 
 /**
@@ -458,6 +467,12 @@ async function onJudgeVerdict(
 	beginRetry(step.id);
 	writeStatusMd(step.workflowId);
 	log(`step ${step.id} rejected by judge (retry ${step.retryCount + 1}/${step.maxRetries}): ${verdict.reason}`);
+	// The step is back to `pending` with no `started_at` while we wait, so the
+	// stale-step sweep can't time it out mid-interval.
+	if (step.retryIntervalSeconds > 0) {
+		log(`step ${step.id} waiting ${step.retryIntervalSeconds}s before the retry`);
+		await wait(step.retryIntervalSeconds);
+	}
 	const workflow = getWorkflow(step.workflowId);
 	const retried = getStep(step.id);
 	if (!workflow || !retried) return;

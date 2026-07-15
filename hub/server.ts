@@ -97,19 +97,27 @@ function publicStep(step: Step): Record<string, unknown> {
 		manualRun: step.manualRun,
 		acceptanceCriteria: step.acceptanceCriteria,
 		maxRetries: step.maxRetries,
+		retryIntervalSeconds: step.retryIntervalSeconds,
 		retryCount: step.retryCount,
 		phase: step.phase,
 	};
 }
 
-/** Reads the optional judge config (acceptance criteria + retry budget) from a step create/edit body. */
-function readStepConfig(body: Record<string, unknown>): { acceptanceCriteria?: string | null; maxRetries?: number } {
-	const config: { acceptanceCriteria?: string | null; maxRetries?: number } = {};
+/** Reads the optional judge config (acceptance criteria + retry budget + retry wait) from a step create/edit body. */
+function readStepConfig(body: Record<string, unknown>): {
+	acceptanceCriteria?: string | null;
+	maxRetries?: number;
+	retryIntervalSeconds?: number;
+} {
+	const config: { acceptanceCriteria?: string | null; maxRetries?: number; retryIntervalSeconds?: number } = {};
 	if ("acceptanceCriteria" in body) {
 		config.acceptanceCriteria = typeof body.acceptanceCriteria === "string" ? body.acceptanceCriteria : null;
 	}
 	if (body.maxRetries != null && Number.isFinite(Number(body.maxRetries))) {
 		config.maxRetries = Math.max(0, Math.floor(Number(body.maxRetries)));
+	}
+	if (body.retryIntervalSeconds != null && Number.isFinite(Number(body.retryIntervalSeconds))) {
+		config.retryIntervalSeconds = Math.max(0, Math.floor(Number(body.retryIntervalSeconds)));
 	}
 	return config;
 }
