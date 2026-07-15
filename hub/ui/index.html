@@ -147,6 +147,13 @@
         font-size: 0.92rem;
         padding: 0.5rem 0.65rem;
       }
+      input[type="text"]:disabled, input[type="password"]:disabled, input[type="number"]:disabled, textarea:disabled, select:disabled{
+        color: var(--faint);
+        /* WebKit ignores `color` on disabled inputs and dims them on its own. */
+        -webkit-text-fill-color: var(--faint);
+        opacity: 1;
+        cursor: not-allowed;
+      }
       textarea{ min-height: 4.5rem; resize: vertical; }
 
       .btn{
@@ -340,6 +347,11 @@
                   <label for="step-retries">Max retries on judge reject</label>
                   <input type="number" id="step-retries" min="0" step="1" value="0" />
                 </div>
+                <div>
+                  <label for="step-interval">Interval ⓘ</label>
+                  <input type="number" id="step-interval" min="0" step="1" value="0" disabled
+                    title="Seconds to wait before each re-run after a judge reject. Only editable when the retries above is greater than 1." />
+                </div>
                 <button type="submit" class="btn">Add step</button>
                 <p class="msg" id="add-step-msg"></p>
               </form>
@@ -415,6 +427,14 @@
         return s.length > n ? `${s.slice(0, n)}…` : s;
       }
 
+      // The wait between retries only applies with more than one retry, so the
+      // field stays disabled (and zeroed) below that.
+      function syncIntervalEnabled(retriesInput, intervalInput) {
+        const enabled = (parseInt(retriesInput.value, 10) || 0) > 1;
+        intervalInput.disabled = !enabled;
+        if (!enabled) intervalInput.value = "0";
+      }
+
       function renderStep(step) {
         const editable = step.status !== "running";
         const running = step.status === "running";
@@ -430,7 +450,9 @@
             <label for="edit-criteria-${step.id}">Acceptance criteria (empty = no judge)</label>
             <textarea id="edit-criteria-${step.id}" placeholder="Optional — what a good result must satisfy.">${escapeHtml(step.acceptanceCriteria || "")}</textarea>
             <label for="edit-retries-${step.id}">Max retries on judge reject</label>
-            <input type="number" id="edit-retries-${step.id}" min="0" step="1" value="${step.maxRetries ?? 0}" />
+            <input type="number" id="edit-retries-${step.id}" min="0" step="1" value="${step.maxRetries ?? 0}" data-retries="${step.id}" />
+            <label for="edit-interval-${step.id}">Interval</label>
+            <input type="number" id="edit-interval-${step.id}" min="0" step="1" value="${step.retryIntervalSeconds ?? 0}" ${(step.maxRetries ?? 0) > 1 ? "" : "disabled"} />
             <div class="step-actions">
               <button class="btn small" data-save="${step.id}">Save</button>
               <button class="btn small" data-cancel="${step.id}">Cancel</button>
@@ -542,17 +564,23 @@
             renderDetail(workflow, steps);
           }),
         );
+        list.querySelectorAll("[data-retries]").forEach((input) =>
+          input.addEventListener("input", () =>
+            syncIntervalEnabled(input, $(`edit-interval-${input.getAttribute("data-retries")}`)),
+          ),
+        );
         list.querySelectorAll("[data-save]").forEach((btn) =>
           btn.addEventListener("click", async () => {
             const stepId = btn.getAttribute("data-save");
             const description = $(`edit-desc-${stepId}`).value.trim();
             const acceptanceCriteria = $(`edit-criteria-${stepId}`).value.trim();
             const maxRetries = Math.max(0, parseInt($(`edit-retries-${stepId}`).value, 10) || 0);
+            const retryIntervalSeconds = Math.max(0, parseInt($(`edit-interval-${stepId}`).value, 10) || 0);
             if (!description) return;
             const res = await fetch(`/api/workflows/${selectedId}/steps/${stepId}`, {
               method: "PATCH",
               headers: { "content-type": "application/json", ...authHeaders() },
-              body: JSON.stringify({ description, acceptanceCriteria, maxRetries }),
+              body: JSON.stringify({ description, acceptanceCriteria, maxRetries, retryIntervalSeconds }),
             });
             if (res.ok) {
               editingStepId = null;
@@ -737,12 +765,15 @@
         }
       });
 
+      $("step-retries").addEventListener("input", () => syncIntervalEnabled($("step-retries"), $("step-interval")));
+
       $("add-step-form").addEventListener("submit", async (ev) => {
         ev.preventDefault();
         if (!selectedId) return;
         const description = $("step-desc").value.trim();
         const acceptanceCriteria = $("step-criteria").value.trim();
         const maxRetries = Math.max(0, parseInt($("step-retries").value, 10) || 0);
+        const retryIntervalSeconds = Math.max(0, parseInt($("step-interval").value, 10) || 0);
         const msg = $("add-step-msg");
         if (!description) return;
         const token = adminToken() || prompt("Admin token — printed by the hub on startup (~/.target/config.json):");
@@ -752,7 +783,7 @@
           const res = await fetch(`/api/workflows/${selectedId}/steps`, {
             method: "POST",
             headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-            body: JSON.stringify({ description, acceptanceCriteria, maxRetries }),
+            body: JSON.stringify({ description, acceptanceCriteria, maxRetries, retryIntervalSeconds }),
           });
           const data = await res.json();
           if (!res.ok) {
@@ -763,6 +794,7 @@
           $("step-desc").value = "";
           $("step-criteria").value = "";
           $("step-retries").value = "0";
+          syncIntervalEnabled($("step-retries"), $("step-interval"));
           msg.textContent = "";
           msg.classList.remove("error");
           await selectWorkflow(selectedId);
