@@ -197,6 +197,10 @@
         font-size: 0.72rem;
         color: var(--faint);
         margin: 0 0 0.5rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
       }
       .convo-log{
         max-height: 340px;
@@ -312,7 +316,10 @@
 
             <div class="convo-block">
               <h2>Conversation</h2>
-              <p class="convo-meta" id="convo-meta"></p>
+              <p class="convo-meta">
+                <span id="convo-meta-text"></span>
+                <button class="btn small" id="btn-copy-resume" title="copy command to open conversation on your terminal">Open conversation</button>
+              </p>
               <div class="convo-log" id="convo-log"></div>
             </div>
 
@@ -346,6 +353,8 @@
       const $ = (id) => document.getElementById(id);
       let selectedId = null;
       let editingStepId = null;
+      let resumeCommand = null;
+      let copiedTimer = null;
 
       function adminToken() {
         return (localStorage.getItem("targetAdminToken") || "").trim();
@@ -452,8 +461,23 @@
         return { prompt: "Prompt", thinking: "Thinking", text: "Agent", tool_use: `→ ${entry.name}`, tool_result: "← result" }[entry.kind];
       }
 
+      function setResumeCommand(command) {
+        resumeCommand = command ?? null;
+        $("btn-copy-resume").style.display = resumeCommand ? "" : "none";
+      }
+
+      function flashCopied() {
+        const btn = $("btn-copy-resume");
+        btn.textContent = "Copied!";
+        clearTimeout(copiedTimer);
+        copiedTimer = setTimeout(() => {
+          btn.textContent = "Open conversation";
+        }, 1200);
+      }
+
       function renderTranscript(data) {
-        $("convo-meta").textContent = `harness: ${data.harness ?? "?"} · session: ${data.sessionId ?? "(none yet)"}`;
+        $("convo-meta-text").textContent = `harness: ${data.harness ?? "?"} · session: ${data.sessionId ?? "(none yet)"}`;
+        setResumeCommand(data.resumeCommand);
         const log = $("convo-log");
         if (data.note) {
           log.innerHTML = `<p class="convo-empty">${escapeHtml(data.note)}</p>`;
@@ -573,6 +597,10 @@
       }
 
       async function selectWorkflow(id) {
+        // Switching workflows: drop the old command up front so a failed
+        // transcript load can't leave the button copying another conversation.
+        // The 2s poll re-selects the same id, which must not flicker it away.
+        if (id !== selectedId) setResumeCommand(null);
         selectedId = id;
         editingStepId = null;
         try {
@@ -619,6 +647,16 @@
       $("btn-restart").addEventListener("click", () => {
         if (confirm("This resets ALL steps to pending and discards previous results. Continue?")) {
           runAction("restart");
+        }
+      });
+
+      $("btn-copy-resume").addEventListener("click", async () => {
+        if (!resumeCommand) return;
+        try {
+          await navigator.clipboard.writeText(resumeCommand);
+          flashCopied();
+        } catch {
+          alert(`Could not copy to the clipboard. Run this yourself:\n\n${resumeCommand}`);
         }
       });
 
