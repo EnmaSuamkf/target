@@ -137,7 +137,7 @@
         text-transform: uppercase;
         color: var(--faint);
       }
-      input[type="text"], input[type="password"], textarea, select{
+      input[type="text"], input[type="password"], input[type="number"], textarea, select{
         width: 100%;
         background: var(--surface-2);
         border: 1px solid var(--border);
@@ -323,6 +323,16 @@
                   <label for="step-desc">Task description for the agent</label>
                   <textarea id="step-desc" required placeholder="What the agent should do in this step..."></textarea>
                 </div>
+                <div>
+                  <label for="step-criteria">Acceptance criteria ⓘ</label>
+                  <textarea id="step-criteria"
+                    title="If set, after running the step the same agent self-evaluates its result against this. On a fail it re-runs the step (up to the retries below) before the workflow fails. Leave empty for no judge."
+                    placeholder="Optional — what a good result must satisfy. Empty = no judge (accepted as soon as it runs)."></textarea>
+                </div>
+                <div>
+                  <label for="step-retries">Max retries on judge reject</label>
+                  <input type="number" id="step-retries" min="0" step="1" value="0" />
+                </div>
                 <button type="submit" class="btn">Add step</button>
                 <p class="msg" id="add-step-msg"></p>
               </form>
@@ -408,18 +418,24 @@
               <span class="step-status ${step.status}">${step.status}</span>
             </div>
             <textarea id="edit-desc-${step.id}">${escapeHtml(step.description)}</textarea>
+            <label for="edit-criteria-${step.id}">Acceptance criteria (empty = no judge)</label>
+            <textarea id="edit-criteria-${step.id}" placeholder="Optional — what a good result must satisfy.">${escapeHtml(step.acceptanceCriteria || "")}</textarea>
+            <label for="edit-retries-${step.id}">Max retries on judge reject</label>
+            <input type="number" id="edit-retries-${step.id}" min="0" step="1" value="${step.maxRetries ?? 0}" />
             <div class="step-actions">
               <button class="btn small" data-save="${step.id}">Save</button>
               <button class="btn small" data-cancel="${step.id}">Cancel</button>
             </div>
           `;
         } else {
+          const statusLabel = step.status === "running" && step.phase === "judge" ? "judging" : step.status;
           li.innerHTML = `
             <div class="step-head">
               <span class="step-idx">#${step.orderIndex + 1}</span>
               <span class="step-desc">${escapeHtml(step.description)}</span>
-              <span class="step-status ${step.status}">${step.status}</span>
+              <span class="step-status ${step.status}">${statusLabel}</span>
             </div>
+            ${step.acceptanceCriteria ? `<div class="step-result">⚖ ${escapeHtml(truncate(step.acceptanceCriteria, 160))} · reintentos ${step.retryCount ?? 0}/${step.maxRetries ?? 0}</div>` : ""}
             ${step.error ? `<div class="step-error">${escapeHtml(step.error)}</div>` : ""}
             ${step.status === "done" && step.result ? `<div class="step-result">${escapeHtml(truncate(step.result, 240))}</div>` : ""}
             <div class="step-actions">
@@ -506,11 +522,13 @@
           btn.addEventListener("click", async () => {
             const stepId = btn.getAttribute("data-save");
             const description = $(`edit-desc-${stepId}`).value.trim();
+            const acceptanceCriteria = $(`edit-criteria-${stepId}`).value.trim();
+            const maxRetries = Math.max(0, parseInt($(`edit-retries-${stepId}`).value, 10) || 0);
             if (!description) return;
             const res = await fetch(`/api/workflows/${selectedId}/steps/${stepId}`, {
               method: "PATCH",
               headers: { "content-type": "application/json", ...authHeaders() },
-              body: JSON.stringify({ description }),
+              body: JSON.stringify({ description, acceptanceCriteria, maxRetries }),
             });
             if (res.ok) {
               editingStepId = null;
@@ -685,6 +703,8 @@
         ev.preventDefault();
         if (!selectedId) return;
         const description = $("step-desc").value.trim();
+        const acceptanceCriteria = $("step-criteria").value.trim();
+        const maxRetries = Math.max(0, parseInt($("step-retries").value, 10) || 0);
         const msg = $("add-step-msg");
         if (!description) return;
         const token = adminToken() || prompt("Admin token — printed by the hub on startup (~/.target/config.json):");
@@ -694,7 +714,7 @@
           const res = await fetch(`/api/workflows/${selectedId}/steps`, {
             method: "POST",
             headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-            body: JSON.stringify({ description }),
+            body: JSON.stringify({ description, acceptanceCriteria, maxRetries }),
           });
           const data = await res.json();
           if (!res.ok) {
@@ -703,6 +723,8 @@
             return;
           }
           $("step-desc").value = "";
+          $("step-criteria").value = "";
+          $("step-retries").value = "0";
           msg.textContent = "";
           msg.classList.remove("error");
           await selectWorkflow(selectedId);
