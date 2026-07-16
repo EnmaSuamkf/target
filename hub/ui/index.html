@@ -245,6 +245,77 @@
         padding: 0.5rem 0;
       }
       details[open] > summary{ margin-bottom: 0.5rem; }
+
+      /* Voice dictation floating control (bottom-right). */
+      .voice-dock{
+        position: fixed;
+        right: 1.2rem;
+        bottom: 1.2rem;
+        z-index: 1000;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 0.35rem 0.4rem 0.35rem 0.7rem;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+      }
+      .voice-lang{
+        width: auto;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        color: var(--text);
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        padding: 0.25rem 0.5rem;
+      }
+      .voice-mic{
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 2.6rem;
+        height: 2.6rem;
+        border-radius: 50%;
+        background: none;
+        border: 1px solid var(--accent-dim);
+        color: var(--accent);
+        padding: 0;
+        flex-shrink: 0;
+      }
+      .voice-mic:hover{ border-color: var(--accent); }
+      .voice-mic svg{ width: 1.15rem; height: 1.15rem; }
+      .voice-mic.listening{
+        background: var(--fail);
+        border-color: var(--fail);
+        color: var(--bg);
+        animation: voice-pulse 1.3s ease-in-out infinite;
+      }
+      .voice-mic:disabled{ opacity: 0.4; cursor: not-allowed; }
+      @keyframes voice-pulse{
+        0%, 100%{ box-shadow: 0 0 0 0 rgba(231, 122, 99, 0.55); }
+        50%{ box-shadow: 0 0 0 8px rgba(231, 122, 99, 0); }
+      }
+      .voice-hint{
+        position: absolute;
+        right: 0;
+        bottom: calc(100% + 0.5rem);
+        white-space: nowrap;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.35rem 0.6rem;
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        color: var(--muted);
+        pointer-events: none;
+        opacity: 0;
+        transform: translateY(4px);
+        transition: opacity 0.15s ease, transform 0.15s ease;
+      }
+      .voice-hint.show{ opacity: 1; transform: translateY(0); }
+      .voice-hint.error{ color: var(--fail); border-color: var(--fail); }
     </style>
   </head>
   <body>
@@ -359,6 +430,22 @@
           </div>
         </section>
       </div>
+    </div>
+
+    <div class="voice-dock" id="voice-dock">
+      <span class="voice-hint" id="voice-hint"></span>
+      <select class="voice-lang" id="voice-lang" title="Dictation language">
+        <option value="en-US">EN</option>
+        <option value="es-ES">ES</option>
+      </select>
+      <button class="voice-mic" id="voice-mic" type="button" title="Dictate into the focused field" aria-label="Dictate into the focused field">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+          <line x1="12" y1="19" x2="12" y2="23" />
+          <line x1="8" y1="23" x2="16" y2="23" />
+        </svg>
+      </button>
     </div>
 
     <script>
@@ -803,6 +890,152 @@
           msg.classList.add("error");
         }
       });
+
+      // Voice dictation — Web Speech API types what you say into the last
+      // editable field you focused. Self-contained; no dependencies.
+      (function setupVoiceDictation() {
+        const micBtn = $("voice-mic");
+        const langSel = $("voice-lang");
+        const hint = $("voice-hint");
+        let hintTimer = null;
+
+        function showHint(text, isError) {
+          hint.textContent = text;
+          hint.classList.toggle("error", !!isError);
+          hint.classList.add("show");
+          clearTimeout(hintTimer);
+          hintTimer = setTimeout(() => hint.classList.remove("show"), 2600);
+        }
+
+        // Remember the last text field the user touched so the mic knows where
+        // to type — a click on the mic itself would otherwise steal the focus.
+        let lastField = null;
+        const isEditable = (el) =>
+          el &&
+          ((el.tagName === "TEXTAREA") ||
+            (el.tagName === "INPUT" &&
+              ["text", "password", "number", "search", "email", "url", "tel"].includes(
+                (el.type || "text").toLowerCase(),
+              )));
+        document.addEventListener("focusin", (ev) => {
+          if (isEditable(ev.target)) lastField = ev.target;
+        });
+
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+        // Restore the remembered language (English is the default).
+        const savedLang = localStorage.getItem("targetVoiceLang");
+        if (savedLang === "es-ES" || savedLang === "en-US") langSel.value = savedLang;
+        langSel.addEventListener("change", () => {
+          localStorage.setItem("targetVoiceLang", langSel.value);
+          if (recognition) recognition.lang = langSel.value;
+        });
+
+        if (!SpeechRecognition) {
+          micBtn.disabled = true;
+          micBtn.title = "Speech recognition is not supported by this browser (try Chrome/Edge).";
+          return;
+        }
+
+        let recognition = null;
+        let listening = false;
+        // The field + caret range captured when dictation started, plus the text
+        // already committed this session, so interim results replace cleanly.
+        let target = null;
+        let insertStart = 0;
+        let insertEnd = 0;
+        let committed = "";
+
+        function insertText(text, isFinal) {
+          if (!target) return;
+          const before = target.value.slice(0, insertStart);
+          const after = target.value.slice(insertEnd);
+          target.value = before + committed + text + after;
+          const caret = insertStart + committed.length + text.length;
+          try {
+            target.setSelectionRange(caret, caret);
+          } catch {
+            // number inputs don't support selection ranges — safe to ignore.
+          }
+          target.dispatchEvent(new Event("input", { bubbles: true }));
+          // Advance the replace region past whatever we just wrote (final OR
+          // interim) so the next result overwrites it instead of being appended
+          // after a stale copy of the previous interim text.
+          insertEnd = insertStart + committed.length + text.length;
+          if (isFinal) {
+            committed += text;
+          }
+        }
+
+        function stop() {
+          if (recognition) {
+            try {
+              recognition.stop();
+            } catch {}
+          }
+        }
+
+        function start() {
+          target = lastField && document.body.contains(lastField) ? lastField : null;
+          if (!target) {
+            showHint("Click a text field first, then the mic.", true);
+            return;
+          }
+          committed = "";
+          insertStart = typeof target.selectionStart === "number" ? target.selectionStart : target.value.length;
+          insertEnd = typeof target.selectionEnd === "number" ? target.selectionEnd : target.value.length;
+
+          recognition = new SpeechRecognition();
+          recognition.lang = langSel.value;
+          recognition.continuous = true;
+          recognition.interimResults = true;
+
+          recognition.onstart = () => {
+            listening = true;
+            micBtn.classList.add("listening");
+            micBtn.title = "Listening… click to stop.";
+          };
+          recognition.onresult = (ev) => {
+            let interim = "";
+            let finalText = "";
+            for (let i = ev.resultIndex; i < ev.results.length; i++) {
+              const res = ev.results[i];
+              if (res.isFinal) finalText += res[0].transcript;
+              else interim += res[0].transcript;
+            }
+            if (finalText) insertText(finalText, true);
+            if (interim) insertText(interim, false);
+          };
+          recognition.onerror = (ev) => {
+            const map = {
+              "no-speech": "No speech detected.",
+              "audio-capture": "No microphone found.",
+              "not-allowed": "Microphone permission denied.",
+              "service-not-allowed": "Speech service not allowed.",
+            };
+            showHint(map[ev.error] || `Recognition error: ${ev.error}`, true);
+          };
+          recognition.onend = () => {
+            listening = false;
+            micBtn.classList.remove("listening");
+            micBtn.title = "Dictate into the focused field";
+            recognition = null;
+          };
+
+          try {
+            recognition.start();
+          } catch (err) {
+            showHint(`Could not start dictation: ${err}`, true);
+          }
+        }
+
+        // Keep the mic from stealing focus from the target field.
+        micBtn.addEventListener("mousedown", (ev) => ev.preventDefault());
+        micBtn.addEventListener("click", () => {
+          if (listening) stop();
+          else start();
+        });
+      })();
 
       // Local single-user tool: poll every 2s so sequential dispatch and the
       // progress bar update live without a manual refresh.
