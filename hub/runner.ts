@@ -39,20 +39,41 @@ function retryNote(reason: string): string {
 }
 
 /**
+ * Appends the acceptance criterion to the exec input so the agent aims for it
+ * from the start. Without this the criterion only surfaced in the judge phase —
+ * the agent did the work never knowing what it would be graded against, so an
+ * honest self-evaluation could only pass by luck.
+ */
+function criteriaNote(criteria: string | null | undefined): string {
+	const trimmed = (criteria ?? "").trim();
+	if (!trimmed) return "";
+	return `\n\nThe result of this step MUST satisfy the following acceptance criterion, so aim explicitly to meet it: "${trimmed}".`;
+}
+
+/**
  * Builds the input for the self-evaluation ("judge") pass: the same agent,
  * resuming the same session, is asked to grade its own previous result against
  * the step's acceptance criteria and answer with a strict JSON verdict.
  * Deliberately omits SUBAGENT_SUFFIX — the verdict must come straight back on
  * this thread, not from a subagent whose summary we'd then have to parse.
+ *
+ * The prompt insists on ACTUAL verification: the step's work was done by a
+ * subagent, so this thread only holds that subagent's summary, not the real
+ * artifacts. Judging from memory is exactly how a clearly-unmet criterion used
+ * to slip through as "ok". So it must re-inspect the real state (read the
+ * files, run the commands) with its tools before ruling, and default to a
+ * rejection whenever it cannot confirm the criterion holds.
  */
 export function judgeInput(criteria: string): string {
 	return [
-		"Evaluate your own result from the previous step of this workflow against the following acceptance criterion:",
+		"Evaluate whether the result of the previous step of this workflow meets the following acceptance criterion:",
 		"",
 		`"${criteria.trim()}"`,
 		"",
-		'Respond ONLY with a JSON object on a single line, with no other text, in exactly this shape: {"ok": true|false, "reason": "<brief explanation>"}',
-		'"ok" is true only if the result meets the criterion. If it does not, set "ok": false and in "reason" explain concretely what is missing or what to fix.',
+		"Important: do NOT trust your memory or the subagent's summary. The step's work was done by a subagent, so its real output may not be in this thread. Verify the criterion by inspecting the actual artifacts with your tools — read the files, run the commands, check the real state — BEFORE deciding.",
+		"",
+		'Once you have verified, end your reply with a JSON object on its own final line, and nothing after it, in exactly this shape: {"ok": true|false, "reason": "<brief explanation>"}',
+		'"ok" is true ONLY if you confirmed the result meets the criterion. If it does not meet it, or you could not verify it, set "ok": false and in "reason" explain concretely what is missing or what to fix. When in doubt, "ok": false.',
 	].join("\n");
 }
 
@@ -75,17 +96,38 @@ export async function dispatchStep(
 	workflow: Workflow,
 	cfg: HubConfig,
 	log: Logger,
-	options: { resumeSession?: boolean; mode?: "exec" | "judge"; retryReason?: string } = {},
+	options: {
+		resumeSession?: boolean;
+		mode?: "exec" | "judge";
+		retryReason?: string;
+		manual?: boolean;
+		sessionIdOverride?: string | null;
+	} = {},
 ): Promise<void> {
 	const mode = options.mode ?? "exec";
-	// The judge must always see what it produced, so it resumes regardless of
-	// the caller's preference.
-	const resumeSession = mode === "judge" ? true : (options.resumeSession ?? true);
+	// Which Claude session (if any) awb should `--resume` for this dispatch.
+	// `sessionIdOverride` wins when the caller pins one explicitly — an on-demand
+	// ▶ run's retry uses it to stay on its own isolated session chain instead of
+	// the shared `workflow.lastSessionId`, which it deliberately never writes.
+	// Otherwise: the judge resumes the very run it is grading (the step's own
+	// `sessionId`, set by markStepJudging — equal to `workflow.lastSessionId`
+	// for a sequential step), and an exec dispatch resumes the shared session
+	// unless the caller opted out.
+	const sessionToResume =
+		options.sessionIdOverride !== undefined
+			? options.sessionIdOverride
+			: mode === "judge"
+				? (step.sessionId ?? workflow.lastSessionId)
+				: (options.resumeSession ?? true)
+					? workflow.lastSessionId
+					: null;
 	const callbackUrl = `http://${cfg.host}:${cfg.port}/api/steps/${step.id}/result?token=${step.callbackToken}`;
 	const input =
 		mode === "judge"
 			? judgeInput(step.acceptanceCriteria ?? "")
-			: `${step.description}${SUBAGENT_SUFFIX}${options.retryReason ? retryNote(options.retryReason) : ""}`;
+			: `${step.description}${criteriaNote(step.acceptanceCriteria)}${SUBAGENT_SUFFIX}${
+					options.retryReason ? retryNote(options.retryReason) : ""
+				}`;
 	try {
 		const res = await fetch(workflow.hookUrl, {
 			method: "POST",
@@ -93,9 +135,9 @@ export async function dispatchStep(
 				"content-type": "application/json",
 				"x-webhook-secret": workflow.secret,
 				// awb resumes that Claude session (`claude --resume`) instead of
-				// starting fresh whenever the workflow already has one — i.e. every
-				// step after the first.
-				...(resumeSession && workflow.lastSessionId ? { sessionid: workflow.lastSessionId } : {}),
+				// starting fresh whenever we have one to resume — i.e. every step
+				// after the first, and every judge pass.
+				...(sessionToResume ? { sessionid: sessionToResume } : {}),
 			},
 			body: JSON.stringify({ jobId: step.id, input, callbackUrl }),
 			signal: AbortSignal.timeout(DISPATCH_TIMEOUT_MS),
@@ -104,7 +146,7 @@ export async function dispatchStep(
 			// In judge mode the step is already `running` in its judge phase, so
 			// this is a no-op (it only fires on a `pending` step) — the exec dispatch
 			// is what it's really for.
-			markStepRunning(step.id);
+			markStepRunning(step.id, options.manual ?? false);
 			log(`step ${step.id} (workflow ${workflow.id}, ${mode}) -> '${workflow.agentName}' accepted`);
 		} else {
 			completeStep(step.id, { ok: false, error: `hook answered ${res.status}` });

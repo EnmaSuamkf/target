@@ -307,9 +307,12 @@ function wait(seconds: number): Promise<void> {
 }
 
 /**
- * Extracts the judge's verdict from its free-form answer. The prompt asks for
- * a bare `{"ok": bool, "reason": string}`, but LLMs wrap or annotate it, so we
- * try the whole text first and then the first `{...}` block, and also accept a
+ * Extracts the judge's verdict from its free-form answer. The prompt asks it to
+ * end with a bare `{"ok": bool, "reason": string}`, but now that the judge
+ * narrates its verification first, the JSON is the LAST thing rather than the
+ * only thing. So we try, in order: the whole text (pure JSON), then each
+ * flat `{...}` block scanned from the end (the final one is the verdict), then
+ * a greedy `{...}` as a last resort for a nested shape. Also accepts a
  * `{"verdict": "ok"|"fail"}` shape. Returns null when nothing parses — the
  * caller treats that as "can't evaluate" and fails the workflow rather than
  * looping on a guess.
@@ -317,8 +320,11 @@ function wait(seconds: number): Promise<void> {
 function parseJudgeVerdict(text: string | undefined): { ok: boolean; reason: string } | null {
 	if (!text) return null;
 	const candidates = [text];
-	const match = text.match(/\{[\s\S]*\}/);
-	if (match) candidates.push(match[0]);
+	// Flat (non-nested) objects, last first — the verdict is the closing line.
+	const flat = text.match(/\{[^{}]*\}/g);
+	if (flat) candidates.push(...flat.reverse());
+	const greedy = text.match(/\{[\s\S]*\}/);
+	if (greedy) candidates.push(greedy[0]);
 	for (const candidate of candidates) {
 		try {
 			const obj = JSON.parse(candidate) as Record<string, unknown>;
@@ -363,7 +369,9 @@ function failWorkflowIfDispatchDied(stepId: string, workflowId: string, what: st
  * Applies a step's job outcome (called from the /api/steps/:id/result
  * callback route). Three shapes of callback land here:
  *
- *  - on-demand ▶ runs (`manualRun`): recorded as-is, no engine involvement.
+ *  - on-demand ▶ runs (`manualRun`): stay outside the sequential engine (they
+ *    never touch workflow status beyond a reconcile, and never advance), but a
+ *    step with acceptance criteria is still judged — routed to `onManualRun`.
  *  - the `judge` phase: the payload is a self-evaluation verdict, not a
  *    result — routed to `onJudgeVerdict`.
  *  - the `exec` phase (a normal sequential step's work): on failure the
@@ -380,12 +388,10 @@ export async function onStepResult(
 	const step = getStep(stepId);
 	if (!step) return;
 
-	// On-demand ▶ run: outside the engine and the judge entirely — unchanged.
+	// On-demand ▶ run: outside the sequential engine, but still judged if the
+	// step carries acceptance criteria.
 	if (step.manualRun) {
-		completeStep(stepId, outcome);
-		reconcileStatus(step.workflowId, log);
-		writeStatusMd(step.workflowId);
-		log(`step ${stepId} (on-demand run) ${outcome.ok ? "done" : `failed (${outcome.error})`}`);
+		await onManualRun(step, outcome, cfg, log);
 		return;
 	}
 
@@ -423,6 +429,128 @@ export async function onStepResult(
 	log(`step ${stepId} done, dispatching judge`);
 	await dispatchStep(judging, workflow, cfg, log, { mode: "judge" });
 	failWorkflowIfDispatchDied(stepId, step.workflowId, "judge", log);
+}
+
+/** Terminal bookkeeping for an on-demand ▶ run: reconcile the workflow badge from the steps and rewrite the .md. A manual run never sets the workflow to running, so this is all it ever does to workflow status. */
+function settleManual(workflowId: string, log: Logger): void {
+	reconcileStatus(workflowId, log);
+	writeStatusMd(workflowId);
+}
+
+/**
+ * Handles an on-demand ▶ run's callback. It stays out of the sequential engine
+ * (never advances, never sets the workflow `running`/`failed` — only a
+ * reconcile at the end), but a step WITH acceptance criteria is still judged,
+ * and a rejected verdict retries the same step up to its budget — exactly like
+ * the engine, just isolated on the run's own session. A step without criteria
+ * is recorded as-is, as before this existed.
+ */
+async function onManualRun(
+	step: Step,
+	outcome: { ok: boolean; result?: string; error?: string; sessionId?: string },
+	cfg: HubConfig,
+	log: Logger,
+): Promise<void> {
+	// The callback is this manual run's self-evaluation verdict, not its result.
+	if (step.phase === "judge") {
+		await onManualJudgeVerdict(step, outcome, cfg, log);
+		return;
+	}
+
+	// --- exec phase: the manual run's actual work finished ---
+	if (!outcome.ok) {
+		completeStep(step.id, outcome);
+		log(`step ${step.id} (on-demand run) failed (${outcome.error})`);
+		settleManual(step.workflowId, log);
+		return;
+	}
+	// No acceptance criteria → no judge; record the result as-is (unchanged).
+	if (!step.acceptanceCriteria) {
+		completeStep(step.id, outcome);
+		log(`step ${step.id} (on-demand run) done`);
+		settleManual(step.workflowId, log);
+		return;
+	}
+	// Keep the result and judge it, resuming this run's OWN session (markStepJudging
+	// stores it, and dispatchStep's judge mode resumes the step's sessionId).
+	markStepJudging(step.id, { result: outcome.result, sessionId: outcome.sessionId });
+	writeStatusMd(step.workflowId);
+	const workflow = getWorkflow(step.workflowId);
+	const judging = getStep(step.id);
+	if (!workflow || !judging) return;
+	log(`step ${step.id} (on-demand run) done, dispatching judge`);
+	await dispatchStep(judging, workflow, cfg, log, { mode: "judge" });
+	// If the judge dispatch died synchronously it already marked the step failed;
+	// otherwise it's `running` in its judge phase and we just refresh the .md.
+	if (getStep(step.id)?.status === "failed") settleManual(step.workflowId, log);
+	else writeStatusMd(step.workflowId);
+}
+
+/**
+ * The judge verdict for an on-demand ▶ run: accept (done), or re-run the same
+ * step with the judge's feedback until the retry budget is spent, then fail —
+ * without ever failing the whole workflow. The retry stays on the run's own
+ * isolated session chain via `sessionIdOverride`, since a manual run never
+ * writes `workflow.lastSessionId`.
+ */
+async function onManualJudgeVerdict(
+	step: Step,
+	outcome: { ok: boolean; result?: string; error?: string; sessionId?: string },
+	cfg: HubConfig,
+	log: Logger,
+): Promise<void> {
+	// The judge job itself couldn't run — we can't evaluate, so mark it failed.
+	if (!outcome.ok) {
+		completeStep(step.id, { ok: false, error: `judge run failed: ${outcome.error ?? "unknown"}` });
+		log(`step ${step.id} (on-demand run) judge could not run: ${outcome.error ?? "unknown"}`, "error");
+		settleManual(step.workflowId, log);
+		return;
+	}
+	const verdict = parseJudgeVerdict(outcome.result);
+	if (!verdict) {
+		completeStep(step.id, { ok: false, error: `judge verdict unparseable: ${truncateText(outcome.result)}` });
+		log(`step ${step.id} (on-demand run) judge verdict unparseable`, "error");
+		settleManual(step.workflowId, log);
+		return;
+	}
+	if (verdict.ok) {
+		finishStepDone(step.id);
+		log(`step ${step.id} (on-demand run) passed the judge`);
+		settleManual(step.workflowId, log);
+		return;
+	}
+
+	// Rejected. Out of retries → fail; otherwise re-run the same manual step.
+	if (step.retryCount >= step.maxRetries) {
+		completeStep(step.id, {
+			ok: false,
+			error: `rejected by the judge after ${step.retryCount} retry(ies): ${verdict.reason || "(no reason given)"}`,
+		});
+		log(`step ${step.id} (on-demand run) failed: rejected by the judge`, "error");
+		settleManual(step.workflowId, log);
+		return;
+	}
+
+	// The judge's session continues the run's chain into the retry.
+	const judgeSession = outcome.sessionId ?? step.sessionId;
+	beginRetry(step.id); // status → pending, retry_count++, keeps is_manual_run
+	writeStatusMd(step.workflowId);
+	log(`step ${step.id} (on-demand run) rejected by judge (retry ${step.retryCount + 1}/${step.maxRetries}): ${verdict.reason}`);
+	if (step.retryIntervalSeconds > 0) {
+		log(`step ${step.id} waiting ${step.retryIntervalSeconds}s before the retry`);
+		await wait(step.retryIntervalSeconds);
+	}
+	const workflow = getWorkflow(step.workflowId);
+	const retried = getStep(step.id);
+	if (!workflow || !retried) return;
+	await dispatchStep(retried, workflow, cfg, log, {
+		manual: true,
+		sessionIdOverride: judgeSession,
+		retryReason: verdict.reason,
+	});
+	// A dead dispatch already marked the step failed; otherwise it's running again.
+	if (getStep(step.id)?.status === "failed") settleManual(step.workflowId, log);
+	else writeStatusMd(step.workflowId);
 }
 
 /**
@@ -494,6 +622,11 @@ async function onJudgeVerdict(
  * either — see `dispatchStep`'s `resumeSession: false`). Blocked while any
  * step of the workflow is already running, sequential or on-demand, since
  * they'd otherwise fight over the same hook/session.
+ *
+ * If the step has acceptance criteria, its callback is still routed through the
+ * judge (see `onManualRun`), retries and all — just kept on this run's own
+ * isolated session chain, never touching the workflow's shared session or its
+ * running/failed status.
  */
 export async function runStep(workflowId: string, stepId: string, cfg: HubConfig, log: Logger): Promise<void> {
 	const workflow = getWorkflow(workflowId);
@@ -505,6 +638,6 @@ export async function runStep(workflowId: string, stepId: string, cfg: HubConfig
 	}
 	if (!startManualRun(stepId)) throw new WorkflowError("this step is already running");
 	writeStatusMd(workflowId);
-	await dispatchStep(step, workflow, cfg, log, { resumeSession: false });
+	await dispatchStep(step, workflow, cfg, log, { resumeSession: false, manual: true });
 	writeStatusMd(workflowId);
 }
