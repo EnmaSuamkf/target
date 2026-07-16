@@ -89,8 +89,10 @@ criterio de aceptación no hay juez y el comportamiento es el de siempre.
 **Corridas bajo demanda (▶).** Un step puede correrse fuera de orden. Esa corrida
 usa el mismo agente/hook pero **siempre una sesión fresca**: nunca reanuda
 `lastSessionId` ni se convierte en la nueva. Queda fuera del motor y no toca el
-estado del workflow; `maybeMarkCompleted()` reconcilia después el caso en que
-todos los steps terminan `done` sin haber pasado por `advance()`.
+estado del workflow directamente; `reconcileStatus()` deriva después el estado
+del workflow del estado **actual** de sus steps (todos `done` → `completed`,
+alguno `failed` → `failed`, algo por correr → `draft`), que es lo que permite
+que reintentar un step fallido hasta que pase saque al workflow de `failed`.
 
 **Permisos.** Por default el agente de un workflow puede responder pero **no**
 escribir archivos ni correr comandos. Para que los steps escriban de verdad en su
@@ -146,9 +148,9 @@ node cli.ts list
 node cli.ts show <workflowId>
 ```
 
-Verificación de tipos: `npm run typecheck` (`tsc --noEmit`). **No hay suite de
-tests ni CI en el repo**; tampoco hay paso de build (Node ejecuta los `.ts`
-directamente).
+Verificación de tipos: `npm run typecheck` (`tsc --noEmit`). Tests: `npm test`
+(`node --test`, sobre un `TARGET_HOME` descartable). **No hay CI en el repo**;
+tampoco hay paso de build (Node ejecuta los `.ts` directamente).
 
 ## Estado actual y foco reciente
 
