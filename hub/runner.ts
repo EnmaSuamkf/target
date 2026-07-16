@@ -24,7 +24,7 @@ export type Logger = (message: string, type?: "info" | "warning" | "error") => v
 const DISPATCH_TIMEOUT_MS = 10_000;
 
 const SUBAGENT_SUFFIX =
-	"\n\nImportante: ejecutá este step delegando el trabajo a un subagente (herramienta Task) en lugar de resolverlo vos directamente en este hilo — esta misma sesión se reutiliza secuencialmente para todos los steps del workflow, y delegar mantiene el hilo principal liviano.";
+	"\n\nImportant: run this step by delegating the work to a subagent (the Task tool) instead of solving it yourself directly in this thread — this same session is reused sequentially for every step of the workflow, and delegating keeps the main thread lightweight.";
 
 /**
  * Builds the input for a re-run of a step the judge rejected: the same task
@@ -33,9 +33,9 @@ const SUBAGENT_SUFFIX =
  */
 function retryNote(reason: string): string {
 	const trimmed = reason.trim();
-	return `\n\nNota: un intento anterior de este step no pasó la evaluación de aceptación${
-		trimmed ? `. Motivo: "${trimmed}"` : ""
-	}. Corregí eso y rehacé el step para cumplir el criterio.`;
+	return `\n\nNote: a previous attempt at this step did not pass the acceptance evaluation${
+		trimmed ? `. Reason: "${trimmed}"` : ""
+	}. Fix that and redo the step so it meets the criterion.`;
 }
 
 /**
@@ -47,12 +47,12 @@ function retryNote(reason: string): string {
  */
 export function judgeInput(criteria: string): string {
 	return [
-		"Evaluá tu propio resultado del step anterior de este workflow contra el siguiente criterio de aceptación:",
+		"Evaluate your own result from the previous step of this workflow against the following acceptance criterion:",
 		"",
 		`"${criteria.trim()}"`,
 		"",
-		'Respondé ÚNICAMENTE con un objeto JSON en una sola línea, sin ningún otro texto, con esta forma exacta: {"ok": true|false, "reason": "<explicación breve>"}',
-		'"ok" es true solo si el resultado cumple el criterio. Si no lo cumple, poné "ok": false y en "reason" explicá concretamente qué falta o qué corregir.',
+		'Respond ONLY with a JSON object on a single line, with no other text, in exactly this shape: {"ok": true|false, "reason": "<brief explanation>"}',
+		'"ok" is true only if the result meets the criterion. If it does not, set "ok": false and in "reason" explain concretely what is missing or what to fix.',
 	].join("\n");
 }
 
