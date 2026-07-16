@@ -373,12 +373,16 @@ export function deleteStep(id: string): boolean {
 	return open().prepare("DELETE FROM steps WHERE id = ?").run(id).changes > 0;
 }
 
-export function markStepRunning(id: string): void {
+export function markStepRunning(id: string, manual = false): void {
+	// `manual` is set on a re-dispatch of an on-demand ▶ run's retry: it comes
+	// through here as a `pending` step (beginRetry put it there) and must stay
+	// flagged manual, or its next callback would be mistaken for a sequential
+	// run. A normal engine dispatch passes false and clears the flag.
 	open()
 		.prepare(
-			"UPDATE steps SET status = 'running', started_at = ?, is_manual_run = 0, phase = 'exec' WHERE id = ? AND status = 'pending'",
+			"UPDATE steps SET status = 'running', started_at = ?, is_manual_run = ?, phase = 'exec' WHERE id = ? AND status = 'pending'",
 		)
-		.run(new Date().toISOString(), id);
+		.run(new Date().toISOString(), manual ? 1 : 0, id);
 }
 
 /**

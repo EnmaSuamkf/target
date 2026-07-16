@@ -19,7 +19,7 @@ import { test } from "node:test";
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-test-"));
 process.env.TARGET_HOME = tmpHome;
 
-const { getWorkflow, insertStep, insertWorkflow, startManualRun } = await import("./db.ts");
+const { getStep, getWorkflow, insertStep, insertWorkflow, markStepJudging, startManualRun } = await import("./db.ts");
 const { onStepResult } = await import("./workflow.ts");
 const { loadConfig } = await import("./config.ts");
 
@@ -96,4 +96,48 @@ test("a re-run that fails a step of a completed workflow fails the workflow", as
 	await finishStep(steps[0].id, false);
 
 	assert.equal(getWorkflow(workflow.id)?.status, "failed");
+});
+
+/**
+ * A manual ▶ run of a step WITH acceptance criteria is judged like an engine
+ * step. We drive the judge-verdict callback directly (phase already `judge`),
+ * which is where the accept/reject/retry decision lives — no hook involved.
+ */
+function manualStepInJudgePhase(criteria: string, opts: { maxRetries?: number } = {}) {
+	const { workflow } = makeWorkflow(0);
+	const step = insertStep(workflow.id, "do the thing", { acceptanceCriteria: criteria, ...opts });
+	assert.ok(startManualRun(step.id));
+	markStepJudging(step.id, { result: "the work", sessionId: "sess-1" });
+	return { workflow, step };
+}
+
+test("manual run that passes the judge marks the step done", async () => {
+	const { workflow, step } = manualStepInJudgePhase("must contain X");
+
+	await onStepResult(step.id, { ok: true, result: '{"ok": true, "reason": "it does"}' }, cfg, silent);
+
+	assert.equal(getStep(step.id)?.status, "done");
+	assert.equal(getWorkflow(workflow.id)?.status, "completed");
+});
+
+test("manual run rejected by the judge with no retries fails the step", async () => {
+	const { workflow, step } = manualStepInJudgePhase("must contain X"); // maxRetries defaults to 0
+
+	await onStepResult(step.id, { ok: true, result: '{"ok": false, "reason": "no X"}' }, cfg, silent);
+
+	assert.equal(getStep(step.id)?.status, "failed");
+	assert.equal(getStep(step.id)?.retryCount, 0);
+	assert.equal(getWorkflow(workflow.id)?.status, "failed");
+});
+
+test("manual run rejected by the judge with retries left re-runs the same step", async () => {
+	const { step } = manualStepInJudgePhase("must contain X", { maxRetries: 1 });
+
+	await onStepResult(step.id, { ok: true, result: '{"ok": false, "reason": "no X"}' }, cfg, silent);
+
+	// The retry fired (counter bumped) and the step stayed a manual run; the
+	// re-dispatch can't reach the fake hook, so it ends failed — but the retry
+	// is what we're proving here.
+	assert.equal(getStep(step.id)?.retryCount, 1);
+	assert.equal(getStep(step.id)?.manualRun, true);
 });
