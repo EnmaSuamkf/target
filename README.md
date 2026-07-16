@@ -1,76 +1,74 @@
 # target
 
-Define **workflows** hechos de N **steps** secuenciales. Reutiliza el mecanismo
-de agentmesh (agente = hook de `agent-webhook-bridge`, step = job async con
-callback) pero con un objetivo distinto: en vez de un registro de agentes
-compartidos + cola de jobs sueltos, cada **workflow crea su propio agente +
-hook dedicados**, y sus steps corren uno detrás del otro **sobre la misma
-sesión de Claude** (`--resume` encadenado), como una única conversación que
-avanza paso a paso.
+Define **workflows** made of N sequential **steps**. It reuses agentmesh's
+mechanism (agent = `agent-webhook-bridge` hook, step = async job with a
+callback) but with a different goal: instead of a registry of shared agents +
+a queue of loose jobs, each **workflow creates its own dedicated agent +
+hook**, and its steps run one after another **on the same Claude session**
+(`--resume` chained), like a single conversation that advances step by step.
 
-## Piezas reusadas de agentmesh
+## Pieces reused from agentmesh
 
-- `hub/awb.ts` — igual que `agentmesh/hub/awb.ts`: crea/inspecciona hooks de
-  `agent-webhook-bridge` escribiendo `~/.agent-webhook-bridge/hooks.json`.
-- Mismo stack cero-dependencias: Node 24 + `node:sqlite` + TS ejecutado
-  directo, mismo patrón de servidor HTTP a mano.
-- Mismo modelo de callback asíncrono: el hook responde `{ok:true}` al toque,
-  el resultado llega después a `POST /api/steps/:id/result`.
+- `hub/awb.ts` — same as `agentmesh/hub/awb.ts`: creates/inspects
+  `agent-webhook-bridge` hooks by writing `~/.agent-webhook-bridge/hooks.json`.
+- Same zero-dependency stack: Node 24 + `node:sqlite` + TS run directly, same
+  hand-written HTTP server pattern.
+- Same async callback model: the hook answers `{ok:true}` immediately, and the
+  result arrives later on `POST /api/steps/:id/result`.
 
-## Qué cambia respecto a agentmesh
+## What changes relative to agentmesh
 
 | agentmesh | target |
 |---|---|
-| Agente = fila reusable en un registro | Agente = 1 por workflow, creado automáticamente al crear el workflow |
-| Job = tarea suelta, sesión opcional | Step = tarea de un workflow, siempre encadenada a la sesión anterior |
-| Jobs en paralelo, sin orden | Steps estrictamente secuenciales (el siguiente no dispara hasta que el anterior termina) |
-| — | Progreso en % (done/total), pausar/reanudar, editar step + reiniciar workflow |
-| — | Cada job lleva agregada la instrucción de resolverse con un subagente (Task tool), porque el hilo principal se reutiliza para todo el workflow |
-| — | `.md` de estado en `~/.target/<slug-del-nombre>-<id>.md`, reescrito en cada cambio |
+| Agent = reusable row in a registry | Agent = 1 per workflow, created automatically when the workflow is created |
+| Job = loose task, optional session | Step = task of a workflow, always chained to the previous session |
+| Parallel jobs, no order | Strictly sequential steps (the next one doesn't fire until the previous one finishes) |
+| — | Progress in % (done/total), pause/resume, edit a step + restart the workflow |
+| — | Every job carries an appended instruction to resolve itself with a subagent (Task tool), because the main thread is reused for the whole workflow |
+| — | Status `.md` in `~/.target/<name-slug>-<id>.md`, rewritten on every change |
 
-## Uso
+## Usage
 
 ```bash
 cd hub && npm install
-node daemon.ts        # o: npx tsx cli.ts start / node cli.ts start
+node daemon.ts        # or: npx tsx cli.ts start / node cli.ts start
 ```
 
-El hub imprime su **admin token** al arrancar (también vive en
-`~/.target/config.json`) — lo pide la UI y lo usa el CLI automáticamente.
+The hub prints its **admin token** on startup (it also lives in
+`~/.target/config.json`) — the UI asks for it and the CLI uses it automatically.
 
 ```bash
 node cli.ts create "release-notes" [--workdir <dir>] [--permission-mode acceptEdits]
-node cli.ts add-step <workflowId> "Leer el CHANGELOG y armar un resumen"
-node cli.ts add-step <workflowId> "Publicar el resumen en docs/release-notes.md"
-node cli.ts run <workflowId>       # arranca / continúa
+node cli.ts add-step <workflowId> "Read the CHANGELOG and put together a summary"
+node cli.ts add-step <workflowId> "Publish the summary to docs/release-notes.md"
+node cli.ts run <workflowId>       # start / continue
 node cli.ts pause <workflowId>
 node cli.ts resume <workflowId>
-node cli.ts restart <workflowId>   # resetea todos los steps y arranca de cero
+node cli.ts restart <workflowId>   # resets every step and starts from scratch
 node cli.ts list
 node cli.ts show <workflowId>
 ```
 
-O desde la UI en `http://127.0.0.1:8893` (sección **Workflow**): crear
-workflow, agregar steps con el botón `+ Agregar step`, ver la barra de
-progreso, Start/Pause/Resume/Restart, y editar un step pendiente antes de
-reiniciar.
+Or from the UI at `http://127.0.0.1:8893` (the **Workflow** section): create a
+workflow, add steps with the `+ Add step` button, watch the progress bar,
+Start/Pause/Resume/Restart, and edit a pending step before restarting.
 
-### Permisos del agente
+### Agent permissions
 
-Por default el agente de un workflow puede responder pero **no** escribir
-archivos ni correr comandos (mismo default conservador de agentmesh fase 1).
-Para que los steps puedan de verdad escribir archivos en su sandbox dedicado
-(`~/.target/sandboxes/<agente>/`), creá el workflow con
-`--permission-mode acceptEdits` (o elegilo en el formulario de la UI).
-`bypassPermissions` existe pero requiere confirmación explícita porque
-habilita ejecución de comandos sin restricciones.
+By default a workflow's agent can answer but **cannot** write files or run
+commands (the same conservative default as agentmesh phase 1). To let steps
+actually write files in their dedicated sandbox
+(`~/.target/sandboxes/<agent>/`), create the workflow with
+`--permission-mode acceptEdits` (or pick it in the UI form).
+`bypassPermissions` exists but requires explicit confirmation because it
+enables unrestricted command execution.
 
-## Requisito externo
+## External requirement
 
-Necesita `agent-webhook-bridge` corriendo (`awb start`) — es quien realmente
-spawnea `claude -p` / `claude --resume` para cada step.
+It needs `agent-webhook-bridge` running (`awb start`) — that's what actually
+spawns `claude -p` / `claude --resume` for each step.
 
-## Estado del proyecto
+## Project status
 
-Este repo está en etapas iniciales. Los issues de GitHub se usan para
-trackear bugs y features pendientes; los PRs deben apuntar a `main`.
+This repo is in its early stages. GitHub issues are used to track bugs and
+pending features; PRs should target `main`.

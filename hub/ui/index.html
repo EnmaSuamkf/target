@@ -553,7 +553,7 @@
               <span class="step-desc">${escapeHtml(step.description)}</span>
               <span class="step-status ${step.status}">${statusLabel}</span>
             </div>
-            ${step.acceptanceCriteria ? `<div class="step-result">⚖ ${escapeHtml(truncate(step.acceptanceCriteria, 160))} · reintentos ${step.retryCount ?? 0}/${step.maxRetries ?? 0}</div>` : ""}
+            ${step.acceptanceCriteria ? `<div class="step-result">⚖ ${escapeHtml(truncate(step.acceptanceCriteria, 160))} · retries ${step.retryCount ?? 0}/${step.maxRetries ?? 0}</div>` : ""}
             ${step.error ? `<div class="step-error">${escapeHtml(step.error)}</div>` : ""}
             ${step.status === "done" && step.result ? `<div class="step-result">${escapeHtml(truncate(step.result, 240))}</div>` : ""}
             <div class="step-actions">

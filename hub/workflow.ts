@@ -80,11 +80,11 @@ export function writeStatusMd(workflowId: string): void {
 		lines.push("_No steps yet._");
 	}
 	for (const step of steps) {
-		const phaseNote = step.status === "running" && step.phase === "judge" ? " _(evaluando)_" : "";
+		const phaseNote = step.status === "running" && step.phase === "judge" ? " _(judging)_" : "";
 		lines.push(`${step.orderIndex + 1}. [${statusMark(step.status)}] ${step.description} — **${step.status}**${phaseNote}`);
 		if (step.acceptanceCriteria) {
-			lines.push(`   - Criterio de aceptación: ${step.acceptanceCriteria}`);
-			lines.push(`   - Reintentos: ${step.retryCount}/${step.maxRetries}`);
+			lines.push(`   - Acceptance criterion: ${step.acceptanceCriteria}`);
+			lines.push(`   - Retries: ${step.retryCount}/${step.maxRetries}`);
 		}
 		if (step.startedAt) lines.push(`   - Started: ${step.startedAt}`);
 		if (step.finishedAt) lines.push(`   - Finished: ${step.finishedAt}`);
@@ -113,7 +113,7 @@ export function createWorkflow(
 	const slug = slugify(trimmed);
 	const agentName = `${slug}-${shortId}`;
 	const workdir = options.workdir?.trim() || path.join(targetDir(), "sandboxes", agentName);
-	const promptTemplate = `Sos el agente de un workflow de Target llamado "${trimmed}". Esta sesión se reutiliza en orden para cada step del workflow. Step actual:\n\n{{payload}}\n\nRealizá el step y respondé con el resultado final de ese step.`;
+	const promptTemplate = `You are the agent of a Target workflow named "${trimmed}". This session is reused in order for every step of the workflow. Current step:\n\n{{payload}}\n\nCarry out the step and respond with the final result of that step.`;
 	const hook = createAwbHook(agentName, workdir, promptTemplate, { permissionMode: options.permissionMode });
 	const mdPath = path.join(targetDir(), `${slug}-${shortId}.md`);
 	const workflow = insertWorkflow({ id, name: trimmed, agentName, hookUrl: hook.hookUrl, secret: hook.secret, mdPath });
@@ -326,7 +326,7 @@ function parseJudgeVerdict(text: string | undefined): { ok: boolean; reason: str
 				const reason = typeof obj.reason === "string" ? obj.reason : "";
 				if (typeof obj.ok === "boolean") return { ok: obj.ok, reason };
 				if (typeof obj.verdict === "string") {
-					return { ok: /^(ok|pass|passed|true|si|sí|aprob)/i.test(obj.verdict.trim()), reason };
+					return { ok: /^(ok|pass|passed|true|approv)/i.test(obj.verdict.trim()), reason };
 				}
 			}
 		} catch {
@@ -464,7 +464,7 @@ async function onJudgeVerdict(
 		failWorkflowAt(
 			step.id,
 			step.workflowId,
-			`rechazado por el juez tras ${step.retryCount} reintento(s): ${verdict.reason || "(sin motivo)"}`,
+			`rejected by the judge after ${step.retryCount} retry(ies): ${verdict.reason || "(no reason given)"}`,
 			log,
 		);
 		return;

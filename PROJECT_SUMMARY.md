@@ -1,171 +1,169 @@
-# target — Resumen del proyecto
+# target — Project summary
 
-## Qué es
+## What it is
 
-**target** es un hub local para definir **workflows** compuestos por N **steps**
-secuenciales ejecutados por Claude. Reutiliza el mecanismo de **agentmesh**
-(agente = hook de `agent-webhook-bridge`, step = job asíncrono con callback),
-pero con un objetivo distinto: en vez de un registro
-de agentes compartidos con una cola de jobs sueltos, **cada workflow crea su
-propio agente + hook dedicados**, y sus steps corren uno detrás del otro sobre la
-**misma sesión de Claude** (`--resume` encadenado), de modo que el workflow
-completo se lee como una única conversación que avanza paso a paso. El hub expone
-una API HTTP, una UI web de una sola página y un CLI; además mantiene, por cada
-workflow, un archivo `.md` de progreso en `~/.target/` que se reescribe en cada
-cambio de estado.
+**target** is a local hub for defining **workflows** made of N sequential
+**steps** executed by Claude. It reuses the **agentmesh** mechanism
+(agent = `agent-webhook-bridge` hook, step = asynchronous job with a callback),
+but with a different goal: instead of a registry of shared agents with a queue
+of loose jobs, **each workflow creates its own dedicated agent + hook**, and its
+steps run one after another on the **same Claude session** (`--resume` chained),
+so that the whole workflow reads as a single conversation that advances step by
+step. The hub exposes an HTTP API, a single-page web UI and a CLI; it also
+keeps, for each workflow, a progress `.md` file in `~/.target/` that is
+rewritten on every state change.
 
 ## Stack
 
-Node.js >= 24, TypeScript ejecutado directamente por Node (sin paso de build) y
-**cero dependencias de runtime**. Todo se apoya en la biblioteca estándar:
-`node:sqlite` (`DatabaseSync`, en modo WAL) para la persistencia, `node:http`
-para el servidor escrito a mano, `node:crypto` para tokens y secretos, y `fetch`
-global para hablar con el broker. Las únicas dependencias son de desarrollo:
-`typescript` y `@types/node`. La UI es un `index.html` estático de ~750 líneas
-servido por el propio hub, sin framework ni bundler.
+Node.js >= 24, TypeScript run directly by Node (no build step) and **zero
+runtime dependencies**. Everything relies on the standard library:
+`node:sqlite` (`DatabaseSync`, in WAL mode) for persistence, `node:http` for the
+hand-written server, `node:crypto` for tokens and secrets, and the global
+`fetch` to talk to the broker. The only dependencies are dev ones:
+`typescript` and `@types/node`. The UI is a static `index.html` of ~750 lines
+served by the hub itself, with no framework or bundler.
 
-Como requisito externo necesita **`agent-webhook-bridge` (awb)** corriendo
-(`awb start`): es quien realmente spawnea `claude -p` / `claude --resume` para
-cada step.
+As an external requirement it needs **`agent-webhook-bridge` (awb)** running
+(`awb start`): that's what actually spawns `claude -p` / `claude --resume` for
+each step.
 
-## Arquitectura
+## Architecture
 
-El flujo es asíncrono de punta a punta. El hub despacha un step al hook de awb
-del workflow; el hook responde `{ok:true}` al toque (solo significa "aceptado") y
-el resultado real llega después a `POST /api/steps/:id/result` mediante el
-`callbackUrl` que el hub envió en el evento. Los módulos, en `hub/`:
+The flow is asynchronous end to end. The hub dispatches a step to the
+workflow's awb hook; the hook answers `{ok:true}` immediately (which only means
+"accepted") and the real result arrives later on `POST /api/steps/:id/result`
+via the `callbackUrl` the hub sent in the event. The modules, under `hub/`:
 
-- **`daemon.ts`** — punto de entrada; carga config, levanta el servidor e imprime
-  el admin token.
-- **`server.ts`** — servidor HTTP: API JSON (workflows, steps, start/pause/
-  resume/restart, transcript, callback de resultados) y la UI. Toda ruta que
-  muta pide el admin token como Bearer; el callback de awb se autentica en
-  cambio con un token por step vía query string, comparado con
-  `timingSafeEqual`.
-- **`workflow.ts`** — el motor y la máquina de estados
-  (`draft → running → paused/completed/failed`). `advance()` es el único lugar
-  que decide qué corre después, así que "pausar" es simplemente no llamarlo.
-  También vive acá la lógica del juez y la reescritura del `.md` de progreso.
-- **`runner.ts`** — despacha un step (o su evaluación) al hook: arma el input,
-  adjunta el `sessionid` a reanudar y el `callbackUrl`, y marca el step
-  `running` o `failed` según la respuesta del hook.
-- **`db.ts`** — capa de almacenamiento pura sobre SQLite: tablas `workflows` y
-  `steps`, migraciones aditivas por `ALTER TABLE` para bases viejas, y expiración
-  **lazy** de steps colgados (cada lectura falla primero los `running` más viejos
-  que el timeout, en vez de un timer por step — sobrevive gratis a reinicios del
-  hub).
-- **`awb.ts`** — puente con la instalación local de awb: crea/inspecciona/borra
-  hooks escribiendo directamente `~/.agent-webhook-bridge/hooks.json` (el broker
-  relee el archivo en cada request, así que un hook nuevo queda vivo sin
-  reiniciar nada).
-- **`transcript.ts`** — lee, en modo best-effort y solo lectura, el `.jsonl` que
-  Claude Code escribe para una sesión (bajo `~/.claude/projects/<slug>/`), para
-  mostrar la conversación real dentro de los steps y no solo el resultado final.
-- **`config.ts`** — config persistida en `~/.target/config.json` (override del
-  directorio con `TARGET_HOME`); default `127.0.0.1:8893`, timeout de step de 10
-  minutos. El puerto se eligió lejos del de awb (8890) y del de agentmesh-hub
-  (8892) para que los tres convivan.
-- **`cli.ts`** — CLI `target`; habla con la API y toma el admin token directo de
-  `~/.target/config.json`, así no hay token que tipear.
+- **`daemon.ts`** — entry point; loads config, brings up the server and prints
+  the admin token.
+- **`server.ts`** — HTTP server: JSON API (workflows, steps, start/pause/
+  resume/restart, transcript, result callback) and the UI. Every mutating route
+  requires the admin token as a Bearer; awb's callback authenticates instead
+  with a per-step token via query string, compared with `timingSafeEqual`.
+- **`workflow.ts`** — the engine and the state machine
+  (`draft → running → paused/completed/failed`). `advance()` is the only place
+  that decides what runs next, so "pausing" is simply not calling it. The judge
+  logic and the rewriting of the progress `.md` also live here.
+- **`runner.ts`** — dispatches a step (or its evaluation) to the hook: builds
+  the input, attaches the `sessionid` to resume and the `callbackUrl`, and marks
+  the step `running` or `failed` depending on the hook's response.
+- **`db.ts`** — a pure storage layer over SQLite: `workflows` and `steps`
+  tables, additive migrations via `ALTER TABLE` for old databases, and **lazy**
+  expiry of stuck steps (each read first fails any `running` step older than the
+  timeout, instead of a timer per step — it survives hub restarts for free).
+- **`awb.ts`** — bridge to the local awb install: creates/inspects/deletes
+  hooks by writing `~/.agent-webhook-bridge/hooks.json` directly (the broker
+  re-reads the file on every request, so a new hook is live without restarting
+  anything).
+- **`transcript.ts`** — reads, best-effort and read-only, the `.jsonl` that
+  Claude Code writes for a session (under `~/.claude/projects/<slug>/`), to show
+  the actual conversation inside the steps and not just the final result.
+- **`config.ts`** — config persisted in `~/.target/config.json` (override the
+  directory with `TARGET_HOME`); default `127.0.0.1:8893`, step timeout of 10
+  minutes. The port was chosen far from awb's (8890) and agentmesh-hub's (8892)
+  so the three can coexist.
+- **`cli.ts`** — the `target` CLI; talks to the API and takes the admin token
+  straight from `~/.target/config.json`, so there's no token to type.
 
-### Detalles de diseño que conviene conocer
+### Design details worth knowing
 
-**Delegación a subagente.** Como la sesión se reutiliza turno tras turno, el
-input de cada step agrega una instrucción explícita de resolver el trabajo con la
-herramienta Task en lugar de hacerlo inline: eso mantiene el contexto de trabajo
-de cada step fuera de la sesión reanudada, que solo acumula los resúmenes finales
-del subagente.
+**Subagent delegation.** Since the session is reused turn after turn, each
+step's input appends an explicit instruction to do the work with the Task tool
+instead of inline: that keeps each step's working context out of the resumed
+session, which only accumulates the subagent's final summaries.
 
-**Juez / autoevaluación.** Un step puede llevar un criterio de aceptación
-opcional. Si lo tiene, al terminar su ejecución (fase `exec`) el step no pasa a
-`done`: entra en fase `judge` y se despacha una segunda corrida, sobre la misma
-sesión, que le pide al agente evaluar su propio resultado y responder un JSON
-`{"ok": bool, "reason": string}`. Si el veredicto acepta, el step queda `done` y
-el motor avanza; si rechaza, se reintenta el mismo step con el feedback del juez
-hasta agotar `maxRetries`, y recién ahí falla el workflow. Un veredicto que no
-parsea también falla el workflow, deliberadamente, en vez de adivinar. Sin
-criterio de aceptación no hay juez y el comportamiento es el de siempre.
+**Judge / self-evaluation.** A step can carry an optional acceptance criterion.
+If it has one, when its execution finishes (the `exec` phase) the step does not
+go to `done`: it enters the `judge` phase and a second run is dispatched, on the
+same session, that asks the agent to evaluate its own result and answer a JSON
+`{"ok": bool, "reason": string}`. If the verdict accepts, the step becomes
+`done` and the engine advances; if it rejects, the same step is retried with the
+judge's feedback until `maxRetries` is exhausted, and only then does the
+workflow fail. A verdict that doesn't parse also fails the workflow,
+deliberately, rather than guessing. With no acceptance criterion there is no
+judge and the behavior is the usual one.
 
-**Corridas bajo demanda (▶).** Un step puede correrse fuera de orden. Esa corrida
-usa el mismo agente/hook pero **siempre una sesión fresca**: nunca reanuda
-`lastSessionId` ni se convierte en la nueva. Queda fuera del motor y no toca el
-estado del workflow directamente; `reconcileStatus()` deriva después el estado
-del workflow del estado **actual** de sus steps (todos `done` → `completed`,
-alguno `failed` → `failed`, algo por correr → `draft`), que es lo que permite
-que reintentar un step fallido hasta que pase saque al workflow de `failed`.
+**On-demand runs (▶).** A step can be run out of order. That run uses the same
+agent/hook but **always a fresh session**: it never resumes `lastSessionId` nor
+becomes the new one. It stays outside the engine and doesn't touch the
+workflow's status directly; `reconcileStatus()` later derives the workflow's
+status from the **current** state of its steps (all `done` → `completed`, any
+`failed` → `failed`, something left to run → `draft`), which is what lets
+retrying a failed step until it passes take the workflow out of `failed`.
 
-**Permisos.** Por default el agente de un workflow puede responder pero **no**
-escribir archivos ni correr comandos. Para que los steps escriban de verdad en su
-sandbox dedicado (`~/.target/sandboxes/<agente>/`) hay que crear el workflow con
-`--permission-mode acceptEdits`. `bypassPermissions` existe pero exige confirmación
-explícita (`acceptBypassRisk: true` / `--yes-bypass-risk`) porque habilita
-ejecución de comandos sin restricciones en la máquina del operador.
+**Permissions.** By default a workflow's agent can answer but **cannot** write
+files or run commands. For steps to actually write in their dedicated sandbox
+(`~/.target/sandboxes/<agent>/`) the workflow must be created with
+`--permission-mode acceptEdits`. `bypassPermissions` exists but demands explicit
+confirmation (`acceptBypassRisk: true` / `--yes-bypass-risk`) because it enables
+unrestricted command execution on the operator's machine.
 
-## Estructura de directorios
+## Directory structure
 
 ```
 /
-├── README.md              Documentación principal (uso, diferencias con agentmesh)
-├── .claude/               settings.local.json (allowlist de permisos)
-└── hub/                   Todo el código
-    ├── daemon.ts          Entry point del hub
-    ├── server.ts          API HTTP + UI
-    ├── workflow.ts        Motor, máquina de estados, juez, .md de progreso
-    ├── runner.ts          Despacho de steps al hook de awb
+├── README.md              Main documentation (usage, differences with agentmesh)
+├── .claude/               settings.local.json (permission allowlist)
+└── hub/                   All the code
+    ├── daemon.ts          Hub entry point
+    ├── server.ts          HTTP API + UI
+    ├── workflow.ts        Engine, state machine, judge, progress .md
+    ├── runner.ts          Dispatch of steps to the awb hook
     ├── db.ts              SQLite (workflows + steps)
-    ├── awb.ts             Puente con agent-webhook-bridge
-    ├── transcript.ts      Lectura de transcripts de sesiones de Claude
-    ├── config.ts          Config persistida en ~/.target
-    ├── cli.ts             CLI `target`
-    └── ui/index.html      UI web (página única, sin build)
+    ├── awb.ts             Bridge to agent-webhook-bridge
+    ├── transcript.ts      Reading of Claude session transcripts
+    ├── config.ts          Config persisted in ~/.target
+    ├── cli.ts             The `target` CLI
+    └── ui/index.html      Web UI (single page, no build)
 ```
 
-En tiempo de ejecución el hub usa `~/.target/`: `config.json`, `target.db`,
-`sandboxes/<agente>/` y un `<slug>-<id>.md` de progreso por workflow.
+At runtime the hub uses `~/.target/`: `config.json`, `target.db`,
+`sandboxes/<agent>/` and a `<slug>-<id>.md` progress file per workflow.
 
-## Cómo correrlo
+## How to run it
 
 ```bash
 cd hub && npm install
-node daemon.ts        # o: npm start / node cli.ts start
+node daemon.ts        # or: npm start / node cli.ts start
 ```
 
-El hub imprime su **admin token** al arrancar (también vive en
-`~/.target/config.json`) — lo pide la UI y lo usa el CLI automáticamente. La UI
-queda en `http://127.0.0.1:8893`. Requiere `agent-webhook-bridge` corriendo
-(`awb start`).
+The hub prints its **admin token** on startup (it also lives in
+`~/.target/config.json`) — the UI asks for it and the CLI uses it automatically.
+The UI lives at `http://127.0.0.1:8893`. It requires `agent-webhook-bridge`
+running (`awb start`).
 
-Vía CLI:
+Via CLI:
 
 ```bash
 node cli.ts create "release-notes" [--workdir <dir>] [--permission-mode acceptEdits]
-node cli.ts add-step <workflowId> "Leer el CHANGELOG y armar un resumen"
-node cli.ts run <workflowId>       # arranca / continúa
+node cli.ts add-step <workflowId> "Read the CHANGELOG and put together a summary"
+node cli.ts run <workflowId>       # start / continue
 node cli.ts pause <workflowId>
 node cli.ts resume <workflowId>
-node cli.ts restart <workflowId>   # resetea todos los steps y arranca de cero
+node cli.ts restart <workflowId>   # resets every step and starts from scratch
 node cli.ts list
 node cli.ts show <workflowId>
 ```
 
-Verificación de tipos: `npm run typecheck` (`tsc --noEmit`). Tests: `npm test`
-(`node --test`, sobre un `TARGET_HOME` descartable). **No hay CI en el repo**;
-tampoco hay paso de build (Node ejecuta los `.ts` directamente).
+Type checking: `npm run typecheck` (`tsc --noEmit`). Tests: `npm test`
+(`node --test`, over a throwaway `TARGET_HOME`). **There is no CI in the repo**;
+there's no build step either (Node runs the `.ts` files directly).
 
-## Estado actual y foco reciente
+## Current status and recent focus
 
-El README lo declara **en etapas iniciales**: los issues de GitHub se usan para
-trackear bugs y features pendientes, y los PRs apuntan a `main`. El repo es chico
-y joven (~2.900 líneas, 6 commits desde el scaffold inicial) y varios comentarios
-hablan de una "fase 1" local-only, con una fase 2 prevista para nodos remotos que
-registren sus propios hooks.
+The README declares it **in its early stages**: GitHub issues are used to track
+bugs and pending features, and PRs target `main`. The repo is small and young
+(~2,900 lines, 6 commits since the initial scaffold) and several comments talk
+about a local-only "phase 1", with a phase 2 planned for remote nodes that
+register their own hooks.
 
-El historial reciente muestra un foco claro en el **control fino sobre steps
-individuales**: primero borrado completo de workflows y ejecución aislada de un
-step; después una simplificación de ese mecanismo (se reemplazaron las columnas y
-el callback separados de "isolated run" por un simple `manualRun` que reutiliza
-`status`/`result`/`error` del step, más la reconciliación del estado del
-workflow); y encima de eso la **autoevaluación de steps con criterio de aceptación
-y reintentos** — el trabajo de la rama actual, `feat/step-acceptance-criteria-judge`.
-El commit más reciente hace que el transcript muestre la sesión del step que corrió
-más recientemente, en vez de solo la sesión compartida del workflow.
+The recent history shows a clear focus on **fine-grained control over
+individual steps**: first full deletion of workflows and isolated execution of a
+step; then a simplification of that mechanism (the separate "isolated run"
+columns and callback were replaced by a simple `manualRun` that reuses the
+step's `status`/`result`/`error`, plus the reconciliation of the workflow's
+status); and on top of that the **self-evaluation of steps with an acceptance
+criterion and retries** — the work of the current branch,
+`feat/step-acceptance-criteria-judge`. The most recent commit makes the
+transcript show the session of the step that ran most recently, instead of only
+the workflow's shared session.
