@@ -44,9 +44,14 @@ idempotent — re-run it any time. Set `AWB_DIR` to point at an existing
 ## Usage
 
 ```bash
-node vendor/agent-webhook-bridge/broker/daemon.ts   # the broker (or: awb start)
-npm start                                          # the hub
+npm start
 ```
+
+One command brings up **both** processes — the `agent-webhook-bridge` broker
+(`127.0.0.1:8890`) and the hub (`127.0.0.1:8893`) — waits until both ports
+answer, then opens the UI in your default browser. It stays in the foreground
+holding both; press **Ctrl-C** to stop them together. If either is already
+running it's reused rather than started twice.
 
 The hub prints its **admin token** on startup (it also lives in
 `~/.target/config.json`) — the UI asks for it and the CLI uses it automatically.
@@ -81,7 +86,8 @@ enables unrestricted command execution.
 
 It needs `agent-webhook-bridge` **running** — that's what actually spawns
 `claude -p` / `claude --resume` for each step. `npm run target:install` puts it
-in place; starting it is still on you (`node vendor/agent-webhook-bridge/broker/daemon.ts`).
+in place and `npm start` boots it alongside the hub, so you don't have to start
+it yourself.
 
 ## Project status
 

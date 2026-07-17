@@ -9,7 +9,7 @@
   },
   "scripts": {
     "target:install": "node scripts/bootstrap.mjs",
-    "start": "npm --prefix hub start",
+    "start": "node scripts/start.ts",
     "test": "npm --prefix hub test",
     "typecheck": "npm --prefix hub run typecheck"
   }

@@ -148,10 +148,10 @@ function main(): void {
 	installDeps("agent-webhook-bridge", awb);
 
 	console.log(`
-Ready to start. Two processes, two terminals:
+Ready to start. One command brings up both the broker and the hub and opens
+the UI:
 
-  1) the broker:  node ${path.join(awb, "broker", "daemon.ts")}
-  2) the hub:     npm start
+  npm start
 
 The hub prints its admin token on startup (also in ~/.target/config.json) and
 serves the UI at http://127.0.0.1:8893.
