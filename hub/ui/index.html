@@ -398,6 +398,7 @@
                 <span id="convo-meta-text"></span>
                 <button class="btn small" id="btn-copy-resume" title="copy command to open conversation on your terminal">Open conversation</button>
               </p>
+              <p class="convo-meta" id="convo-usage" style="display:none"></p>
               <div class="convo-log" id="convo-log"></div>
             </div>
 
@@ -584,9 +585,25 @@
         }, 1200);
       }
 
+      function renderUsage(usage) {
+        const el = $("convo-usage");
+        if (!usage || !usage.turns) {
+          el.style.display = "none";
+          return;
+        }
+        const k = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+        const pct = usage.contextWindow ? ((100 * usage.contextTokens) / usage.contextWindow).toFixed(1) : "0.0";
+        const subs = usage.includesSubagents ? " incl. subagents" : "";
+        el.textContent =
+          `context: ${k(usage.contextTokens)} / ${k(usage.contextWindow)} (${pct}%)` +
+          ` · total: in ${k(usage.totalInputTokens)} · out ${k(usage.outputTokens)}${subs}`;
+        el.style.display = "";
+      }
+
       function renderTranscript(data) {
         $("convo-meta-text").textContent = `harness: ${data.harness ?? "?"} · session: ${data.sessionId ?? "(none yet)"}`;
         setResumeCommand(data.resumeCommand);
+        renderUsage(data.usage);
         const log = $("convo-log");
         if (data.note) {
           log.innerHTML = `<p class="convo-empty">${escapeHtml(data.note)}</p>`;

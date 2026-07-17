@@ -369,9 +369,10 @@ function failWorkflowIfDispatchDied(stepId: string, workflowId: string, what: st
  * Applies a step's job outcome (called from the /api/steps/:id/result
  * callback route). Three shapes of callback land here:
  *
- *  - on-demand ▶ runs (`manualRun`): stay outside the sequential engine (they
- *    never touch workflow status beyond a reconcile, and never advance), but a
- *    step with acceptance criteria is still judged — routed to `onManualRun`.
+ *  - on-demand ▶ runs (`manualRun`): stay outside the sequential engine for
+ *    status (they never touch workflow status beyond a reconcile, and never
+ *    advance), but share its one Claude session and are still judged when the
+ *    step has acceptance criteria — routed to `onManualRun`.
  *  - the `judge` phase: the payload is a self-evaluation verdict, not a
  *    result — routed to `onJudgeVerdict`.
  *  - the `exec` phase (a normal sequential step's work): on failure the
@@ -442,8 +443,8 @@ function settleManual(workflowId: string, log: Logger): void {
  * (never advances, never sets the workflow `running`/`failed` — only a
  * reconcile at the end), but a step WITH acceptance criteria is still judged,
  * and a rejected verdict retries the same step up to its budget — exactly like
- * the engine, just isolated on the run's own session. A step without criteria
- * is recorded as-is, as before this existed.
+ * the engine, on the workflow's one shared session. A step without criteria is
+ * recorded as-is.
  */
 async function onManualRun(
 	step: Step,
@@ -464,6 +465,9 @@ async function onManualRun(
 		settleManual(step.workflowId, log);
 		return;
 	}
+	// Chain the shared session now — the judge (and any retry) resumes this same
+	// one, and a later step or ▶ run continues the same conversation.
+	if (outcome.sessionId) setWorkflowSessionId(step.workflowId, outcome.sessionId);
 	// No acceptance criteria → no judge; record the result as-is (unchanged).
 	if (!step.acceptanceCriteria) {
 		completeStep(step.id, outcome);
@@ -489,9 +493,9 @@ async function onManualRun(
 /**
  * The judge verdict for an on-demand ▶ run: accept (done), or re-run the same
  * step with the judge's feedback until the retry budget is spent, then fail —
- * without ever failing the whole workflow. The retry stays on the run's own
- * isolated session chain via `sessionIdOverride`, since a manual run never
- * writes `workflow.lastSessionId`.
+ * without ever failing the whole workflow. The judge's session is chained back
+ * onto the workflow and the retry resumes it, so the on-demand run stays on the
+ * same shared conversation as the rest of the workflow.
  */
 async function onManualJudgeVerdict(
 	step: Step,
@@ -499,6 +503,8 @@ async function onManualJudgeVerdict(
 	cfg: HubConfig,
 	log: Logger,
 ): Promise<void> {
+	if (outcome.sessionId) setWorkflowSessionId(step.workflowId, outcome.sessionId);
+
 	// The judge job itself couldn't run — we can't evaluate, so mark it failed.
 	if (!outcome.ok) {
 		completeStep(step.id, { ok: false, error: `judge run failed: ${outcome.error ?? "unknown"}` });
@@ -531,8 +537,6 @@ async function onManualJudgeVerdict(
 		return;
 	}
 
-	// The judge's session continues the run's chain into the retry.
-	const judgeSession = outcome.sessionId ?? step.sessionId;
 	beginRetry(step.id); // status → pending, retry_count++, keeps is_manual_run
 	writeStatusMd(step.workflowId);
 	log(`step ${step.id} (on-demand run) rejected by judge (retry ${step.retryCount + 1}/${step.maxRetries}): ${verdict.reason}`);
@@ -543,11 +547,8 @@ async function onManualJudgeVerdict(
 	const workflow = getWorkflow(step.workflowId);
 	const retried = getStep(step.id);
 	if (!workflow || !retried) return;
-	await dispatchStep(retried, workflow, cfg, log, {
-		manual: true,
-		sessionIdOverride: judgeSession,
-		retryReason: verdict.reason,
-	});
+	// Resume the shared session (now equal to the judge's session we just chained).
+	await dispatchStep(retried, workflow, cfg, log, { manual: true, resumeSession: true, retryReason: verdict.reason });
 	// A dead dispatch already marked the step failed; otherwise it's running again.
 	if (getStep(step.id)?.status === "failed") settleManual(step.workflowId, log);
 	else writeStatusMd(step.workflowId);
@@ -617,16 +618,17 @@ async function onJudgeVerdict(
 /**
  * Runs a single step's job right now (the ▶ button) instead of waiting for
  * the sequential engine to reach it in order: dispatched to the same
- * agent/hook, always a fresh Claude session (never resumes
- * `workflow.lastSessionId`, and its own session never becomes the new one
- * either — see `dispatchStep`'s `resumeSession: false`). Blocked while any
- * step of the workflow is already running, sequential or on-demand, since
- * they'd otherwise fight over the same hook/session.
+ * agent/hook and resuming the workflow's shared Claude session, so an
+ * on-demand run continues the same conversation as the rest of the workflow
+ * (its callback persists the session id back onto the workflow, exactly like a
+ * sequential step). Blocked while any step of the workflow is already running,
+ * sequential or on-demand, since they'd otherwise fight over the same
+ * hook/session.
  *
  * If the step has acceptance criteria, its callback is still routed through the
- * judge (see `onManualRun`), retries and all — just kept on this run's own
- * isolated session chain, never touching the workflow's shared session or its
- * running/failed status.
+ * judge (see `onManualRun`), retries and all. It stays OUT of the sequential
+ * engine for status/ordering (never advances, never sets the workflow
+ * running/failed — only a reconcile), but shares the one session.
  */
 export async function runStep(workflowId: string, stepId: string, cfg: HubConfig, log: Logger): Promise<void> {
 	const workflow = getWorkflow(workflowId);
@@ -638,6 +640,6 @@ export async function runStep(workflowId: string, stepId: string, cfg: HubConfig
 	}
 	if (!startManualRun(stepId)) throw new WorkflowError("this step is already running");
 	writeStatusMd(workflowId);
-	await dispatchStep(step, workflow, cfg, log, { resumeSession: false, manual: true });
+	await dispatchStep(step, workflow, cfg, log, { manual: true });
 	writeStatusMd(workflowId);
 }

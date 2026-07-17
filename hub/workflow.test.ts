@@ -130,6 +130,17 @@ test("manual run rejected by the judge with no retries fails the step", async ()
 	assert.equal(getWorkflow(workflow.id)?.status, "failed");
 });
 
+test("an on-demand run chains its session onto the shared workflow session", async () => {
+	const { workflow, steps } = makeWorkflow(1);
+
+	assert.ok(startManualRun(steps[0].id));
+	await onStepResult(steps[0].id, { ok: true, result: "fine", sessionId: "sess-shared" }, cfg, silent);
+
+	// The ▶ run must persist its session as the workflow's shared one, so the
+	// next step/run continues the same conversation instead of a fresh session.
+	assert.equal(getWorkflow(workflow.id)?.lastSessionId, "sess-shared");
+});
+
 test("manual run rejected by the judge with retries left re-runs the same step", async () => {
 	const { step } = manualStepInJudgePhase("must contain X", { maxRetries: 1 });
 

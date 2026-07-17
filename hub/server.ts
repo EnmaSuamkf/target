@@ -28,7 +28,7 @@ import { harnessResumeCommand, hookRuntime, PUBLISHABLE_PERMISSION_MODES, type P
 import type { HubConfig } from "./config.ts";
 import { getWorkflow, latestStepSession, listSteps, listWorkflows, stepProgress, type Step, type Workflow } from "./db.ts";
 import type { Logger } from "./runner.ts";
-import { readTranscript } from "./transcript.ts";
+import { readTokenUsage, readTranscript } from "./transcript.ts";
 import {
 	addStep,
 	createWorkflow,
@@ -340,6 +340,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				harness: runtime.harness,
 				resumeCommand: harnessResumeCommand(runtime.harness, sessionId),
 				entries: [],
+				usage: null,
 				note:
 					sessionId == null
 						? "No session yet: the id is only known once a step finishes running."
@@ -352,6 +353,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			harness: runtime.harness,
 			resumeCommand: harnessResumeCommand(runtime.harness, sessionId),
 			entries: readTranscript(runtime.workdir, sessionId),
+			usage: readTokenUsage(runtime.workdir, sessionId),
 		});
 		return;
 	}
