@@ -1,0 +1,16 @@
+{
+  "name": "target",
+  "version": "0.1.0",
+  "description": "Target: define workflows made of sequential steps, each running as a job against one dedicated agent+hook (agent-webhook-bridge) on a shared Claude session.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "target:install": "node scripts/bootstrap.mjs",
+    "start": "npm --prefix hub start",
+    "test": "npm --prefix hub test",
+    "typecheck": "npm --prefix hub run typecheck"
+  }
+}

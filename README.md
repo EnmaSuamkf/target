@@ -27,26 +27,40 @@ hook**, and its steps run one after another **on the same Claude session**
 | — | Every job carries an appended instruction to resolve itself with a subagent (Task tool), because the main thread is reused for the whole workflow |
 | — | Status `.md` in `~/.target/<name-slug>-<id>.md`, rewritten on every change |
 
+## Install
+
+Needs **Node >= 24** (see `.nvmrc`; the installer activates it through nvm/fnm
+if the node in your PATH is older).
+
+```bash
+npm run target:install
+```
+
+One command from the repo root: installs the hub's dependencies, clones
+`agent-webhook-bridge` into `vendor/` (gitignored) and installs its own. It's
+idempotent — re-run it any time. Set `AWB_DIR` to point at an existing
+`agent-webhook-bridge` clone instead of vendoring a second copy.
+
 ## Usage
 
 ```bash
-cd hub && npm install
-node daemon.ts        # or: npx tsx cli.ts start / node cli.ts start
+node vendor/agent-webhook-bridge/broker/daemon.ts   # the broker (or: awb start)
+npm start                                          # the hub
 ```
 
 The hub prints its **admin token** on startup (it also lives in
 `~/.target/config.json`) — the UI asks for it and the CLI uses it automatically.
 
 ```bash
-node cli.ts create "release-notes" [--workdir <dir>] [--permission-mode acceptEdits]
-node cli.ts add-step <workflowId> "Read the CHANGELOG and put together a summary"
-node cli.ts add-step <workflowId> "Publish the summary to docs/release-notes.md"
-node cli.ts run <workflowId>       # start / continue
-node cli.ts pause <workflowId>
-node cli.ts resume <workflowId>
-node cli.ts restart <workflowId>   # resets every step and starts from scratch
-node cli.ts list
-node cli.ts show <workflowId>
+node hub/cli.ts create "release-notes" [--workdir <dir>] [--permission-mode acceptEdits]
+node hub/cli.ts add-step <workflowId> "Read the CHANGELOG and put together a summary"
+node hub/cli.ts add-step <workflowId> "Publish the summary to docs/release-notes.md"
+node hub/cli.ts run <workflowId>       # start / continue
+node hub/cli.ts pause <workflowId>
+node hub/cli.ts resume <workflowId>
+node hub/cli.ts restart <workflowId>   # resets every step and starts from scratch
+node hub/cli.ts list
+node hub/cli.ts show <workflowId>
 ```
 
 Or from the UI at `http://127.0.0.1:8893` (the **Workflow** section): create a
@@ -65,8 +79,9 @@ enables unrestricted command execution.
 
 ## External requirement
 
-It needs `agent-webhook-bridge` running (`awb start`) — that's what actually
-spawns `claude -p` / `claude --resume` for each step.
+It needs `agent-webhook-bridge` **running** — that's what actually spawns
+`claude -p` / `claude --resume` for each step. `npm run target:install` puts it
+in place; starting it is still on you (`node vendor/agent-webhook-bridge/broker/daemon.ts`).
 
 ## Project status
 
