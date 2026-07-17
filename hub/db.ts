@@ -333,11 +333,10 @@ export function nextPendingStep(workflowId: string): Step | null {
 
 /**
  * Session id of the step that ran most recently (by `started_at`) and produced
- * a session — i.e. the conversation the user most likely wants to watch. For a
- * sequential run this is the shared session (every step reports the same one,
- * which also equals `workflow.lastSessionId`); for an on-demand ▶ run it's that
- * run's own fresh session, which `lastSessionId` deliberately never tracks.
- * Null if no step has produced a session yet.
+ * a session — i.e. the conversation the user most likely wants to watch. Every
+ * step, sequential or on-demand, now shares the one session, so this equals
+ * `workflow.lastSessionId`; it stays a step-level lookup so a session surfaces
+ * the instant a step reports one. Null if no step has produced a session yet.
  */
 export function latestStepSession(workflowId: string): string | null {
 	const row = open()

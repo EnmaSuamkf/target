@@ -78,11 +78,13 @@ export function judgeInput(criteria: string): string {
 }
 
 /**
- * Dispatches one workflow step to its workflow's awb hook. By default it
- * resumes `workflow.lastSessionId` (the sequential engine's case — every
- * step after the first continues the same Claude session). An on-demand run
- * (workflow.ts's `runStep`) passes `resumeSession: false` so it always starts
- * a fresh session instead of forking the shared one.
+ * Dispatches one workflow step to its workflow's awb hook. It resumes
+ * `workflow.lastSessionId` whenever the workflow has one — the whole workflow,
+ * whether driven by the sequential engine or the on-demand ▶ button, shares
+ * that single Claude session, so every step reads as one continuous
+ * conversation. The very first dispatch (no session yet) starts fresh and its
+ * callback persists the session id the workflow then reuses. `resumeSession:
+ * false` forces a fresh session regardless.
  *
  * `mode: "judge"` dispatches the self-evaluation pass instead of the step's
  * work: it always resumes the session (the agent must remember what it just
@@ -101,26 +103,20 @@ export async function dispatchStep(
 		mode?: "exec" | "judge";
 		retryReason?: string;
 		manual?: boolean;
-		sessionIdOverride?: string | null;
 	} = {},
 ): Promise<void> {
 	const mode = options.mode ?? "exec";
 	// Which Claude session (if any) awb should `--resume` for this dispatch.
-	// `sessionIdOverride` wins when the caller pins one explicitly — an on-demand
-	// ▶ run's retry uses it to stay on its own isolated session chain instead of
-	// the shared `workflow.lastSessionId`, which it deliberately never writes.
-	// Otherwise: the judge resumes the very run it is grading (the step's own
-	// `sessionId`, set by markStepJudging — equal to `workflow.lastSessionId`
-	// for a sequential step), and an exec dispatch resumes the shared session
-	// unless the caller opted out.
+	// The judge resumes the very run it is grading (the step's own `sessionId`,
+	// set by markStepJudging — equal to `workflow.lastSessionId` once the shared
+	// session exists); an exec dispatch resumes the shared session unless the
+	// caller forces a fresh one with `resumeSession: false`.
 	const sessionToResume =
-		options.sessionIdOverride !== undefined
-			? options.sessionIdOverride
-			: mode === "judge"
-				? (step.sessionId ?? workflow.lastSessionId)
-				: (options.resumeSession ?? true)
-					? workflow.lastSessionId
-					: null;
+		mode === "judge"
+			? (step.sessionId ?? workflow.lastSessionId)
+			: (options.resumeSession ?? true)
+				? workflow.lastSessionId
+				: null;
 	const callbackUrl = `http://${cfg.host}:${cfg.port}/api/steps/${step.id}/result?token=${step.callbackToken}`;
 	const input =
 		mode === "judge"
