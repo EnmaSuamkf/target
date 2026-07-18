@@ -25,6 +25,7 @@ import {
 	markStepJudging,
 	nextPendingStep,
 	resetSteps,
+	setStepSelection,
 	setWorkflowSessionId,
 	setWorkflowStatus,
 	slugify,
@@ -225,6 +226,12 @@ function reconcileStatus(workflowId: string, log?: Logger): void {
  * Called after create/start/resume/restart and after every step callback —
  * it's the only place that decides "what runs next", so pause is just
  * refusing to call this until resume.
+ *
+ * `nextPendingStep` only ever returns a *selected* step, so a run started with
+ * nothing selected returns null here immediately — that must NOT be read as
+ * "the workflow is done". We only mark `completed` when there is truly no
+ * pending work left at all (selected or not); if pending-but-unselected steps
+ * remain, this is a no-op — nothing dispatches, nothing is marked completed.
  */
 async function advance(workflowId: string, cfg: HubConfig, log: Logger): Promise<void> {
 	const workflow = getWorkflow(workflowId);
@@ -233,6 +240,7 @@ async function advance(workflowId: string, cfg: HubConfig, log: Logger): Promise
 	if (steps.some((s) => s.status === "running")) return; // a step is already in flight
 	const next = nextPendingStep(workflowId);
 	if (!next) {
+		if (steps.some((s) => s.status === "pending")) return; // unselected steps still pending — not actually done
 		setWorkflowStatus(workflowId, "completed");
 		writeStatusMd(workflowId);
 		log(`workflow ${workflowId} completed`);
@@ -242,12 +250,20 @@ async function advance(workflowId: string, cfg: HubConfig, log: Logger): Promise
 	writeStatusMd(workflowId);
 }
 
-export async function startWorkflow(workflowId: string, cfg: HubConfig, log: Logger): Promise<Workflow> {
+export async function startWorkflow(
+	workflowId: string,
+	cfg: HubConfig,
+	log: Logger,
+	stepIds: string[] = [],
+): Promise<Workflow> {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	if (workflow.status === "completed" || workflow.status === "failed") {
 		throw new WorkflowError(`workflow is ${workflow.status} — use restart instead`);
 	}
+	// Persist the run selection so the sequential engine (which advances across
+	// async job callbacks) only ever dispatches the chosen steps. Empty = none.
+	setStepSelection(workflowId, stepIds);
 	if (workflow.status !== "running") {
 		setWorkflowStatus(workflowId, "running");
 		writeStatusMd(workflowId);
@@ -269,10 +285,16 @@ export function pauseWorkflow(workflowId: string): Workflow {
 	return updated;
 }
 
-export async function resumeWorkflow(workflowId: string, cfg: HubConfig, log: Logger): Promise<Workflow> {
+export async function resumeWorkflow(
+	workflowId: string,
+	cfg: HubConfig,
+	log: Logger,
+	stepIds: string[] = [],
+): Promise<Workflow> {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	if (workflow.status !== "paused") throw new WorkflowError("only a paused workflow can be resumed");
+	setStepSelection(workflowId, stepIds);
 	setWorkflowStatus(workflowId, "running");
 	writeStatusMd(workflowId);
 	await advance(workflowId, cfg, log);
@@ -281,11 +303,22 @@ export async function resumeWorkflow(workflowId: string, cfg: HubConfig, log: Lo
 	return updated;
 }
 
-/** Resets every step to pending and drops session chaining, then starts over from step 1. */
-export async function restartWorkflow(workflowId: string, cfg: HubConfig, log: Logger): Promise<Workflow> {
+/**
+ * Resets the selected steps to pending and drops session chaining, then starts
+ * over. With a subset chosen it re-runs only those, leaving the rest
+ * untouched; with nothing selected, nothing is reset and nothing runs.
+ */
+export async function restartWorkflow(
+	workflowId: string,
+	cfg: HubConfig,
+	log: Logger,
+	stepIds: string[] = [],
+): Promise<Workflow> {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	if (workflow.status === "running") throw new WorkflowError("pause the workflow before restarting it");
+	// Selection first, so resetSteps only wipes the chosen steps.
+	setStepSelection(workflowId, stepIds);
 	resetSteps(workflowId);
 	setWorkflowSessionId(workflowId, null);
 	setWorkflowStatus(workflowId, "running");

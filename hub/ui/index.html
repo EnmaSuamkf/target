@@ -186,6 +186,7 @@
         padding: 0.65rem 0.8rem;
       }
       .step-head{ display: flex; align-items: baseline; gap: 0.55rem; justify-content: space-between; }
+      .step-check{ flex-shrink: 0; margin: 0; cursor: pointer; align-self: center; }
       .step-idx{ font-family: var(--mono); color: var(--faint); font-size: 0.78rem; flex-shrink: 0; }
       .step-desc{ flex: 1; font-size: 0.9rem; overflow-wrap: anywhere; }
       .step-status{ font-family: var(--mono); font-size: 0.72rem; flex-shrink: 0; }
@@ -453,6 +454,10 @@
       const $ = (id) => document.getElementById(id);
       let selectedId = null;
       let editingStepId = null;
+      // Step ids the user checked to run. Empty = run nothing (a deliberate
+      // no-op — see `runAction` below). Start, Resume and Restart send this
+      // set so the engine runs only these.
+      const stepSelection = new Set();
       let resumeCommand = null;
       let copiedTimer = null;
 
@@ -550,6 +555,7 @@
           const statusLabel = step.status === "running" && step.phase === "judge" ? "judging" : step.status;
           li.innerHTML = `
             <div class="step-head">
+              <input type="checkbox" class="step-check" data-select="${step.id}" ${stepSelection.has(step.id) ? "checked" : ""} title="Check to run only the selected steps on Start, Resume and Restart. Leave all unchecked to run nothing." />
               <span class="step-idx">#${step.orderIndex + 1}</span>
               <span class="step-desc">${escapeHtml(step.description)}</span>
               <span class="step-status ${step.status}">${statusLabel}</span>
@@ -656,6 +662,13 @@
         list.innerHTML = "";
         for (const step of steps) list.appendChild(renderStep(step));
 
+        list.querySelectorAll("[data-select]").forEach((box) =>
+          box.addEventListener("change", () => {
+            const id = box.getAttribute("data-select");
+            if (box.checked) stepSelection.add(id);
+            else stepSelection.delete(id);
+          }),
+        );
         list.querySelectorAll("[data-edit]").forEach((btn) =>
           btn.addEventListener("click", () => {
             editingStepId = btn.getAttribute("data-edit");
@@ -732,7 +745,10 @@
         // Switching workflows: drop the old command up front so a failed
         // transcript load can't leave the button copying another conversation.
         // The 2s poll re-selects the same id, which must not flicker it away.
-        if (id !== selectedId) setResumeCommand(null);
+        if (id !== selectedId) {
+          setResumeCommand(null);
+          stepSelection.clear();
+        }
         selectedId = id;
         editingStepId = null;
         try {
@@ -755,10 +771,15 @@
         const token = adminToken() || prompt("Admin token — printed by the hub on startup (~/.target/config.json):");
         if (!token) return;
         rememberToken(token);
+        // Start/Resume/Restart carry the checked step ids so the engine runs
+        // only those. An empty set means "run nothing" — leaving every box
+        // unchecked and pressing the button is a deliberate no-op.
+        const withSelection = action === "start" || action === "resume" || action === "restart";
         try {
           const res = await fetch(`/api/workflows/${selectedId}/${action}`, {
             method: "POST",
-            headers: authHeaders(),
+            headers: withSelection ? { "content-type": "application/json", ...authHeaders() } : authHeaders(),
+            body: withSelection ? JSON.stringify({ stepIds: [...stepSelection] }) : undefined,
           });
           const data = await res.json();
           if (!res.ok) {
