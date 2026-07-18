@@ -74,6 +74,15 @@ export interface Step {
 	retryCount: number;
 	/** Which job the step's in-flight callback belongs to (see StepPhase). */
 	phase: StepPhase;
+	/**
+	 * Whether this step is part of the current run selection. The sequential
+	 * engine only ever dispatches selected steps, so Start/Resume/Restart run
+	 * exactly the chosen subset. New steps default to selected (so workflows
+	 * that never use this feature keep running everything), but an explicit
+	 * empty selection via `setStepSelection` marks every step unselected —
+	 * "select nothing" means nothing runs, not "run everything".
+	 */
+	selected: boolean;
 }
 
 let db: DatabaseSync | null = null;
@@ -115,7 +124,8 @@ function open(): DatabaseSync {
 			max_retries INTEGER NOT NULL DEFAULT 0,
 			retry_interval_seconds INTEGER NOT NULL DEFAULT 0,
 			retry_count INTEGER NOT NULL DEFAULT 0,
-			phase TEXT NOT NULL DEFAULT 'exec'
+			phase TEXT NOT NULL DEFAULT 'exec',
+			selected INTEGER NOT NULL DEFAULT 1
 		);
 		CREATE INDEX IF NOT EXISTS idx_steps_workflow ON steps(workflow_id, order_index);
 	`);
@@ -137,6 +147,7 @@ function open(): DatabaseSync {
 	addColumn("retry_interval_seconds", "retry_interval_seconds INTEGER NOT NULL DEFAULT 0");
 	addColumn("retry_count", "retry_count INTEGER NOT NULL DEFAULT 0");
 	addColumn("phase", "phase TEXT NOT NULL DEFAULT 'exec'");
+	addColumn("selected", "selected INTEGER NOT NULL DEFAULT 1");
 	return db;
 }
 
@@ -256,6 +267,7 @@ function rowToStep(row: Record<string, unknown>): Step {
 		retryIntervalSeconds: Number(row.retry_interval_seconds ?? 0),
 		retryCount: Number(row.retry_count ?? 0),
 		phase: (row.phase as StepPhase) ?? "exec",
+		selected: Number(row.selected ?? 1) === 1,
 	};
 }
 
@@ -291,6 +303,7 @@ export function insertStep(
 		retryIntervalSeconds,
 		retryCount: 0,
 		phase: "exec",
+		selected: true,
 	};
 	database
 		.prepare(
@@ -326,7 +339,7 @@ export function listSteps(workflowId: string): Step[] {
 
 export function nextPendingStep(workflowId: string): Step | null {
 	const row = open()
-		.prepare("SELECT * FROM steps WHERE workflow_id = ? AND status = 'pending' ORDER BY order_index LIMIT 1")
+		.prepare("SELECT * FROM steps WHERE workflow_id = ? AND status = 'pending' AND selected = 1 ORDER BY order_index LIMIT 1")
 		.get(workflowId);
 	return row ? rowToStep(row as Record<string, unknown>) : null;
 }
@@ -475,13 +488,46 @@ export function expireStaleSteps(timeoutMs: number): string[] {
 	return rows.map((r) => String(r.workflow_id));
 }
 
-/** Resets every step of a workflow back to pending, wiping prior results — used by restart. */
+/**
+ * Records which steps a run should dispatch. An empty selection means "run
+ * nothing" — every step is flagged UNSELECTED, so the sequential engine
+ * (`nextPendingStep` only returns a selected step) dispatches nothing at all.
+ * Otherwise only the listed steps are selected and the rest are skipped. Ids
+ * that don't belong to the workflow are ignored.
+ *
+ * Note this only governs runs that actually call this function (Start/Resume/
+ * Restart). Brand-new steps still default to `selected = 1` at the column
+ * level (see `insertStep`/the `selected` column default), so existing
+ * workflows nobody has touched with this feature keep running exactly as
+ * before.
+ */
+export function setStepSelection(workflowId: string, stepIds: string[]): void {
+	const database = open();
+	if (stepIds.length === 0) {
+		database.prepare("UPDATE steps SET selected = 0 WHERE workflow_id = ?").run(workflowId);
+		return;
+	}
+	const placeholders = stepIds.map(() => "?").join(", ");
+	database
+		.prepare(
+			`UPDATE steps SET selected = CASE WHEN id IN (${placeholders}) THEN 1 ELSE 0 END WHERE workflow_id = ?`,
+		)
+		.run(...stepIds, workflowId);
+}
+
+/**
+ * Resets the workflow's *selected* steps back to pending, wiping prior results
+ * — used by restart. Only selected steps are touched, so restarting with a
+ * subset chosen leaves the unselected steps' results intact and re-runs just
+ * the chosen ones. With nothing selected (see `setStepSelection`), no step is
+ * selected, so this resets nothing at all.
+ */
 export function resetSteps(workflowId: string): void {
 	open()
 		.prepare(
 			`UPDATE steps SET status = 'pending', result = NULL, error = NULL, session_id = NULL,
 			 started_at = NULL, finished_at = NULL, is_manual_run = 0, phase = 'exec', retry_count = 0
-			 WHERE workflow_id = ?`,
+			 WHERE workflow_id = ? AND selected = 1`,
 		)
 		.run(workflowId);
 }

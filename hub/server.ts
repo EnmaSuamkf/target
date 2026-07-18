@@ -100,6 +100,7 @@ function publicStep(step: Step): Record<string, unknown> {
 		retryIntervalSeconds: step.retryIntervalSeconds,
 		retryCount: step.retryCount,
 		phase: step.phase,
+		selected: step.selected,
 	};
 }
 
@@ -440,21 +441,29 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			return;
 		}
 		const action = parts[3] as "start" | "pause" | "resume" | "restart";
-		(async () => {
-			try {
-				const workflow =
-					action === "start"
-						? await startWorkflow(workflowId, cfg, log)
-						: action === "pause"
-							? pauseWorkflow(workflowId)
-							: action === "resume"
-								? await resumeWorkflow(workflowId, cfg, log)
-								: await restartWorkflow(workflowId, cfg, log);
-				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
-			} catch (err) {
-				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
-			}
-		})();
+		// Start/resume/restart may carry a `stepIds` selection: run only those
+		// steps. Pause ignores the body. An empty/missing selection = run none
+		// (see `setStepSelection` in db.ts).
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const stepIds = Array.isArray(body.stepIds)
+				? body.stepIds.filter((id): id is string => typeof id === "string")
+				: [];
+			(async () => {
+				try {
+					const workflow =
+						action === "start"
+							? await startWorkflow(workflowId, cfg, log, stepIds)
+							: action === "pause"
+								? pauseWorkflow(workflowId)
+								: action === "resume"
+									? await resumeWorkflow(workflowId, cfg, log, stepIds)
+									: await restartWorkflow(workflowId, cfg, log, stepIds);
+					sendJson(res, 200, { workflow: publicWorkflow(workflow) });
+				} catch (err) {
+					sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				}
+			})();
+		});
 		return;
 	}
 
