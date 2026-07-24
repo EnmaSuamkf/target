@@ -21,6 +21,12 @@ import { test } from "node:test";
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-test-server-"));
 process.env.TARGET_HOME = tmpHome;
+// Isolate awb too: createAwbHook (reached via POST /api/workflows → createWorkflow)
+// would otherwise write test hooks into the REAL ~/.agent-webhook-bridge/hooks.json,
+// polluting the operator's broker and, on a lost-update, clobbering a real hook
+// (which then 404s on dispatch after the next awb restart). Point AWB_HOME at the
+// same throwaway dir so each suite gets its own empty hooks.json.
+process.env.AWB_HOME = tmpHome;
 
 const { insertTemplate, setWorkflowSessionId } = await import("./db.ts");
 const { deleteAwbHook } = await import("./awb.ts");

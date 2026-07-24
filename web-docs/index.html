@@ -443,6 +443,19 @@ node hub/cli.ts run &lt;workflowId&gt;       # start / continue</code></pre>
           left to run → <code>draft</code>) — which is what lets retrying a single failed step
           until it passes take the whole workflow back out of <code>failed</code>.
         </p>
+        <h3>Aborting a stuck step</h3>
+        <p>
+          If a step's dispatch never calls back (a hung exec or judge — the agent
+          process is stuck), it stays <code>running</code> forever and blocks everything:
+          ▶ refuses to re-run a <code>running</code> step, and <code>restart</code> is
+          disabled while the workflow is <code>running</code>. The <strong>Abort</strong>
+          button (or <code>POST /api/workflows/:id/steps/:stepId/abort</code>) force-fails
+          that one stuck step — <strong>preserving its session</strong> so "Open
+          conversation" still works — which moves the workflow to <code>failed</code> so
+          you can ▶ re-run just that step. (Without it you'd have to wait for the
+          10-minute stale-step timeout, or pause+restart the whole workflow.) Any late
+          callback for the aborted step is ignored.
+        </p>
         <h3>Selecting which steps run</h3>
         <p>
           Every step has a <code>selected</code> flag (on by default). Start, Resume and
@@ -596,6 +609,7 @@ hub    →  next pending, selected step dispatched     until none remain, then t
               <tr><td><code>PATCH /api/workflows/:id/steps/:stepId</code></td><td>Edits a step's description / judge settings (admin token).</td></tr>
               <tr><td><code>DELETE /api/workflows/:id/steps/:stepId</code></td><td>Removes a pending step (admin token).</td></tr>
               <tr><td><code>POST /api/workflows/:id/steps/:stepId/run</code></td><td>Runs one step now, outside the sequential order, always on a fresh session (admin token).</td></tr>
+              <tr><td><code>POST /api/workflows/:id/steps/:stepId/abort</code></td><td>Force-fails a step stuck <code>running</code> (a dispatch whose callback never came back, e.g. a hung judge), preserving its session, so it can be re-run via ▶ without restarting the whole workflow (admin token).</td></tr>
               <tr><td><code>POST /api/workflows/:id/start</code></td><td>Begins/continues sequential dispatch (admin token). Body: <code>{stepIds?: string[]}</code> to restrict which steps run.</td></tr>
               <tr><td><code>POST /api/workflows/:id/pause</code></td><td>Stops dispatching further steps (admin token).</td></tr>
               <tr><td><code>POST /api/workflows/:id/resume</code></td><td>Undoes pause (admin token). Same optional <code>stepIds</code> body as start.</td></tr>

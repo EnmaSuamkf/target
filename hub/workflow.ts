@@ -16,6 +16,7 @@ import {
 	deleteStep,
 	deleteWorkflow,
 	expireStaleSteps,
+	failRunningStep,
 	finishStepDone,
 	getStep,
 	getWorkflow,
@@ -482,6 +483,13 @@ export async function onStepResult(
 ): Promise<void> {
 	const step = getStep(stepId);
 	if (!step) return;
+	// A step only awaits a result callback while it's `running`. If it's no
+	// longer running it was already resolved another way — aborted via the
+	// "Abort" action (`failRunningStep`), timed out by the stale-step sweep
+	// (`expireStaleSteps`), or reset by a restart. Drop the late callback so it
+	// can't corrupt the step's new state (e.g. a stale judge verdict landing on
+	// a step that's since been re-run).
+	if (step.status !== "running") return;
 
 	// On-demand ▶ run: outside the sequential engine, but still judged if the
 	// step carries acceptance criteria.
@@ -736,4 +744,29 @@ export async function runStep(workflowId: string, stepId: string, cfg: HubConfig
 	writeStatusMd(workflowId);
 	await dispatchStep(step, workflow, cfg, log, { manual: true });
 	writeStatusMd(workflowId);
+}
+
+/**
+ * Aborts a step stuck `running` (a dispatch whose awb callback never came
+ * back — e.g. a hung judge). Marks it `failed` with `error = "aborted"` while
+ * preserving its session id, so the conversation it established is still
+ * reachable and the operator can re-run the step via the ▶ button once it's
+ * no longer `running`. Mirrors `onStepResult`'s failure path: a failed step
+ * fails the workflow, and a later successful ▶ re-run reconciles it back out
+ * of `failed`. Any late awb callback for the aborted step is ignored by the
+ * `status === "running"` guard in `onStepResult`. Only a `running` step can be
+ * aborted; aborting a step in any other state throws.
+ */
+export function abortStep(workflowId: string, stepId: string): Workflow {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	const step = getStep(stepId);
+	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
+	if (step.status !== "running") throw new WorkflowError("only a running step can be aborted");
+	if (!failRunningStep(stepId, "aborted")) throw new WorkflowError("only a running step can be aborted");
+	setWorkflowStatus(workflowId, "failed");
+	writeStatusMd(workflowId);
+	const updated = getWorkflow(workflowId);
+	if (!updated) throw new WorkflowError("workflow disappeared");
+	return updated;
 }

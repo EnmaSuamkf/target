@@ -88,6 +88,16 @@ first. You add it to an existing workflow with `target set-context` (or the
 **Conversation context** block in the detail panel); it isn't part of workflow
 creation.
 
+### Stuck steps
+
+A step whose dispatch never calls back (a hung exec or judge) stays `running`
+and blocks the workflow: ▶ won't re-run a `running` step and Restart is
+disabled while the workflow is `running`. Use the **Abort** button on the step
+(or `POST /api/workflows/:id/steps/:stepId/abort`) to force-fail just that step
+— its session is preserved, so "Open conversation" still works — then ▶ re-run
+it. (Otherwise you wait for the 10-minute stale-step timeout, or pause +
+restart the whole workflow.)
+
 ### Agent permissions
 
 By default a workflow's agent can answer but **cannot** write files or run

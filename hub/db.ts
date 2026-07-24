@@ -566,6 +566,29 @@ export function startManualRun(stepId: string): boolean {
 	return changes > 0;
 }
 
+/**
+ * Aborts a step that is stuck `running` (a dispatch whose awb callback never
+ * came back): marks it `failed` with the given error and a `finished_at`, but
+ * PRESERVES `session_id`/`result`/`phase` so the conversation it established is
+ * still reachable ("Open conversation") and the operator can inspect what
+ * happened. Only acts on a `running` step (mirrors `startManualRun`'s guard);
+ * returns whether a row was changed. The operator can then re-run the step
+ * via the ▶ button (`startManualRun`), which reconciles the workflow back out
+ * of `failed` once it passes. Also makes the result callback path ignore any
+ * late awb callback for this step (see the `status === "running"` guard in
+ * `onStepResult`).
+ */
+export function failRunningStep(stepId: string, error: string): boolean {
+	return (
+		open()
+			.prepare(
+				`UPDATE steps SET status = 'failed', error = ?, finished_at = ?
+				 WHERE id = ? AND status = 'running'`,
+			)
+			.run(error, new Date().toISOString(), stepId).changes > 0
+	);
+}
+
 /** Fails any step stuck `running` past the timeout; returns the distinct workflow ids affected, so the caller can fail the workflow too instead of leaving it stuck. */
 export function expireStaleSteps(timeoutMs: number): string[] {
 	const cutoff = new Date(Date.now() - timeoutMs).toISOString();

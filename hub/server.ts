@@ -15,6 +15,7 @@
  *   PATCH  /api/workflows/:id/steps/:stepId             → edit a step's description (admin token)
  *   DELETE /api/workflows/:id/steps/:stepId             → remove a pending step (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/run         → run one step now, outside the sequential order (admin token)
+ *   POST   /api/workflows/:id/steps/:stepId/abort        → abort a step stuck running, so it can be re-run (admin token)
  *   POST   /api/workflows/:id/start                    → begin/continue sequential dispatch (admin token)
  *   POST   /api/workflows/:id/pause                    → stop dispatching further steps (admin token)
  *   POST   /api/workflows/:id/resume                   → undo pause (admin token)
@@ -53,6 +54,7 @@ import type { Logger } from "./runner.ts";
 import { openResumeTerminal } from "./terminal.ts";
 import { readTokenUsage } from "./transcript.ts";
 import {
+	abortStep,
 	addStep,
 	createWorkflow,
 	editStep,
@@ -71,6 +73,14 @@ import {
 import { getStep } from "./db.ts";
 
 const UI_FILE = path.join(import.meta.dirname, "ui", "index.html");
+
+// A small "target" bullseye served as the page favicon (see /favicon.svg).
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="7" fill="#0e1416"/>
+  <circle cx="16" cy="16" r="12" fill="none" stroke="#4a9eff" stroke-width="2.5"/>
+  <circle cx="16" cy="16" r="7" fill="none" stroke="#4a9eff" stroke-width="2.5"/>
+  <circle cx="16" cy="16" r="2.6" fill="#4a9eff"/>
+</svg>`;
 
 function timingSafeEqualStr(a: string, b: string): boolean {
 	const ab = Buffer.from(a);
@@ -230,6 +240,20 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
 			res.end("target-hub is running. The web UI isn't built yet — use the API.");
 		}
+		return;
+	}
+
+	// Favicon — a small "target" bullseye. The page links to /favicon.svg
+	// explicitly; /favicon.ico is served as 204 to silence the default request
+	// browsers make (otherwise it 404s and clutters the console/network tab).
+	if (req.method === "GET" && url.pathname === "/favicon.svg") {
+		res.writeHead(200, { "content-type": "image/svg+xml; charset=utf-8", "cache-control": "public, max-age=86400" });
+		res.end(FAVICON_SVG);
+		return;
+	}
+	if (req.method === "GET" && url.pathname === "/favicon.ico") {
+		res.writeHead(204, { "content-type": "image/x-icon" });
+		res.end();
 		return;
 	}
 
@@ -689,6 +713,27 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
 			}
 		})();
+		return;
+	}
+
+	// --- /api/workflows/:id/steps/:stepId/abort (abort a step stuck running) ---
+	//
+	// For a step whose dispatch never called back (a hung exec or judge), this
+	// force-fails it so the operator can re-run it via ▶ without restarting the
+	// whole workflow. Preserves the step's session id. Admin-gated (mutating).
+
+	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "abort" && !parts[6] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		try {
+			const workflow = abortStep(workflowId, parts[4]);
+			log(`workflow ${workflowId} step ${parts[4]} aborted`);
+			sendJson(res, 200, { workflow: publicWorkflow(workflow) });
+		} catch (err) {
+			sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+		}
 		return;
 	}
 

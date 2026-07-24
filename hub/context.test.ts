@@ -21,6 +21,10 @@ import { test } from "node:test";
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-test-context-"));
 process.env.TARGET_HOME = tmpHome;
+// Isolate awb: this suite POSTs to /api/workflows (the real create path →
+// createAwbHook), so without AWB_HOME it would write test hooks into the
+// operator's real ~/.agent-webhook-bridge/hooks.json. See server.test.ts.
+process.env.AWB_HOME = tmpHome;
 
 const { insertStep, insertWorkflow, getWorkflow } = await import("./db.ts");
 const { createServer } = await import("./server.ts");

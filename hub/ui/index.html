@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Target — workflows</title>
     <style>
       /* Same palette/typography family as agentmesh's hub UI. */
@@ -683,6 +684,7 @@
             ${step.status === "done" && step.result ? `<div class="step-result">${escapeHtml(truncate(step.result, 240))}</div>` : ""}
             <div class="step-actions">
               <button class="btn small" data-run="${step.id}" ${running ? "disabled" : ""}>${running ? "running…" : "▶ Run"}</button>
+              <button class="btn small danger" data-abort="${step.id}" ${running ? "" : "disabled"} title="Force-fail this stuck step so it can be re-run, without restarting the whole workflow. Its session is preserved.">Abort</button>
               <button class="btn small" data-edit="${step.id}" ${editable ? "" : "disabled"}>Edit</button>
               <button class="btn small danger" data-remove="${step.id}" ${step.status === "pending" ? "" : "disabled"}>Remove</button>
             </div>
@@ -872,6 +874,25 @@
             else {
               const data = await res.json().catch(() => ({}));
               alert(`Could not run the step in isolation: ${data.error ?? res.status}`);
+            }
+          }),
+        );
+        list.querySelectorAll("[data-abort]").forEach((btn) =>
+          btn.addEventListener("click", async () => {
+            const stepId = btn.getAttribute("data-abort");
+            if (!confirm("Abort this stuck step? It will be marked failed (its session is preserved) so you can re-run it. The workflow moves to failed until the step passes again."))
+              return;
+            const token = adminToken() || prompt("Admin token — printed by the hub on startup (~/.target/config.json):");
+            if (!token) return;
+            rememberToken(token);
+            const res = await fetch(`/api/workflows/${selectedId}/steps/${stepId}/abort`, {
+              method: "POST",
+              headers: { authorization: `Bearer ${token}` },
+            });
+            if (res.ok) await selectWorkflow(selectedId);
+            else {
+              const data = await res.json().catch(() => ({}));
+              alert(`Could not abort the step: ${data.error ?? res.status}`);
             }
           }),
         );

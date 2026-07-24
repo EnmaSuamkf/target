@@ -12,6 +12,8 @@ import { test } from "node:test";
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-test-templates-"));
 process.env.TARGET_HOME = tmpHome;
+// Isolate awb too (defensive — keep test hooks out of the real broker).
+process.env.AWB_HOME = tmpHome;
 
 const { deleteTemplate, getTemplate, insertTemplate, listTemplates, updateTemplate } = await import("./db.ts");
 
