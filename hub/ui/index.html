@@ -416,10 +416,8 @@
             <span class="progress-pct" id="d-progress-pct"></span>
 
             <div class="btn-row">
-              <button class="btn" id="btn-start">Start</button>
-              <button class="btn warn" id="btn-pause">Pause</button>
-              <button class="btn" id="btn-resume">Resume</button>
-              <button class="btn danger" id="btn-restart">Restart</button>
+              <button class="btn" id="btn-start" title="Begins the run, continues a stopped one, or starts a finished one over — whichever fits the current status.">Start</button>
+              <button class="btn warn" id="btn-stop" title="Stops dispatching further steps. The step already in flight finishes on its own.">Stop</button>
               <button class="btn danger" id="btn-delete">Delete</button>
             </div>
             <p class="msg" id="d-action-msg"></p>
@@ -430,8 +428,8 @@
                 <div>
                   <label for="ctx-input">Context injected before the first step of a fresh run ⓘ</label>
                   <textarea id="ctx-input"
-                    title="Preamble injected before the first step when the workflow's conversation starts (before all steps). Injected once per conversation; once injected it's locked — restart the workflow to edit it. Leave empty to clear (before injection)."
-                    placeholder="Optional — background/constraints every step should inherit. Injected once, before the first step of a fresh conversation. Locked once injected; restart to edit."></textarea>
+                    title="Preamble injected before the first step when the workflow's conversation starts (before all steps). Injected once per conversation; once injected it's locked — start the workflow over to edit it. Leave empty to clear (before injection)."
+                    placeholder="Optional — background/constraints every step should inherit. Injected once, before the first step of a fresh conversation. Locked once injected; start it over to edit."></textarea>
                 </div>
                 <div class="btn-row">
                   <button type="submit" class="btn small" id="ctx-save">Save context</button>
@@ -575,10 +573,14 @@
       // context is visible/editable without hunting for a collapsed section).
       let ctxDetailsUserToggled = false;
       // Step ids the user checked to run. Empty = run nothing (a deliberate
-      // no-op — see `runAction` below). Start, Resume and Restart send this
-      // set so the engine runs only these.
+      // no-op — see `runAction` below). Start sends this set so the engine
+      // runs only these.
       const stepSelection = new Set();
       let openTerminalFlashTimer = null;
+      // Status of the workflow currently rendered in the detail panel. The
+      // action row is only three buttons — Start, Stop, Delete — so Start has
+      // to pick the engine action that fits this status (see `startActionFor`).
+      let selectedStatus = null;
 
       function adminToken() {
         return (localStorage.getItem("targetAdminToken") || "").trim();
@@ -674,7 +676,7 @@
           const statusLabel = step.status === "running" && step.phase === "judge" ? "judging" : step.status;
           li.innerHTML = `
             <div class="step-head">
-              <input type="checkbox" class="step-check" data-select="${step.id}" ${stepSelection.has(step.id) ? "checked" : ""} title="Check to run only the selected steps on Start, Resume and Restart. Leave all unchecked to run nothing." />
+              <input type="checkbox" class="step-check" data-select="${step.id}" ${stepSelection.has(step.id) ? "checked" : ""} title="Check to run only the selected steps on Start. Leave all unchecked to run nothing." />
               <span class="step-idx">#${step.orderIndex + 1}</span>
               <span class="step-desc">${escapeHtml(step.description)}</span>
               <span class="step-status ${step.status}">${statusLabel}</span>
@@ -741,6 +743,22 @@
         }, 1200);
       }
 
+      /**
+       * Which engine action the single Start button triggers for a given
+       * workflow status. The endpoints stay as they are — the UI just stops
+       * asking the operator to know which one applies:
+       *   draft                → start   (begin dispatching)
+       *   paused               → resume  (continue where Stop left off)
+       *   completed | failed   → restart (start over; `start` refuses these)
+       *   running              → null    (nothing to start — button disabled)
+       */
+      function startActionFor(status) {
+        if (status === "draft") return "start";
+        if (status === "paused") return "resume";
+        if (status === "completed" || status === "failed") return "restart";
+        return null;
+      }
+
       function renderDetail(workflow, steps) {
         $("detail-empty").style.display = "none";
         $("detail").style.display = "block";
@@ -752,10 +770,9 @@
         $("d-progress-fill").style.width = `${workflow.progress.pct}%`;
         $("d-progress-pct").textContent = `${workflow.progress.done}/${workflow.progress.total} steps — ${workflow.progress.pct}%`;
 
-        $("btn-start").disabled = !(workflow.status === "draft" || workflow.status === "paused");
-        $("btn-pause").disabled = workflow.status !== "running";
-        $("btn-resume").disabled = workflow.status !== "paused";
-        $("btn-restart").disabled = workflow.status === "running";
+        selectedStatus = workflow.status;
+        $("btn-start").disabled = !startActionFor(workflow.status);
+        $("btn-stop").disabled = workflow.status !== "running";
         // `lastSessionId` misses a step run in isolation via ▶ (never folded
         // into the workflow row) — good enough to gate the button without an
         // extra fetch; the open-terminal endpoint re-resolves the real session.
@@ -778,7 +795,7 @@
         if (ctxSave) ctxSave.disabled = injected;
         const ctxMsg = $("ctx-msg");
         if (ctxMsg) {
-          ctxMsg.textContent = injected ? "Locked — already injected. Restart the workflow to edit it." : "";
+          ctxMsg.textContent = injected ? "Locked — already injected. Start the workflow over to edit it." : "";
           ctxMsg.classList.toggle("error", false);
         }
         const ctxState = $("ctx-state");
@@ -938,9 +955,10 @@
         const token = adminToken() || prompt("Admin token — printed by the hub on startup (~/.target/config.json):");
         if (!token) return;
         rememberToken(token);
-        // Start/Resume/Restart carry the checked step ids so the engine runs
-        // only those. An empty set means "run nothing" — leaving every box
-        // unchecked and pressing the button is a deliberate no-op.
+        // Every action behind Start (start/resume/restart) carries the checked
+        // step ids so the engine runs only those. An empty set means "run
+        // nothing" — leaving every box unchecked and pressing Start is a
+        // deliberate no-op.
         const withSelection = action === "start" || action === "resume" || action === "restart";
         try {
           const res = await fetch(`/api/workflows/${selectedId}/${action}`, {
@@ -961,14 +979,23 @@
         }
       }
 
-      $("btn-start").addEventListener("click", () => runAction("start"));
-      $("btn-pause").addEventListener("click", () => runAction("pause"));
-      $("btn-resume").addEventListener("click", () => runAction("resume"));
-      $("btn-restart").addEventListener("click", () => {
-        if (confirm("This resets ALL steps to pending and discards previous results. Continue?")) {
-          runAction("restart");
+      $("btn-start").addEventListener("click", () => {
+        const action = startActionFor(selectedStatus);
+        if (!action) return;
+        // Starting a finished workflow means restarting it, which resets the
+        // selected steps to pending, discards their results and opens a fresh
+        // conversation. The Start label doesn't say that — so ask first.
+        if (
+          action === "restart" &&
+          !confirm(
+            `This workflow is ${selectedStatus}. Starting it again resets the selected steps to pending and discards their previous results. Continue?`,
+          )
+        ) {
+          return;
         }
+        runAction(action);
       });
+      $("btn-stop").addEventListener("click", () => runAction("pause"));
 
       $("btn-copy-resume").addEventListener("click", async () => {
         if (!selectedId) return;
@@ -1018,6 +1045,7 @@
             return;
           }
           selectedId = null;
+          selectedStatus = null;
           editingStepId = null;
           $("detail").style.display = "none";
           $("detail-empty").style.display = "block";
