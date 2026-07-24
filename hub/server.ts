@@ -6,8 +6,10 @@
  *   GET    /api/workflows                             → list (with progress %)
  *   POST   /api/workflows                             → create (admin token) — makes the awb hook too; optional templateId seeds its steps
  *   GET    /api/workflows/:id                          → detail + steps
- *   GET    /api/workflows/:id/transcript                → harness + live conversation of the current/last session
+ *   GET    /api/workflows/:id/session-info                → harness + session id + token usage of the current/last session
+ *   POST   /api/workflows/:id/open-terminal              → spawn a local terminal resuming the current/last session (admin token)
  *   DELETE /api/workflows/:id                          → remove: deletes its awb hook + .md file + DB rows (admin token)
+ *   PATCH  /api/workflows/:id/context                  → set the conversation context preamble (admin token)
  *   POST   /api/workflows/:id/steps                    → add a step (admin token)
  *   POST   /api/workflows/:id/steps/from-template       → append a template's steps (admin token)
  *   PATCH  /api/workflows/:id/steps/:stepId             → edit a step's description (admin token)
@@ -48,7 +50,8 @@ import {
 	type Workflow,
 } from "./db.ts";
 import type { Logger } from "./runner.ts";
-import { readTokenUsage, readTranscript } from "./transcript.ts";
+import { openResumeTerminal } from "./terminal.ts";
+import { readTokenUsage } from "./transcript.ts";
 import {
 	addStep,
 	createWorkflow,
@@ -61,6 +64,7 @@ import {
 	restartWorkflow,
 	resumeWorkflow,
 	runStep,
+	setConversationContext,
 	startWorkflow,
 	WorkflowError,
 } from "./workflow.ts";
@@ -96,6 +100,8 @@ function publicWorkflow(workflow: Workflow): Record<string, unknown> {
 		workdir: runtime.workdir,
 		harness: runtime.harness,
 		progress: stepProgress(workflow.id),
+		conversationContext: workflow.conversationContext,
+		contextInjected: workflow.contextInjected,
 		createdAt: workflow.createdAt,
 		updatedAt: workflow.updatedAt,
 	};
@@ -462,17 +468,42 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		return;
 	}
 
-	// --- /api/workflows/:id/transcript ---
+	// --- /api/workflows/:id/context ---
 	//
-	// Shows the actual Claude conversation of whichever step ran most recently
-	// — not just each step's final result. That's the shared session for a
-	// sequential run, but for an on-demand ▶ run it's that run's own fresh
-	// session (which `lastSessionId` never tracks), so we resolve it from the
-	// steps rather than only from `lastSessionId`. Only readable once a session
-	// id exists: a step still on its first run doesn't have one yet, because awb
-	// only reports it in the completion callback.
+	// Edits a workflow's conversation context — the preamble injected before
+	// the first step of a fresh conversation (see runner.ts). The context is
+	// editable only BEFORE it's been injected: once `context_injected` is true
+	// the agent is already operating under it, so editing is rejected (the UI
+	// locks the field and disables Save). To change it, restart the workflow
+	// first (restart resets the flag and starts a fresh conversation). Send an
+	// empty string to clear it (only while still editable).
 
-	if (workflowId && parts[3] === "transcript" && !parts[4] && req.method === "GET") {
+	if (workflowId && parts[3] === "context" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const context = typeof body.conversationContext === "string" ? body.conversationContext : null;
+			try {
+				const workflow = setConversationContext(workflowId, context);
+				log(`workflow ${workflowId} conversation context updated`);
+				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
+			} catch (err) {
+				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		});
+		return;
+	}
+
+	// --- /api/workflows/:id/session-info ---
+	//
+	// Read-only summary (harness, session id, token usage) for the "Open
+	// conversation" block — no admin token needed, same as GET
+	// /api/workflows/:id, since nothing here mutates state or launches a
+	// process on the operator's machine.
+
+	if (workflowId && parts[3] === "session-info" && !parts[4] && req.method === "GET") {
 		const workflow = getWorkflow(workflowId);
 		if (!workflow) {
 			sendJson(res, 404, { error: "unknown_workflow" });
@@ -480,27 +511,61 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 		const runtime = hookRuntime(workflow.hookUrl);
 		const sessionId = latestStepSession(workflowId) ?? workflow.lastSessionId;
-		if (!sessionId || !runtime.workdir) {
-			sendJson(res, 200, {
-				sessionId,
-				harness: runtime.harness,
-				resumeCommand: harnessResumeCommand(runtime.harness, sessionId),
-				entries: [],
-				usage: null,
-				note:
-					sessionId == null
-						? "No session yet: the id is only known once a step finishes running."
-						: undefined,
-			});
-			return;
-		}
 		sendJson(res, 200, {
 			sessionId,
 			harness: runtime.harness,
-			resumeCommand: harnessResumeCommand(runtime.harness, sessionId),
-			entries: readTranscript(runtime.workdir, sessionId),
-			usage: readTokenUsage(runtime.workdir, sessionId),
+			usage: sessionId && runtime.workdir ? readTokenUsage(runtime.workdir, sessionId) : null,
 		});
+		return;
+	}
+
+	// --- /api/workflows/:id/open-terminal ---
+	//
+	// Spawns a terminal emulator on this machine (see terminal.ts), already
+	// `cd`'d into the workdir of whichever step ran most recently, running that
+	// harness's resume command. That's the shared session for a sequential run,
+	// but for an on-demand ▶ run it's that run's own fresh session (which
+	// `lastSessionId` never tracks), so we resolve it from the steps rather
+	// than only from `lastSessionId`. Only possible once a session id exists: a
+	// step still on its first run doesn't have one yet, because awb only
+	// reports it in the completion callback. This launches a real OS process on
+	// the operator's desktop, so it's admin-gated like every other mutating
+	// action even though nothing in the DB changes.
+
+	if (workflowId && parts[3] === "open-terminal" && !parts[4] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		const workflow = getWorkflow(workflowId);
+		if (!workflow) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		const runtime = hookRuntime(workflow.hookUrl);
+		const sessionId = latestStepSession(workflowId) ?? workflow.lastSessionId;
+		if (!sessionId) {
+			sendJson(res, 400, { error: "no_session_yet" });
+			return;
+		}
+		if (!runtime.workdir) {
+			sendJson(res, 400, { error: "unknown_workdir" });
+			return;
+		}
+		const resumeCommand = harnessResumeCommand(runtime.harness, sessionId);
+		if (!resumeCommand) {
+			sendJson(res, 400, { error: "unknown_harness" });
+			return;
+		}
+		const workdir = runtime.workdir;
+		(async () => {
+			try {
+				await openResumeTerminal(workdir, resumeCommand);
+				sendJson(res, 200, { ok: true, sessionId, workdir });
+			} catch (err) {
+				sendJson(res, 500, { error: String((err as Error).message ?? err) });
+			}
+		})();
 		return;
 	}
 

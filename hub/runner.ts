@@ -51,6 +51,20 @@ function criteriaNote(criteria: string | null | undefined): string {
 }
 
 /**
+ * Builds the conversation-context preamble prepended to the FIRST dispatch of
+ * a fresh conversation (no session to resume yet). It's the workflow-level
+ * background/constraints the operator wants every step to inherit. Injected
+ * once: later steps resume the session, which already carries it in history,
+ * so `dispatchStep` only prepends it when starting fresh AND the workflow's
+ * `context_injected` guard is still false. Returns "" when there's no context.
+ */
+function contextPreamble(context: string | null | undefined): string {
+	const trimmed = (context ?? "").trim();
+	if (!trimmed) return "";
+	return `Conversation context — this background applies to every step of this workflow:\n\n${trimmed}\n\n---\n\n`;
+}
+
+/**
  * Builds the input for the self-evaluation ("judge") pass: the same agent,
  * resuming the same session, is asked to grade its own previous result against
  * the step's acceptance criteria and answer with a strict JSON verdict.
@@ -118,10 +132,21 @@ export async function dispatchStep(
 				? workflow.lastSessionId
 				: null;
 	const callbackUrl = `http://${cfg.host}:${cfg.port}/api/steps/${step.id}/result?token=${step.callbackToken}`;
+	// Inject the conversation context ONLY on the first dispatch of a fresh
+	// conversation: exec mode, no session to resume (awb starts a fresh
+	// `claude`), and the workflow's `context_injected` guard still false. Later
+	// steps resume the session, which already carries the preamble in history —
+	// re-injecting would duplicate it. A failed first dispatch that produced no
+	// session leaves the guard false, so the next attempt re-injects cleanly.
+	const freshConversation = sessionToResume === null;
+	const preamble =
+		mode === "exec" && freshConversation && !workflow.contextInjected
+			? contextPreamble(workflow.conversationContext)
+			: "";
 	const input =
 		mode === "judge"
 			? judgeInput(step.acceptanceCriteria ?? "")
-			: `${step.description}${criteriaNote(step.acceptanceCriteria)}${SUBAGENT_SUFFIX}${
+			: `${preamble}${step.description}${criteriaNote(step.acceptanceCriteria)}${SUBAGENT_SUFFIX}${
 					options.retryReason ? retryNote(options.retryReason) : ""
 				}`;
 	try {

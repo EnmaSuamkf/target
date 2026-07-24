@@ -25,6 +25,8 @@ import {
 	markStepJudging,
 	nextPendingStep,
 	resetSteps,
+	setContextInjected,
+	setWorkflowConversationContext,
 	setStepSelection,
 	setWorkflowSessionId,
 	setWorkflowStatus,
@@ -58,6 +60,12 @@ function statusMark(status: Step["status"]): string {
 	return { pending: " ", running: "~", done: "x", failed: "!" }[status];
 }
 
+/** Truncates the conversation context for the one-line summary in the progress .md. */
+function truncateMd(s: string, n = 120): string {
+	const t = s.replace(/\s+/g, " ").trim();
+	return t.length > n ? `${t.slice(0, n)}…` : t;
+}
+
 /** Rewrites the workflow's whole progress file — cheap enough to do on every state change. */
 export function writeStatusMd(workflowId: string): void {
 	const workflow = getWorkflow(workflowId);
@@ -72,6 +80,7 @@ export function writeStatusMd(workflowId: string): void {
 		`- Progress: ${progress.done}/${progress.total} steps done (${progress.pct}%)${progress.failed ? `, ${progress.failed} failed` : ""}`,
 		`- Agent: ${workflow.agentName}`,
 		`- Session: ${workflow.lastSessionId ?? "(none yet)"}`,
+		`- Conversation context: ${workflow.conversationContext ? truncateMd(workflow.conversationContext) : "(none)"}${workflow.conversationContext ? ` — injected: ${workflow.contextInjected ? "yes" : "no"}` : ""}`,
 		`- Last updated: ${new Date().toISOString()}`,
 		"",
 		"## Steps",
@@ -117,9 +126,58 @@ export function createWorkflow(
 	const promptTemplate = `You are the agent of a Target workflow named "${trimmed}". This session is reused in order for every step of the workflow. Current step:\n\n{{payload}}\n\nCarry out the step and respond with the final result of that step.`;
 	const hook = createAwbHook(agentName, workdir, promptTemplate, { permissionMode: options.permissionMode });
 	const mdPath = path.join(targetDir(), `${slug}-${shortId}.md`);
-	const workflow = insertWorkflow({ id, name: trimmed, agentName, hookUrl: hook.hookUrl, secret: hook.secret, mdPath });
+	const workflow = insertWorkflow({
+		id,
+		name: trimmed,
+		agentName,
+		hookUrl: hook.hookUrl,
+		secret: hook.secret,
+		mdPath,
+	});
 	writeStatusMd(workflow.id);
 	return workflow;
+}
+
+/**
+ * Records a session id onto the workflow (chaining the next dispatch to it)
+ * and, the first time a session is established, marks the conversation context
+ * as injected — the guard that keeps the preamble from being re-injected on
+ * later steps. No-op when there's no session to chain.
+ */
+function chainSession(workflowId: string, sessionId: string | undefined | null): void {
+	if (!sessionId) return;
+	setWorkflowSessionId(workflowId, sessionId);
+	// The first session establishes the conversation the context preamble was
+	// injected into — mark it injected so it's never re-injected on later steps.
+	// Only tracked when there IS a context: with an empty context nothing was
+	// injected, so the flag stays false (the tracker stays honest / irrelevant).
+	const workflow = getWorkflow(workflowId);
+	if (workflow && workflow.conversationContext && !workflow.contextInjected) setContextInjected(workflowId, true);
+}
+
+/**
+ * Updates a workflow's conversation context — the preamble injected before
+ * the first step of a fresh conversation (see runner.ts). The context is
+ * editable only BEFORE it's been injected: once `context_injected` is true
+ * the agent is already operating under it, so this throws
+ * `context already injected` (the UI locks the field and disables Save, and
+ * the PATCH route returns 400). To change an injected context, restart the
+ * workflow first — restart resets the flag and starts a fresh conversation.
+ * Pass an empty string / null to clear it (while still editable).
+ */
+export function setConversationContext(workflowId: string, context: string | null): Workflow {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	// Once the context has been injected into the conversation, it's frozen:
+	// the agent is already operating under it, so changing it mid-conversation
+	// would be silently inconsistent. To edit it, restart the workflow first
+	// (restart resets `context_injected` and starts a fresh conversation).
+	if (workflow.contextInjected) throw new WorkflowError("context already injected");
+	setWorkflowConversationContext(workflowId, context);
+	writeStatusMd(workflowId);
+	const updated = getWorkflow(workflowId);
+	if (!updated) throw new WorkflowError("workflow disappeared");
+	return updated;
 }
 
 /**
@@ -321,6 +379,9 @@ export async function restartWorkflow(
 	setStepSelection(workflowId, stepIds);
 	resetSteps(workflowId);
 	setWorkflowSessionId(workflowId, null);
+	// A restart starts a brand-new conversation, so the conversation context
+	// (if any) must be injected again on the new first step — reset the guard.
+	setContextInjected(workflowId, false);
 	setWorkflowStatus(workflowId, "running");
 	writeStatusMd(workflowId);
 	log(`workflow ${workflowId} restarted`);
@@ -444,7 +505,7 @@ export async function onStepResult(
 		return;
 	}
 	// Chain the session now — the judge (and any retry) resumes this same one.
-	if (outcome.sessionId) setWorkflowSessionId(step.workflowId, outcome.sessionId);
+	chainSession(step.workflowId, outcome.sessionId);
 
 	// No acceptance criteria → no judge; accept the result as before.
 	if (!step.acceptanceCriteria) {
@@ -500,7 +561,7 @@ async function onManualRun(
 	}
 	// Chain the shared session now — the judge (and any retry) resumes this same
 	// one, and a later step or ▶ run continues the same conversation.
-	if (outcome.sessionId) setWorkflowSessionId(step.workflowId, outcome.sessionId);
+	chainSession(step.workflowId, outcome.sessionId);
 	// No acceptance criteria → no judge; record the result as-is (unchanged).
 	if (!step.acceptanceCriteria) {
 		completeStep(step.id, outcome);
@@ -536,7 +597,7 @@ async function onManualJudgeVerdict(
 	cfg: HubConfig,
 	log: Logger,
 ): Promise<void> {
-	if (outcome.sessionId) setWorkflowSessionId(step.workflowId, outcome.sessionId);
+	chainSession(step.workflowId, outcome.sessionId);
 
 	// The judge job itself couldn't run — we can't evaluate, so mark it failed.
 	if (!outcome.ok) {
@@ -599,7 +660,7 @@ async function onJudgeVerdict(
 	cfg: HubConfig,
 	log: Logger,
 ): Promise<void> {
-	if (outcome.sessionId) setWorkflowSessionId(step.workflowId, outcome.sessionId);
+	chainSession(step.workflowId, outcome.sessionId);
 
 	// The judge job itself couldn't run — we can't evaluate, so stop.
 	if (!outcome.ok) {
