@@ -4,11 +4,12 @@
  * Routes:
  *   GET    /health                                   → liveness
  *   GET    /api/workflows                             → list (with progress %)
- *   POST   /api/workflows                             → create (admin token) — makes the awb hook too
+ *   POST   /api/workflows                             → create (admin token) — makes the awb hook too; optional templateId seeds its steps
  *   GET    /api/workflows/:id                          → detail + steps
  *   GET    /api/workflows/:id/transcript                → harness + live conversation of the current/last session
  *   DELETE /api/workflows/:id                          → remove: deletes its awb hook + .md file + DB rows (admin token)
  *   POST   /api/workflows/:id/steps                    → add a step (admin token)
+ *   POST   /api/workflows/:id/steps/from-template       → append a template's steps (admin token)
  *   PATCH  /api/workflows/:id/steps/:stepId             → edit a step's description (admin token)
  *   DELETE /api/workflows/:id/steps/:stepId             → remove a pending step (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/run         → run one step now, outside the sequential order (admin token)
@@ -17,6 +18,11 @@
  *   POST   /api/workflows/:id/resume                   → undo pause (admin token)
  *   POST   /api/workflows/:id/restart                  → reset all steps, start over (admin token)
  *   POST   /api/steps/:id/result                       → awb's result callback (?token=<per-step token>)
+ *   GET    /api/templates                              → list templates (optional ?q= filters by name/tag)
+ *   POST   /api/templates                               → create a template (admin token)
+ *   GET    /api/templates/:id                            → template detail
+ *   PATCH  /api/templates/:id                            → update a template (admin token)
+ *   DELETE /api/templates/:id                            → remove a template (admin token)
  *   GET    /                                           → ui/index.html
  */
 import * as crypto from "node:crypto";
@@ -26,7 +32,21 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { harnessResumeCommand, hookRuntime, PUBLISHABLE_PERMISSION_MODES, type PublishablePermissionMode } from "./awb.ts";
 import type { HubConfig } from "./config.ts";
-import { getWorkflow, latestStepSession, listSteps, listWorkflows, stepProgress, type Step, type Workflow } from "./db.ts";
+import {
+	deleteTemplate,
+	getWorkflow,
+	insertTemplate,
+	getTemplate,
+	latestStepSession,
+	listSteps,
+	listTemplates,
+	listWorkflows,
+	stepProgress,
+	updateTemplate,
+	type Step,
+	type Template,
+	type Workflow,
+} from "./db.ts";
 import type { Logger } from "./runner.ts";
 import { readTokenUsage, readTranscript } from "./transcript.ts";
 import {
@@ -101,6 +121,17 @@ function publicStep(step: Step): Record<string, unknown> {
 		retryCount: step.retryCount,
 		phase: step.phase,
 		selected: step.selected,
+	};
+}
+
+function publicTemplate(template: Template): Record<string, unknown> {
+	return {
+		id: template.id,
+		name: template.name,
+		tags: template.tags,
+		steps: template.steps,
+		createdAt: template.createdAt,
+		updatedAt: template.updatedAt,
 	};
 }
 
@@ -233,6 +264,100 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		return;
 	}
 
+	// --- /api/templates ---
+
+	if (parts[1] === "templates") {
+		if (!parts[2]) {
+			if (req.method === "GET") {
+				const q = (url.searchParams.get("q") ?? "").trim().toLowerCase();
+				let templates = listTemplates();
+				if (q) {
+					templates = templates.filter(
+						(t) => t.name.toLowerCase().includes(q) || t.tags.some((tag) => tag.toLowerCase().includes(q)),
+					);
+				}
+				sendJson(res, 200, { templates: templates.map(publicTemplate) });
+				return;
+			}
+			if (req.method === "POST") {
+				if (!isAdmin(cfg, req.headers)) {
+					sendJson(res, 401, { error: "unauthorized" });
+					return;
+				}
+				readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+					const name = typeof body.name === "string" ? body.name.trim() : "";
+					if (!name) {
+						sendJson(res, 400, { error: "name is required" });
+						return;
+					}
+					const template = insertTemplate({ name, tags: body.tags, steps: body.steps });
+					log(`template '${template.name}' (${template.id}) created`);
+					sendJson(res, 200, { template: publicTemplate(template) });
+				});
+				return;
+			}
+			sendJson(res, 404, { error: "not_found" });
+			return;
+		}
+
+		const templateId = parts[2];
+
+		if (!parts[3] && req.method === "GET") {
+			const template = getTemplate(templateId);
+			if (!template) {
+				sendJson(res, 404, { error: "unknown_template" });
+				return;
+			}
+			sendJson(res, 200, { template: publicTemplate(template) });
+			return;
+		}
+
+		if (!parts[3] && (req.method === "PATCH" || req.method === "PUT")) {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				const input: { name?: string; tags?: unknown; steps?: unknown } = {};
+				if (typeof body.name === "string") {
+					const trimmed = body.name.trim();
+					if (!trimmed) {
+						sendJson(res, 400, { error: "name is required" });
+						return;
+					}
+					input.name = trimmed;
+				}
+				if ("tags" in body) input.tags = body.tags;
+				if ("steps" in body) input.steps = body.steps;
+				const template = updateTemplate(templateId, input);
+				if (!template) {
+					sendJson(res, 404, { error: "unknown_template" });
+					return;
+				}
+				sendJson(res, 200, { template: publicTemplate(template) });
+			});
+			return;
+		}
+
+		if (!parts[3] && req.method === "DELETE") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			const removed = deleteTemplate(templateId);
+			if (!removed) {
+				sendJson(res, 404, { error: "unknown_template" });
+				return;
+			}
+			log(`template ${templateId} deleted`);
+			sendJson(res, 200, { ok: true });
+			return;
+		}
+
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
 	if (parts[1] !== "workflows") {
 		sendJson(res, 404, { error: "not_found" });
 		return;
@@ -277,8 +402,28 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					}
 					permissionMode = body.permissionMode as PublishablePermissionMode;
 				}
+				// Optional: seed the new workflow with a template's steps (same order,
+				// same judge config), leaving the template itself untouched — a
+				// template's name/tags never carry over, only its steps.
+				let template: Template | null = null;
+				if (typeof body.templateId === "string" && body.templateId !== "") {
+					template = getTemplate(body.templateId);
+					if (!template) {
+						sendJson(res, 404, { error: "unknown_template" });
+						return;
+					}
+				}
 				try {
 					const workflow = createWorkflow(name, { workdir, permissionMode });
+					if (template) {
+						for (const step of template.steps) {
+							addStep(workflow.id, step.description, {
+								acceptanceCriteria: step.acceptanceCriteria,
+								maxRetries: step.maxRetries,
+								retryIntervalSeconds: step.retryIntervalSeconds,
+							});
+						}
+					}
 					log(`workflow '${workflow.name}' (${workflow.id}) created — agent '${workflow.agentName}'`);
 					sendJson(res, 200, { workflow: publicWorkflow(workflow) });
 				} catch (err) {
@@ -371,6 +516,55 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			try {
 				const step = addStep(workflowId, description, readStepConfig(body));
 				sendJson(res, 200, { step: publicStep(step) });
+			} catch (err) {
+				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		});
+		return;
+	}
+
+	// --- /api/workflows/:id/steps/from-template (append a template's steps to an existing workflow) ---
+
+	if (workflowId && parts[3] === "steps" && parts[4] === "from-template" && !parts[5] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		const workflow = getWorkflow(workflowId);
+		if (!workflow) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const templateId = typeof body.templateId === "string" ? body.templateId : "";
+			const template = getTemplate(templateId);
+			if (!template) {
+				sendJson(res, 404, { error: "unknown_template" });
+				return;
+			}
+			try {
+				const existingDescriptions = new Set(listSteps(workflowId).map((step) => step.description));
+				let added = 0;
+				let skipped = 0;
+				for (const step of template.steps) {
+					if (existingDescriptions.has(step.description)) {
+						skipped++;
+						continue;
+					}
+					addStep(workflowId, step.description, {
+						acceptanceCriteria: step.acceptanceCriteria,
+						maxRetries: step.maxRetries,
+						retryIntervalSeconds: step.retryIntervalSeconds,
+					});
+					existingDescriptions.add(step.description);
+					added++;
+				}
+				sendJson(res, 200, {
+					workflow: publicWorkflow(getWorkflow(workflowId) as Workflow),
+					steps: listSteps(workflowId).map(publicStep),
+					added,
+					skipped,
+				});
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
 			}

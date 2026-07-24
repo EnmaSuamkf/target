@@ -85,6 +85,29 @@ export interface Step {
 	selected: boolean;
 }
 
+/**
+ * A single step within a `Template`, mirroring the fields the "+ Add step"
+ * form on a workflow collects (see `insertStep`'s options) — a template just
+ * stores them ahead of time so they can seed those same fields when the
+ * template is used to create real steps later. Templates never execute, so
+ * unlike `Step` there's no status/retry/session tracking here.
+ */
+export interface TemplateStep {
+	description: string;
+	acceptanceCriteria: string | null;
+	maxRetries: number;
+	retryIntervalSeconds: number;
+}
+
+export interface Template {
+	id: string;
+	name: string;
+	tags: string[];
+	steps: TemplateStep[];
+	createdAt: string;
+	updatedAt: string;
+}
+
 let db: DatabaseSync | null = null;
 
 function open(): DatabaseSync {
@@ -128,6 +151,14 @@ function open(): DatabaseSync {
 			selected INTEGER NOT NULL DEFAULT 1
 		);
 		CREATE INDEX IF NOT EXISTS idx_steps_workflow ON steps(workflow_id, order_index);
+		CREATE TABLE IF NOT EXISTS templates (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			tags TEXT NOT NULL DEFAULT '',
+			steps TEXT NOT NULL DEFAULT '[]',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
 	`);
 	// `CREATE TABLE IF NOT EXISTS` above is a no-op on a `steps` table that
 	// already existed before these columns were added — add any that are missing
@@ -552,4 +583,113 @@ export function stepProgress(workflowId: string): Progress {
 	const done = Number(row.done ?? 0);
 	const failed = Number(row.failed ?? 0);
 	return { total, done, failed, pct: total === 0 ? 0 : Math.round((done / total) * 100) };
+}
+
+// --- Templates --------------------------------------------------------
+//
+// A template is a saved (name, tags, ordered step list) triple that seeds the
+// same fields as the workflow "+ Add step" form, so a user doesn't have to
+// re-type the same steps for every new workflow. Templates never execute —
+// no status, no dispatch, no awb hook — so the whole step list is stored as
+// one JSON column rather than a child table like `steps`.
+
+function normalizeTemplateTags(tags: unknown): string[] {
+	if (!Array.isArray(tags)) return [];
+	return tags.map((t) => String(t).trim()).filter((t) => t !== "");
+}
+
+function normalizeTemplateSteps(steps: unknown): TemplateStep[] {
+	if (!Array.isArray(steps)) return [];
+	return steps
+		.map((s) => {
+			const obj = (s ?? {}) as Record<string, unknown>;
+			const description = typeof obj.description === "string" ? obj.description.trim() : "";
+			const acceptanceCriteria =
+				typeof obj.acceptanceCriteria === "string" && obj.acceptanceCriteria.trim() !== ""
+					? obj.acceptanceCriteria.trim()
+					: null;
+			const maxRetries = Math.max(0, Math.floor(Number(obj.maxRetries ?? 0)) || 0);
+			const retryIntervalSeconds = Math.max(0, Math.floor(Number(obj.retryIntervalSeconds ?? 0)) || 0);
+			return { description, acceptanceCriteria, maxRetries, retryIntervalSeconds };
+		})
+		.filter((s) => s.description !== "");
+}
+
+function rowToTemplate(row: Record<string, unknown>): Template {
+	let tags: string[] = [];
+	try {
+		const parsed = JSON.parse(String(row.tags ?? "[]"));
+		if (Array.isArray(parsed)) tags = parsed.map((t) => String(t));
+	} catch {
+		// Tolerate malformed/legacy data rather than blow up the whole list.
+	}
+	let steps: TemplateStep[] = [];
+	try {
+		const parsed = JSON.parse(String(row.steps ?? "[]"));
+		if (Array.isArray(parsed)) steps = normalizeTemplateSteps(parsed);
+	} catch {
+		// Tolerate malformed/legacy data rather than blow up the whole list.
+	}
+	return {
+		id: String(row.id),
+		name: String(row.name),
+		tags,
+		steps,
+		createdAt: String(row.created_at),
+		updatedAt: String(row.updated_at),
+	};
+}
+
+export function insertTemplate(input: { name: string; tags?: unknown; steps?: unknown }): Template {
+	const now = new Date().toISOString();
+	const template: Template = {
+		id: crypto.randomUUID(),
+		name: input.name,
+		tags: normalizeTemplateTags(input.tags),
+		steps: normalizeTemplateSteps(input.steps),
+		createdAt: now,
+		updatedAt: now,
+	};
+	open()
+		.prepare(`INSERT INTO templates (id, name, tags, steps, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
+		.run(
+			template.id,
+			template.name,
+			JSON.stringify(template.tags),
+			JSON.stringify(template.steps),
+			template.createdAt,
+			template.updatedAt,
+		);
+	return template;
+}
+
+export function getTemplate(id: string): Template | null {
+	const row = open().prepare("SELECT * FROM templates WHERE id = ?").get(id);
+	return row ? rowToTemplate(row as Record<string, unknown>) : null;
+}
+
+export function listTemplates(): Template[] {
+	const rows = open().prepare("SELECT * FROM templates ORDER BY created_at DESC").all();
+	return (rows as Record<string, unknown>[]).map(rowToTemplate);
+}
+
+/** Partial update — only the fields present in `input` are changed. Returns null if the template doesn't exist. */
+export function updateTemplate(
+	id: string,
+	input: { name?: string; tags?: unknown; steps?: unknown },
+): Template | null {
+	const existing = getTemplate(id);
+	if (!existing) return null;
+	const name = input.name !== undefined ? input.name : existing.name;
+	const tags = input.tags !== undefined ? normalizeTemplateTags(input.tags) : existing.tags;
+	const steps = input.steps !== undefined ? normalizeTemplateSteps(input.steps) : existing.steps;
+	const updatedAt = new Date().toISOString();
+	open()
+		.prepare("UPDATE templates SET name = ?, tags = ?, steps = ?, updated_at = ? WHERE id = ?")
+		.run(name, JSON.stringify(tags), JSON.stringify(steps), updatedAt, id);
+	return { ...existing, name, tags, steps, updatedAt };
+}
+
+export function deleteTemplate(id: string): boolean {
+	return open().prepare("DELETE FROM templates WHERE id = ?").run(id).changes > 0;
 }
