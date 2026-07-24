@@ -39,6 +39,20 @@ export interface Workflow {
 	lastSessionId: string | null;
 	/** Absolute path of the progress markdown file under ~/.target. */
 	mdPath: string;
+	/**
+	 * Optional preamble injected before the first step of a fresh conversation
+	 * (see runner.ts). It's prepended to the very first dispatch's input and
+	 * then lives in the resumed session's history, so it's never re-injected on
+	 * later steps — the resumed session already carries it.
+	 */
+	conversationContext: string | null;
+	/**
+	 * Whether `conversationContext` has been injected into the workflow's
+	 * conversation (session) yet — the guard that keeps it from being injected
+	 * twice. Set true when the first session is established, reset to false by
+	 * restart (a fresh conversation) and by editing the context.
+	 */
+	contextInjected: boolean;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -126,6 +140,8 @@ function open(): DatabaseSync {
 			status TEXT NOT NULL DEFAULT 'draft',
 			last_session_id TEXT,
 			md_path TEXT NOT NULL,
+			conversation_context TEXT,
+			context_injected INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
@@ -179,6 +195,16 @@ function open(): DatabaseSync {
 	addColumn("retry_count", "retry_count INTEGER NOT NULL DEFAULT 0");
 	addColumn("phase", "phase TEXT NOT NULL DEFAULT 'exec'");
 	addColumn("selected", "selected INTEGER NOT NULL DEFAULT 1");
+	// Same upgrade safety for the `workflows` table: `conversation_context` and
+	// `context_injected` were added after launch, so an older DB won't have them.
+	const existingWorkflowColumns = new Set(
+		(database.prepare("PRAGMA table_info(workflows)").all() as Record<string, unknown>[]).map((c) => String(c.name)),
+	);
+	const addWorkflowColumn = (name: string, ddl: string) => {
+		if (!existingWorkflowColumns.has(name)) database.exec(`ALTER TABLE workflows ADD COLUMN ${ddl};`);
+	};
+	addWorkflowColumn("conversation_context", "conversation_context TEXT");
+	addWorkflowColumn("context_injected", "context_injected INTEGER NOT NULL DEFAULT 0");
 	return db;
 }
 
@@ -204,6 +230,8 @@ function rowToWorkflow(row: Record<string, unknown>): Workflow {
 		status: row.status as WorkflowStatus,
 		lastSessionId: row.last_session_id == null ? null : String(row.last_session_id),
 		mdPath: String(row.md_path),
+		conversationContext: row.conversation_context == null ? null : String(row.conversation_context),
+		contextInjected: Number(row.context_injected ?? 0) === 1,
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
 	};
@@ -216,8 +244,10 @@ export function insertWorkflow(input: {
 	hookUrl: string;
 	secret: string;
 	mdPath: string;
+	conversationContext?: string | null;
 }): Workflow {
 	const now = new Date().toISOString();
+	const conversationContext = input.conversationContext?.trim() || null;
 	const workflow: Workflow = {
 		id: input.id,
 		name: input.name,
@@ -227,13 +257,15 @@ export function insertWorkflow(input: {
 		status: "draft",
 		lastSessionId: null,
 		mdPath: input.mdPath,
+		conversationContext,
+		contextInjected: false,
 		createdAt: now,
 		updatedAt: now,
 	};
 	open()
 		.prepare(
-			`INSERT INTO workflows (id, name, agent_name, hook_url, secret, status, last_session_id, md_path, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO workflows (id, name, agent_name, hook_url, secret, status, last_session_id, md_path, conversation_context, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			workflow.id,
@@ -244,6 +276,7 @@ export function insertWorkflow(input: {
 			workflow.status,
 			workflow.lastSessionId,
 			workflow.mdPath,
+			workflow.conversationContext,
 			workflow.createdAt,
 			workflow.updatedAt,
 		);
@@ -270,6 +303,35 @@ export function setWorkflowSessionId(id: string, sessionId: string | null): void
 	open()
 		.prepare("UPDATE workflows SET last_session_id = ?, updated_at = ? WHERE id = ?")
 		.run(sessionId, new Date().toISOString(), id);
+}
+
+/**
+ * Sets whether the workflow's conversation context has been injected into its
+ * conversation (session) yet — the guard that keeps the preamble from being
+ * injected twice. Set true when the first session is established (workflow.ts),
+ * reset to false by restart (a fresh conversation) and by editing the context.
+ */
+export function setContextInjected(id: string, value: boolean): void {
+	open()
+		.prepare("UPDATE workflows SET context_injected = ?, updated_at = ? WHERE id = ?")
+		.run(value ? 1 : 0, new Date().toISOString(), id);
+}
+
+/**
+ * Low-level setter for a workflow's conversation context — the preamble
+ * injected before the first step of a fresh conversation (see runner.ts).
+ * Called only via `setConversationContext`, which locks the context once it's
+ * been injected, so this is only reached while the context is still editable
+ * (i.e. `context_injected` is false). It stores the (trimmed) value and
+ * leaves the flag untouched; the flag is set to true by `chainSession` on the
+ * first session and reset to false by `restartWorkflow`. Pass null/empty to
+ * clear it.
+ */
+export function setWorkflowConversationContext(id: string, context: string | null): void {
+	const trimmed = context?.trim() || null;
+	open()
+		.prepare("UPDATE workflows SET conversation_context = ?, updated_at = ? WHERE id = ?")
+		.run(trimmed, new Date().toISOString(), id);
 }
 
 export function deleteWorkflow(id: string): boolean {
@@ -502,6 +564,29 @@ export function startManualRun(stepId: string): boolean {
 		)
 		.run(now, stepId).changes;
 	return changes > 0;
+}
+
+/**
+ * Aborts a step that is stuck `running` (a dispatch whose awb callback never
+ * came back): marks it `failed` with the given error and a `finished_at`, but
+ * PRESERVES `session_id`/`result`/`phase` so the conversation it established is
+ * still reachable ("Open conversation") and the operator can inspect what
+ * happened. Only acts on a `running` step (mirrors `startManualRun`'s guard);
+ * returns whether a row was changed. The operator can then re-run the step
+ * via the ▶ button (`startManualRun`), which reconciles the workflow back out
+ * of `failed` once it passes. Also makes the result callback path ignore any
+ * late awb callback for this step (see the `status === "running"` guard in
+ * `onStepResult`).
+ */
+export function failRunningStep(stepId: string, error: string): boolean {
+	return (
+		open()
+			.prepare(
+				`UPDATE steps SET status = 'failed', error = ?, finished_at = ?
+				 WHERE id = ? AND status = 'running'`,
+			)
+			.run(error, new Date().toISOString(), stepId).changes > 0
+	);
 }
 
 /** Fails any step stuck `running` past the timeout; returns the distinct workflow ids affected, so the caller can fail the workflow too instead of leaving it stuck. */

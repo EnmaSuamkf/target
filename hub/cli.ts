@@ -14,8 +14,12 @@ function usage(): void {
 Commands:
   start                                 Run the hub (foreground)
   create <name> [--workdir <dir>]       Create a workflow (creates its agent + awb hook too)
+  set-context <workflowId> "<text>"   Set (or clear with "") a workflow's conversation context
   add-step <workflowId> <description...>
                                          Append a step to a workflow
+  templates                             List available workflow templates
+  create-from-template <templateId> <workflowName> [--workdir <dir>]
+                                         Create a workflow seeded with a template's steps
   list                                  List workflows with progress
   show <workflowId>                     Show a workflow's steps
   run <workflowId>                      Start (or continue) sequential dispatch
@@ -39,6 +43,8 @@ interface WorkflowJson {
 	agentName: string;
 	lastSessionId: string | null;
 	mdPath: string;
+	conversationContext: string | null;
+	contextInjected: boolean;
 }
 
 interface StepJson {
@@ -47,6 +53,13 @@ interface StepJson {
 	description: string;
 	status: string;
 	error: string | null;
+}
+
+interface TemplateJson {
+	id: string;
+	name: string;
+	tags: string[];
+	steps: { description: string; acceptanceCriteria: string | null }[];
 }
 
 async function main(): Promise<void> {
@@ -121,6 +134,47 @@ async function main(): Promise<void> {
 		return;
 	}
 
+	if (cmd === "templates" || cmd === "list-templates") {
+		const res = await fetch(`${apiBase}/templates`);
+		if (!res.ok) await fail(res);
+		const { templates } = (await res.json()) as { templates: TemplateJson[] };
+		if (templates.length === 0) {
+			console.log("No templates registered.");
+			return;
+		}
+		for (const t of templates) {
+			const tags = t.tags.length ? ` [${t.tags.join(", ")}]` : "";
+			console.log(`${t.id}  '${t.name}'  ${t.steps.length} step(s)${tags}`);
+		}
+		return;
+	}
+
+	if (cmd === "create-from-template") {
+		const [templateId, name] = rest.filter((a) => !a.startsWith("--"));
+		const workdir = flagValue(rest, "--workdir");
+		const permissionMode = flagValue(rest, "--permission-mode");
+		if (!templateId || !name) {
+			console.error("Usage: target create-from-template <templateId> <workflowName> [--workdir <dir>] [--permission-mode <mode>]");
+			process.exitCode = 1;
+			return;
+		}
+		const createRes = await fetch(`${apiBase}/workflows`, {
+			method: "POST",
+			headers: { "content-type": "application/json", ...authHeaders },
+			body: JSON.stringify({
+				name,
+				templateId,
+				...(workdir ? { workdir } : {}),
+				...(permissionMode ? { permissionMode } : {}),
+			}),
+		});
+		if (!createRes.ok) await fail(createRes);
+		const { workflow } = (await createRes.json()) as { workflow: WorkflowJson };
+		console.log(`Workflow '${workflow.name}' created from template '${templateId}' (${workflow.id}), agent '${workflow.agentName}'.`);
+		console.log(`Status file: ${workflow.mdPath}`);
+		return;
+	}
+
 	if (cmd === "list") {
 		const res = await fetch(`${apiBase}/workflows`);
 		const { workflows } = (await res.json()) as { workflows: WorkflowJson[] };
@@ -146,10 +200,37 @@ async function main(): Promise<void> {
 		const res = await fetch(`${apiBase}/workflows/${workflowId}`);
 		if (!res.ok) await fail(res);
 		const { workflow, steps } = (await res.json()) as { workflow: WorkflowJson; steps: StepJson[] };
-		console.log(`'${workflow.name}' (${workflow.id}) — ${workflow.status} — ${workflow.progress.pct}%\n`);
+		console.log(`'${workflow.name}' (${workflow.id}) — ${workflow.status} — ${workflow.progress.pct}%`);
+		if (workflow.conversationContext) {
+			const preview = workflow.conversationContext.replace(/\s+/g, " ").trim().slice(0, 100);
+			console.log(`Conversation context (injected: ${workflow.contextInjected ? "yes" : "no"}): ${preview}${workflow.conversationContext.length > 100 ? "…" : ""}`);
+		}
+		console.log("");
 		for (const s of steps) {
 			console.log(`  ${s.orderIndex + 1}. [${s.status}] ${s.description}${s.error ? ` — ${s.error}` : ""}`);
 		}
+		return;
+	}
+
+	if (cmd === "set-context") {
+		const [workflowId, ...contextParts] = rest;
+		const context = contextParts.join(" ");
+		if (!workflowId) {
+			console.error('Usage: target set-context <workflowId> "<text>"  (pass an empty string to clear)');
+			process.exitCode = 1;
+			return;
+		}
+		const res = await fetch(`${apiBase}/workflows/${workflowId}/context`, {
+			method: "PATCH",
+			headers: { "content-type": "application/json", ...authHeaders },
+			body: JSON.stringify({ conversationContext: context }),
+		});
+		if (!res.ok) await fail(res);
+		const { workflow } = (await res.json()) as { workflow: WorkflowJson };
+		console.log(
+			`Conversation context ${workflow.conversationContext ? "updated" : "cleared"} for '${workflow.name}'` +
+				(workflow.conversationContext ? ` (injected: ${workflow.contextInjected ? "yes" : "no"}).` : "."),
+		);
 		return;
 	}
 

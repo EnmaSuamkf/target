@@ -18,6 +18,8 @@ import { test } from "node:test";
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-test-"));
 process.env.TARGET_HOME = tmpHome;
+// Isolate awb too (defensive — keep test hooks out of the real broker).
+process.env.AWB_HOME = tmpHome;
 
 const {
 	completeStep,
@@ -27,6 +29,7 @@ const {
 	insertWorkflow,
 	listSteps,
 	markStepJudging,
+	markStepRunning,
 	nextPendingStep,
 	resetSteps,
 	setStepSelection,
@@ -56,8 +59,16 @@ function makeWorkflow(count: number) {
 	return { workflow, steps };
 }
 
-/** Runs a step's exec job to the given outcome, exactly as awb's callback would. */
+/** Runs a step's exec job to the given outcome, exactly as awb's callback would.
+ * `onStepResult` only processes callbacks for a `running` step (a late callback
+ * for an already-resolved step is dropped), so we first mark a pending step as
+ * running to simulate the dispatch that's now answering — the way a real run
+ * would already be `running` by the time awb calls back. A step already running
+ * (after `startManualRun`, the ▶ dispatch) is left untouched so its manual flag
+ * survives. */
 async function finishStep(stepId: string, ok: boolean) {
+	const step = getStep(stepId);
+	if (step && step.status === "pending") markStepRunning(stepId);
 	await onStepResult(stepId, ok ? { ok: true, result: "fine" } : { ok: false, error: "boom" }, cfg, silent);
 }
 

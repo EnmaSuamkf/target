@@ -407,6 +407,22 @@ node hub/cli.ts run &lt;workflowId&gt;       # start / continue</code></pre>
           under the hood), so the agent keeps the full context of everything the workflow has
           done so far.
         </p>
+        <h3>Conversation context</h3>
+        <p>
+          Because the whole workflow is one conversation, you can give it a stable preamble:
+          a <strong>conversation context</strong> is an optional text injected <strong>before
+          the first step</strong> of a fresh run — background, constraints, definitions, a
+          persona — so every step inherits it without repeating it. It's injected exactly
+          once: later steps resume the session, which already carries it in history, so it's
+          never re-injected automatically. Restarting the workflow starts a new conversation
+          and injects it again. Once injected, the context is <strong>locked</strong> (the
+          field becomes read-only and Save is disabled) — to change it, restart the workflow
+          first. You add it to an existing workflow with
+          <code>target set-context</code> (or the <strong>Conversation context</strong> block
+          in the detail panel) — it isn't part of workflow creation. Its injection state is
+          tracked with a <code>contextInjected</code> flag surfaced in the API and the
+          progress <code>.md</code> file.
+        </p>
         <h3>Subagent delegation</h3>
         <p>
           Because the session is reused turn after turn, each step's input appends an explicit
@@ -426,6 +442,19 @@ node hub/cli.ts run &lt;workflowId&gt;       # start / continue</code></pre>
           → <code>completed</code>, any <code>failed</code> → <code>failed</code>, something
           left to run → <code>draft</code>) — which is what lets retrying a single failed step
           until it passes take the whole workflow back out of <code>failed</code>.
+        </p>
+        <h3>Aborting a stuck step</h3>
+        <p>
+          If a step's dispatch never calls back (a hung exec or judge — the agent
+          process is stuck), it stays <code>running</code> forever and blocks everything:
+          ▶ refuses to re-run a <code>running</code> step, and <code>restart</code> is
+          disabled while the workflow is <code>running</code>. The <strong>Abort</strong>
+          button (or <code>POST /api/workflows/:id/steps/:stepId/abort</code>) force-fails
+          that one stuck step — <strong>preserving its session</strong> so "Open
+          conversation" still works — which moves the workflow to <code>failed</code> so
+          you can ▶ re-run just that step. (Without it you'd have to wait for the
+          10-minute stale-step timeout, or pause+restart the whole workflow.) Any late
+          callback for the aborted step is ignored.
         </p>
         <h3>Selecting which steps run</h3>
         <p>
@@ -546,6 +575,7 @@ hub    →  next pending, selected step dispatched     until none remain, then t
               <tr><td><code>npm run typecheck</code></td><td>Type-checks the hub with <code>tsc --noEmit</code>.</td></tr>
               <tr><td><code>target start</code></td><td>Runs the hub in the foreground (equivalent to <code>node hub/daemon.ts</code>).</td></tr>
               <tr><td><code>target create &lt;name&gt; [--workdir &lt;dir&gt;] [--permission-mode &lt;mode&gt;] [--yes-bypass-risk]</code></td><td>Creates a workflow — and its dedicated awb hook + agent. Modes: <code>acceptEdits</code>, <code>auto</code>, <code>manual</code>, <code>dontAsk</code>, <code>plan</code>, <code>bypassPermissions</code> (needs <code>--yes-bypass-risk</code>).</td></tr>
+              <tr><td><code>target set-context &lt;workflowId&gt; "&lt;text&gt;"</code></td><td>Sets (or clears, with an empty string) a workflow's conversation context preamble.</td></tr>
               <tr><td><code>target add-step &lt;workflowId&gt; &lt;description...&gt;</code></td><td>Appends a step to a workflow.</td></tr>
               <tr><td><code>target list</code></td><td>Lists workflows with their status and progress %.</td></tr>
               <tr><td><code>target show &lt;workflowId&gt;</code></td><td>Shows a workflow's steps and their status.</td></tr>
@@ -570,14 +600,16 @@ hub    →  next pending, selected step dispatched     until none remain, then t
             <tbody>
               <tr><td><code>GET /health</code></td><td>Liveness + workflow count.</td></tr>
               <tr><td><code>GET /api/workflows</code></td><td>List workflows with progress % (also expires stale steps first).</td></tr>
-              <tr><td><code>POST /api/workflows</code></td><td>Create a workflow (admin token) — also creates its awb hook. Body: <code>{name, workdir?, permissionMode?, acceptBypassRisk?}</code>.</td></tr>
+              <tr><td><code>POST /api/workflows</code></td><td>Create a workflow (admin token) — also creates its awb hook. Body: <code>{name, workdir?, permissionMode?, acceptBypassRisk?, templateId?}</code>. The conversation context is set afterward via <code>PATCH /api/workflows/:id/context</code>, not at creation.</td></tr>
               <tr><td><code>GET /api/workflows/:id</code></td><td>Workflow detail + its steps.</td></tr>
               <tr><td><code>GET /api/workflows/:id/transcript</code></td><td>The harness + live conversation of the current/most-recently-run session, read from Claude Code's own <code>.jsonl</code> transcript.</td></tr>
               <tr><td><code>DELETE /api/workflows/:id</code></td><td>Removes a workflow: deletes its awb hook, its <code>.md</code> file and its DB rows (admin token).</td></tr>
+              <tr><td><code>PATCH /api/workflows/:id/context</code></td><td>Sets (or clears) a workflow's conversation context preamble (admin token). Body: <code>{conversationContext}</code>.</td></tr>
               <tr><td><code>POST /api/workflows/:id/steps</code></td><td>Adds a step (admin token). Body: <code>{description, acceptanceCriteria?, maxRetries?, retryIntervalSeconds?}</code>.</td></tr>
               <tr><td><code>PATCH /api/workflows/:id/steps/:stepId</code></td><td>Edits a step's description / judge settings (admin token).</td></tr>
               <tr><td><code>DELETE /api/workflows/:id/steps/:stepId</code></td><td>Removes a pending step (admin token).</td></tr>
               <tr><td><code>POST /api/workflows/:id/steps/:stepId/run</code></td><td>Runs one step now, outside the sequential order, always on a fresh session (admin token).</td></tr>
+              <tr><td><code>POST /api/workflows/:id/steps/:stepId/abort</code></td><td>Force-fails a step stuck <code>running</code> (a dispatch whose callback never came back, e.g. a hung judge), preserving its session, so it can be re-run via ▶ without restarting the whole workflow (admin token).</td></tr>
               <tr><td><code>POST /api/workflows/:id/start</code></td><td>Begins/continues sequential dispatch (admin token). Body: <code>{stepIds?: string[]}</code> to restrict which steps run.</td></tr>
               <tr><td><code>POST /api/workflows/:id/pause</code></td><td>Stops dispatching further steps (admin token).</td></tr>
               <tr><td><code>POST /api/workflows/:id/resume</code></td><td>Undoes pause (admin token). Same optional <code>stepIds</code> body as start.</td></tr>

@@ -58,6 +58,7 @@ The hub prints its **admin token** on startup (it also lives in
 
 ```bash
 node hub/cli.ts create "release-notes" [--workdir <dir>] [--permission-mode acceptEdits]
+node hub/cli.ts set-context <workflowId> "<text>"   # set (or clear with "") the conversation context, on an existing workflow
 node hub/cli.ts add-step <workflowId> "Read the CHANGELOG and put together a summary"
 node hub/cli.ts add-step <workflowId> "Publish the summary to docs/release-notes.md"
 node hub/cli.ts run <workflowId>       # start / continue
@@ -71,6 +72,31 @@ node hub/cli.ts show <workflowId>
 Or from the UI at `http://127.0.0.1:8893` (the **Workflow** section): create a
 workflow, add steps with the `+ Add step` button, watch the progress bar,
 Start/Pause/Resume/Restart, and edit a pending step before restarting.
+
+### Conversation context
+
+A workflow runs as one continuous conversation on a shared Claude session
+(every step after the first resumes the same session). A **conversation
+context** is an optional preamble injected **before the first step** of a
+fresh run, so every step inherits that background (audience, constraints,
+definitions, a persona) without repeating it. It's injected once: later steps
+resume the session, which already carries it in history, so it's never
+re-injected automatically. Restarting the workflow starts a new conversation
+and injects it again. Once injected, the context is **locked** (the field
+becomes read-only and Save is disabled) — to change it, restart the workflow
+first. You add it to an existing workflow with `target set-context` (or the
+**Conversation context** block in the detail panel); it isn't part of workflow
+creation.
+
+### Stuck steps
+
+A step whose dispatch never calls back (a hung exec or judge) stays `running`
+and blocks the workflow: ▶ won't re-run a `running` step and Restart is
+disabled while the workflow is `running`. Use the **Abort** button on the step
+(or `POST /api/workflows/:id/steps/:stepId/abort`) to force-fail just that step
+— its session is preserved, so "Open conversation" still works — then ▶ re-run
+it. (Otherwise you wait for the 10-minute stale-step timeout, or pause +
+restart the whole workflow.)
 
 ### Agent permissions
 

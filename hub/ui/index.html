@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Target — workflows</title>
     <style>
       /* Same palette/typography family as agentmesh's hub UI. */
@@ -248,44 +249,16 @@
       .step-actions{ display: flex; gap: 0.4rem; margin-top: 0.4rem; }
 
       .convo-block{ margin: 1.2rem 0; }
-      .convo-block h2{ margin-bottom: 0.4rem; }
       .convo-meta{
         font-family: var(--mono);
         font-size: 0.72rem;
         color: var(--faint);
-        margin: 0 0 0.5rem;
+        margin: 0.5rem 0 0;
         display: flex;
         align-items: center;
         gap: 0.5rem;
         flex-wrap: wrap;
       }
-      .convo-log{
-        max-height: 340px;
-        overflow-y: auto;
-        display: grid;
-        gap: 0.45rem;
-        background: var(--surface-2);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 0.7rem 0.8rem;
-      }
-      .convo-empty{ font-size: 0.82rem; color: var(--faint); }
-      .turn{ font-size: 0.85rem; overflow-wrap: anywhere; white-space: pre-wrap; }
-      .turn .turn-label{
-        font-family: var(--mono);
-        font-size: 0.68rem;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        margin-right: 0.4rem;
-      }
-      .turn.prompt{ color: var(--muted); }
-      .turn.prompt .turn-label{ color: var(--muted); }
-      .turn.text{ color: var(--text); }
-      .turn.text .turn-label{ color: var(--accent); }
-      .turn.thinking{ color: var(--faint); font-style: italic; }
-      .turn.tool_use .turn-label{ color: var(--warn); }
-      .turn.tool_result{ color: var(--faint); }
-      .turn.tool_result .turn-label{ color: var(--faint); }
 
       details.new-wf > summary, details.add-step > summary{
         cursor: pointer;
@@ -451,16 +424,29 @@
             </div>
             <p class="msg" id="d-action-msg"></p>
 
+            <details class="add-step" id="context-details">
+              <summary>Conversation context <span id="ctx-state" class="progress-pct"></span></summary>
+              <form id="context-form">
+                <div>
+                  <label for="ctx-input">Context injected before the first step of a fresh run ⓘ</label>
+                  <textarea id="ctx-input"
+                    title="Preamble injected before the first step when the workflow's conversation starts (before all steps). Injected once per conversation; once injected it's locked — restart the workflow to edit it. Leave empty to clear (before injection)."
+                    placeholder="Optional — background/constraints every step should inherit. Injected once, before the first step of a fresh conversation. Locked once injected; restart to edit."></textarea>
+                </div>
+                <div class="btn-row">
+                  <button type="submit" class="btn small" id="ctx-save">Save context</button>
+                </div>
+                <p class="msg" id="ctx-msg"></p>
+              </form>
+            </details>
+
             <ol class="steps" id="steps-list"></ol>
 
             <div class="convo-block">
-              <h2>Conversation</h2>
-              <p class="convo-meta">
-                <span id="convo-meta-text"></span>
-                <button class="btn small" id="btn-copy-resume" title="copy command to open conversation on your terminal">Open conversation</button>
-              </p>
+              <button class="btn small" id="btn-copy-resume" title="Opens a terminal on this machine, cd'd into the workflow's workdir, running claude --resume">Open conversation</button>
+              <p class="msg" id="convo-msg"></p>
+              <p class="convo-meta" id="convo-meta-text" style="display:none"></p>
               <p class="convo-meta" id="convo-usage" style="display:none"></p>
-              <div class="convo-log" id="convo-log"></div>
             </div>
 
             <details class="add-step">
@@ -583,12 +569,16 @@
       const $ = (id) => document.getElementById(id);
       let selectedId = null;
       let editingStepId = null;
+      // Whether the user has manually opened/closed the Conversation context
+      // <details> for the currently-selected workflow. Until they do, we
+      // auto-open it when the workflow already has a context (so an existing
+      // context is visible/editable without hunting for a collapsed section).
+      let ctxDetailsUserToggled = false;
       // Step ids the user checked to run. Empty = run nothing (a deliberate
       // no-op — see `runAction` below). Start, Resume and Restart send this
       // set so the engine runs only these.
       const stepSelection = new Set();
-      let resumeCommand = null;
-      let copiedTimer = null;
+      let openTerminalFlashTimer = null;
 
       function adminToken() {
         return (localStorage.getItem("targetAdminToken") || "").trim();
@@ -694,30 +684,13 @@
             ${step.status === "done" && step.result ? `<div class="step-result">${escapeHtml(truncate(step.result, 240))}</div>` : ""}
             <div class="step-actions">
               <button class="btn small" data-run="${step.id}" ${running ? "disabled" : ""}>${running ? "running…" : "▶ Run"}</button>
+              <button class="btn small danger" data-abort="${step.id}" ${running ? "" : "disabled"} title="Force-fail this stuck step so it can be re-run, without restarting the whole workflow. Its session is preserved.">Abort</button>
               <button class="btn small" data-edit="${step.id}" ${editable ? "" : "disabled"}>Edit</button>
               <button class="btn small danger" data-remove="${step.id}" ${step.status === "pending" ? "" : "disabled"}>Remove</button>
             </div>
           `;
         }
         return li;
-      }
-
-      function turnLabel(entry) {
-        return { prompt: "Prompt", thinking: "Thinking", text: "Agent", tool_use: `→ ${entry.name}`, tool_result: "← result" }[entry.kind];
-      }
-
-      function setResumeCommand(command) {
-        resumeCommand = command ?? null;
-        $("btn-copy-resume").style.display = resumeCommand ? "" : "none";
-      }
-
-      function flashCopied() {
-        const btn = $("btn-copy-resume");
-        btn.textContent = "Copied!";
-        clearTimeout(copiedTimer);
-        copiedTimer = setTimeout(() => {
-          btn.textContent = "Open conversation";
-        }, 1200);
       }
 
       function renderUsage(usage) {
@@ -735,40 +708,37 @@
         el.style.display = "";
       }
 
-      function renderTranscript(data) {
-        $("convo-meta-text").textContent = `harness: ${data.harness ?? "?"} · session: ${data.sessionId ?? "(none yet)"}`;
-        setResumeCommand(data.resumeCommand);
+      function renderSessionInfo(data) {
+        const meta = $("convo-meta-text");
+        if (!data.sessionId) {
+          meta.style.display = "none";
+          renderUsage(null);
+          return;
+        }
+        meta.textContent = `harness: ${data.harness ?? "?"} · session: ${data.sessionId}`;
+        meta.style.display = "";
         renderUsage(data.usage);
-        const log = $("convo-log");
-        if (data.note) {
-          log.innerHTML = `<p class="convo-empty">${escapeHtml(data.note)}</p>`;
-          return;
-        }
-        if (!data.entries || data.entries.length === 0) {
-          log.innerHTML = `<p class="convo-empty">No activity yet.</p>`;
-          return;
-        }
-        const wasAtBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
-        log.innerHTML = data.entries
-          .map((entry) => {
-            if (entry.kind === "thinking") {
-              return `<div class="turn thinking"><span class="turn-label">${turnLabel(entry)}</span>…</div>`;
-            }
-            const text = entry.kind === "tool_use" || entry.kind === "tool_result" ? entry.summary : entry.text;
-            return `<div class="turn ${entry.kind}"><span class="turn-label">${turnLabel(entry)}</span>${escapeHtml(text || "")}</div>`;
-          })
-          .join("");
-        if (wasAtBottom) log.scrollTop = log.scrollHeight;
       }
 
-      async function loadTranscript(workflowId) {
+      async function loadSessionInfo(workflowId) {
         try {
-          const res = await fetch(`/api/workflows/${workflowId}/transcript`);
-          if (!res.ok) return;
-          renderTranscript(await res.json());
+          const res = await fetch(`/api/workflows/${workflowId}/session-info`);
+          if (!res.ok || workflowId !== selectedId) return;
+          const data = await res.json();
+          if (workflowId !== selectedId) return;
+          renderSessionInfo(data);
         } catch {
-          // Best-effort — the steps list already reflects real status either way.
+          // Best-effort — the conversation button already re-resolves the real session.
         }
+      }
+
+      function flashOpened() {
+        const btn = $("btn-copy-resume");
+        btn.textContent = "Opened!";
+        clearTimeout(openTerminalFlashTimer);
+        openTerminalFlashTimer = setTimeout(() => {
+          btn.textContent = "Open conversation";
+        }, 1200);
       }
 
       function renderDetail(workflow, steps) {
@@ -786,6 +756,45 @@
         $("btn-pause").disabled = workflow.status !== "running";
         $("btn-resume").disabled = workflow.status !== "paused";
         $("btn-restart").disabled = workflow.status === "running";
+        // `lastSessionId` misses a step run in isolation via ▶ (never folded
+        // into the workflow row) — good enough to gate the button without an
+        // extra fetch; the open-terminal endpoint re-resolves the real session.
+        $("btn-copy-resume").disabled = !workflow.lastSessionId;
+
+        // Conversation context: show the stored value and its injected state.
+        // Don't clobber the textarea while the user is typing in it — the 2s
+        // poll re-renders this panel and would wipe in-progress edits.
+        const ctxInput = $("ctx-input");
+        if (ctxInput && document.activeElement !== ctxInput) {
+          ctxInput.value = workflow.conversationContext ?? "";
+        }
+        // Once the context has been injected, freeze it: the agent is already
+        // operating under it, so editing mid-conversation would be silently
+        // inconsistent. The field becomes read-only and Save is disabled until
+        // a restart resets the flag.
+        const injected = !!workflow.contextInjected;
+        if (ctxInput) ctxInput.readOnly = injected;
+        const ctxSave = $("ctx-save");
+        if (ctxSave) ctxSave.disabled = injected;
+        const ctxMsg = $("ctx-msg");
+        if (ctxMsg) {
+          ctxMsg.textContent = injected ? "Locked — already injected. Restart the workflow to edit it." : "";
+          ctxMsg.classList.toggle("error", false);
+        }
+        const ctxState = $("ctx-state");
+        if (ctxState) {
+          ctxState.textContent = workflow.conversationContext
+            ? `· injected: ${injected ? "yes" : "not yet"}`
+            : "(none)";
+        }
+        // Auto-open the Conversation context section when the workflow already
+        // has a context, so it's visible/editable without hunting for a
+        // collapsed section. Once the user opens or closes it themselves, we
+        // respect their choice for the rest of the time this workflow is shown.
+        const ctxDetails = $("context-details");
+        if (ctxDetails && !ctxDetailsUserToggled) {
+          ctxDetails.open = !!workflow.conversationContext;
+        }
 
         const list = $("steps-list");
         list.innerHTML = "";
@@ -868,15 +877,36 @@
             }
           }),
         );
+        list.querySelectorAll("[data-abort]").forEach((btn) =>
+          btn.addEventListener("click", async () => {
+            const stepId = btn.getAttribute("data-abort");
+            if (!confirm("Abort this stuck step? It will be marked failed (its session is preserved) so you can re-run it. The workflow moves to failed until the step passes again."))
+              return;
+            const token = adminToken() || prompt("Admin token — printed by the hub on startup (~/.target/config.json):");
+            if (!token) return;
+            rememberToken(token);
+            const res = await fetch(`/api/workflows/${selectedId}/steps/${stepId}/abort`, {
+              method: "POST",
+              headers: { authorization: `Bearer ${token}` },
+            });
+            if (res.ok) await selectWorkflow(selectedId);
+            else {
+              const data = await res.json().catch(() => ({}));
+              alert(`Could not abort the step: ${data.error ?? res.status}`);
+            }
+          }),
+        );
       }
 
       async function selectWorkflow(id) {
-        // Switching workflows: drop the old command up front so a failed
-        // transcript load can't leave the button copying another conversation.
-        // The 2s poll re-selects the same id, which must not flicker it away.
+        // Switching workflows: clear the previous conversation status message
+        // up front. The 2s poll re-selects the same id, which must not flicker
+        // it away.
         if (id !== selectedId) {
-          setResumeCommand(null);
+          $("convo-msg").textContent = "";
+          $("convo-msg").classList.remove("error");
           stepSelection.clear();
+          ctxDetailsUserToggled = false;
         }
         selectedId = id;
         editingStepId = null;
@@ -892,9 +922,8 @@
           const { workflow, steps } = await res.json();
           if (id !== selectedId) return;
           renderDetail(workflow, steps);
-          await loadTranscript(id);
-          if (id !== selectedId) return;
           await loadWorkflows();
+          await loadSessionInfo(id);
         } catch (err) {
           if (id !== selectedId) return;
           $("d-action-msg").textContent = `Could not load the workflow: ${err}`;
@@ -942,12 +971,28 @@
       });
 
       $("btn-copy-resume").addEventListener("click", async () => {
-        if (!resumeCommand) return;
+        if (!selectedId) return;
+        const msg = $("convo-msg");
+        msg.textContent = "";
+        msg.classList.remove("error");
+        const token = adminToken() || prompt("Admin token — printed by the hub on startup (~/.target/config.json):");
+        if (!token) return;
+        rememberToken(token);
         try {
-          await navigator.clipboard.writeText(resumeCommand);
-          flashCopied();
-        } catch {
-          alert(`Could not copy to the clipboard. Run this yourself:\n\n${resumeCommand}`);
+          const res = await fetch(`/api/workflows/${selectedId}/open-terminal`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${token}` },
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            msg.textContent = data.error ?? `error ${res.status}`;
+            msg.classList.add("error");
+            return;
+          }
+          flashOpened();
+        } catch (err) {
+          msg.textContent = String(err);
+          msg.classList.add("error");
         }
       });
 
@@ -1086,6 +1131,43 @@
             body: JSON.stringify({ templateId }),
           });
           const data = await res.json();
+          if (!res.ok) {
+            msg.textContent = data.error ?? `error ${res.status}`;
+            msg.classList.add("error");
+            return;
+          }
+          msg.textContent = "";
+          msg.classList.remove("error");
+          await selectWorkflow(selectedId);
+        } catch (err) {
+          msg.textContent = String(err);
+          msg.classList.add("error");
+        }
+      });
+
+      // Remember when the user opens/closes the Conversation context section
+      // so the auto-open-on-existing-context logic stops overriding them.
+      $("context-details").addEventListener("toggle", () => {
+        ctxDetailsUserToggled = true;
+      });
+
+      $("context-form").addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        if (!selectedId) return;
+        const conversationContext = $("ctx-input").value.trim();
+        const msg = $("ctx-msg");
+        msg.textContent = "";
+        msg.classList.remove("error");
+        const token = adminToken() || prompt("Admin token — printed by the hub on startup (~/.target/config.json):");
+        if (!token) return;
+        rememberToken(token);
+        try {
+          const res = await fetch(`/api/workflows/${selectedId}/context`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+            body: JSON.stringify({ conversationContext }),
+          });
+          const data = await res.json().catch(() => ({}));
           if (!res.ok) {
             msg.textContent = data.error ?? `error ${res.status}`;
             msg.classList.add("error");

@@ -110,6 +110,17 @@ export function hookRuntime(hookUrl: string): HookRuntime {
 }
 
 /**
+ * POSIX single-quoting, escaping an embedded `'` as `'\''` — shared by every
+ * caller that drops a DB-derived value (workdir, sessionId) into a shell
+ * command. Those values aren't attacker input here, but the hub now actually
+ * executes this string (terminal.ts spawns it in a real shell), not just
+ * displays it, so it's quoted as if it might be.
+ */
+export function shellQuote(value: string): string {
+	return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
  * Shell command that reopens a harness session in a terminal, keyed by the
  * harness name `hookRuntime` reports. awb only ships the `spawn:claude`
  * adapter today (broker/dispatch.ts), so claude is the only entry we can fill
@@ -117,13 +128,13 @@ export function hookRuntime(hookUrl: string): HookRuntime {
  * to spawn it.
  */
 const HARNESS_RESUME_COMMANDS: Record<string, (sessionId: string) => string> = {
-	claude: (sessionId) => `claude --resume ${sessionId}`,
+	claude: (sessionId) => `claude --resume ${shellQuote(sessionId)}`,
 };
 
 /**
  * The command to resume `sessionId` under `harness`, or null when either is
  * unknown — callers must hide the offer rather than show a command that would
- * fail (or resume the wrong conversation) if pasted.
+ * fail (or resume the wrong conversation) if pasted or run.
  */
 export function harnessResumeCommand(harness: string | null, sessionId: string | null): string | null {
 	if (!harness || !sessionId) return null;
