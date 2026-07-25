@@ -49,7 +49,8 @@ export function WorkflowDetail({
 	onStart: (stepIds: string[]) => void;
 	onStop: () => void;
 	onDelete: () => void;
-	onSaveContext: (context: string) => Promise<void>;
+	/** Resolves true only when the server really stored the context. */
+	onSaveContext: (context: string) => Promise<boolean>;
 	onOpenTerminal: () => void;
 	onAddStep: (input: StepConfigInput) => Promise<void>;
 	onSaveStep: (id: string, input: StepConfigInput) => Promise<void>;

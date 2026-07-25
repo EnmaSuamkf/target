@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { Workflow } from "../api/types.ts";
+import { initialDraftState, isDirty, markSaved, reconcileDraft } from "./contextDraft.ts";
 import styles from "./DetailPanels.module.css";
 
 /**
@@ -12,36 +13,48 @@ import styles from "./DetailPanels.module.css";
  * answers 400. The field goes read-only and says how to unlock it (restart,
  * which resets the flag and starts a fresh conversation).
  *
- * The draft is local state seeded from the workflow, and deliberately *not*
- * re-synced while focused — the 2s poll would otherwise wipe whatever the
- * operator is typing.
+ * The draft is local state seeded from the workflow. The 2s poll would happily
+ * wipe whatever the operator is typing, so a new server value is adopted only
+ * when the draft has no unsaved edits — tracked by comparing it against
+ * `synced` (the text the draft last agreed with), never by focus.
+ *
+ * Focus is deliberately NOT the guard: clicking "Save context" blurs the
+ * textarea *before* the click is dispatched, so a focus-gated resync fired on
+ * that blur, reset the draft to the stale server value and disabled the Save
+ * button — the typed text vanished and nothing was ever saved.
  */
 export function ContextPanel({
 	workflow,
 	onSave,
 }: {
 	workflow: Workflow;
-	onSave: (context: string) => Promise<void>;
+	/** Resolves true only when the server really stored the context. */
+	onSave: (context: string) => Promise<boolean>;
 }): React.JSX.Element {
-	const [draft, setDraft] = useState(workflow.conversationContext ?? "");
-	const [focused, setFocused] = useState(false);
-	const [saving, setSaving] = useState(false);
-
 	const injected = workflow.contextInjected;
 	const serverValue = workflow.conversationContext ?? "";
 
-	// Adopt the server value on poll, but never while the field has focus.
-	useEffect(() => {
-		if (!focused) setDraft(serverValue);
-	}, [serverValue, focused]);
+	const [state, setState] = useState(() => initialDraftState(workflow.id, serverValue));
+	const [saving, setSaving] = useState(false);
 
-	const dirty = draft !== serverValue;
+	// Reconcile during render (React's derived-state pattern) rather than in an
+	// effect, so adoption can never land between a blur and the click that
+	// caused it. `reconcileDraft` returns the same object when there's nothing
+	// to do, which keeps this from looping.
+	const current = reconcileDraft(state, workflow.id, serverValue);
+	if (current !== state) setState(current);
+
+	const draft = current.draft;
+	const dirty = isDirty(current);
+	const setDraft = (value: string): void => setState((prev) => ({ ...prev, draft: value }));
 
 	const save = async (): Promise<void> => {
 		if (saving || injected) return;
 		setSaving(true);
 		try {
-			await onSave(draft);
+			// Only treat the draft as saved when the server actually took it —
+			// otherwise a failed save would silently look persisted.
+			if (await onSave(draft)) setState((prev) => markSaved(prev, draft));
 		} finally {
 			setSaving(false);
 		}
@@ -67,8 +80,6 @@ export function ContextPanel({
 				readOnly={injected}
 				placeholder="Optional — constraints, definitions or a persona every step should share."
 				onChange={(ev) => setDraft(ev.target.value)}
-				onFocus={() => setFocused(true)}
-				onBlur={() => setFocused(false)}
 				aria-label="Conversation context"
 			/>
 
@@ -78,7 +89,7 @@ export function ContextPanel({
 						{saving ? "Saving…" : "Save context"}
 					</button>
 					{dirty && !saving && (
-						<button type="button" className="btn btn--sm btn--ghost" onClick={() => setDraft(serverValue)}>
+						<button type="button" className="btn btn--sm btn--ghost" onClick={() => setDraft(current.synced)}>
 							Discard
 						</button>
 					)}
