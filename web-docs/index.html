@@ -211,11 +211,12 @@
         <h1>Installation and usage</h1>
         <p class="tagline">
           A local hub for defining <strong>workflows</strong> made of N sequential
-          <strong>steps</strong> executed by Claude. It reuses agentmesh's mechanism
-          (agent = <code>agent-webhook-bridge</code> hook, step = asynchronous job with a
-          callback) but each workflow creates its own dedicated agent + hook, and its steps
-          run one after another on the <strong>same Claude session</strong>
-          (<code>--resume</code> chained) — a single conversation that advances step by step.
+          <strong>steps</strong> executed by a coding agent — <strong>Claude Code</strong>
+          (default) or <strong>free-code</strong>, chosen per workflow. It reuses agentmesh's
+          mechanism (agent = <code>agent-webhook-bridge</code> hook, step = asynchronous job
+          with a callback) but each workflow creates its own dedicated agent + hook, and its
+          steps run one after another on the <strong>same session</strong>
+          (resume chained) — a single conversation that advances step by step.
         </p>
         <nav class="toc" aria-label="Contents">
           <a href="#overview">Overview</a>
@@ -241,10 +242,14 @@
         <h2>Overview</h2>
         <p>
           <strong>target</strong> is a local hub for defining workflows made of N sequential
-          steps executed by Claude. Instead of a registry of shared, reusable agents with a
+          steps executed by a coding agent. Two runtimes are supported —
+          <strong>Claude Code</strong> (default) and
+          <strong><a href="https://github.com/EnmaSuamkf/free-code">free-code</a></strong>,
+          chosen per workflow with <code>--runner</code> or the UI's Agent runtime selector.
+          Instead of a registry of shared, reusable agents with a
           queue of loose jobs (the agentmesh model), <strong>each workflow creates its own
           dedicated agent + awb hook</strong> when it's created, and its steps are dispatched
-          one at a time, always chained onto the previous Claude session, so the whole
+          one at a time, always chained onto the previous session, so the whole
           workflow reads as one continuous conversation rather than N unrelated jobs.
         </p>
         <p>
@@ -284,8 +289,8 @@
         <h2>Requirements</h2>
         <ul>
           <li><strong>Node.js 24 or newer</strong> (pinned in <code>.nvmrc</code>). The hub runs its <code>.ts</code> files directly via <code>node:sqlite</code> and Node's built-in TypeScript stripping — no build step.</li>
-          <li><strong><a href="https://github.com/EnmaSuamkf/agent-webhook-bridge">agent-webhook-bridge</a> (awb)</strong> running on the same machine — it's what actually spawns <code>claude -p</code> / <code>claude --resume</code> for each step.</li>
-          <li><strong>Claude Code CLI</strong> installed and authenticated, and <strong>git</strong> on <code>PATH</code> (used to clone/update the vendored awb checkout).</li>
+          <li><strong><a href="https://github.com/EnmaSuamkf/agent-webhook-bridge">agent-webhook-bridge</a> (awb)</strong> running on the same machine — it's what actually spawns <code>claude -p</code> / <code>claude --resume</code> (or <code>free-code -p</code> / <code>free-code --session</code>) for each step.</li>
+          <li><strong>Claude Code CLI</strong> and/or <strong>free-code CLI</strong> installed and authenticated — you only need the binary/ies your workflows' <code>--runner</code> actually uses — and <strong>git</strong> on <code>PATH</code> (used to clone/update the vendored awb checkout).</li>
         </ul>
       </section>
 
@@ -364,7 +369,7 @@ npm run target:install</code></pre>
           per request — no restart needed). Steps are appended afterwards, then dispatch is
           started.
         </p>
-        <pre><code>node hub/cli.ts create "release-notes" [--workdir &lt;dir&gt;] [--permission-mode acceptEdits]
+        <pre><code>node hub/cli.ts create "release-notes" [--workdir &lt;dir&gt;] [--permission-mode acceptEdits] [--runner free-code]
 node hub/cli.ts add-step &lt;workflowId&gt; "Read the CHANGELOG and put together a summary"
 node hub/cli.ts add-step &lt;workflowId&gt; "Publish the summary to docs/release-notes.md"
 node hub/cli.ts run &lt;workflowId&gt;       # start / continue</code></pre>
@@ -409,9 +414,24 @@ node hub/cli.ts run &lt;workflowId&gt;       # start / continue</code></pre>
         <p>
           Unlike a job queue, a workflow's steps are strictly sequential: the next step
           doesn't fire until the previous one is <code>done</code>, and each dispatch resumes
-          the same Claude <code>sessionId</code> as the last one (<code>claude --resume</code>
-          under the hood), so the agent keeps the full context of everything the workflow has
-          done so far.
+          the same <code>sessionId</code> as the last one (<code>claude --resume</code> or
+          <code>free-code --session</code> under the hood), so the agent keeps the full
+          context of everything the workflow has done so far.
+        </p>
+        <h3>Per-workflow runtime (<code>--runner</code>)</h3>
+        <p>
+          Each workflow picks which CLI its agent spawns at creation time:
+          <strong>Claude Code</strong> (default) or <strong>free-code</strong>. The hub writes
+          <code>spawn:claude</code> or <code>spawn:free-code</code> into the hook's consumers
+          and awb's matching adapter does the rest — the engine, judges, retries and context
+          injection are identical either way. The differences that surface:
+          free-code sessions are <code>.jsonl</code> file paths (kept under
+          <code>~/.agent-webhook-bridge/sessions/&lt;agent&gt;/</code>) instead of uuids,
+          "Open conversation" runs <code>free-code --session &lt;path&gt;</code>, and the
+          permission mode maps to free-code's <code>--tools</code> set (unset → read-only,
+          <code>acceptEdits</code> → +write/edit, <code>bypassPermissions</code> → full incl.
+          bash). The runner is fixed for the workflow's lifetime — to switch, create a new
+          workflow.
         </p>
         <h3>Conversation context</h3>
         <p>
@@ -428,6 +448,18 @@ node hub/cli.ts run &lt;workflowId&gt;       # start / continue</code></pre>
           in the detail panel) — it isn't part of workflow creation. Its injection state is
           tracked with a <code>contextInjected</code> flag surfaced in the API and the
           progress <code>.md</code> file.
+        </p>
+        <h3>Expandable rich-text inputs</h3>
+        <p>
+          Every multi-line text field in the web UI — step descriptions, acceptance
+          criteria, the conversation context, template steps — has an <strong>expand</strong>
+          button in its corner. It opens a popup with a large editor and a formatting
+          toolbar: <strong>bold</strong>, <em>italic</em>, headings, and bulleted or numbered
+          lists. Pressing <strong>OK</strong> writes the result back into the original field;
+          Cancel or Escape discards the popup's edits and leaves the field untouched. The
+          text is stored as <strong>Markdown</strong> (<code>**bold**</code>, <code>- </code>
+          bullets, <code>#</code> headings), since everything typed here ultimately becomes
+          plain text handed to the agent.
         </p>
         <h3>Subagent delegation</h3>
         <p>
@@ -459,7 +491,7 @@ node hub/cli.ts run &lt;workflowId&gt;       # start / continue</code></pre>
           that one stuck step — <strong>preserving its session</strong> so "Open
           conversation" still works — which moves the workflow to <code>failed</code> so
           you can ▶ re-run just that step. (Without it you'd have to wait for the
-          10-minute stale-step timeout, or pause+restart the whole workflow.) Any late
+          20-minute stale-step timeout, or pause+restart the whole workflow.) Any late
           callback for the aborted step is ignored.
         </p>
         <h3>Selecting which steps run</h3>
@@ -497,7 +529,7 @@ node hub/cli.ts run &lt;workflowId&gt;       # start / continue</code></pre>
       <section id="how-a-step-flows">
         <h2>How a step flows</h2>
         <div class="diagram">hub    →  POST to the workflow's awb hook          {stepId, input, <span class="hl">callbackUrl</span>} + secret, sessionId to resume
-awb    →  spawns <span class="hl">claude -p</span> / <span class="hl">claude --resume</span>       the step's description, appended with the subagent instruction
+awb    →  spawns <span class="hl">claude -p</span>/<span class="hl">--resume</span> or <span class="hl">free-code -p</span>/<span class="hl">--session</span>   the step's description, appended with the subagent instruction
 awb    →  POST callbackUrl {ok, result, session_id}  when the run finishes
 hub    →  step <span class="hl">done</span> or <span class="hl">judge</span>            done if no acceptance criteria; otherwise a self-evaluation run follows
 hub    →  next pending, selected step dispatched     until none remain, then the workflow is <span class="hl">completed</span></div>
@@ -557,7 +589,7 @@ hub    →  next pending, selected step dispatched     until none remain, then t
               <tr><td><code>host</code></td><td><code>127.0.0.1</code></td><td>Bind address for the hub's HTTP server.</td></tr>
               <tr><td><code>port</code></td><td><code>8893</code></td><td>Chosen away from awb's default (<code>8890</code>) and agentmesh-hub's (<code>8892</code>) so all three can share a machine.</td></tr>
               <tr><td><code>adminToken</code></td><td>random, generated on first load</td><td>Bearer token required by every mutating <code>/api</code> route. Printed at hub startup.</td></tr>
-              <tr><td><code>stepTimeoutMs</code></td><td><code>600000</code> (10 minutes)</td><td>A step still pending/running longer than this is lazily marked <code>failed</code>.</td></tr>
+              <tr><td><code>stepTimeoutMs</code></td><td><code>1200000</code> (20 minutes)</td><td>A step still pending/running longer than this is lazily marked <code>failed</code>.</td></tr>
               <tr><td><code>maxInputBytes</code></td><td><code>65536</code> (64 KiB)</td><td>Request body size cap enforced while reading JSON bodies; oversized bodies get <code>413</code>.</td></tr>
             </tbody>
           </table>
@@ -613,7 +645,7 @@ hub    →  next pending, selected step dispatched     until none remain, then t
               <tr><td><code>npm run ui:dev</code></td><td>Vite dev server on <code>:5173</code> with hot reload, proxying <code>/api</code> to a hub started separately. Override its target with <code>TARGET_HUB_ORIGIN</code>.</td></tr>
               <tr><td><code>npm run ui:build</code></td><td>Builds the web UI into <code>hub/ui/dist</code>, which is what the hub serves.</td></tr>
               <tr><td><code>target start</code></td><td>Runs the hub in the foreground (equivalent to <code>node hub/daemon.ts</code>).</td></tr>
-              <tr><td><code>target create &lt;name&gt; [--workdir &lt;dir&gt;] [--permission-mode &lt;mode&gt;] [--yes-bypass-risk]</code></td><td>Creates a workflow — and its dedicated awb hook + agent. Modes: <code>acceptEdits</code>, <code>auto</code>, <code>manual</code>, <code>dontAsk</code>, <code>plan</code>, <code>bypassPermissions</code> (needs <code>--yes-bypass-risk</code>).</td></tr>
+              <tr><td><code>target create &lt;name&gt; [--workdir &lt;dir&gt;] [--permission-mode &lt;mode&gt;] [--runner &lt;claude|free-code&gt;] [--yes-bypass-risk]</code></td><td>Creates a workflow — and its dedicated awb hook + agent. Modes: <code>acceptEdits</code>, <code>auto</code>, <code>manual</code>, <code>dontAsk</code>, <code>plan</code>, <code>bypassPermissions</code> (needs <code>--yes-bypass-risk</code>). <code>--runner</code> picks which CLI the agent spawns (default <code>claude</code>).</td></tr>
               <tr><td><code>target set-context &lt;workflowId&gt; "&lt;text&gt;"</code></td><td>Sets (or clears, with an empty string) a workflow's conversation context preamble.</td></tr>
               <tr><td><code>target add-step &lt;workflowId&gt; &lt;description...&gt;</code></td><td>Appends a step to a workflow.</td></tr>
               <tr><td><code>target list</code></td><td>Lists workflows with their status and progress %.</td></tr>
@@ -639,7 +671,7 @@ hub    →  next pending, selected step dispatched     until none remain, then t
             <tbody>
               <tr><td><code>GET /health</code></td><td>Liveness + workflow count.</td></tr>
               <tr><td><code>GET /api/workflows</code></td><td>List workflows with progress % (also expires stale steps first).</td></tr>
-              <tr><td><code>POST /api/workflows</code></td><td>Create a workflow (admin token) — also creates its awb hook. Body: <code>{name, workdir?, permissionMode?, acceptBypassRisk?, templateId?}</code>. The conversation context is set afterward via <code>PATCH /api/workflows/:id/context</code>, not at creation.</td></tr>
+              <tr><td><code>POST /api/workflows</code></td><td>Create a workflow (admin token) — also creates its awb hook. Body: <code>{name, workdir?, permissionMode?, runner?, acceptBypassRisk?, templateId?}</code>. <code>runner</code> is <code>claude</code> (default) or <code>free-code</code>. The conversation context is set afterward via <code>PATCH /api/workflows/:id/context</code>, not at creation.</td></tr>
               <tr><td><code>GET /api/workflows/:id</code></td><td>Workflow detail + its steps.</td></tr>
               <tr><td><code>GET /api/workflows/:id/transcript</code></td><td>The harness + live conversation of the current/most-recently-run session, read from Claude Code's own <code>.jsonl</code> transcript.</td></tr>
               <tr><td><code>DELETE /api/workflows/:id</code></td><td>Removes a workflow: deletes its awb hook, its <code>.md</code> file and its DB rows (admin token).</td></tr>

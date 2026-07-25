@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Template, TemplateInput, TemplateStep } from "../api/types.ts";
 import { EmptyState } from "../components/EmptyState.tsx";
+import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { Field } from "../components/Field.tsx";
 import { relativeTime } from "../lib/format.ts";
 import styles from "./TemplatesView.module.css";
@@ -336,19 +337,19 @@ function TemplateForm({
 								</div>
 							</div>
 
-							<textarea
-								className="textarea"
+							<ExpandableTextarea
 								value={step.description}
 								placeholder="What the agent should do in this step…"
-								onChange={(ev) => updateStep(index, { description: ev.target.value })}
+								onChange={(value) => updateStep(index, { description: value })}
 								aria-label={`Step ${index + 1} description`}
+								expandTitle={`Edit step ${index + 1} description`}
 							/>
-							<textarea
-								className="textarea"
+							<ExpandableTextarea
 								value={step.acceptanceCriteria ?? ""}
 								placeholder="Optional acceptance criteria — empty = no judge."
-								onChange={(ev) => updateStep(index, { acceptanceCriteria: ev.target.value || null })}
+								onChange={(value) => updateStep(index, { acceptanceCriteria: value || null })}
 								aria-label={`Step ${index + 1} acceptance criteria`}
+								expandTitle={`Edit step ${index + 1} acceptance criteria`}
 							/>
 
 							<div className={styles.stepRowGrid}>

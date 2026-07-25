@@ -29,7 +29,7 @@ export interface HubConfig {
 const DEFAULTS: Omit<HubConfig, "adminToken"> = {
 	host: "127.0.0.1",
 	port: 8893,
-	stepTimeoutMs: 10 * 60 * 1000,
+	stepTimeoutMs: 20 * 60 * 1000,
 	maxInputBytes: 64 * 1024,
 };
 

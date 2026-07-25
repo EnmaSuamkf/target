@@ -1,0 +1,40 @@
+.wrap {
+	position: relative;
+	display: grid;
+}
+
+/* Room for the corner button so text doesn't run underneath it. */
+.wrap > textarea {
+	padding-right: var(--space-8);
+}
+
+.expand {
+	position: absolute;
+	top: var(--space-1);
+	right: var(--space-1);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.5rem;
+	height: 1.5rem;
+	padding: 0;
+	border: 1px solid transparent;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--text-subtle);
+	cursor: pointer;
+	transition:
+		background var(--transition),
+		color var(--transition),
+		border-color var(--transition);
+}
+
+.expand:hover {
+	background: var(--gray-100);
+	border-color: var(--border);
+	color: var(--accent-600);
+}
+
+.expand:active {
+	background: var(--gray-200);
+}

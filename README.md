@@ -4,8 +4,16 @@ Define **workflows** made of N sequential **steps**. It reuses agentmesh's
 mechanism (agent = `agent-webhook-bridge` hook, step = async job with a
 callback) but with a different goal: instead of a registry of shared agents +
 a queue of loose jobs, each **workflow creates its own dedicated agent +
-hook**, and its steps run one after another **on the same Claude session**
-(`--resume` chained), like a single conversation that advances step by step.
+hook**, and its steps run one after another **on the same harness session**
+(resume chained), like a single conversation that advances step by step.
+
+Two runtimes are supported, same as agent-webhook-bridge and agentmesh:
+**Claude Code** (the default) and **[free-code](https://github.com/EnmaSuamkf/free-code)**.
+Pick one per workflow with `--runner <claude|free-code>` (or the **Agent
+runtime** selector in the UI form). Both share the same hook protocol
+(secret, `callbackUrl`, `sessionId`), so steps, judges, retries, context
+injection and session chaining behave identically — only the spawned CLI and
+the session-id shape differ (a claude uuid vs. a free-code `.jsonl` path).
 
 ## Pieces reused from agentmesh
 
@@ -66,7 +74,7 @@ in its `Ready.` block (it always lives in `~/.target/config.json`) — the UI
 asks for it and the CLI uses it automatically.
 
 ```bash
-node hub/cli.ts create "release-notes" [--workdir <dir>] [--permission-mode acceptEdits]
+node hub/cli.ts create "release-notes" [--workdir <dir>] [--permission-mode acceptEdits] [--runner free-code]
 node hub/cli.ts set-context <workflowId> "<text>"   # set (or clear with "") the conversation context, on an existing workflow
 node hub/cli.ts add-step <workflowId> "Read the CHANGELOG and put together a summary"
 node hub/cli.ts add-step <workflowId> "Publish the summary to docs/release-notes.md"
@@ -142,7 +150,7 @@ and blocks the workflow: ▶ won't re-run a `running` step and Restart is
 disabled while the workflow is `running`. Use the **Abort** button on the step
 (or `POST /api/workflows/:id/steps/:stepId/abort`) to force-fail just that step
 — its session is preserved, so "Open conversation" still works — then ▶ re-run
-it. (Otherwise you wait for the 10-minute stale-step timeout, or pause +
+it. (Otherwise you wait for the 20-minute stale-step timeout, or pause +
 restart the whole workflow.)
 
 ### Agent permissions
@@ -155,10 +163,43 @@ actually write files in their dedicated sandbox
 `bypassPermissions` exists but requires explicit confirmation because it
 enables unrestricted command execution.
 
+### Choosing the runtime (`--runner`)
+
+A workflow's agent spawns **Claude Code** by default. Create it with
+`--runner free-code` (or pick **free-code** in the UI's Agent runtime
+selector) to run every step on the free-code CLI instead:
+
+```bash
+node hub/cli.ts create "release-notes" --runner free-code --permission-mode acceptEdits
+```
+
+What changes and what doesn't:
+
+- **Same engine.** Steps still run strictly in order on one shared session;
+  judges, retries, conversation context and the progress `.md` all work the
+  same. The hub writes `spawn:free-code` into the hook's `consumers`, and
+  awb's free-code adapter does the rest.
+- **Sessions are `.jsonl` paths.** free-code resumes by session-file path,
+  not by uuid; awb keeps those files under
+  `~/.agent-webhook-bridge/sessions/<agent>/` and reports the path as the
+  `session_id`. "Open conversation" accounts for it: it opens a terminal
+  running `free-code --session <path>` instead of `claude --resume <id>`.
+- **Permissions map to `--tools`.** free-code has no `--permission-mode`;
+  awb maps the hook's mode to a tool set (unset → read-only,
+  `acceptEdits` → +write/edit, `bypassPermissions` → full incl. bash). Same
+  opt-in risk model as claude.
+- **Token usage still works.** The Conversation panel reads free-code's own
+  transcript usage (`input`/`output`/`cacheRead`/`cacheWrite`) straight off
+  the session file; there are no subagent transcripts to fold in.
+
+The runner is fixed at workflow creation (it's the hook's spawn consumer);
+to switch runtimes, create a new workflow.
+
 ## External requirement
 
 It needs `agent-webhook-bridge` **running** — that's what actually spawns
-`claude -p` / `claude --resume` for each step. `npm run target:install` puts it
+`claude -p` / `claude --resume` (or `free-code -p` / `free-code --session`)
+for each step. `npm run target:install` puts it
 in place and `npm start` boots it alongside the hub, so you don't have to start
 it yourself.
 

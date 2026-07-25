@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 /**
  * CLI: print the real token usage of a session, read straight from the
- * transcript Claude Code writes (no API calls). Accepts either a Claude session
- * id or a workflow id/name — a workflow resolves to its shared session and the
- * agent's workdir; a bare session id is located by scanning ~/.claude/projects.
+ * transcript the harness writes (no API calls). Accepts a workflow id/name, a
+ * Claude session id, or a free-code session `.jsonl` path — a workflow
+ * resolves to its shared session and the agent's workdir; a bare Claude
+ * session id is located by scanning ~/.claude/projects; a `.jsonl` path is
+ * read directly.
  *
  *   node hub/tokens.ts <sessionId | workflowId | workflow-name>
  *
@@ -48,7 +50,13 @@ function resolve(arg: string): { sessionId: string; workdir: string; label: stri
 		if (!workdir) return { error: `can't resolve the workdir for workflow '${workflow.name}' (remote or missing hook)` };
 		return { sessionId, workdir, label: `workflow ${workflow.name} · session ${sessionId}` };
 	}
-	// Otherwise treat the argument as a bare session id and locate its transcript.
+	// A free-code session IS its transcript's absolute .jsonl path — read it
+	// directly (readTokenUsage detects the shape; the workdir is irrelevant).
+	if (arg.endsWith(".jsonl") && path.isAbsolute(arg)) {
+		if (!fs.existsSync(arg)) return { error: `no transcript found at '${arg}'` };
+		return { sessionId: arg, workdir: path.dirname(arg), label: `session ${arg}` };
+	}
+	// Otherwise treat the argument as a bare claude session id and locate its transcript.
 	const workdir = findWorkdirForSession(arg);
 	if (!workdir) return { error: `no transcript found for session '${arg}' (unknown session or workflow)` };
 	return { sessionId: arg, workdir, label: `session ${arg}` };
@@ -92,7 +100,11 @@ function main(): void {
 		return;
 	}
 	const usage = readTokenUsage(resolved.workdir, resolved.sessionId);
-	if (usage.turns === 0 && !fs.existsSync(transcriptPath(resolved.workdir, resolved.sessionId))) {
+	const transcriptFile =
+		resolved.sessionId.endsWith(".jsonl") && path.isAbsolute(resolved.sessionId)
+			? resolved.sessionId
+			: transcriptPath(resolved.workdir, resolved.sessionId);
+	if (usage.turns === 0 && !fs.existsSync(transcriptFile)) {
 		console.error(`transcript is empty or missing for ${resolved.label}`);
 		process.exitCode = 1;
 		return;

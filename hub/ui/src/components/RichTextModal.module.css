@@ -1,0 +1,90 @@
+.toolbar {
+	display: flex;
+	gap: var(--space-1);
+	padding: var(--space-1);
+	border: 1px solid var(--border);
+	border-bottom: none;
+	border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+	background: var(--surface-sunken);
+}
+
+.tool {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 2rem;
+	height: 2rem;
+	border: 1px solid transparent;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--gray-600);
+	font-family: inherit;
+	font-size: var(--text-sm);
+	cursor: pointer;
+	transition:
+		background var(--transition),
+		color var(--transition);
+}
+
+.tool:hover {
+	background: var(--gray-200);
+	color: var(--text);
+}
+
+.tool:active {
+	background: var(--gray-300);
+}
+
+.headingIcon {
+	font-weight: 700;
+	font-size: var(--text-sm);
+}
+
+.editor {
+	min-height: 18rem;
+	max-height: 55vh;
+	overflow-y: auto;
+	padding: var(--space-3) var(--space-4);
+	border: 1px solid var(--border-strong);
+	border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+	background: var(--surface);
+	color: var(--text);
+	font-size: var(--text-base);
+	line-height: 1.65;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.editor:focus {
+	outline: none;
+	border-color: var(--accent-500);
+	box-shadow: var(--ring);
+}
+
+/* Formatting the toolbar produces, rendered the way it will read. */
+.editor h1,
+.editor h2,
+.editor h3 {
+	margin: var(--space-2) 0 var(--space-1);
+	font-weight: 600;
+	line-height: 1.35;
+}
+.editor h1 {
+	font-size: var(--text-xl);
+}
+.editor h2 {
+	font-size: var(--text-lg);
+}
+.editor h3 {
+	font-size: var(--text-md);
+}
+
+.editor ul,
+.editor ol {
+	margin: var(--space-1) 0;
+	padding-left: var(--space-6);
+}
+
+.editor li {
+	margin: 0.125rem 0;
+}
