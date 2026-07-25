@@ -289,7 +289,10 @@ export function getWorkflow(id: string): Workflow | null {
 }
 
 export function listWorkflows(): Workflow[] {
-	const rows = open().prepare("SELECT * FROM workflows ORDER BY created_at DESC").all();
+	// `rowid DESC` is the tiebreaker: `created_at` is an ISO string with only
+	// millisecond precision, so two rows created in the same millisecond compare
+	// equal and would otherwise come back in an arbitrary (insertion) order.
+	const rows = open().prepare("SELECT * FROM workflows ORDER BY created_at DESC, rowid DESC").all();
 	return (rows as Record<string, unknown>[]).map(rowToWorkflow);
 }
 
@@ -754,7 +757,8 @@ export function getTemplate(id: string): Template | null {
 }
 
 export function listTemplates(): Template[] {
-	const rows = open().prepare("SELECT * FROM templates ORDER BY created_at DESC").all();
+	// See listWorkflows: `rowid DESC` keeps same-millisecond rows newest-first.
+	const rows = open().prepare("SELECT * FROM templates ORDER BY created_at DESC, rowid DESC").all();
 	return (rows as Record<string, unknown>[]).map(rowToTemplate);
 }
 
