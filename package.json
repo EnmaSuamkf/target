@@ -11,6 +11,8 @@
     "target:install": "node scripts/bootstrap.mjs",
     "start": "node scripts/start.ts",
     "test": "npm --prefix hub test",
-    "typecheck": "npm --prefix hub run typecheck"
+    "typecheck": "npm --prefix hub run typecheck && npm --prefix hub/ui run typecheck",
+    "ui:dev": "npm --prefix hub/ui run dev",
+    "ui:build": "npm --prefix hub/ui run build"
   }
 }

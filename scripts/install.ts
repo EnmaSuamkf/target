@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 
 const REPO_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HUB_DIR = path.join(REPO_DIR, "hub");
+const UI_DIR = path.join(HUB_DIR, "ui");
 const AWB_REPO_URL = "https://github.com/EnmaSuamkf/agent-webhook-bridge.git";
 
 function awbDir(): string {
@@ -129,22 +130,40 @@ function syncAwb(dir: string): void {
 	}
 }
 
+/**
+ * Builds the React UI into hub/ui/dist, which is what the hub serves at `/`.
+ * The hub itself stays dependency-free at runtime — this is the only build
+ * step in the repo, and it runs here so `npm start` never has to.
+ */
+function buildUi(): void {
+	log("ui: building the web UI (vite)...");
+	if (run("npm", ["run", "build"], UI_DIR) !== 0) {
+		throw new InstallError(`the UI build failed in ${UI_DIR}`);
+	}
+}
+
 function main(): void {
 	const awb = awbDir();
-	log("[1/4] node");
+	log("[1/6] node");
 	log(`node ${process.version} satisfies the >=24 requirement.`);
 
-	log("[2/4] hub dependencies");
+	log("[2/6] hub dependencies");
 	installDeps("hub", HUB_DIR);
 
-	log("[3/4] agent-webhook-bridge");
+	log("[3/6] ui dependencies");
+	installDeps("ui", UI_DIR);
+
+	log("[4/6] ui build");
+	buildUi();
+
+	log("[5/6] agent-webhook-bridge");
 	requireGit();
 	syncAwb(awb);
 	if (!fs.existsSync(path.join(awb, "package.json"))) {
 		throw new InstallError(`${awb} has no package.json — that doesn't look like an agent-webhook-bridge clone.`);
 	}
 
-	log("[4/4] agent-webhook-bridge dependencies");
+	log("[6/6] agent-webhook-bridge dependencies");
 	installDeps("agent-webhook-bridge", awb);
 
 	console.log(`

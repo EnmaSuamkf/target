@@ -229,6 +229,7 @@
           <a href="#permissions">Permissions &amp; security</a>
           <a href="#failure-modes">Failure modes</a>
           <a href="#configuration">Configuration</a>
+          <a href="#web-ui">Web UI</a>
           <a href="#command-reference">Command reference</a>
           <a href="#api-reference">API reference</a>
           <a href="#project-structure">Project structure</a>
@@ -265,13 +266,17 @@
           </table>
         </div>
         <p>
-          Stack: Node.js ≥ 24, TypeScript run directly by Node (no build step), and
-          <strong>zero runtime dependencies</strong> — <code>node:sqlite</code> (WAL mode) for
+          Stack: Node.js ≥ 24, TypeScript run directly by Node, and <strong>zero runtime
+          dependencies in the hub</strong> — <code>node:sqlite</code> (WAL mode) for
           persistence, <code>node:http</code> for the hand-written server, <code>node:crypto</code>
-          for tokens, and the global <code>fetch</code> to talk to the broker. The only
-          dependencies at all are dev-only: <code>typescript</code> and <code>@types/node</code>.
-          The UI is a single static <code>hub/ui/index.html</code> served by the hub itself, no
-          framework or bundler.
+          for tokens, and the global <code>fetch</code> to talk to the broker. The hub's only
+          dependencies are dev-only: <code>typescript</code> and <code>@types/node</code>.
+        </p>
+        <p>
+          The web UI is a <strong>React + Vite</strong> single-page app in <code>hub/ui</code>,
+          built ahead of time into <code>hub/ui/dist</code> and served by the hub as plain static
+          files. The build runs as part of <code>npm run target:install</code>, so the hub never
+          bundles anything at runtime — it only reads the built output.
         </p>
       </section>
 
@@ -323,7 +328,8 @@ npm run target:install</code></pre>
           UI in your default browser, then holds the foreground with both children attached.
           <strong>Ctrl-C</strong> (or <code>SIGTERM</code>) tears both down cleanly. If either
           port is already answering (broker or hub started some other way), that one is reused
-          instead of fought over.
+          instead of fought over — the command still prints the admin token and stays in the
+          foreground, and Ctrl-C stops the reused services too.
         </p>
         <p>To run just the hub (assuming awb is already running separately):</p>
         <pre><code>cd hub &amp;&amp; node daemon.ts
@@ -363,7 +369,7 @@ node hub/cli.ts add-step &lt;workflowId&gt; "Read the CHANGELOG and put together
 node hub/cli.ts add-step &lt;workflowId&gt; "Publish the summary to docs/release-notes.md"
 node hub/cli.ts run &lt;workflowId&gt;       # start / continue</code></pre>
         <p>
-          Or from the UI at <code>http://127.0.0.1:8893</code> (the <em>Workflow</em> section):
+          Or from the UI at <code>http://127.0.0.1:8893</code>:
           create a workflow, add steps with the <strong>+ Add step</strong> button, watch the
           progress bar, Start/Stop the run, and edit a pending step before starting it over.
         </p>
@@ -563,16 +569,49 @@ hub    →  next pending, selected step dispatched     until none remain, then t
         </p>
       </section>
 
+      <section id="web-ui">
+        <h2>The web UI</h2>
+        <p>
+          A React + Vite single-page app in <code>hub/ui</code>, served by the hub from
+          <code>hub/ui/dist</code> at <code>http://127.0.0.1:8893</code>. It's the only part of
+          the repo with a build step: <code>npm run target:install</code> produces the bundle and
+          <code>npm start</code> refuses to boot without it.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Behaviour</th><th>Detail</th></tr></thead>
+            <tbody>
+              <tr><td>Admin token</td><td>Kept in <code>localStorage</code> under <code>targetAdminToken</code> and sent as <code>Authorization: Bearer &lt;token&gt;</code>. Set it from the header button; the app warns while none is stored, since every mutating action would answer <code>401</code>.</td></tr>
+              <tr><td>Step selection</td><td>Start / Resume / Start over dispatch exactly the ticked steps. Nothing ticked runs nothing, so the button is disabled instead of silently doing nothing.</td></tr>
+              <tr><td>One Start button</td><td>It maps to whichever engine action fits the status: <code>start</code> when draft, <code>resume</code> when paused, <code>restart</code> when completed or failed.</td></tr>
+              <tr><td>Live updates</td><td>The hub has no streaming endpoint, so the UI polls every 2s. Polling pauses while the tab is hidden and refreshes immediately on focus.</td></tr>
+              <tr><td>Deep links</td><td>The selected workflow lives in the URL hash (<code>#/w/&lt;id&gt;</code>), so a reload or a shared link reopens it.</td></tr>
+              <tr><td>Conversation context</td><td>Editable until it's been injected. Afterwards the field is read-only — the agent is already running under it — and only a start-over unlocks it.</td></tr>
+              <tr><td>Dictation</td><td>The mic dictates into the last focused text field via the Web Speech API (Chrome/Edge). English and Spanish; the choice is remembered.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Working on it: <code>npm run ui:dev</code> serves it on <code>:5173</code> with hot
+          reload while proxying API calls to a hub started separately with
+          <code>npm start</code>. <code>npm run ui:build</code> produces the production bundle.
+          The previous single-file UI is kept as <code>hub/ui/legacy-index.html</code> for
+          reference.
+        </p>
+      </section>
+
       <section id="command-reference">
         <h2>Command reference</h2>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Command</th><th>What it does</th></tr></thead>
             <tbody>
-              <tr><td><code>npm run target:install</code></td><td>One-command bootstrap: hub dependencies, vendors/updates <code>agent-webhook-bridge</code>, installs its dependencies. Idempotent.</td></tr>
-              <tr><td><code>npm start</code></td><td>Boots the awb broker and the target hub together, waits for both ports, opens the UI, holds the foreground until Ctrl-C.</td></tr>
+              <tr><td><code>npm run target:install</code></td><td>One-command bootstrap: hub dependencies, UI dependencies + build, vendors/updates <code>agent-webhook-bridge</code>, installs its dependencies. Idempotent.</td></tr>
+              <tr><td><code>npm start</code></td><td>Boots the awb broker and the target hub together, waits for both ports, opens the UI, holds the foreground until Ctrl-C. Requires the UI to have been built.</td></tr>
               <tr><td><code>npm test</code></td><td>Runs the hub's tests (<code>node --test</code>, from <code>hub/workflow.test.ts</code>) against a throwaway <code>TARGET_HOME</code>.</td></tr>
-              <tr><td><code>npm run typecheck</code></td><td>Type-checks the hub with <code>tsc --noEmit</code>.</td></tr>
+              <tr><td><code>npm run typecheck</code></td><td>Type-checks the hub and the UI with <code>tsc --noEmit</code>.</td></tr>
+              <tr><td><code>npm run ui:dev</code></td><td>Vite dev server on <code>:5173</code> with hot reload, proxying <code>/api</code> to a hub started separately. Override its target with <code>TARGET_HUB_ORIGIN</code>.</td></tr>
+              <tr><td><code>npm run ui:build</code></td><td>Builds the web UI into <code>hub/ui/dist</code>, which is what the hub serves.</td></tr>
               <tr><td><code>target start</code></td><td>Runs the hub in the foreground (equivalent to <code>node hub/daemon.ts</code>).</td></tr>
               <tr><td><code>target create &lt;name&gt; [--workdir &lt;dir&gt;] [--permission-mode &lt;mode&gt;] [--yes-bypass-risk]</code></td><td>Creates a workflow — and its dedicated awb hook + agent. Modes: <code>acceptEdits</code>, <code>auto</code>, <code>manual</code>, <code>dontAsk</code>, <code>plan</code>, <code>bypassPermissions</code> (needs <code>--yes-bypass-risk</code>).</td></tr>
               <tr><td><code>target set-context &lt;workflowId&gt; "&lt;text&gt;"</code></td><td>Sets (or clears, with an empty string) a workflow's conversation context preamble.</td></tr>
@@ -626,12 +665,12 @@ hub    →  next pending, selected step dispatched     until none remain, then t
         <div class="diagram">/
 ├── README.md              Main documentation (usage, differences with agentmesh)
 ├── PROJECT_SUMMARY.md     Architecture write-up (modules, design details, status)
-├── package.json           Root scripts: target:install, start, test, typecheck
+├── package.json           Root scripts: target:install, start, test, typecheck, ui:dev, ui:build
 ├── .nvmrc                 Pins Node 24
 ├── .claude/               settings.local.json (permission allowlist for this repo)
 ├── scripts/
 │   ├── bootstrap.mjs      Plain-JS entry for `npm run target:install`; activates Node 24+ via nvm/fnm if needed
-│   ├── install.ts         Installs hub deps, vendors/updates agent-webhook-bridge
+│   ├── install.ts         Installs hub + UI deps, builds the UI, vendors/updates agent-webhook-bridge
 │   └── start.ts           Boots the awb broker + hub together for `npm start`
 └── hub/                   All the hub's code
     ├── daemon.ts          Entry point: loads config, starts the HTTP server, prints the admin token
@@ -644,7 +683,9 @@ hub    →  next pending, selected step dispatched     until none remain, then t
     ├── config.ts          Config persisted in ~/.target/config.json
     ├── cli.ts             The `target` CLI
     ├── workflow.test.ts   Tests (node --test) over a throwaway TARGET_HOME
-    └── ui/index.html      Web UI (single static page, no build)</div>
+    └── ui/                Web UI (React + Vite)
+        ├── src/           Components, views and the typed API client
+        └── dist/          Build output served by the hub (gitignored)</div>
         <p>
           At runtime the hub uses <code>~/.target/</code>: <code>config.json</code>,
           <code>target.db</code>, <code>sandboxes/&lt;agent&gt;/</code> and a
