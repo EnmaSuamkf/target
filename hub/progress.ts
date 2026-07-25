@@ -80,9 +80,21 @@ export interface StepActivity {
 /** Last time each step's artifacts were actually stat'd, so the sweep (which runs on every workflow GET) doesn't hit the filesystem every 2 seconds. */
 const lastProbeAt = new Map<string, number>();
 
-/** Drops a step's throttle entry — called when a step settles so the map can't grow forever. */
+/** Drops a step's throttle entry — called the moment the sweep times a step out, so a re-run of the same id isn't throttled by the dead attempt's probe. */
 export function forgetProbe(stepId: string): void {
 	lastProbeAt.delete(stepId);
+}
+
+/**
+ * Drops the throttle entries of every step that is no longer `running`. Called
+ * by the sweep with the set of in-flight steps: a step that settled (done,
+ * failed, aborted, restarted) will never be probed again, so keeping its entry
+ * would leak one map slot per step the daemon has ever run.
+ */
+export function pruneProbes(runningStepIds: Set<string>): void {
+	for (const stepId of lastProbeAt.keys()) {
+		if (!runningStepIds.has(stepId)) lastProbeAt.delete(stepId);
+	}
 }
 
 function statOf(file: string): { mtimeMs: number; size: number } | null {

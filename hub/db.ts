@@ -566,9 +566,10 @@ export function recordStepProgress(
  * Marks a freshly-dispatched step `queued` — the broker accepted the POST but
 	 * the run hasn't started yet (it's waiting on the workdir `flock` behind
 	 * another run, or just hasn't sent its `started` callback). The step's
-	 * timeout clock does NOT start here: `started_at` stays null while queued, so
-	 * `expireStaleSteps` (which keys on `started_at`) leaves it alone until the
-	 * broker's `started` callback flips it to `running` via
+	 * timeout clock does NOT start here: `started_at` stays null while queued (and
+	 * the idle-watchdog stamps are cleared), so `findTimeoutCandidates` — whose
+	 * `running` arms key on `started_at`/`last_progress_at` — leaves it alone
+	 * until the broker's `started` callback flips it to `running` via
 	 * `promoteQueuedToRunning`. A separate `queuedTimeoutMs` safety net covers a
 	 * dead broker that never calls back. Only acts on a `pending` step — a
 	 * judge-phase dispatch (the step is already `running`) is a no-op here, so

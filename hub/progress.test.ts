@@ -21,7 +21,7 @@ process.env.AWB_HOME = path.join(tmpHome, ".agent-webhook-bridge");
 
 const { createAwbHook } = await import("./awb.ts");
 const { insertStep, insertWorkflow, markStepRunning, getStep } = await import("./db.ts");
-const { probeStepProgress, stepActivity } = await import("./progress.ts");
+const { probeStepProgress, pruneProbes, stepActivity } = await import("./progress.ts");
 const { loadConfig } = await import("./config.ts");
 const { claudeProjectDir } = await import("./transcript.ts");
 
@@ -124,6 +124,24 @@ test("probes are throttled unless forced", () => {
 	assert.ok(probeStepProgress(workflow, step, cfg, true)); // forced: always looks
 	assert.equal(probeStepProgress(workflow, step, cfg), null); // throttled right after
 	assert.ok(probeStepProgress(workflow, step, cfg, true)); // the sweep's decision always forces
+});
+
+test("pruning forgets the throttle of steps that are no longer running", () => {
+	const { workflow, step, agentName } = makeRunningStep();
+	write(path.join(String(process.env.AWB_HOME), "logs", `${agentName}-1.log`), new Date());
+
+	assert.ok(probeStepProgress(workflow, step, cfg, true));
+	assert.equal(probeStepProgress(workflow, step, cfg), null); // throttled
+
+	// The sweep reports the in-flight steps; this one settled, so its entry goes
+	// (the map must not keep a slot for every step the daemon ever ran).
+	pruneProbes(new Set<string>());
+
+	assert.ok(probeStepProgress(workflow, step, cfg)); // no entry left → not throttled
+	// A step that IS still running keeps its throttle across a prune.
+	assert.equal(probeStepProgress(workflow, step, cfg), null);
+	pruneProbes(new Set([step.id]));
+	assert.equal(probeStepProgress(workflow, step, cfg), null);
 });
 
 /**

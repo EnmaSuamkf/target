@@ -45,7 +45,7 @@ import {
 	type Workflow,
 	type WorkflowStatus,
 } from "./db.ts";
-import { forgetProbe, humanizeSeconds, probeStepProgress, stepActivity } from "./progress.ts";
+import { forgetProbe, humanizeSeconds, probeStepProgress, pruneProbes, stepActivity } from "./progress.ts";
 import { dispatchStep, type Logger } from "./runner.ts";
 
 export class WorkflowError extends Error {}
@@ -58,7 +58,13 @@ export class WorkflowError extends Error {}
  * able to say "active 4s ago" instead of only finding out at the deadline.
  */
 function refreshProgress(cfg: HubConfig): void {
-	for (const step of listRunningSteps()) {
+	const running = listRunningSteps();
+	// The throttle is keyed by step id and this is the only place that knows
+	// which steps are still in flight, so it's also where the entries of settled
+	// steps are dropped — otherwise the map would grow by one slot per step the
+	// daemon has ever run.
+	pruneProbes(new Set(running.map((step) => step.id)));
+	for (const step of running) {
 		const workflow = getWorkflow(step.workflowId);
 		if (workflow) recordFreshSignal(step, workflow, cfg);
 	}
@@ -699,7 +705,7 @@ export async function onStepResult(
 	// A step only awaits a result callback while it's `running` or `queued`. If
 	// it's neither it was already resolved another way — aborted via the
 	// "Abort" action (`failRunningStep`), timed out by the stale-step sweep
-	// (`expireStaleSteps`), or reset by a restart. Drop the late callback so it
+	// (`expireStale`), or reset by a restart. Drop the late callback so it
 	// can't corrupt the step's new state (e.g. a stale judge verdict landing on
 	// a step that's since been re-run). A `queued` step accepting its result
 	// here means the broker's `started` callback was lost in flight (the run

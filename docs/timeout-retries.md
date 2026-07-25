@@ -115,6 +115,8 @@ ran on workflow reads, i.e. only while someone had the UI open.
 
 - `hub/progress.ts` (new): the probe, the derived-state helper, the per-step
   probe throttle. Read-only and best-effort: any fs error yields "no signal".
+  The throttle map is pruned on every sweep down to the steps still `running`,
+  so a long-lived daemon doesn't keep a slot per step it has ever run.
 - `hub/db.ts`: `last_progress_at` / `last_progress_kind` / `last_progress_token`
   columns (added via the existing `addColumn` upgrade path, so old DBs migrate
   themselves), `recordStepProgress`, `listRunningSteps`, `findTimeoutCandidates`
@@ -138,7 +140,11 @@ ran on workflow reads, i.e. only while someone had the UI open.
 
 `hub/progress.test.ts` (new): freshest transcript wins (subagents included),
 free-code session files, the run-log fallback, "no artifact → no signal",
-fingerprint semantics, the throttle, and every derived state.
+fingerprint semantics, the throttle and its pruning, and every derived state.
+
+`hub/config.test.ts` (new): the documented defaults, and the compatibility rule
+— a config file carrying only the legacy `stepTimeoutMs` has it honored as the
+idle timeout, while an explicit `stepIdleTimeoutMs` wins.
 
 `hub/workflow.test.ts`: a long step whose agent is still writing is **not**
 timed out (the reported bug), a quiet step is timed out even though its

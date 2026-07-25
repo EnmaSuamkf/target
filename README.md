@@ -172,17 +172,37 @@ workflow.)
 Runs are serialized per `workdir` with a file lock (`flock`), so a second step
 on the same repo waits behind the first. A dispatched step is `queued` until
 the broker fires its `started` callback (the instant the lock is acquired and
-the run actually begins) — only then does it flip to `running` and its 20-min
-`stepTimeoutMs` clock start. So a step queued behind a long run isn't timed
-out while still waiting its turn. The lock is held by the spawned process
+the run actually begins) — only then does it flip to `running` and its idle
+clock start. So a step queued behind a long run isn't timed out while still
+waiting its turn. The lock is held by the spawned process
 itself, so it survives a broker restart (an orphaned child keeps holding it; a
 new broker's run for that workdir blocks until the orphan exits). A separate
 `queuedTimeoutMs` (default 6h) is the safety net for a dead broker that never
 sends `started`.
 
+### A step is timed out for going silent, not for taking long
+
+A `running` step is no longer failed on a wall clock. The hub watches the
+artifacts its harness writes (Claude Code transcripts — subagent transcripts
+included — free-code session files, and awb's run log) and only declares a
+timeout when **nothing has changed** for `stepIdleTimeoutMs` (default 10 min),
+or when the step blows past the absolute ceiling `stepHardTimeoutMs` (default
+6h) however busy it looks. A step that's genuinely working is left alone for
+as long as it keeps working; a hung one is caught sooner than the old 20-minute
+clock caught it.
+
+Each step exposes an `activity` state (`running-active` / `running-idle` /
+`stalled` / `timed-out-hard`), rendered in the UI next to the elapsed time as
+"active 8s ago" / "no activity 6m", and the timeout error now says why:
+`timeout (no progress for 12m; last signal: transcript at …)`. If no artifact
+is found at all (remote hook, unknown harness) the watchdog degrades to the
+old clock rather than blocking. The sweep runs on every workflow read and on a
+60s interval in the daemon, so an unattended hub still frees a hung step's
+workdir lock. See `docs/timeout-retries.md`.
+
 ### Timeouts consume the retry budget instead of failing outright
 
-A step that times out (either clock) with retry budget left (`maxRetries`
+A step that times out (any clock) with retry budget left (`maxRetries`
 minus retries already used) is **retried instead of failing the workflow**:
 the timeout consumes one retry, the hung run is best-effort killed on the
 broker (freeing the workdir lock), the step goes back to `pending` and is

@@ -592,7 +592,7 @@ hub    →  next pending, selected step dispatched     until none remain, then t
           <table>
             <thead><tr><th>What happened</th><th>How the step ends</th></tr></thead>
             <tbody>
-              <tr><td>The step's still <code>running</code> (actually executing) longer than the step timeout</td><td>If the step has retry budget left (<code>maxRetries</code> minus retries used), the timeout <strong>consumes one retry</strong>: the hung run is best-effort killed on the broker, the step goes back to <code>pending</code> and is re-dispatched on the same session with a note that the previous attempt timed out (honoring <code>retryIntervalSeconds</code>). Only with the budget spent (or <code>maxRetries: 0</code>, the default) is it marked <code>failed</code> with a timeout error, once anything reads the workflow/step list. A <code>queued</code> step waiting on the workdir lock is <em>not</em> timed out by this — it has its own much longer <code>queuedTimeoutMs</code>, which uses the same retry-then-fail rule.</td></tr>
+              <tr><td>The step's <code>running</code> but its agent has written nothing for <code>stepIdleTimeoutMs</code> (or it passed the <code>stepHardTimeoutMs</code> ceiling)</td><td>If the step has retry budget left (<code>maxRetries</code> minus retries used), the timeout <strong>consumes one retry</strong>: the hung run is best-effort killed on the broker, the step goes back to <code>pending</code> and is re-dispatched on the same session with a note that the previous attempt timed out (honoring <code>retryIntervalSeconds</code>). Only with the budget spent (or <code>maxRetries: 0</code>, the default) is it marked <code>failed</code> with a timeout error, once anything reads the workflow/step list. A <code>queued</code> step waiting on the workdir lock is <em>not</em> timed out by this — it has its own much longer <code>queuedTimeoutMs</code>, which uses the same retry-then-fail rule.</td></tr>
               <tr><td>The judge's verdict rejects the result</td><td>Retried on the same step, with feedback, until <code>maxRetries</code> is exhausted — then the workflow fails.</td></tr>
               <tr><td>The judge's verdict doesn't parse as JSON</td><td>The workflow fails immediately (deliberately, rather than guessing at the intended verdict).</td></tr>
               <tr><td>awb's result callback reports a non-zero exit</td><td><code>failed</code>, with the reported error/exit code.</td></tr>
@@ -600,15 +600,30 @@ hub    →  next pending, selected step dispatched     until none remain, then t
           </table>
         </div>
         <p>
-          Expiry is <strong>lazy</strong> — implemented in <code>db.ts</code>/<code>workflow.ts</code>'s
-          <code>expireStale</code>: any read of the workflow list or a workflow's detail first
-          fails any <code>running</code> step older than <code>stepTimeoutMs</code> (measured from
-          the broker's <code>started</code> callback, i.e. the true run start) and any
-          <code>queued</code> step older than <code>queuedTimeoutMs</code>, so timeouts are
-          enforced without a timer and survive hub restarts for free. A callback that
-          arrives after the timeout does not resurrect the step. A timed-out step with
-          retry budget left is retried right from that sweep instead of failing — the
-          timeout consumes one retry, exactly like a judge rejection.
+          A <code>running</code> step is timed out for going <strong>silent</strong>, not for
+          taking long. <code>hub/progress.ts</code> watches the artifacts the harness itself
+          writes — Claude Code transcripts (<code>~/.claude/projects/&lt;workdir-slug&gt;/</code>,
+          subagent transcripts included), free-code session files, and awb's per-run log —
+          and a step is only declared stalled once nothing has changed for
+          <code>stepIdleTimeoutMs</code>. It's a <code>stat</code>, not a parse, throttled to
+          <code>progressProbeThrottleMs</code> per step. If no artifact is found at all the
+          watchdog degrades to the plain clock rather than blocking, and
+          <code>stepHardTimeoutMs</code> is the ceiling nothing survives. Every step also
+          exposes a derived <code>activity</code> state
+          (<code>running-active</code> / <code>running-idle</code> / <code>stalled</code> /
+          <code>timed-out-hard</code>), which the UI shows as "active 8s ago" / "no activity 6m".
+        </p>
+        <p>
+          The sweep is <strong>two-phase</strong>, in <code>workflow.ts</code>'s
+          <code>expireStale</code>: <code>findTimeoutCandidates</code> (<code>db.ts</code>) only
+          <em>reads</em> the steps whose clocks ran out, then each idle candidate is re-probed
+          against the filesystem — one whose agent demonstrably just wrote something is spared.
+          It runs on any read of the workflow list or a workflow's detail (so timeouts survive
+          hub restarts for free) <em>and</em> on a 60s interval in <code>hub/daemon.ts</code>, so
+          an unattended hub still frees a hung step's workdir lock. A callback that arrives
+          after the timeout does not resurrect the step. A timed-out step with retry budget left
+          is retried right from that sweep instead of failing — the timeout consumes one retry,
+          exactly like a judge rejection.
         </p>
       </section>
 
@@ -626,7 +641,11 @@ hub    →  next pending, selected step dispatched     until none remain, then t
               <tr><td><code>host</code></td><td><code>127.0.0.1</code></td><td>Bind address for the hub's HTTP server.</td></tr>
               <tr><td><code>port</code></td><td><code>8893</code></td><td>Chosen away from awb's default (<code>8890</code>) and agentmesh-hub's (<code>8892</code>) so all three can share a machine.</td></tr>
               <tr><td><code>adminToken</code></td><td>random, generated on first load</td><td>Bearer token required by every mutating <code>/api</code> route. Printed at hub startup.</td></tr>
-              <tr><td><code>stepTimeoutMs</code></td><td><code>1200000</code> (20 minutes)</td><td>A step still <code>running</code> (actually executing, past the <code>started</code> callback) longer than this is lazily retried (if it has retry budget left) or marked <code>failed</code>.</td></tr>
+              <tr><td><code>stepIdleTimeoutMs</code></td><td><code>600000</code> (10 minutes)</td><td>A <code>running</code> step whose agent has shown <em>no sign of progress</em> for this long is declared stalled and lazily retried (if it has retry budget left) or marked <code>failed</code>. This is the timeout that matters — a step working away is never killed for being slow.</td></tr>
+              <tr><td><code>stepIdleWarnMs</code></td><td><code>180000</code> (3 minutes)</td><td>How long without progress before the UI shows the step as idle. Display only — nothing acts on it.</td></tr>
+              <tr><td><code>stepHardTimeoutMs</code></td><td><code>21600000</code> (6 hours)</td><td>Absolute ceiling measured from <code>started_at</code>: a step older than this is timed out however active it looks. Guards against a shared workdir whose <em>other</em> session keeps the artifacts warm forever.</td></tr>
+              <tr><td><code>progressProbeThrottleMs</code></td><td><code>5000</code> (5 seconds)</td><td>Minimum gap between two filesystem probes of the same step. The sweep runs on every workflow read, so the probe is throttled to stay cheap; the final decision to time a step out always forces a fresh probe.</td></tr>
+              <tr><td><code>stepTimeoutMs</code></td><td><code>1200000</code> (20 minutes)</td><td><strong>Legacy</strong>, no longer a wall clock. A config file that still sets it (and not <code>stepIdleTimeoutMs</code>) has that value used as the idle timeout, so a tuned install doesn't silently lose its setting.</td></tr>
               <tr><td><code>queuedTimeoutMs</code></td><td><code>21600000</code> (6 hours)</td><td>A step still <code>queued</code> (accepted by the broker but waiting on the workdir lock / its <code>started</code> callback) longer than this is lazily retried (if it has retry budget left) or marked <code>failed</code> — a safety net for a dead broker that never calls back.</td></tr>
               <tr><td><code>maxInputBytes</code></td><td><code>65536</code> (64 KiB)</td><td>Request body size cap enforced while reading JSON bodies; oversized bodies get <code>413</code>.</td></tr>
             </tbody>
