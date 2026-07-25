@@ -1,0 +1,123 @@
+/**
+ * Design tokens for the light theme.
+ *
+ * The previous UI was a dark terminal palette (near-black surfaces, a neon
+ * green accent, monospace everywhere). This is the opposite brief: a light,
+ * quiet document surface where colour carries meaning instead of decoration —
+ * neutral greys for structure, one indigo accent for interactive elements, and
+ * semantic hues reserved for run status. Monospace is kept, but only for the
+ * things that genuinely are machine identifiers (ids, paths, session tokens).
+ */
+
+:root {
+	/* Neutrals — the greys everything structural is built from. */
+	--gray-50: #f8fafc;
+	--gray-100: #f1f5f9;
+	--gray-200: #e2e8f0;
+	--gray-300: #cbd5e1;
+	--gray-400: #94a3b8;
+	--gray-500: #64748b;
+	--gray-600: #475569;
+	--gray-700: #334155;
+	--gray-800: #1e293b;
+	--gray-900: #0f172a;
+
+	/* Accent — interactive affordances only, never decoration. */
+	--accent-50: #eef2ff;
+	--accent-100: #e0e7ff;
+	--accent-200: #c7d2fe;
+	--accent-500: #6366f1;
+	--accent-600: #4f46e5;
+	--accent-700: #4338ca;
+
+	/* Semantic — reserved for run status so status is readable at a glance. */
+	--success-50: #ecfdf5;
+	--success-200: #a7f3d0;
+	--success-500: #10b981;
+	--success-700: #047857;
+
+	--warn-50: #fffbeb;
+	--warn-200: #fde68a;
+	--warn-500: #f59e0b;
+	--warn-700: #b45309;
+
+	--danger-50: #fef2f2;
+	--danger-200: #fecaca;
+	--danger-500: #ef4444;
+	--danger-600: #dc2626;
+	--danger-700: #b91c1c;
+
+	--info-50: #eff6ff;
+	--info-200: #bfdbfe;
+	--info-500: #3b82f6;
+	--info-700: #1d4ed8;
+
+	/* Semantic surface roles — components reference these, not raw greys, so
+	   the palette can move without touching every component. */
+	--bg: var(--gray-50);
+	--surface: #ffffff;
+	--surface-sunken: var(--gray-100);
+	--border: var(--gray-200);
+	--border-strong: var(--gray-300);
+	--text: var(--gray-900);
+	--text-muted: var(--gray-500);
+	--text-subtle: var(--gray-400);
+
+	/* Typography */
+	--font-sans:
+		-apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+	--font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+
+	--text-xs: 0.75rem;
+	--text-sm: 0.8125rem;
+	--text-base: 0.875rem;
+	--text-md: 0.9375rem;
+	--text-lg: 1.125rem;
+	--text-xl: 1.375rem;
+	--text-2xl: 1.75rem;
+
+	/* Spacing — a 4px scale; every gap/padding comes from here. */
+	--space-1: 0.25rem;
+	--space-2: 0.5rem;
+	--space-3: 0.75rem;
+	--space-4: 1rem;
+	--space-5: 1.25rem;
+	--space-6: 1.5rem;
+	--space-8: 2rem;
+	--space-10: 2.5rem;
+	--space-12: 3rem;
+
+	--radius-sm: 6px;
+	--radius: 8px;
+	--radius-md: 10px;
+	--radius-lg: 14px;
+	--radius-full: 999px;
+
+	/* Shadows — soft and low-contrast; depth comes from borders first. */
+	--shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.04);
+	--shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+	--shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08), 0 2px 4px rgba(15, 23, 42, 0.04);
+	--shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.12), 0 4px 8px rgba(15, 23, 42, 0.06);
+
+	--ring: 0 0 0 3px var(--accent-100);
+
+	--transition: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+
+	--header-height: 3.5rem;
+	--sidebar-width: 21rem;
+	--content-max: 78rem;
+}
+
+/* Respect a user's reduced-motion preference — the UI polls every 2s and
+   animates progress bars, which is exactly the kind of movement this setting
+   exists to suppress. */
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+}

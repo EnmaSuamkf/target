@@ -1,0 +1,92 @@
+.dock {
+	position: fixed;
+	bottom: var(--space-5);
+	left: var(--space-5);
+	z-index: 90;
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	padding: var(--space-2);
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-full);
+	box-shadow: var(--shadow-md);
+}
+
+.hint {
+	max-width: 18rem;
+	padding-left: var(--space-2);
+	font-size: var(--text-xs);
+	line-height: 1.4;
+	color: var(--text-muted);
+}
+
+.hintError {
+	color: var(--danger-600);
+}
+
+.lang {
+	appearance: none;
+	padding: var(--space-1) var(--space-2);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-full);
+	background: var(--surface-sunken);
+	color: var(--gray-600);
+	font-family: inherit;
+	font-size: var(--text-xs);
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.lang:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.mic {
+	display: grid;
+	place-items: center;
+	width: 2.25rem;
+	height: 2.25rem;
+	padding: 0;
+	border: none;
+	border-radius: 50%;
+	background: var(--accent-600);
+	color: #fff;
+	cursor: pointer;
+	transition: background var(--transition), transform var(--transition);
+}
+
+.mic svg {
+	width: 17px;
+	height: 17px;
+}
+
+.mic:hover:not(:disabled) {
+	background: var(--accent-700);
+}
+
+.mic:disabled {
+	background: var(--gray-300);
+	cursor: not-allowed;
+}
+
+/* Listening: red plus a halo, so it's unmistakable that the mic is live. */
+.listening {
+	background: var(--danger-500);
+	animation: mic-pulse 1.5s ease-in-out infinite;
+}
+
+.listening:hover:not(:disabled) {
+	background: var(--danger-600);
+}
+
+@keyframes mic-pulse {
+	0%,
+	100% {
+		box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.45);
+	}
+	50% {
+		box-shadow: 0 0 0 7px rgba(239, 68, 68, 0);
+	}
+}

@@ -13,7 +13,7 @@
  * AWB_HOME/hooks.json for the broker), so overriding those to test on spare
  * ports keeps the readiness poll pointed at whatever the daemons will bind.
  */
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -62,9 +62,32 @@ function endpointFromConfig(file: string, fallback: Endpoint): Endpoint {
 	}
 }
 
+function targetHome(): string {
+	return process.env.TARGET_HOME ?? path.join(os.homedir(), ".target");
+}
+
 function hubEndpoint(): Endpoint {
-	const home = process.env.TARGET_HOME ?? path.join(os.homedir(), ".target");
-	return endpointFromConfig(path.join(home, "config.json"), { host: "127.0.0.1", port: 8893 });
+	return endpointFromConfig(path.join(targetHome(), "config.json"), { host: "127.0.0.1", port: 8893 });
+}
+
+/**
+ * The admin token from the hub's config.
+ *
+ * A hub we spawned prints it itself on startup, but one we're only reusing
+ * printed it into whatever terminal started it — which isn't this one. Reading
+ * it here means `npm start` always shows the token, however the hub got up.
+ */
+function adminToken(): string | null {
+	try {
+		const cfg = JSON.parse(fs.readFileSync(path.join(targetHome(), "config.json"), "utf8")) as {
+			adminToken?: unknown;
+		};
+		return typeof cfg.adminToken === "string" && cfg.adminToken !== "" ? cfg.adminToken : null;
+	} catch {
+		// No config yet (first run, before the hub writes one) — the spawned hub
+		// prints the token itself, so this is never the only way to see it.
+		return null;
+	}
 }
 
 function brokerEndpoint(): Endpoint {
@@ -113,6 +136,48 @@ function killAll(components: Component[], signal: NodeJS.Signals = "SIGTERM"): v
 	}
 }
 
+/**
+ * Stops a service we didn't spawn, by finding whoever holds its port.
+ *
+ * A reused service has no child handle to signal, so the PID is resolved with
+ * `lsof` (falling back to `fuser`) and signalled directly. Best-effort by
+ * design: if neither tool exists, or the process is owned by another user,
+ * this reports and moves on rather than failing the shutdown.
+ */
+function stopByPort(comp: Component, signal: NodeJS.Signals): void {
+	const { port } = comp.endpoint;
+	let pids: number[] = [];
+
+	const lsof = spawnSync("lsof", ["-t", `-i:${port}`, "-sTCP:LISTEN"], { encoding: "utf8" });
+	if (lsof.status === 0 && lsof.stdout.trim()) {
+		pids = lsof.stdout.trim().split(/\s+/).map(Number).filter(Number.isInteger);
+	} else {
+		const fuser = spawnSync("fuser", [`${port}/tcp`], { encoding: "utf8" });
+		if (fuser.status === 0) {
+			const out = `${fuser.stdout ?? ""} ${fuser.stderr ?? ""}`;
+			pids = out.trim().split(/\s+/).map(Number).filter(Number.isInteger);
+		}
+	}
+
+	// Never signal ourselves: `npm start` isn't what's holding the port, but a
+	// bad parse shouldn't be able to take this process down either.
+	pids = pids.filter((pid) => pid > 0 && pid !== process.pid);
+
+	if (pids.length === 0) {
+		log(`could not find the process holding ${urlOf(comp.endpoint)} — stop ${comp.label} yourself.`, "warning");
+		return;
+	}
+
+	for (const pid of pids) {
+		try {
+			process.kill(pid, signal);
+			log(`stopped ${comp.label} (pid ${pid}).`);
+		} catch {
+			log(`could not stop ${comp.label} (pid ${pid}) — stop it yourself.`, "warning");
+		}
+	}
+}
+
 /** Opens the URL in the default browser; a failure is logged, never fatal. */
 function openBrowser(url: string): void {
 	const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
@@ -136,6 +201,12 @@ async function main(): Promise<void> {
 	}
 	if (!fs.existsSync(path.join(HUB_DIR, "node_modules"))) {
 		throw new StartError("hub dependencies are missing. Run `npm run target:install` first.");
+	}
+	// The UI is a Vite build (hub/ui/dist), not a checked-in file — without it
+	// the hub answers `/` with a plain-text notice instead of the app, which is
+	// a confusing way to find out the install step was skipped.
+	if (!fs.existsSync(path.join(HUB_DIR, "ui", "dist", "index.html"))) {
+		throw new StartError("the web UI isn't built. Run `npm run target:install` first.");
 	}
 
 	const components: Component[] = [
@@ -184,36 +255,77 @@ async function main(): Promise<void> {
 
 	openBrowser(urlOf(hub.endpoint));
 
+	const token = adminToken();
+	const reusedAny = components.some((c) => c.reused);
+
 	console.log(`
 Ready.
 
-  awb broker:  ${urlOf(broker.endpoint)}
-  target hub:  ${urlOf(hub.endpoint)}   (UI opened in your browser)
+  awb broker:  ${urlOf(broker.endpoint)}${broker.reused ? "   (reused)" : ""}
+  target hub:  ${urlOf(hub.endpoint)}   (UI opened in your browser)${hub.reused ? "   (reused)" : ""}
 
-The hub's admin token is printed above (also in ~/.target/config.json) — the
-UI asks for it and the CLI uses it automatically. Press Ctrl-C to stop both.
+  admin token: ${token ?? "(unavailable — see ~/.target/config.json)"}
+
+The UI asks for the token and the CLI uses it automatically.${
+		reusedAny ? "\nServices already running were reused; Ctrl-C stops them too." : ""
+	}
+Press Ctrl-C to stop both.
 `);
 
-	const spawned = components.filter((c) => c.child);
-	if (spawned.length === 0) {
-		log("both services were already running — nothing to hold; exiting.");
-		return;
-	}
-
-	// Hold the foreground until every child we started exits, and forward a
-	// Ctrl-C / SIGTERM to them so shutdown is clean rather than orphaning them.
+	// Hold the foreground until everything is down, and forward Ctrl-C /
+	// SIGTERM so shutdown is clean rather than orphaning anything.
+	//
+	// Reused services aren't our children — we can't wait on an `exit` event or
+	// signal them through a handle, so they're polled and stopped by PID. That
+	// keeps `npm start` behaving the same either way: it stays in the
+	// foreground and Ctrl-C takes the whole stack down, whether this invocation
+	// spawned the services or adopted ones already running.
 	await new Promise<void>((resolve) => {
+		const spawned = components.filter((c) => c.child);
+		const reused = components.filter((c) => !c.child);
 		let remaining = spawned.length;
+		let done = false;
+
+		const finish = (): void => {
+			if (done) return;
+			done = true;
+			clearInterval(watch);
+			resolve();
+		};
+
 		const onExit = (c: Component) => (code: number | null, signal: NodeJS.Signals | null): void => {
 			c.exited = true;
 			log(`${c.label} exited (${signal ?? `code ${code ?? 0}`}).`);
-			if (--remaining === 0) resolve();
+			if (--remaining === 0 && reused.length === 0) finish();
 		};
 		for (const c of spawned) c.child?.on("exit", onExit(c));
+
+		// Notice a reused service dying on its own (or being stopped from the
+		// terminal that started it) so we don't hold the foreground forever.
+		const watch = setInterval(() => {
+			void (async () => {
+				if (done || reused.length === 0) return;
+				for (const c of reused) {
+					if (c.exited) continue;
+					if (!(await isListening(c.endpoint))) {
+						c.exited = true;
+						log(`${c.label} is no longer listening.`);
+					}
+				}
+				if (components.every((c) => c.exited)) finish();
+			})();
+		}, 1000);
 
 		const shutdown = (signal: NodeJS.Signals): void => {
 			log(`received ${signal} — shutting down...`);
 			killAll(components, signal);
+			for (const c of reused) {
+				if (!c.exited) stopByPort(c, signal);
+			}
+			// Children report their own exit; reused ones are gone once the port
+			// stops answering, which the watcher above picks up. Give both a beat,
+			// then leave regardless so Ctrl-C never appears to hang.
+			setTimeout(finish, 1500);
 		};
 		process.on("SIGINT", () => shutdown("SIGINT"));
 		process.on("SIGTERM", () => shutdown("SIGTERM"));

@@ -1,0 +1,414 @@
+import { useEffect, useMemo, useState } from "react";
+import type { Template, TemplateInput, TemplateStep } from "../api/types.ts";
+import { EmptyState } from "../components/EmptyState.tsx";
+import { Field } from "../components/Field.tsx";
+import { relativeTime } from "../lib/format.ts";
+import styles from "./TemplatesView.module.css";
+
+/**
+ * Templates: reusable ordered step lists that seed a new workflow or get
+ * appended to an existing one. They never execute, so there's no status or
+ * session here — just a name, tags, and the steps with their judge config.
+ *
+ * Search filters locally on name and tags (the API also accepts `?q=`, but
+ * filtering in the browser is instant and the list is small by nature).
+ */
+export function TemplatesView({
+	templates,
+	busy,
+	onCreate,
+	onUpdate,
+	onDelete,
+}: {
+	templates: Template[];
+	busy: boolean;
+	onCreate: (input: TemplateInput) => Promise<void>;
+	onUpdate: (id: string, input: TemplateInput) => Promise<void>;
+	onDelete: (id: string) => void;
+}): React.JSX.Element {
+	const [query, setQuery] = useState("");
+	const [tagFilter, setTagFilter] = useState("");
+	const [editingId, setEditingId] = useState<string | null>(null);
+	const [creating, setCreating] = useState(false);
+
+	const allTags = useMemo(() => {
+		const tags = new Set<string>();
+		for (const template of templates) for (const tag of template.tags) tags.add(tag);
+		return [...tags].sort();
+	}, [templates]);
+
+	const visible = useMemo(() => {
+		const q = query.trim().toLowerCase();
+		return templates
+			.filter((t) => (tagFilter === "" ? true : t.tags.includes(tagFilter)))
+			.filter((t) =>
+				q === "" ? true : t.name.toLowerCase().includes(q) || t.tags.some((tag) => tag.toLowerCase().includes(q)),
+			)
+			.sort((a, b) => a.name.localeCompare(b.name));
+	}, [templates, query, tagFilter]);
+
+	const editing = editingId ? (templates.find((t) => t.id === editingId) ?? null) : null;
+
+	// If the template being edited disappears (deleted elsewhere), leave the form.
+	useEffect(() => {
+		if (editingId && !templates.some((t) => t.id === editingId)) setEditingId(null);
+	}, [templates, editingId]);
+
+	const showForm = creating || editing !== null;
+
+	return (
+		<div className={styles.layout}>
+			<aside className={styles.listPanel} aria-label="Templates">
+				<div className={styles.head}>
+					<div className={styles.headRow}>
+						<h2 className={styles.heading}>
+							Templates
+							{templates.length > 0 && <span className={styles.count}>{templates.length}</span>}
+						</h2>
+						<button
+							type="button"
+							className="btn btn--primary btn--sm"
+							onClick={() => {
+								setEditingId(null);
+								setCreating(true);
+							}}
+						>
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
+								<path d="M12 5v14M5 12h14" />
+							</svg>
+							New
+						</button>
+					</div>
+
+					{templates.length > 0 && (
+						<>
+							<input
+								type="search"
+								className="input"
+								placeholder="Search by name or tag…"
+								value={query}
+								onChange={(ev) => setQuery(ev.target.value)}
+								aria-label="Search templates"
+							/>
+							{allTags.length > 0 && (
+								<div className={styles.tags} role="group" aria-label="Filter by tag">
+									<button
+										type="button"
+										className={`${styles.tag} ${tagFilter === "" ? styles.tagActive : ""}`}
+										onClick={() => setTagFilter("")}
+										aria-pressed={tagFilter === ""}
+									>
+										All
+									</button>
+									{allTags.map((tag) => (
+										<button
+											key={tag}
+											type="button"
+											className={`${styles.tag} ${tagFilter === tag ? styles.tagActive : ""}`}
+											onClick={() => setTagFilter(tag)}
+											aria-pressed={tagFilter === tag}
+										>
+											{tag}
+										</button>
+									))}
+								</div>
+							)}
+						</>
+					)}
+				</div>
+
+				<div className={styles.list}>
+					{visible.length === 0 ? (
+						templates.length === 0 ? (
+							<EmptyState
+								title="No templates yet"
+								description="Save a step list you repeat, then use it to seed new workflows."
+								action={
+									<button type="button" className="btn btn--primary btn--sm" onClick={() => setCreating(true)}>
+										Create a template
+									</button>
+								}
+							/>
+						) : (
+							<EmptyState title="No matches" description="Try a different search or clear the tag filter." />
+						)
+					) : (
+						visible.map((template) => (
+							<button
+								key={template.id}
+								type="button"
+								className={`${styles.card} ${template.id === editingId ? styles.cardSelected : ""}`}
+								onClick={() => {
+									setCreating(false);
+									setEditingId(template.id);
+								}}
+								aria-current={template.id === editingId ? "true" : undefined}
+							>
+								<span className={styles.cardName}>{template.name}</span>
+								<span className={styles.cardMeta}>
+									{template.steps.length} step{template.steps.length === 1 ? "" : "s"} ·{" "}
+									{relativeTime(template.updatedAt)}
+								</span>
+								{template.tags.length > 0 && (
+									<span className={styles.cardTags}>
+										{template.tags.map((tag) => (
+											<span key={tag} className={styles.cardTag}>
+												{tag}
+											</span>
+										))}
+									</span>
+								)}
+							</button>
+						))
+					)}
+				</div>
+			</aside>
+
+			<section className={styles.formPanel}>
+				{showForm ? (
+					<TemplateForm
+						key={editing?.id ?? "new"}
+						template={editing}
+						busy={busy}
+						onCancel={() => {
+							setCreating(false);
+							setEditingId(null);
+						}}
+						onDelete={editing ? () => onDelete(editing.id) : undefined}
+						onSubmit={async (input) => {
+							if (editing) await onUpdate(editing.id, input);
+							else await onCreate(input);
+							setCreating(false);
+						}}
+					/>
+				) : (
+					<EmptyState
+						title="No template selected"
+						description="Pick a template to edit it, or create a new one."
+						action={
+							<button type="button" className="btn btn--primary btn--sm" onClick={() => setCreating(true)}>
+								New template
+							</button>
+						}
+					/>
+				)}
+			</section>
+		</div>
+	);
+}
+
+/** Create/edit form for a template and its ordered steps. */
+function TemplateForm({
+	template,
+	busy,
+	onSubmit,
+	onCancel,
+	onDelete,
+}: {
+	template: Template | null;
+	busy: boolean;
+	onSubmit: (input: TemplateInput) => Promise<void>;
+	onCancel: () => void;
+	onDelete?: (() => void) | undefined;
+}): React.JSX.Element {
+	const [name, setName] = useState(template?.name ?? "");
+	const [tags, setTags] = useState(template?.tags.join(", ") ?? "");
+	const [steps, setSteps] = useState<TemplateStep[]>(template?.steps ?? []);
+	const [saving, setSaving] = useState(false);
+
+	const updateStep = (index: number, patch: Partial<TemplateStep>): void => {
+		setSteps((current) => current.map((step, i) => (i === index ? { ...step, ...patch } : step)));
+	};
+
+	const move = (index: number, delta: number): void => {
+		setSteps((current) => {
+			const target = index + delta;
+			if (target < 0 || target >= current.length) return current;
+			const next = [...current];
+			const [moved] = next.splice(index, 1);
+			if (moved) next.splice(target, 0, moved);
+			return next;
+		});
+	};
+
+	const submit = async (ev: React.FormEvent): Promise<void> => {
+		ev.preventDefault();
+		const trimmedName = name.trim();
+		if (!trimmedName || saving) return;
+		setSaving(true);
+		try {
+			await onSubmit({
+				name: trimmedName,
+				tags: tags
+					.split(",")
+					.map((t) => t.trim())
+					.filter(Boolean),
+				// Drop blank rows rather than persisting empty steps.
+				steps: steps
+					.map((step) => ({ ...step, description: step.description.trim() }))
+					.filter((step) => step.description !== ""),
+			});
+		} finally {
+			setSaving(false);
+		}
+	};
+
+	return (
+		<form className={styles.form} onSubmit={submit}>
+			<div className={styles.formHead}>
+				<h2 className={styles.heading}>{template ? "Edit template" : "New template"}</h2>
+				{onDelete && (
+					<button type="button" className="btn btn--sm btn--danger" onClick={onDelete} disabled={busy || saving}>
+						Delete
+					</button>
+				)}
+			</div>
+
+			<Field label="Name" required>
+				{(props) => (
+					<input
+						{...props}
+						type="text"
+						className="input"
+						value={name}
+						placeholder="e.g. release checklist"
+						onChange={(ev) => setName(ev.target.value)}
+						required
+					/>
+				)}
+			</Field>
+
+			<Field label="Tags" hint="Comma-separated, used for search and filtering.">
+				{(props) => (
+					<input
+						{...props}
+						type="text"
+						className="input"
+						value={tags}
+						placeholder="release, docs"
+						onChange={(ev) => setTags(ev.target.value)}
+					/>
+				)}
+			</Field>
+
+			<div className={styles.stepsBlock}>
+				<div className={styles.stepsHead}>
+					<span className="label">Steps</span>
+					<span className="hint">{steps.length} total</span>
+				</div>
+
+				{steps.length === 0 && <p className="hint">No steps yet — add the first one below.</p>}
+
+				<div className={styles.stepRows}>
+					{steps.map((step, index) => (
+						// Index keys are correct here: these rows are positional and
+						// reordering is an explicit user action that rewrites the list.
+						<div key={index} className={styles.stepRow}>
+							<div className={styles.stepRowHead}>
+								<span className={styles.stepRowIndex}>{index + 1}</span>
+								<div className={styles.stepRowControls}>
+									<button
+										type="button"
+										className="btn btn--sm btn--ghost"
+										onClick={() => move(index, -1)}
+										disabled={index === 0}
+										aria-label={`Move step ${index + 1} up`}
+									>
+										↑
+									</button>
+									<button
+										type="button"
+										className="btn btn--sm btn--ghost"
+										onClick={() => move(index, 1)}
+										disabled={index === steps.length - 1}
+										aria-label={`Move step ${index + 1} down`}
+									>
+										↓
+									</button>
+									<button
+										type="button"
+										className="btn btn--sm btn--ghost"
+										onClick={() => setSteps((current) => current.filter((_, i) => i !== index))}
+										aria-label={`Remove step ${index + 1}`}
+									>
+										✕
+									</button>
+								</div>
+							</div>
+
+							<textarea
+								className="textarea"
+								value={step.description}
+								placeholder="What the agent should do in this step…"
+								onChange={(ev) => updateStep(index, { description: ev.target.value })}
+								aria-label={`Step ${index + 1} description`}
+							/>
+							<textarea
+								className="textarea"
+								value={step.acceptanceCriteria ?? ""}
+								placeholder="Optional acceptance criteria — empty = no judge."
+								onChange={(ev) => updateStep(index, { acceptanceCriteria: ev.target.value || null })}
+								aria-label={`Step ${index + 1} acceptance criteria`}
+							/>
+
+							<div className={styles.stepRowGrid}>
+								<label className={styles.smallField}>
+									<span className="hint">Max retries</span>
+									<input
+										type="number"
+										className="input"
+										min={0}
+										step={1}
+										value={step.maxRetries}
+										onChange={(ev) =>
+											updateStep(index, { maxRetries: Math.max(0, parseInt(ev.target.value, 10) || 0) })
+										}
+									/>
+								</label>
+								<label className={styles.smallField}>
+									<span className="hint">Interval (s)</span>
+									<input
+										type="number"
+										className="input"
+										min={0}
+										step={1}
+										value={step.maxRetries > 1 ? step.retryIntervalSeconds : 0}
+										disabled={step.maxRetries <= 1}
+										onChange={(ev) =>
+											updateStep(index, {
+												retryIntervalSeconds: Math.max(0, parseInt(ev.target.value, 10) || 0),
+											})
+										}
+										title="Only applies with more than one retry."
+									/>
+								</label>
+							</div>
+						</div>
+					))}
+				</div>
+
+				<button
+					type="button"
+					className={styles.addStep}
+					onClick={() =>
+						setSteps((current) => [
+							...current,
+							{ description: "", acceptanceCriteria: null, maxRetries: 0, retryIntervalSeconds: 0 },
+						])
+					}
+				>
+					+ Add step
+				</button>
+			</div>
+
+			<div className={styles.formActions}>
+				<button type="submit" className="btn btn--primary" disabled={name.trim() === "" || saving}>
+					{saving ? "Saving…" : template ? "Save changes" : "Create template"}
+				</button>
+				<button type="button" className="btn" onClick={onCancel} disabled={saving}>
+					Cancel
+				</button>
+			</div>
+		</form>
+	);
+}

@@ -36,10 +36,18 @@ if the node in your PATH is older).
 npm run target:install
 ```
 
-One command from the repo root: installs the hub's dependencies, clones
+One command from the repo root: installs the hub's dependencies, installs and
+**builds the web UI** (`hub/ui` → `hub/ui/dist`), clones
 `agent-webhook-bridge` into `vendor/` (gitignored) and installs its own. It's
 idempotent — re-run it any time. Set `AWB_DIR` to point at an existing
 `agent-webhook-bridge` clone instead of vendoring a second copy.
+
+The UI is the only part of the repo with a build step, so `npm start` refuses
+to boot until `hub/ui/dist` exists. Rebuild it on its own with:
+
+```bash
+npm run ui:build
+```
 
 ## Usage
 
@@ -53,8 +61,9 @@ answer, then opens the UI in your default browser. It stays in the foreground
 holding both; press **Ctrl-C** to stop them together. If either is already
 running it's reused rather than started twice.
 
-The hub prints its **admin token** on startup (it also lives in
-`~/.target/config.json`) — the UI asks for it and the CLI uses it automatically.
+The hub prints its **admin token** on startup, and `npm start` also shows it
+in its `Ready.` block (it always lives in `~/.target/config.json`) — the UI
+asks for it and the CLI uses it automatically.
 
 ```bash
 node hub/cli.ts create "release-notes" [--workdir <dir>] [--permission-mode acceptEdits]
@@ -69,9 +78,47 @@ node hub/cli.ts list
 node hub/cli.ts show <workflowId>
 ```
 
-Or from the UI at `http://127.0.0.1:8893` (the **Workflow** section): create a
-workflow, add steps with the `+ Add step` button, watch the progress bar,
-Start/Pause/Resume/Restart, and edit a pending step before restarting.
+Or from the UI at `http://127.0.0.1:8893`: create a workflow, add steps with
+`Add step`, tick the steps to run, watch the progress bar, Start/Stop, and edit
+a pending step before starting it over.
+
+### The web UI
+
+A React + Vite single-page app in `hub/ui`, served by the hub as static files
+from `hub/ui/dist`. The hub itself stays dependency-free at runtime — it only
+reads the built output.
+
+| Path | What it is |
+|---|---|
+| `hub/ui/src` | Application source (components, views, API client) |
+| `hub/ui/dist` | Build output the hub serves (gitignored) |
+| `hub/ui/legacy-index.html` | The previous single-file UI, kept for reference |
+
+Working on it:
+
+```bash
+npm run ui:dev     # Vite dev server on :5173, proxying /api to the hub
+npm run ui:build   # production build into hub/ui/dist
+npm run typecheck  # type-checks the hub and the UI
+```
+
+`ui:dev` gives hot reload while proxying API calls to a hub started separately
+with `npm start`. Point it at a hub on another port with `TARGET_HUB_ORIGIN`.
+
+Notes on behaviour worth knowing:
+
+- **Admin token.** Stored in `localStorage` under `targetAdminToken` and sent as
+  `Authorization: Bearer <token>`. Set it from the button in the header; the app
+  warns while none is stored, since every mutating action would 401.
+- **Step selection.** Start/Resume/Start-over dispatch exactly the ticked steps.
+  Nothing ticked runs nothing, so the button is disabled rather than a silent
+  no-op.
+- **One Start button.** It maps to the action that fits the status — `start`
+  when draft, `resume` when paused, `restart` when completed or failed.
+- **Live updates.** The hub has no streaming endpoint, so the UI polls every 2s.
+  Polling pauses while the tab is hidden and resumes on focus.
+- **Deep links.** The selected workflow is in the URL hash (`#/w/<id>`), so a
+  reload or a shared link reopens it.
 
 ### Conversation context
 

@@ -1,0 +1,26 @@
+.form {
+	display: grid;
+	gap: var(--space-4);
+}
+
+/* The bypassPermissions confirmation. Styled as a warning because it's the one
+   choice in this form that hands the agent unrestricted command execution. */
+.risk {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--space-3);
+	padding: var(--space-3);
+	border: 1px solid var(--danger-200);
+	border-radius: var(--radius);
+	background: var(--danger-50);
+	font-size: var(--text-xs);
+	line-height: 1.55;
+	color: var(--danger-700);
+	cursor: pointer;
+}
+
+.risk input {
+	flex: none;
+	margin-top: 2px;
+	accent-color: var(--danger-600);
+}

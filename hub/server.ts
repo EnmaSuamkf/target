@@ -72,14 +72,73 @@ import {
 } from "./workflow.ts";
 import { getStep } from "./db.ts";
 
-const UI_FILE = path.join(import.meta.dirname, "ui", "index.html");
+/**
+ * The UI is a React app (hub/ui) built by Vite into hub/ui/dist. The hub only
+ * ever serves those built files — it has no bundler and no build step of its
+ * own, so `npm run target:install` is what produces this directory.
+ */
+const UI_DIR = path.join(import.meta.dirname, "ui", "dist");
+const UI_FILE = path.join(UI_DIR, "index.html");
+
+const CONTENT_TYPES: Record<string, string> = {
+	".html": "text/html; charset=utf-8",
+	".js": "text/javascript; charset=utf-8",
+	".css": "text/css; charset=utf-8",
+	".json": "application/json; charset=utf-8",
+	".map": "application/json; charset=utf-8",
+	".svg": "image/svg+xml; charset=utf-8",
+	".png": "image/png",
+	".jpg": "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif": "image/gif",
+	".webp": "image/webp",
+	".ico": "image/x-icon",
+	".woff": "font/woff",
+	".woff2": "font/woff2",
+};
+
+/**
+ * Serves a file from the built UI directory, or returns false when there's
+ * nothing to serve.
+ *
+ * The resolved path is checked to still be inside `UI_DIR`, so a crafted
+ * `/assets/../../..` can't read outside the build output. Vite fingerprints
+ * asset filenames, so everything under `/assets/` is immutable and cached hard
+ * while `index.html` is never cached (it's what points at the current hashes).
+ */
+function serveStatic(res: http.ServerResponse, pathname: string): boolean {
+	const relative = pathname.replace(/^\/+/, "");
+	if (relative === "") return false;
+
+	const resolved = path.resolve(UI_DIR, relative);
+	if (resolved !== UI_DIR && !resolved.startsWith(UI_DIR + path.sep)) return false;
+
+	let stat: fs.Stats;
+	try {
+		stat = fs.statSync(resolved);
+	} catch {
+		return false;
+	}
+	if (!stat.isFile()) return false;
+
+	const immutable = pathname.startsWith("/assets/");
+	res.writeHead(200, {
+		"content-type": CONTENT_TYPES[path.extname(resolved).toLowerCase()] ?? "application/octet-stream",
+		"content-length": stat.size,
+		"cache-control": immutable ? "public, max-age=31536000, immutable" : "no-cache",
+	});
+	fs.createReadStream(resolved).pipe(res);
+	return true;
+}
 
 // A small "target" bullseye served as the page favicon (see /favicon.svg).
+// Recoloured for the light UI — the old near-black tile was drawn for the
+// previous dark theme and looked like a hole punched in the tab strip.
 const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="7" fill="#0e1416"/>
-  <circle cx="16" cy="16" r="12" fill="none" stroke="#4a9eff" stroke-width="2.5"/>
-  <circle cx="16" cy="16" r="7" fill="none" stroke="#4a9eff" stroke-width="2.5"/>
-  <circle cx="16" cy="16" r="2.6" fill="#4a9eff"/>
+  <rect width="32" height="32" rx="7" fill="#4f46e5"/>
+  <circle cx="16" cy="16" r="9.5" fill="none" stroke="#ffffff" stroke-width="2.4"/>
+  <circle cx="16" cy="16" r="4.5" fill="none" stroke="#ffffff" stroke-width="2.4"/>
+  <circle cx="16" cy="16" r="1.6" fill="#ffffff"/>
 </svg>`;
 
 function timingSafeEqualStr(a: string, b: string): boolean {
@@ -234,11 +293,13 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	if (req.method === "GET" && url.pathname === "/") {
 		try {
 			const html = fs.readFileSync(UI_FILE);
-			res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+			res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
 			res.end(html);
 		} catch {
 			res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
-			res.end("target-hub is running. The web UI isn't built yet — use the API.");
+			res.end(
+				"target-hub is running, but the web UI isn't built.\n\nBuild it with:\n  npm run target:install\n\n(or, from hub/ui: npm install && npm run build)\n\nThe API is available meanwhile.",
+			);
 		}
 		return;
 	}
@@ -254,6 +315,12 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	if (req.method === "GET" && url.pathname === "/favicon.ico") {
 		res.writeHead(204, { "content-type": "image/x-icon" });
 		res.end();
+		return;
+	}
+
+	// Built UI assets (/assets/... plus anything else Vite emitted). Checked
+	// before the catch-all 404 so the single-page app can load its own bundle.
+	if (req.method === "GET" && parts[0] !== "api" && serveStatic(res, url.pathname)) {
 		return;
 	}
 

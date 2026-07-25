@@ -6,3 +6,6 @@ vendor/
 *.db
 *.sqlite
 *.sqlite3
+
+# Built web UI (produced by `npm run target:install` / `npm run ui:build`).
+hub/ui/dist/
