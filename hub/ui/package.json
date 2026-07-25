@@ -1,7 +1,7 @@
 {
   "name": "target-ui",
   "version": "0.1.0",
-  "description": "Target hub UI — React + Vite single-page app served as static files by hub/server.ts.",
+  "description": "The Target Project hub UI — React + Vite single-page app served as static files by hub/server.ts.",
   "private": true,
   "type": "module",
   "engines": {

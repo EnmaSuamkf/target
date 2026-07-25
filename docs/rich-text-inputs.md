@@ -1,6 +1,6 @@
 # Feature: Expandable rich-text inputs
 
-Every multi-line text field in the Target web UI (step descriptions,
+Every multi-line text field in The Target Project web UI (step descriptions,
 acceptance criteria, conversation context, template steps) has an **expand**
 button in its top-right corner. Clicking it opens a popup with a large
 formatting-capable editor; pressing **OK** writes the edited text back into
@@ -27,7 +27,7 @@ bullet/numbered lists, without changing what the field ultimately holds.
   `Modal` component, so focus trapping, Escape and backdrop dismissal come
   for free.
 - **Markdown at rest** (`hub/ui/src/lib/richtext.ts`). Everything typed in
-  Target ultimately becomes plain text handed to an agent, so the editor
+  The Target Project ultimately becomes plain text handed to an agent, so the editor
   stores Markdown, not HTML. On open the field's Markdown is rendered to
   HTML (`markdownToHtml`); on OK the edited DOM is serialized back
   (`htmlToMarkdown`): `**bold**`, `*italic*`, `- ` / `1. ` lists, `#`

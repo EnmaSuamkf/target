@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { CreateWorkflowInput, PermissionMode, Runner, Template } from "../api/types.ts";
+import { DirectoryBrowser } from "../components/DirectoryBrowser.tsx";
 import { Field } from "../components/Field.tsx";
 import { Modal } from "../components/Modal.tsx";
 import styles from "./CreateWorkflowModal.module.css";
@@ -57,6 +58,7 @@ export function CreateWorkflowModal({
 	const [templateId, setTemplateId] = useState("");
 	const [acceptRisk, setAcceptRisk] = useState(false);
 	const [saving, setSaving] = useState(false);
+	const [browsing, setBrowsing] = useState(false);
 
 	// Fresh form on every open.
 	useEffect(() => {
@@ -67,6 +69,7 @@ export function CreateWorkflowModal({
 		setPermissionMode("");
 		setTemplateId("");
 		setAcceptRisk(false);
+		setBrowsing(false);
 	}, [open]);
 
 	const bypass = permissionMode === "bypassPermissions";
@@ -126,19 +129,42 @@ export function CreateWorkflowModal({
 
 				<Field
 					label="Working directory"
-					hint="Where this workflow's agent works. Leave empty for a dedicated sandbox under ~/.target/sandboxes/."
+					hint="Where this workflow's agent works. Leave empty for a dedicated sandbox under ~/.target/sandboxes/. Type a path or browse with …"
 				>
 					{(props) => (
-						<input
-							{...props}
-							type="text"
-							className="input"
-							value={workdir}
-							placeholder="~/my-project"
-							onChange={(ev) => setWorkdir(ev.target.value)}
-						/>
+						<div className={styles.workdirRow}>
+							<input
+								{...props}
+								type="text"
+								className="input"
+								value={workdir}
+								placeholder="~/my-project"
+								onChange={(ev) => setWorkdir(ev.target.value)}
+							/>
+							<button
+								type="button"
+								className="btn"
+								onClick={() => setBrowsing((value) => !value)}
+								aria-expanded={browsing}
+								aria-label="Browse directories"
+								title="Browse directories"
+							>
+								…
+							</button>
+						</div>
 					)}
 				</Field>
+
+				{browsing && (
+					<DirectoryBrowser
+						initialPath={workdir}
+						onSelect={(path) => {
+							setWorkdir(path);
+							setBrowsing(false);
+						}}
+						onClose={() => setBrowsing(false)}
+					/>
+				)}
 
 				<Field
 					label="Agent runtime"

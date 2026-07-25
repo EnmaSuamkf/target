@@ -1,5 +1,5 @@
 /**
- * Persisted configuration for the target hub.
+ * Persisted configuration for The Target Project hub.
  *
  * File: ~/.target/config.json (override the directory with TARGET_HOME,
  * useful for tests). The admin token is generated on first load and stored

@@ -1,5 +1,5 @@
 /**
- * One-command install for target: hub dependencies + the local
+ * One-command install for The Target Project: hub dependencies + the local
  * agent-webhook-bridge (awb) install the hub can't work without — it spawns
  * every step's `claude` run and hosts the hooks `hub/awb.ts` writes.
  *

@@ -14,6 +14,7 @@
  */
 import type {
 	CreateWorkflowInput,
+	DirListing,
 	SessionInfo,
 	Step,
 	StepConfigInput,
@@ -210,6 +211,18 @@ export function addStepsFromTemplate(
 		`/api/workflows/${workflowId}/steps/from-template`,
 		{ method: "POST", admin: true, body: json({ templateId }) },
 	);
+}
+
+// --- filesystem (directory picker) ---
+
+/**
+ * Lists the subdirectories of `path` on the hub's machine. Empty path (or
+ * "~") starts at the hub user's home. Admin-gated: it exposes filesystem
+ * structure, so it needs the same token as every mutating route.
+ */
+export function listDirs(path?: string): Promise<DirListing> {
+	const query = path && path.trim() !== "" ? `?path=${encodeURIComponent(path.trim())}` : "";
+	return request<DirListing>(`/api/fs/dirs${query}`, { admin: true });
 }
 
 // --- templates ---

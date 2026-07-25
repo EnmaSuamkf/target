@@ -1,5 +1,5 @@
 /**
- * `npm start`: boots the agent-webhook-bridge (awb) broker and the target hub
+ * `npm start`: boots the agent-webhook-bridge (awb) broker and The Target Project hub
  * together, waits until both ports actually answer, opens the UI in a browser,
  * then holds the foreground with both children attached. Ctrl-C (SIGINT) or
  * SIGTERM tears both down cleanly.
@@ -211,7 +211,7 @@ async function main(): Promise<void> {
 
 	const components: Component[] = [
 		{ label: "awb broker", endpoint: brokerEndpoint(), reused: false, exited: false },
-		{ label: "target hub", endpoint: hubEndpoint(), reused: false, exited: false },
+		{ label: "The Target Project hub", endpoint: hubEndpoint(), reused: false, exited: false },
 	];
 
 	// Spawn each component only if its port isn't already answering — a broker
@@ -230,9 +230,9 @@ async function main(): Promise<void> {
 	}
 
 	if (hub.reused) {
-		log(`target hub already listening on ${urlOf(hub.endpoint)} — reusing it.`);
+		log(`The Target Project hub already listening on ${urlOf(hub.endpoint)} — reusing it.`);
 	} else {
-		log(`starting target hub (${urlOf(hub.endpoint)})...`);
+		log(`starting The Target Project hub (${urlOf(hub.endpoint)})...`);
 		hub.child = spawn(process.execPath, ["daemon.ts"], { cwd: HUB_DIR, stdio: "inherit" });
 	}
 
@@ -262,7 +262,7 @@ async function main(): Promise<void> {
 Ready.
 
   awb broker:  ${urlOf(broker.endpoint)}${broker.reused ? "   (reused)" : ""}
-  target hub:  ${urlOf(hub.endpoint)}   (UI opened in your browser)${hub.reused ? "   (reused)" : ""}
+  The Target Project hub:  ${urlOf(hub.endpoint)}   (UI opened in your browser)${hub.reused ? "   (reused)" : ""}
 
   admin token: ${token ?? "(unavailable — see ~/.target/config.json)"}
 

@@ -1,7 +1,7 @@
 /**
  * Markdown ⇄ HTML conversion for the rich-text popup editor.
  *
- * Every value in Target is ultimately plain text handed to an agent, so the
+ * Every value in The Target Project is ultimately plain text handed to an agent, so the
  * editor stores Markdown, not HTML. The popup renders that Markdown as real
  * formatting (bold, italic, lists, headings) in a contentEditable surface and
  * converts back on save. The subset is deliberately small — exactly what the

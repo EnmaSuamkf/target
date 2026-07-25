@@ -105,6 +105,18 @@ export interface SessionInfo {
 	usage: TokenUsage | null;
 }
 
+/** One level of the server-side directory listing (GET /api/fs/dirs). */
+export interface DirListing {
+	/** Absolute, resolved path of the listed directory. */
+	path: string;
+	/** Absolute parent path, or null at the filesystem root. */
+	parent: string | null;
+	/** The hub user's home directory (for the picker's "Home" shortcut). */
+	home: string;
+	/** Subdirectory names (visible first, then hidden, both sorted). */
+	dirs: string[];
+}
+
 /** Payload accepted by POST /api/workflows. */
 export interface CreateWorkflowInput {
 	name: string;

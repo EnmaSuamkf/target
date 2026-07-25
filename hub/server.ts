@@ -1,5 +1,5 @@
 /**
- * HTTP listener for the target hub: JSON API + the UI's static page.
+ * HTTP listener for The Target Project hub: JSON API + the UI's static page.
  *
  * Routes:
  *   GET    /health                                   → liveness
@@ -24,6 +24,7 @@
  *   GET    /api/templates                              → list templates (optional ?q= filters by name/tag)
  *   POST   /api/templates                               → create a template (admin token)
  *   GET    /api/templates/:id                            → template detail
+ *   GET    /api/fs/dirs?path=<dir>                        → list subdirectories (admin token; for the UI's directory picker)
  *   PATCH  /api/templates/:id                            → update a template (admin token)
  *   DELETE /api/templates/:id                            → remove a template (admin token)
  *   GET    /                                           → ui/index.html
@@ -459,6 +460,68 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
+	// --- /api/fs/dirs (directory picker for the create-workflow form) ---
+	//
+	// Lists the subdirectories of a path on the hub's machine so the UI can
+	// offer a click-through directory browser instead of forcing the operator
+	// to type the workdir by hand. Exposes filesystem structure, so it's
+	// admin-gated like every other route that touches the operator's machine.
+	// `~` expands to the hub user's home; an empty/missing path starts there.
+
+	if (parts[1] === "fs" && parts[2] === "dirs" && !parts[3] && req.method === "GET") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		const raw = (url.searchParams.get("path") ?? "").trim();
+		const expanded = raw === "" ? os.homedir() : raw.replace(/^~(?=\/|$)/, os.homedir());
+		const resolved = path.resolve(expanded);
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(resolved, { withFileTypes: true });
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			sendJson(res, 400, {
+				error:
+					code === "ENOENT"
+						? `no such directory: ${resolved}`
+						: code === "ENOTDIR"
+							? `not a directory: ${resolved}`
+							: code === "EACCES"
+								? `permission denied: ${resolved}`
+								: `cannot read directory: ${resolved}`,
+			});
+			return;
+		}
+		const dirs = entries
+			.filter((entry) => {
+				if (entry.isDirectory()) return true;
+				if (!entry.isSymbolicLink()) return false;
+				// Follow symlinks only far enough to know they point at a directory.
+				try {
+					return fs.statSync(path.join(resolved, entry.name)).isDirectory();
+				} catch {
+					return false;
+				}
+			})
+			.map((entry) => entry.name)
+			.sort((a, b) => {
+				// Hidden directories after visible ones, both alphabetically.
+				const aHidden = a.startsWith(".");
+				const bHidden = b.startsWith(".");
+				if (aHidden !== bHidden) return aHidden ? 1 : -1;
+				return a.localeCompare(b);
+			});
+		const parent = path.dirname(resolved);
+		sendJson(res, 200, {
+			path: resolved,
+			parent: parent === resolved ? null : parent,
+			home: os.homedir(),
+			dirs,
+		});
 		return;
 	}
 

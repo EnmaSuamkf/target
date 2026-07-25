@@ -1,0 +1,96 @@
+.panel {
+	display: grid;
+	gap: var(--space-2);
+	padding: var(--space-3);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--gray-50);
+}
+
+.toolbar {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	min-width: 0;
+}
+
+/* Current path — truncated from the left so the tail (the interesting part)
+   stays visible when it overflows. */
+.path {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	direction: rtl;
+	text-align: left;
+	font-family: var(--font-mono);
+	font-size: var(--text-xs);
+	color: var(--text-subtle);
+}
+
+.list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	max-height: 13rem;
+	overflow-y: auto;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	background: var(--bg);
+}
+
+.list[aria-busy="true"] {
+	opacity: 0.6;
+}
+
+.empty {
+	padding: var(--space-3);
+	font-size: var(--text-xs);
+	color: var(--text-subtle);
+}
+
+.dir {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	width: 100%;
+	padding: var(--space-2) var(--space-3);
+	border: 0;
+	background: transparent;
+	font: inherit;
+	font-size: var(--text-sm);
+	color: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+.dir:hover:not(:disabled) {
+	background: var(--accent-50);
+	color: var(--accent-700);
+}
+
+.dir:disabled {
+	cursor: default;
+}
+
+.dir svg {
+	flex: none;
+	color: var(--gray-400);
+}
+
+.dir:hover:not(:disabled) svg {
+	color: var(--accent-600);
+}
+
+.dirName {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: var(--space-2);
+}

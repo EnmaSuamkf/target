@@ -26,13 +26,20 @@ const LANG_KEY = "targetVoiceLang";
 
 type EditableElement = HTMLInputElement | HTMLTextAreaElement;
 
+/** Anything dictation can write into: form fields or a contenteditable host
+ * (the rich-text popup editor is a contenteditable div, not a textarea). */
+type DictationTarget = EditableElement | HTMLElement;
+
 const DICTATABLE_INPUT_TYPES = ["text", "password", "number", "search", "email", "url", "tel"];
 
-function isEditable(el: EventTarget | null): el is EditableElement {
+function isEditable(el: EventTarget | null): el is DictationTarget {
 	if (!(el instanceof HTMLElement)) return false;
 	if (el instanceof HTMLTextAreaElement) return true;
 	if (el instanceof HTMLInputElement) return DICTATABLE_INPUT_TYPES.includes((el.type || "text").toLowerCase());
-	return false;
+	// contenteditable surfaces (e.g. the rich-text popup editor). True for any
+	// element inside an editable host, which is fine — insertion goes through
+	// a dedicated text node planted at the caret, not the element reference.
+	return el.isContentEditable;
 }
 
 /**
@@ -102,12 +109,15 @@ export function useDictation(): Dictation {
 	const [hintIsError, setHintIsError] = useState(false);
 
 	const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
-	const lastFieldRef = useRef<EditableElement | null>(null);
+	const lastFieldRef = useRef<DictationTarget | null>(null);
 	// Target field and the replace region for the current dictation session.
-	const targetRef = useRef<EditableElement | null>(null);
+	const targetRef = useRef<DictationTarget | null>(null);
 	const insertStartRef = useRef(0);
 	const insertEndRef = useRef(0);
 	const committedRef = useRef("");
+	// For contenteditable targets: a dedicated text node at the caret that each
+	// recognition result rewrites, so interim guesses replace instead of append.
+	const ceNodeRef = useRef<Text | null>(null);
 	const hintTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
 	const showHint = useCallback((text: string, isError = false) => {
@@ -157,6 +167,25 @@ export function useDictation(): Dictation {
 		const target = targetRef.current;
 		if (!target) return;
 
+		// contenteditable target: rewrite the dedicated text node in place.
+		const ceNode = ceNodeRef.current;
+		if (ceNode) {
+			ceNode.data = committedRef.current + text;
+			const selection = window.getSelection();
+			if (selection) {
+				const range = document.createRange();
+				range.setStart(ceNode, ceNode.data.length);
+				range.collapse(true);
+				selection.removeAllRanges();
+				selection.addRange(range);
+			}
+			target.dispatchEvent(new Event("input", { bubbles: true }));
+			if (isFinal) committedRef.current += text;
+			return;
+		}
+
+		if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) return;
+
 		const before = target.value.slice(0, insertStartRef.current);
 		const after = target.value.slice(insertEndRef.current);
 		const next = before + committedRef.current + text + after;
@@ -192,8 +221,29 @@ export function useDictation(): Dictation {
 
 		targetRef.current = field;
 		committedRef.current = "";
-		insertStartRef.current = typeof field.selectionStart === "number" ? field.selectionStart : field.value.length;
-		insertEndRef.current = typeof field.selectionEnd === "number" ? field.selectionEnd : field.value.length;
+		ceNodeRef.current = null;
+
+		if (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) {
+			insertStartRef.current = typeof field.selectionStart === "number" ? field.selectionStart : field.value.length;
+			insertEndRef.current = typeof field.selectionEnd === "number" ? field.selectionEnd : field.value.length;
+		} else {
+			// contenteditable: plant an empty text node at the caret (replacing any
+			// selection), or at the end when the selection lives elsewhere. Every
+			// recognition result rewrites this node.
+			const node = document.createTextNode("");
+			const selection = window.getSelection();
+			let range: Range;
+			if (selection && selection.rangeCount > 0 && field.contains(selection.getRangeAt(0).startContainer)) {
+				range = selection.getRangeAt(0);
+				range.deleteContents();
+			} else {
+				range = document.createRange();
+				range.selectNodeContents(field);
+				range.collapse(false);
+			}
+			range.insertNode(node);
+			ceNodeRef.current = node;
+		}
 
 		const recognition = new Ctor();
 		recognition.lang = lang;
