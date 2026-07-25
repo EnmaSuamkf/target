@@ -8,7 +8,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { createAwbHook, deleteAwbHook, type HookOptions } from "./awb.ts";
+import { createAwbHook, deleteAwbHook, abortAwbRun, type HookOptions } from "./awb.ts";
 import { targetDir, type HubConfig } from "./config.ts";
 import {
 	beginRetry,
@@ -23,6 +23,7 @@ import {
 	insertStep,
 	insertWorkflow,
 	listSteps,
+	listWorkflows,
 	markStepJudging,
 	nextPendingStep,
 	resetSteps,
@@ -44,10 +45,39 @@ import { dispatchStep, type Logger } from "./runner.ts";
 
 export class WorkflowError extends Error {}
 
-/** Fails any step stuck past its timeout and, for a still-`running` workflow that owned one, fails the workflow too — otherwise it would sit stuck forever with no step left to dispatch. */
+/**
+ * Fails any step stuck past its timeout. A timed-out step with retry budget
+ * left (`retryCount < maxRetries`) is NOT terminal: it consumes one retry and
+ * is re-dispatched (mirroring the judge-reject retry path), so a transient
+ * hang doesn't kill the whole workflow while the operator explicitly allowed
+ * retries. Only when the budget is spent (or was never granted) does the
+ * timeout fail the step for good — and, for a still-`running` workflow that
+ * owned it, fail the workflow too, otherwise it would sit stuck forever with
+ * no step left to dispatch.
+ */
 export function expireStale(cfg: HubConfig, log: Logger): void {
-	const affected = expireStaleSteps(cfg.stepTimeoutMs);
-	for (const workflowId of affected) {
+	const expired = expireStaleSteps(cfg.stepTimeoutMs, cfg.queuedTimeoutMs);
+	const failedWorkflowIds = new Set<string>();
+	for (const { stepId, workflowId } of expired) {
+		const step = getStep(stepId);
+		const workflow = getWorkflow(workflowId);
+		if (step && workflow && step.retryCount < step.maxRetries) {
+			// Retry budget left → consume one retry and re-run the step instead of
+			// failing the workflow. `beginRetry` runs synchronously here so the
+			// step is back to `pending` (and the heal below leaves the workflow
+			// alone) before this sweep returns; the re-dispatch itself is
+			// fire-and-forget so a read-path caller isn't blocked by the retry
+			// interval or the dispatch round-trip.
+			beginRetry(stepId); // status → pending, retry_count++, keeps is_manual_run
+			writeStatusMd(workflowId);
+			log(`step ${stepId} timed out — retrying (${step.retryCount + 1}/${step.maxRetries})`, "warning");
+			const retried = getStep(stepId);
+			if (retried) void retryTimedOutStep(retried, workflow, cfg, log);
+			continue;
+		}
+		failedWorkflowIds.add(workflowId);
+	}
+	for (const workflowId of failedWorkflowIds) {
 		const workflow = getWorkflow(workflowId);
 		if (workflow?.status === "running") {
 			setWorkflowStatus(workflowId, "failed");
@@ -55,10 +85,67 @@ export function expireStale(cfg: HubConfig, log: Logger): void {
 		}
 		writeStatusMd(workflowId);
 	}
+	healSettledStatuses(log);
+}
+
+/**
+ * Re-dispatches a step whose previous attempt timed out (its retry was
+ * already consumed by `expireStale`, which put it back to `pending`).
+ * Best-effort kills the timed-out run on the broker first — the old process
+ * may still be hung, holding the workdir `flock`, and the retry would
+ * otherwise just queue behind that zombie until it too timed out. Honors the
+ * step's `retryIntervalSeconds` like a judge-reject retry, then re-reads the
+ * step and only dispatches if it's still `pending` (an abort/restart/manual
+ * ▶ run in the meantime wins). The re-run resumes the workflow's shared
+ * session and carries a note that the previous attempt timed out, so the
+ * agent continues from partial progress instead of starting over blind.
+ */
+async function retryTimedOutStep(step: Step, workflow: Workflow, cfg: HubConfig, log: Logger): Promise<void> {
+	await abortAwbRun(workflow.hookUrl, workflow.secret, step.id, log);
+	if (step.retryIntervalSeconds > 0) {
+		log(`step ${step.id} waiting ${step.retryIntervalSeconds}s before the timeout retry`);
+		await wait(step.retryIntervalSeconds);
+	}
+	const current = getStep(step.id);
+	if (!current || current.status !== "pending") return; // resolved another way meanwhile
+	await dispatchStep(current, workflow, cfg, log, {
+		resumeSession: true,
+		manual: current.manualRun,
+		timedOut: true,
+	});
+	if (current.manualRun) {
+		// A manual ▶ run stays outside the sequential engine: a dead dispatch
+		// already marked the step failed, so just reconcile; otherwise refresh.
+		if (getStep(step.id)?.status === "failed") settleManual(step.workflowId, log);
+		else writeStatusMd(step.workflowId);
+	} else {
+		failWorkflowIfDispatchDied(step.id, step.workflowId, "timeout retry", log);
+	}
+}
+
+/**
+ * Read-path self-heal, run on every workflow GET (via `expireStale`): any
+ * workflow whose steps are ALL settled (none pending, none running) must show
+ * the status those steps add up to — `failed` if any step is failed, else
+ * `completed` (or `draft` for a running workflow left with zero steps). This
+ * recomputes the badge after events the engine never gets a callback for
+ * (deleting the remaining pending steps of a `running` workflow, DB states
+ * written by older buggy versions), so stale rows like "running at 100%" or
+ * "completed with a red bar" fix themselves on the next read instead of
+ * sticking forever. Workflows with pending/running steps are left strictly
+ * alone: the engine (or the operator's next Start) owns those, and addStep's
+ * deliberate terminal→draft reset must survive a read.
+ */
+function healSettledStatuses(log: Logger): void {
+	for (const workflow of listWorkflows()) {
+		const steps = listSteps(workflow.id);
+		if (steps.some((s) => s.status === "pending" || s.status === "running" || s.status === "queued")) continue;
+		if (reconcileStatus(workflow.id, log)) writeStatusMd(workflow.id);
+	}
 }
 
 function statusMark(status: Step["status"]): string {
-	return { pending: " ", running: "~", done: "x", failed: "!" }[status];
+	return { pending: " ", queued: ".", running: "~", done: "x", failed: "!" }[status];
 }
 
 /** Truncates the conversation context for the one-line summary in the progress .md. */
@@ -229,7 +316,7 @@ export function editStep(
 	if (!trimmed) throw new WorkflowError("description is required");
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
-	if (step.status === "running") throw new WorkflowError("cannot edit a step while its job is running");
+	if (step.status === "running" || step.status === "queued") throw new WorkflowError("cannot edit a step while its job is running");
 	updateStepDescription(stepId, trimmed);
 	// Only touch the judge config when the caller actually sent fields — a plain
 	// description edit shouldn't silently wipe an existing criterion.
@@ -268,20 +355,43 @@ export function removeStep(workflowId: string, stepId: string): void {
  * place that reconciles it after the fact instead of duplicating the check at
  * every call site. Nothing here is sticky: re-running a step that had failed
  * until it succeeds clears the workflow's `failed` badge, since only the last
- * attempt of each step counts. Leaves `running` alone (that's `advance()`'s own
- * job) and never downgrades a deliberate `paused` to `draft`.
+ * attempt of each step counts. A `running` workflow is normally `advance()`'s
+ * own job — but a workflow can be left `running` with its engine permanently
+ * idle: no step in flight and no pending step left at all (e.g. the pending
+ * steps were removed after the others finished). No callback will ever arrive
+ * to settle that, so it IS reconciled here instead of sitting stuck at 100%
+ * `running` forever. A `running` workflow that still has ANY pending or
+ * running step is left strictly alone — that covers a step in flight, a
+ * pending retry mid-wait, and the deliberate "0 selected steps stay running"
+ * behavior. Never downgrades a deliberate `paused` to `draft`. Returns whether
+ * it actually changed the status, so read-path callers know to rewrite the .md.
  */
-function reconcileStatus(workflowId: string, log?: Logger): void {
+function reconcileStatus(workflowId: string, log?: Logger): boolean {
 	const workflow = getWorkflow(workflowId);
-	if (!workflow || workflow.status === "running") return;
+	if (!workflow) return false;
+	if (workflow.status === "running") {
+		const steps = listSteps(workflowId);
+		// Any step still pending or in flight — the engine may yet act; hands off.
+		if (steps.some((s) => s.status === "running" || s.status === "pending" || s.status === "queued")) return false;
+	}
 	const progress = stepProgress(workflowId);
-	if (progress.total === 0) return;
+	if (progress.total === 0) {
+		// Every step was deleted out from under a running-but-idle workflow —
+		// there is nothing left to run, so `running` would be a lie forever.
+		if (workflow.status === "running") {
+			setWorkflowStatus(workflowId, "draft");
+			log?.(`workflow ${workflowId} draft`);
+			return true;
+		}
+		return false;
+	}
 	const derived: WorkflowStatus =
 		progress.failed > 0 ? "failed" : progress.done === progress.total ? "completed" : "draft";
-	if (derived === workflow.status) return;
-	if (derived === "draft" && workflow.status === "paused") return;
+	if (derived === workflow.status) return false;
+	if (derived === "draft" && workflow.status === "paused") return false;
 	setWorkflowStatus(workflowId, derived);
 	log?.(`workflow ${workflowId} ${derived}`);
+	return true;
 }
 
 /**
@@ -301,13 +411,18 @@ async function advance(workflowId: string, cfg: HubConfig, log: Logger): Promise
 	const workflow = getWorkflow(workflowId);
 	if (!workflow || workflow.status !== "running") return;
 	const steps = listSteps(workflowId);
-	if (steps.some((s) => s.status === "running")) return; // a step is already in flight
+	if (steps.some((s) => s.status === "running" || s.status === "queued")) return; // a step is already in flight (running or queued on the workdir lock)
 	const next = nextPendingStep(workflowId);
 	if (!next) {
 		if (steps.some((s) => s.status === "pending")) return; // unselected steps still pending — not actually done
-		setWorkflowStatus(workflowId, "completed");
+		// Every step has run. The terminal badge must agree with the progress
+		// bar: a step still `failed` (e.g. an old failure left outside a re-run
+		// selection) makes the workflow `failed`, not `completed` — only
+		// all-done reads as done.
+		const terminal: WorkflowStatus = steps.some((s) => s.status === "failed") ? "failed" : "completed";
+		setWorkflowStatus(workflowId, terminal);
 		writeStatusMd(workflowId);
-		log(`workflow ${workflowId} completed`);
+		log(`workflow ${workflowId} ${terminal}`, terminal === "failed" ? "error" : "info");
 		return;
 	}
 	await dispatchStep(next, workflow, cfg, log);
@@ -488,13 +603,17 @@ export async function onStepResult(
 ): Promise<void> {
 	const step = getStep(stepId);
 	if (!step) return;
-	// A step only awaits a result callback while it's `running`. If it's no
-	// longer running it was already resolved another way — aborted via the
+	// A step only awaits a result callback while it's `running` or `queued`. If
+	// it's neither it was already resolved another way — aborted via the
 	// "Abort" action (`failRunningStep`), timed out by the stale-step sweep
 	// (`expireStaleSteps`), or reset by a restart. Drop the late callback so it
 	// can't corrupt the step's new state (e.g. a stale judge verdict landing on
-	// a step that's since been re-run).
-	if (step.status !== "running") return;
+	// a step that's since been re-run). A `queued` step accepting its result
+	// here means the broker's `started` callback was lost in flight (the run
+	// began and finished without us hearing the start); `completeStep`/
+	// `markStepJudging` both accept `queued`, so we settle it directly rather
+	// than dropping it — losing the start is not a reason to lose the result.
+	if (step.status !== "running" && step.status !== "queued") return;
 
 	// On-demand ▶ run: outside the sequential engine, but still judged if the
 	// step carries acceptance criteria.
@@ -742,7 +861,7 @@ export async function runStep(workflowId: string, stepId: string, cfg: HubConfig
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
-	if (listSteps(workflowId).some((s) => s.status === "running")) {
+	if (listSteps(workflowId).some((s) => s.status === "running" || s.status === "queued")) {
 		throw new WorkflowError("a step is already running for this workflow");
 	}
 	if (!startManualRun(stepId)) throw new WorkflowError("this step is already running");
@@ -752,25 +871,39 @@ export async function runStep(workflowId: string, stepId: string, cfg: HubConfig
 }
 
 /**
- * Aborts a step stuck `running` (a dispatch whose awb callback never came
- * back — e.g. a hung judge). Marks it `failed` with `error = "aborted"` while
- * preserving its session id, so the conversation it established is still
- * reachable and the operator can re-run the step via the ▶ button once it's
- * no longer `running`. Mirrors `onStepResult`'s failure path: a failed step
+ * Aborts a step stuck `running` or `queued` (a dispatch whose awb callback
+ * never came back — e.g. a hung judge, or a run still queued on the workdir
+ * lock). Marks it `failed` with `error = "aborted"` while preserving its
+ * session id, so the conversation it established is still reachable and the
+ * operator can re-run the step via the ▶ button once it's no longer
+ * `running`/`queued`. Mirrors `onStepResult`'s failure path: a failed step
  * fails the workflow, and a later successful ▶ re-run reconciles it back out
  * of `failed`. Any late awb callback for the aborted step is ignored by the
- * `status === "running"` guard in `onStepResult`. Only a `running` step can be
+ * status guard in `onStepResult`. Only a `running`/`queued` step can be
  * aborted; aborting a step in any other state throws.
+ *
+ * ALSO kills the spawned process on the broker (the fix for the original
+ * bug: the step showed `failed` but the orphaned agent kept running for hours,
+ * holding the workdir `flock` and blocking every other workflow on that repo).
+ * `abortAwbRun` POSTs the hook's `/abort` endpoint with `{ jobId }`; the broker
+ * SIGTERM/SIGKILLs the whole process group. Best-effort: a broker that's down
+ * or a run that already finished just log a warning — the DB settling must not
+ * be blocked by the kill, since the operator wants the step failed now either
+ * way. Async because the kill is a network call.
  */
-export function abortStep(workflowId: string, stepId: string): Workflow {
+export async function abortStep(workflowId: string, stepId: string, log?: Logger): Promise<Workflow> {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
-	if (step.status !== "running") throw new WorkflowError("only a running step can be aborted");
+	if (step.status !== "running" && step.status !== "queued") throw new WorkflowError("only a running step can be aborted");
 	if (!failRunningStep(stepId, "aborted")) throw new WorkflowError("only a running step can be aborted");
 	setWorkflowStatus(workflowId, "failed");
 	writeStatusMd(workflowId);
+	// Kill the spawned process on the broker so it stops holding the workdir
+	// `flock`. Fire after the DB is settled so the operator sees `failed` first;
+	// never let a broker error undo the abort (best-effort).
+	if (log) await abortAwbRun(workflow.hookUrl, workflow.secret, stepId, log);
 	const updated = getWorkflow(workflowId);
 	if (!updated) throw new WorkflowError("workflow disappeared");
 	return updated;

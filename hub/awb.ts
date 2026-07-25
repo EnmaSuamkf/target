@@ -222,3 +222,52 @@ export function deleteAwbHook(name: string): boolean {
 		return false;
 	}
 }
+
+/**
+ * Best-effort abort of an in-flight run on the local awb broker: POSTs the
+ * hook's `/abort` endpoint with `{ jobId }`, authenticated with the hook's
+ * shared secret. The broker looks up the run's process-group leader (the row
+ * it registered at spawn time) and SIGTERMs/SIGKILLs the whole group — flock,
+ * the bash shim, and the agent binary — which is what actually frees the
+ * workdir `flock` for the next run.
+ *
+ * Called from `hub/workflow.ts` `abortStep` so aborting a stuck step also
+ * kills the spawned process that's still holding the workdir, not just the
+ * DB row (which was the old bug: the step showed `failed` but the orphaned
+ * agent kept running for hours, blocking everything else on that repo).
+ *
+ * Never throws — a broker that's down, a hook that's gone, or a run that
+ * already finished on its own all resolve to a logged warning, since none of
+ * them should block the abort from settling the step in the DB. Returns
+ * whether the broker acknowledged the kill (true = a live run was signalled,
+ * false = nothing to kill / broker unreachable). `cfg` is only used for the
+ * `AWB_HOME` directory lookup in `inspectLocalHook`, not for any secret.
+ */
+export async function abortAwbRun(hookUrl: string, secret: string, jobId: string, log: (msg: string, type?: "info" | "warning" | "error") => void): Promise<boolean> {
+	const info = inspectLocalHook(hookUrl);
+	if (!info.local || !info.found || !info.name) {
+		log(`abort: hook not local/found, skipping broker kill`, "warning");
+		return false;
+	}
+	// Build the /abort URL from the hook URL: same origin + /hook/<name>/abort.
+	const abortUrl = new URL(hookUrl);
+	abortUrl.pathname = `/hook/${encodeURIComponent(info.name)}/abort`;
+	try {
+		const res = await fetch(abortUrl, {
+			method: "POST",
+			headers: { "content-type": "application/json", "x-webhook-secret": secret },
+			body: JSON.stringify({ jobId }),
+			signal: AbortSignal.timeout(5_000),
+		});
+		if (!res.ok) {
+			log(`abort: broker /abort answered ${res.status}`, "warning");
+			return false;
+		}
+		const body = (await res.json()) as { killed?: boolean };
+		log(`abort: broker killed=${body.killed === true}`);
+		return body.killed === true;
+	} catch (err) {
+		log(`abort: broker /abort unreachable: ${String(err)}`, "warning");
+		return false;
+	}
+}

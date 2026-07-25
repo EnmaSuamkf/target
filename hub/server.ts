@@ -44,6 +44,7 @@ import {
 } from "./awb.ts";
 import type { HubConfig } from "./config.ts";
 import {
+	promoteQueuedToRunning,
 	deleteTemplate,
 	getWorkflow,
 	insertTemplate,
@@ -196,6 +197,7 @@ function publicStep(step: Step): Record<string, unknown> {
 		sessionId: step.sessionId,
 		createdAt: step.createdAt,
 		startedAt: step.startedAt,
+		queuedAt: step.queuedAt,
 		finishedAt: step.finishedAt,
 		manualRun: step.manualRun,
 		acceptanceCriteria: step.acceptanceCriteria,
@@ -334,6 +336,32 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 
 	if (parts[0] !== "api") {
 		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
+	// --- /api/steps/:id/started (awb callback; per-step token, no admin) ---
+	//
+	// The broker POSTs `{started: true}` here the instant the run actually
+	// begins (after the workdir `flock` is acquired). That flips a `queued` step
+	// to `running` and starts its timeout clock at the true run start — so a
+	// step queued behind another on the same workdir isn't timed out while
+	// still waiting its turn. Authenticated with the same per-step token as the
+	// result callback. A late/extra `started` for a step that's no longer
+	// `queued` (already running, done, aborted, etc.) is a no-op. Best-effort:
+	// if this callback is lost, the result callback still settles the step
+	// (see `onStepResult`'s `queued` branch) and the `queuedTimeoutMs` safety
+	// net eventually fails it.
+
+	if (parts[1] === "steps" && parts[2] && parts[3] === "started" && req.method === "POST") {
+		const step = getStep(parts[2]);
+		const token = url.searchParams.get("token") ?? "";
+		if (!step || !token || !timingSafeEqualStr(token, step.callbackToken)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		const promoted = promoteQueuedToRunning(step.id);
+		if (promoted) log(`step ${step.id} started (queued -> running)`);
+		sendJson(res, 200, { ok: true, promoted });
 		return;
 	}
 
@@ -863,24 +891,29 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		return;
 	}
 
-	// --- /api/workflows/:id/steps/:stepId/abort (abort a step stuck running) ---
+	// --- /api/workflows/:id/steps/:stepId/abort (abort a step stuck running/queued) ---
 	//
-	// For a step whose dispatch never called back (a hung exec or judge), this
-	// force-fails it so the operator can re-run it via ▶ without restarting the
-	// whole workflow. Preserves the step's session id. Admin-gated (mutating).
+	// For a step whose dispatch never called back (a hung exec or judge) or
+	// that's still queued on the workdir lock, this force-fails it so the
+	// operator can re-run it via ▶ without restarting the whole workflow.
+	// Preserves the step's session id, and kills the spawned process on the
+	// broker (so an orphaned agent stops holding the workdir `flock`).
+	// Admin-gated (mutating). Async because the broker kill is a network call.
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "abort" && !parts[6] && req.method === "POST") {
 		if (!isAdmin(cfg, req.headers)) {
 			sendJson(res, 401, { error: "unauthorized" });
 			return;
 		}
-		try {
-			const workflow = abortStep(workflowId, parts[4]);
-			log(`workflow ${workflowId} step ${parts[4]} aborted`);
-			sendJson(res, 200, { workflow: publicWorkflow(workflow) });
-		} catch (err) {
-			sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
-		}
+		(async () => {
+			try {
+				const workflow = await abortStep(workflowId, parts[4], log);
+				log(`workflow ${workflowId} step ${parts[4]} aborted`);
+				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
+			} catch (err) {
+				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		})();
 		return;
 	}
 

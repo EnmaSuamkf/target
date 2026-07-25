@@ -36,7 +36,8 @@ const {
 	setWorkflowStatus,
 	startManualRun,
 } = await import("./db.ts");
-const { onStepResult, pauseWorkflow, resumeWorkflow, restartWorkflow, startWorkflow } = await import("./workflow.ts");
+const { expireStale, onStepResult, pauseWorkflow, removeStep, resumeWorkflow, restartWorkflow, startWorkflow } =
+	await import("./workflow.ts");
 const { loadConfig } = await import("./config.ts");
 
 const cfg = loadConfig();
@@ -362,6 +363,171 @@ test("advance() marks completed when every step is truly done, even with an empt
 	// the one case where "no next step" really does mean the workflow is done.
 	await restartWorkflow(workflow.id, cfg, silent, []);
 	assert.equal(getWorkflow(workflow.id)?.status, "completed");
+});
+
+/**
+ * Status/progress coherence: the badge must always agree with what the bar
+ * shows. Two real-world reports drove these: (1) deleting the remaining
+ * pending steps of a `running` workflow left it "running" at a full blue bar
+ * forever (no callback ever arrives to settle it), and (2) a workflow could
+ * read "completed" while a step was still failed (red bar + green badge).
+ */
+test("removing the last pending steps of a running workflow settles it to completed", () => {
+	const { workflow, steps } = makeWorkflow(3);
+	completeStep(steps[0].id, { ok: true });
+	setWorkflowStatus(workflow.id, "running"); // engine idle: nothing in flight
+
+	removeStep(workflow.id, steps[1].id);
+	// One pending step remains — the engine may still act, so hands off.
+	assert.equal(getWorkflow(workflow.id)?.status, "running");
+
+	removeStep(workflow.id, steps[2].id);
+	// Now every remaining step is done and nothing can ever call back: settled.
+	assert.equal(getWorkflow(workflow.id)?.status, "completed");
+});
+
+test("removing every step of a running workflow settles it back to draft", () => {
+	const { workflow, steps } = makeWorkflow(1);
+	setWorkflowStatus(workflow.id, "running");
+
+	removeStep(workflow.id, steps[0].id);
+
+	assert.equal(getWorkflow(workflow.id)?.status, "draft");
+});
+
+test("a running workflow with a failed step and no pending work settles to failed when its pending steps are removed", () => {
+	const { workflow, steps } = makeWorkflow(3);
+	completeStep(steps[0].id, { ok: true });
+	completeStep(steps[1].id, { ok: false, error: "boom" });
+	setWorkflowStatus(workflow.id, "running");
+
+	removeStep(workflow.id, steps[2].id);
+
+	assert.equal(getWorkflow(workflow.id)?.status, "failed");
+});
+
+test("the read-path heal fixes a workflow stuck running at 100%", () => {
+	const { workflow, steps } = makeWorkflow(1);
+	completeStep(steps[0].id, { ok: true });
+	// A stale DB row (older engine bug / steps deleted out-of-band): running,
+	// bar full, and no callback will ever arrive.
+	setWorkflowStatus(workflow.id, "running");
+
+	expireStale(cfg, silent); // runs on every workflow GET
+
+	assert.equal(getWorkflow(workflow.id)?.status, "completed");
+});
+
+test("the read-path heal fixes a workflow marked completed while a step is still failed", () => {
+	const { workflow, steps } = makeWorkflow(2);
+	completeStep(steps[0].id, { ok: true });
+	completeStep(steps[1].id, { ok: false, error: "boom" });
+	setWorkflowStatus(workflow.id, "completed"); // stale: red bar + green badge
+
+	expireStale(cfg, silent);
+
+	assert.equal(getWorkflow(workflow.id)?.status, "failed");
+});
+
+test("the read-path heal leaves workflows with pending steps strictly alone", () => {
+	const { workflow, steps } = makeWorkflow(2);
+	completeStep(steps[0].id, { ok: true });
+	// addStep's terminal→draft reset (a fresh pending step on a finished
+	// workflow) must survive reads — pending work means the operator owns it.
+	setWorkflowStatus(workflow.id, "draft");
+
+	expireStale(cfg, silent);
+
+	assert.equal(getWorkflow(workflow.id)?.status, "draft");
+	assert.equal(getStep(steps[1].id)?.status, "pending");
+});
+
+test("advance() ends the run as failed, not completed, when a failed step remains", async () => {
+	const { workflow, steps } = makeWorkflow(2);
+	// Step 1 failed on an earlier attempt and was left outside the re-run
+	// selection; step 2 is the one the engine is now finishing.
+	completeStep(steps[0].id, { ok: false, error: "boom" });
+	setStepSelection(workflow.id, [steps[1].id]);
+	setWorkflowStatus(workflow.id, "running");
+
+	await finishStep(steps[1].id, true);
+
+	// The bar shows 1 done + 1 failed — the badge must agree: failed, not completed.
+	assert.equal(getStep(steps[1].id)?.status, "done");
+	assert.equal(getWorkflow(workflow.id)?.status, "failed");
+});
+
+/**
+ * Timeout retries: a step that times out with retry budget left
+ * (`maxRetries` > retries used) must be retried instead of failing the
+ * workflow — the timeout consumes one retry, the step goes back to `pending`,
+ * and only a spent budget makes the timeout terminal. Driven through the real
+ * `expireStale` sweep with a negative `stepTimeoutMs` so any `running` step
+ * counts as expired immediately (no clock manipulation needed).
+ */
+const timeoutCfg = { ...cfg, stepTimeoutMs: -1000, queuedTimeoutMs: -1000 };
+
+test("a timed-out step with retries available is retried, not failed", () => {
+	const { workflow } = makeWorkflow(0);
+	const step = insertStep(workflow.id, "long step", { maxRetries: 2 });
+	markStepRunning(step.id);
+	setWorkflowStatus(workflow.id, "running");
+
+	expireStale(timeoutCfg, silent);
+
+	// The timeout consumed one retry and put the step back to pending; the
+	// workflow stays running — the retry dispatch owns it now.
+	const after = getStep(step.id);
+	assert.equal(after?.status, "pending");
+	assert.equal(after?.retryCount, 1);
+	assert.equal(getWorkflow(workflow.id)?.status, "running");
+});
+
+test("a timed-out step with no retry budget fails the step and the workflow", () => {
+	const { workflow } = makeWorkflow(0);
+	const step = insertStep(workflow.id, "long step"); // maxRetries defaults to 0
+	markStepRunning(step.id);
+	setWorkflowStatus(workflow.id, "running");
+
+	expireStale(timeoutCfg, silent);
+
+	assert.equal(getStep(step.id)?.status, "failed");
+	assert.equal(getStep(step.id)?.error, "timeout");
+	assert.equal(getWorkflow(workflow.id)?.status, "failed");
+});
+
+test("a timed-out step whose retry budget is spent fails for good", () => {
+	const { workflow } = makeWorkflow(0);
+	const step = insertStep(workflow.id, "long step", { maxRetries: 1 });
+	setWorkflowStatus(workflow.id, "running");
+
+	// First attempt times out → retry consumed (1/1), step back to pending.
+	markStepRunning(step.id);
+	expireStale(timeoutCfg, silent);
+	assert.equal(getStep(step.id)?.retryCount, 1);
+
+	// Second attempt times out too — budget spent → terminal failure.
+	markStepRunning(step.id);
+	setWorkflowStatus(workflow.id, "running");
+	expireStale(timeoutCfg, silent);
+
+	assert.equal(getStep(step.id)?.status, "failed");
+	assert.equal(getStep(step.id)?.error, "timeout");
+	assert.equal(getWorkflow(workflow.id)?.status, "failed");
+});
+
+test("a timed-out queued step also uses its retry budget", () => {
+	const { workflow } = makeWorkflow(0);
+	const step = insertStep(workflow.id, "queued step", { maxRetries: 1 });
+	assert.ok(startManualRun(step.id)); // marks it queued with queued_at = now
+	setWorkflowStatus(workflow.id, "running");
+
+	expireStale(timeoutCfg, silent);
+
+	const after = getStep(step.id);
+	assert.equal(after?.status, "pending");
+	assert.equal(after?.retryCount, 1);
+	assert.equal(after?.manualRun, true); // the ▶ flag survives the retry
 });
 
 test("restart resets only the selected steps, leaving the rest done", () => {

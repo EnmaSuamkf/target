@@ -7,7 +7,7 @@
  */
 
 export type WorkflowStatus = "draft" | "running" | "paused" | "completed" | "failed";
-export type StepStatus = "pending" | "running" | "done" | "failed";
+export type StepStatus = "pending" | "queued" | "running" | "done" | "failed";
 
 /**
  * Which job a `running` step is waiting on: its own execution (`exec`) or the
@@ -63,6 +63,8 @@ export interface Step {
 	sessionId: string | null;
 	createdAt: string;
 	startedAt: string | null;
+	/** When the step was accepted by the broker as `queued` (awaiting the workdir lock / its `started` callback). Null once it has started or for steps never dispatched. */
+	queuedAt: string | null;
 	finishedAt: string | null;
 	manualRun: boolean;
 	acceptanceCriteria: string | null;

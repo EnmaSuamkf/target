@@ -143,15 +143,54 @@ first. You add it to an existing workflow with `target set-context` (or the
 **Conversation context** block in the detail panel); it isn't part of workflow
 creation.
 
+### Status and progress bar always agree
+
+The workflow badge is derived from the current state of its steps, the same
+data the progress bar shows, so they can't disagree: a run that ends with a
+step still `failed` ends the workflow `failed` (never `completed` with a red
+bar), and every workflow read self-heals settled workflows — one whose steps
+are all finished but whose badge is stale (e.g. stuck `running` at 100%
+because its remaining pending steps were deleted) is reconciled to
+`completed`/`failed`/`draft` on the next `GET`. Workflows that still have
+pending or running steps are never touched by this heal.
+
 ### Stuck steps
 
-A step whose dispatch never calls back (a hung exec or judge) stays `running`
-and blocks the workflow: ▶ won't re-run a `running` step and Restart is
-disabled while the workflow is `running`. Use the **Abort** button on the step
-(or `POST /api/workflows/:id/steps/:stepId/abort`) to force-fail just that step
-— its session is preserved, so "Open conversation" still works — then ▶ re-run
-it. (Otherwise you wait for the 20-minute stale-step timeout, or pause +
-restart the whole workflow.)
+A step whose dispatch never calls back (a hung exec or judge) stays
+`running` or `queued` and blocks the workflow: ▶ won't re-run an in-flight
+step and Restart is disabled while the workflow is `running`. Use the
+**Abort** button on the step (or
+`POST /api/workflows/:id/steps/:stepId/abort`) to force-fail just that step —
+its session is preserved, so "Open conversation" still works, and the spawned
+agent process is killed on the broker (SIGTERM/SIGKILL), freeing the workdir
+lock so other workflows on the same repo can proceed — then ▶ re-run it.
+(Otherwise you wait for the stale-step timeout, or pause + restart the whole
+workflow.)
+
+### Queued steps and a fair timeout clock
+
+Runs are serialized per `workdir` with a file lock (`flock`), so a second step
+on the same repo waits behind the first. A dispatched step is `queued` until
+the broker fires its `started` callback (the instant the lock is acquired and
+the run actually begins) — only then does it flip to `running` and its 20-min
+`stepTimeoutMs` clock start. So a step queued behind a long run isn't timed
+out while still waiting its turn. The lock is held by the spawned process
+itself, so it survives a broker restart (an orphaned child keeps holding it; a
+new broker's run for that workdir blocks until the orphan exits). A separate
+`queuedTimeoutMs` (default 6h) is the safety net for a dead broker that never
+sends `started`.
+
+### Timeouts consume the retry budget instead of failing outright
+
+A step that times out (either clock) with retry budget left (`maxRetries`
+minus retries already used) is **retried instead of failing the workflow**:
+the timeout consumes one retry, the hung run is best-effort killed on the
+broker (freeing the workdir lock), the step goes back to `pending` and is
+re-dispatched on the same shared session with a note that the previous
+attempt timed out — so the agent continues from partial progress. The step's
+`retryIntervalSeconds` is honored before the re-run, exactly like a
+judge-reject retry. Only when the budget is spent (or `maxRetries` is 0, the
+default) does a timeout fail the step — and the workflow — for good.
 
 ### Agent permissions
 

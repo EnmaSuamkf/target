@@ -17,7 +17,7 @@ import * as path from "node:path";
 import { dbFile } from "./config.ts";
 
 export type WorkflowStatus = "draft" | "running" | "paused" | "completed" | "failed";
-export type StepStatus = "pending" | "running" | "done" | "failed";
+export type StepStatus = "pending" | "queued" | "running" | "done" | "failed";
 /**
  * Which job a `running` step is currently waiting on: its own execution
  * (`exec`) or the self-evaluation that runs afterwards (`judge`). Both come
@@ -71,6 +71,8 @@ export interface Step {
 	callbackToken: string;
 	createdAt: string;
 	startedAt: string | null;
+	/** When the step was accepted by the broker as `queued` (awaiting the workdir lock / its `started` callback). Null once it has started (`startedAt` takes over) or for steps never dispatched. */
+	queuedAt: string | null;
 	finishedAt: string | null;
 	/** Whether the current/last run was triggered on demand (the ▶ button) rather than by the sequential engine. */
 	manualRun: boolean;
@@ -157,6 +159,7 @@ function open(): DatabaseSync {
 			callback_token TEXT NOT NULL,
 			created_at TEXT NOT NULL,
 			started_at TEXT,
+			queued_at TEXT,
 			finished_at TEXT,
 			is_manual_run INTEGER NOT NULL DEFAULT 0,
 			acceptance_criteria TEXT,
@@ -195,6 +198,7 @@ function open(): DatabaseSync {
 	addColumn("retry_count", "retry_count INTEGER NOT NULL DEFAULT 0");
 	addColumn("phase", "phase TEXT NOT NULL DEFAULT 'exec'");
 	addColumn("selected", "selected INTEGER NOT NULL DEFAULT 1");
+	addColumn("queued_at", "queued_at TEXT");
 	// Same upgrade safety for the `workflows` table: `conversation_context` and
 	// `context_injected` were added after launch, so an older DB won't have them.
 	const existingWorkflowColumns = new Set(
@@ -356,6 +360,7 @@ function rowToStep(row: Record<string, unknown>): Step {
 		callbackToken: String(row.callback_token),
 		createdAt: String(row.created_at),
 		startedAt: row.started_at == null ? null : String(row.started_at),
+		queuedAt: row.queued_at == null ? null : String(row.queued_at),
 		finishedAt: row.finished_at == null ? null : String(row.finished_at),
 		manualRun: Number(row.is_manual_run ?? 0) === 1,
 		acceptanceCriteria: row.acceptance_criteria == null ? null : String(row.acceptance_criteria),
@@ -392,6 +397,7 @@ export function insertStep(
 		callbackToken: crypto.randomBytes(24).toString("hex"),
 		createdAt: new Date().toISOString(),
 		startedAt: null,
+		queuedAt: null,
 		finishedAt: null,
 		manualRun: false,
 		acceptanceCriteria,
@@ -494,8 +500,46 @@ export function markStepRunning(id: string, manual = false): void {
 }
 
 /**
- * Records an exec run's successful result but keeps the step `running` and
- * flips it into the `judge` phase — the self-evaluation job is about to be
+ * Marks a freshly-dispatched step `queued` — the broker accepted the POST but
+	 * the run hasn't started yet (it's waiting on the workdir `flock` behind
+	 * another run, or just hasn't sent its `started` callback). The step's
+	 * timeout clock does NOT start here: `started_at` stays null while queued, so
+	 * `expireStaleSteps` (which keys on `started_at`) leaves it alone until the
+	 * broker's `started` callback flips it to `running` via
+	 * `promoteQueuedToRunning`. A separate `queuedTimeoutMs` safety net covers a
+	 * dead broker that never calls back. Only acts on a `pending` step — a
+	 * judge-phase dispatch (the step is already `running`) is a no-op here, so
+	 * the judge stays `running` throughout (its `started` callback just refreshes
+	 * `started_at`). Mirrors `markStepRunning`'s guard.
+	 */
+export function markStepQueued(id: string, manual = false): void {
+	open()
+		.prepare(
+			"UPDATE steps SET status = 'queued', queued_at = ?, started_at = NULL, is_manual_run = ?, phase = 'exec' WHERE id = ? AND status = 'pending'",
+		)
+		.run(new Date().toISOString(), manual ? 1 : 0, id);
+}
+
+/**
+ * Promotes a `queued` step to `running` and starts its timeout clock — called
+	 * when the broker's `started` callback arrives (the run actually began) or
+	 * when a result callback lands on a still-`queued` step (the `started`
+	 * callback was lost, so settle from the result directly). Only acts on a
+	 * `queued` step; any other state is left alone (a late `started` for a step
+	 * already done/aborted is ignored). Returns whether a row was promoted.
+	 */
+export function promoteQueuedToRunning(id: string): boolean {
+	return (
+		open()
+			.prepare("UPDATE steps SET status = 'running', started_at = ? WHERE id = ? AND status = 'queued'")
+			.run(new Date().toISOString(), id).changes > 0
+	);
+}
+
+/**
+ * Records an exec run's successful result but keeps the step `running` (or
+ * `queued`, if the `started` callback was lost and the result arrived first)
+ * and flips it into the `judge` phase — the self-evaluation job is about to be
  * dispatched, and its verdict (not this result) decides whether the step is
  * finally `done`. `started_at` is reset so the stale-step timeout is measured
  * against the judge run now in flight, not the exec run that already answered.
@@ -504,7 +548,7 @@ export function markStepJudging(id: string, outcome: { result?: string; sessionI
 	open()
 		.prepare(
 			`UPDATE steps SET result = ?, session_id = ?, phase = 'judge', started_at = ?, error = NULL
-			 WHERE id = ? AND status = 'running'`,
+			 WHERE id = ? AND status IN ('running', 'queued')`,
 		)
 		.run(outcome.result ?? null, outcome.sessionId ?? null, new Date().toISOString(), id);
 }
@@ -512,7 +556,7 @@ export function markStepJudging(id: string, outcome: { result?: string; sessionI
 /** Marks a judge-accepted step `done`, preserving the exec result already stored by `markStepJudging`. */
 export function finishStepDone(id: string): void {
 	open()
-		.prepare("UPDATE steps SET status = 'done', finished_at = ? WHERE id = ? AND status = 'running'")
+		.prepare("UPDATE steps SET status = 'done', finished_at = ? WHERE id = ? AND status IN ('running', 'queued')")
 		.run(new Date().toISOString(), id);
 }
 
@@ -538,7 +582,7 @@ export function completeStep(
 	open()
 		.prepare(
 			`UPDATE steps SET status = ?, result = ?, error = ?, session_id = ?, finished_at = ?
-			 WHERE id = ? AND status IN ('pending', 'running')`,
+			 WHERE id = ? AND status IN ('pending', 'queued', 'running')`,
 		)
 		.run(
 			outcome.ok ? "done" : "failed",
@@ -551,60 +595,86 @@ export function completeStep(
 }
 
 /**
- * Starts an on-demand run (the ▶ button): marks the step `running` right
+ * Starts an on-demand run (the ▶ button): marks the step `queued` right
  * now regardless of its position in the queue or its previous outcome
  * (pending/done/failed all qualify — this doubles as "rerun this step"),
- * clearing any prior result/error. No-op (returns false) if it's already
- * `running`, so the caller doesn't double-dispatch it.
+ * clearing any prior result/error. The dispatch that follows is accepted by
+ * the broker and the run begins when the workdir lock is free; the broker's
+ * `started` callback then promotes `queued → running` (`promoteQueuedToRunning`),
+ * so the timeout clock starts at the real run start just like a sequential
+ * step. No-op (returns false) if it's already `running` OR `queued`, so the
+ * caller doesn't double-dispatch it.
  */
 export function startManualRun(stepId: string): boolean {
 	const now = new Date().toISOString();
 	const changes = open()
 		.prepare(
-			`UPDATE steps SET status = 'running', result = NULL, error = NULL, session_id = NULL,
-			 started_at = ?, finished_at = NULL, is_manual_run = 1, phase = 'exec', retry_count = 0
-			 WHERE id = ? AND status != 'running'`,
+			`UPDATE steps SET status = 'queued', result = NULL, error = NULL, session_id = NULL,
+			 queued_at = ?, started_at = NULL, finished_at = NULL, is_manual_run = 1, phase = 'exec', retry_count = 0
+			 WHERE id = ? AND status NOT IN ('running', 'queued')`,
 		)
 		.run(now, stepId).changes;
 	return changes > 0;
 }
 
 /**
- * Aborts a step that is stuck `running` (a dispatch whose awb callback never
- * came back): marks it `failed` with the given error and a `finished_at`, but
- * PRESERVES `session_id`/`result`/`phase` so the conversation it established is
- * still reachable ("Open conversation") and the operator can inspect what
- * happened. Only acts on a `running` step (mirrors `startManualRun`'s guard);
+ * Aborts a step that is stuck `running` or `queued` (a dispatch whose awb
+ * callback never came back, or one still waiting on the workdir lock): marks
+ * it `failed` with the given error and a `finished_at`, but PRESERVES
+ * `session_id`/`result`/`phase` so the conversation it established is still
+ * reachable ("Open conversation") and the operator can inspect what happened.
+ * Only acts on a `running` or `queued` step (mirrors `startManualRun`'s guard);
  * returns whether a row was changed. The operator can then re-run the step
  * via the ▶ button (`startManualRun`), which reconciles the workflow back out
  * of `failed` once it passes. Also makes the result callback path ignore any
- * late awb callback for this step (see the `status === "running"` guard in
- * `onStepResult`).
+ * late awb callback for this step (see the `status` guard in `onStepResult`).
  */
 export function failRunningStep(stepId: string, error: string): boolean {
 	return (
 		open()
 			.prepare(
 				`UPDATE steps SET status = 'failed', error = ?, finished_at = ?
-				 WHERE id = ? AND status = 'running'`,
+				 WHERE id = ? AND status IN ('running', 'queued')`,
 			)
 			.run(error, new Date().toISOString(), stepId).changes > 0
 	);
 }
 
-/** Fails any step stuck `running` past the timeout; returns the distinct workflow ids affected, so the caller can fail the workflow too instead of leaving it stuck. */
-export function expireStaleSteps(timeoutMs: number): string[] {
-	const cutoff = new Date(Date.now() - timeoutMs).toISOString();
+/**
+ * Fails any step stuck past its timeout and, for a still-`running` workflow
+ * that owned one, fails the workflow too — otherwise it would sit stuck
+ * forever with no step left to dispatch. Two clocks: `running` steps time out
+ * from `started_at` (the actual run start, reported by the broker's `started`
+ * callback), and `queued` steps from `queued_at` against the much longer
+ * `queuedTimeoutMs` — a queued step is just waiting its turn on the workdir
+ * lock, so it must NOT be timed out by `stepTimeoutMs` (that was the unfair
+ * countdown queued steps used to suffer). `queued_at` being null for any
+ * non-queued step keeps them out of both queries. Returns the affected
+ * (stepId, workflowId) pairs so the caller can decide per step whether to
+ * retry it (budget left) or fail the workflow (budget spent) — see
+ * `expireStale` in workflow.ts.
+ */
+export function expireStaleSteps(
+	timeoutMs: number,
+	queuedTimeoutMs: number,
+): { stepId: string; workflowId: string }[] {
+	const runCutoff = new Date(Date.now() - timeoutMs).toISOString();
+	const queuedCutoff = new Date(Date.now() - queuedTimeoutMs).toISOString();
 	const rows = open()
-		.prepare(`SELECT DISTINCT workflow_id FROM steps WHERE status = 'running' AND started_at < ?`)
-		.all(cutoff) as Record<string, unknown>[];
+		.prepare(
+			`SELECT id, workflow_id FROM steps
+			 WHERE (status = 'running' AND started_at < ?)
+			    OR (status = 'queued' AND queued_at < ?)`,
+		)
+		.all(runCutoff, queuedCutoff) as Record<string, unknown>[];
 	open()
 		.prepare(
 			`UPDATE steps SET status = 'failed', error = 'timeout', finished_at = ?
-			 WHERE status = 'running' AND started_at < ?`,
+			 WHERE (status = 'running' AND started_at < ?)
+			    OR (status = 'queued' AND queued_at < ?)`,
 		)
-		.run(new Date().toISOString(), cutoff);
-	return rows.map((r) => String(r.workflow_id));
+		.run(new Date().toISOString(), runCutoff, queuedCutoff);
+	return rows.map((r) => ({ stepId: String(r.id), workflowId: String(r.workflow_id) }));
 }
 
 /**

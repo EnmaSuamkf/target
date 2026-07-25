@@ -63,7 +63,7 @@ export function StepItem({
 		);
 	}
 
-	const elapsed = duration(step.startedAt, step.finishedAt);
+	const elapsed = duration(step.startedAt, step.finishedAt, step.queuedAt);
 	const hasResult = step.status === "done" && step.result;
 
 	return (
@@ -128,14 +128,14 @@ export function StepItem({
 
 			<div className={styles.actions}>
 				<button type="button" className="btn btn--sm" onClick={() => onRun(step.id)} disabled={running || busy}>
-					{running ? "Running…" : "▶ Run"}
+					{step.status === "running" ? "Running…" : step.status === "queued" ? "Queued…" : "▶ Run"}
 				</button>
 				<button
 					type="button"
 					className="btn btn--sm btn--danger"
 					onClick={() => onAbort(step.id)}
-					disabled={!running || busy}
-					title="Force-fail this stuck step so it can be re-run, without restarting the whole workflow. Its session is preserved."
+					disabled={!(step.status === "running" || step.status === "queued") || busy}
+					title="Force-fail this stuck step so it can be re-run, without restarting the whole workflow. Also kills the spawned agent process on the broker, freeing the workdir lock. Its session is preserved."
 				>
 					Abort
 				</button>
