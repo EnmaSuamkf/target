@@ -59,6 +59,7 @@ import {
 	type Template,
 	type Workflow,
 } from "./db.ts";
+import { stepActivity } from "./progress.ts";
 import type { Logger } from "./runner.ts";
 import { openResumeTerminal } from "./terminal.ts";
 import { readTokenUsage } from "./transcript.ts";
@@ -185,7 +186,7 @@ function publicWorkflow(workflow: Workflow): Record<string, unknown> {
 	};
 }
 
-function publicStep(step: Step): Record<string, unknown> {
+function publicStep(step: Step, cfg: HubConfig): Record<string, unknown> {
 	return {
 		id: step.id,
 		workflowId: step.workflowId,
@@ -206,6 +207,12 @@ function publicStep(step: Step): Record<string, unknown> {
 		retryCount: step.retryCount,
 		phase: step.phase,
 		selected: step.selected,
+		// Progress watchdog (see progress.ts): when the agent was last seen doing
+		// something and what the derived activity state is. `activity` is null for
+		// anything that isn't `running` — there's nothing to watch.
+		lastProgressAt: step.lastProgressAt,
+		lastProgressKind: step.lastProgressKind,
+		activity: stepActivity(step, cfg),
 	};
 }
 
@@ -648,7 +655,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			sendJson(res, 404, { error: "unknown_workflow" });
 			return;
 		}
-		sendJson(res, 200, { workflow: publicWorkflow(workflow), steps: listSteps(workflowId).map(publicStep) });
+		sendJson(res, 200, { workflow: publicWorkflow(workflow), steps: listSteps(workflowId).map((s) => publicStep(s, cfg)) });
 		return;
 	}
 
@@ -779,7 +786,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			const description = typeof body.description === "string" ? body.description : "";
 			try {
 				const step = addStep(workflowId, description, readStepConfig(body));
-				sendJson(res, 200, { step: publicStep(step) });
+				sendJson(res, 200, { step: publicStep(step, cfg) });
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
 			}
@@ -825,7 +832,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				}
 				sendJson(res, 200, {
 					workflow: publicWorkflow(getWorkflow(workflowId) as Workflow),
-					steps: listSteps(workflowId).map(publicStep),
+					steps: listSteps(workflowId).map((s) => publicStep(s, cfg)),
 					added,
 					skipped,
 				});
@@ -845,7 +852,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			const description = typeof body.description === "string" ? body.description : "";
 			try {
 				const step = editStep(workflowId, parts[4], description, readStepConfig(body));
-				sendJson(res, 200, { step: publicStep(step) });
+				sendJson(res, 200, { step: publicStep(step, cfg) });
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
 			}
@@ -883,7 +890,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					sendJson(res, 404, { error: "unknown_step" });
 					return;
 				}
-				sendJson(res, 200, { step: publicStep(step) });
+				sendJson(res, 200, { step: publicStep(step, cfg) });
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
 			}

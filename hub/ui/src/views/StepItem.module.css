@@ -80,6 +80,12 @@
 	color: var(--text-muted);
 }
 
+/* A running step whose agent has gone quiet — a warning, not a failure: the
+   idle watchdog hasn't acted yet, but this is what it's counting. */
+.metaItemIdle {
+	color: var(--warn-700);
+}
+
 .retries {
 	padding: 0 var(--space-1);
 	border-radius: var(--radius-sm);

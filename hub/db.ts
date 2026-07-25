@@ -15,6 +15,7 @@ import { DatabaseSync } from "node:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { dbFile } from "./config.ts";
+import type { ProgressKind } from "./progress.ts";
 
 export type WorkflowStatus = "draft" | "running" | "paused" | "completed" | "failed";
 export type StepStatus = "pending" | "queued" | "running" | "done" | "failed";
@@ -88,6 +89,18 @@ export interface Step {
 	retryIntervalSeconds: number;
 	/** Retries already consumed on the current attempt cycle; reset by restart. */
 	retryCount: number;
+	/**
+	 * Last moment this step's agent was observed doing something — the mtime of
+	 * the freshest artifact its harness wrote (see progress.ts). Seeded with the
+	 * run start when the step goes `running`, so the idle clock always has a
+	 * reference. This is what the stale sweep measures instead of the old wall
+	 * clock: a step that keeps writing is never timed out for being slow.
+	 */
+	lastProgressAt: string | null;
+	/** Which artifact that signal came from (`transcript`, `session-file`, `run-log`) — kept for diagnosing a timeout after the fact. */
+	lastProgressKind: ProgressKind | null;
+	/** Fingerprint of the observed artifact; progress is only recorded when it changes, so an untouched file can't keep a hung step alive. */
+	lastProgressToken: string | null;
 	/** Which job the step's in-flight callback belongs to (see StepPhase). */
 	phase: StepPhase;
 	/**
@@ -167,7 +180,10 @@ function open(): DatabaseSync {
 			retry_interval_seconds INTEGER NOT NULL DEFAULT 0,
 			retry_count INTEGER NOT NULL DEFAULT 0,
 			phase TEXT NOT NULL DEFAULT 'exec',
-			selected INTEGER NOT NULL DEFAULT 1
+			selected INTEGER NOT NULL DEFAULT 1,
+			last_progress_at TEXT,
+			last_progress_kind TEXT,
+			last_progress_token TEXT
 		);
 		CREATE INDEX IF NOT EXISTS idx_steps_workflow ON steps(workflow_id, order_index);
 		CREATE TABLE IF NOT EXISTS templates (
@@ -199,6 +215,9 @@ function open(): DatabaseSync {
 	addColumn("phase", "phase TEXT NOT NULL DEFAULT 'exec'");
 	addColumn("selected", "selected INTEGER NOT NULL DEFAULT 1");
 	addColumn("queued_at", "queued_at TEXT");
+	addColumn("last_progress_at", "last_progress_at TEXT");
+	addColumn("last_progress_kind", "last_progress_kind TEXT");
+	addColumn("last_progress_token", "last_progress_token TEXT");
 	// Same upgrade safety for the `workflows` table: `conversation_context` and
 	// `context_injected` were added after launch, so an older DB won't have them.
 	const existingWorkflowColumns = new Set(
@@ -367,6 +386,9 @@ function rowToStep(row: Record<string, unknown>): Step {
 		maxRetries: Number(row.max_retries ?? 0),
 		retryIntervalSeconds: Number(row.retry_interval_seconds ?? 0),
 		retryCount: Number(row.retry_count ?? 0),
+		lastProgressAt: row.last_progress_at == null ? null : String(row.last_progress_at),
+		lastProgressKind: row.last_progress_kind == null ? null : (String(row.last_progress_kind) as ProgressKind),
+		lastProgressToken: row.last_progress_token == null ? null : String(row.last_progress_token),
 		phase: (row.phase as StepPhase) ?? "exec",
 		selected: Number(row.selected ?? 1) === 1,
 	};
@@ -404,6 +426,9 @@ export function insertStep(
 		maxRetries,
 		retryIntervalSeconds,
 		retryCount: 0,
+		lastProgressAt: null,
+		lastProgressKind: null,
+		lastProgressToken: null,
 		phase: "exec",
 		selected: true,
 	};
@@ -436,6 +461,16 @@ export function listSteps(workflowId: string): Step[] {
 	const rows = open()
 		.prepare("SELECT * FROM steps WHERE workflow_id = ? ORDER BY order_index")
 		.all(workflowId);
+	return (rows as Record<string, unknown>[]).map(rowToStep);
+}
+
+/**
+ * Every step currently `running` across all workflows — the set the progress
+ * watchdog keeps an eye on. Usually zero or one (steps run one at a time per
+ * workflow), so the sweep's per-step filesystem probe stays cheap.
+ */
+export function listRunningSteps(): Step[] {
+	const rows = open().prepare("SELECT * FROM steps WHERE status = 'running'").all();
 	return (rows as Record<string, unknown>[]).map(rowToStep);
 }
 
@@ -492,20 +527,49 @@ export function markStepRunning(id: string, manual = false): void {
 	// through here as a `pending` step (beginRetry put it there) and must stay
 	// flagged manual, or its next callback would be mistaken for a sequential
 	// run. A normal engine dispatch passes false and clears the flag.
+	//
+	// The idle clock is seeded with the run start (and its fingerprint cleared,
+	// since any artifact this step saw belonged to a previous attempt): until the
+	// first probe lands, "last progress" is "it just started".
+	const now = new Date().toISOString();
 	open()
 		.prepare(
-			"UPDATE steps SET status = 'running', started_at = ?, is_manual_run = ?, phase = 'exec' WHERE id = ? AND status = 'pending'",
+			`UPDATE steps SET status = 'running', started_at = ?, is_manual_run = ?, phase = 'exec',
+			 last_progress_at = ?, last_progress_kind = NULL, last_progress_token = NULL
+			 WHERE id = ? AND status = 'pending'`,
 		)
-		.run(new Date().toISOString(), manual ? 1 : 0, id);
+		.run(now, manual ? 1 : 0, now, id);
+}
+
+/**
+ * Records that a step's agent was observed doing something (progress.ts probes
+ * the harness's own artifacts). Only writes when the artifact fingerprint
+ * CHANGED — a file that merely still exists must not keep resetting the idle
+ * clock, or a hung run would look alive forever. Only touches a `running` step;
+ * returns whether the clock actually moved.
+ */
+export function recordStepProgress(
+	id: string,
+	signal: { at: string; kind: string; token: string },
+): boolean {
+	return (
+		open()
+			.prepare(
+				`UPDATE steps SET last_progress_at = ?, last_progress_kind = ?, last_progress_token = ?
+				 WHERE id = ? AND status = 'running' AND (last_progress_token IS NULL OR last_progress_token <> ?)`,
+			)
+			.run(signal.at, signal.kind, signal.token, id, signal.token).changes > 0
+	);
 }
 
 /**
  * Marks a freshly-dispatched step `queued` — the broker accepted the POST but
 	 * the run hasn't started yet (it's waiting on the workdir `flock` behind
 	 * another run, or just hasn't sent its `started` callback). The step's
-	 * timeout clock does NOT start here: `started_at` stays null while queued, so
-	 * `expireStaleSteps` (which keys on `started_at`) leaves it alone until the
-	 * broker's `started` callback flips it to `running` via
+	 * timeout clock does NOT start here: `started_at` stays null while queued (and
+	 * the idle-watchdog stamps are cleared), so `findTimeoutCandidates` — whose
+	 * `running` arms key on `started_at`/`last_progress_at` — leaves it alone
+	 * until the broker's `started` callback flips it to `running` via
 	 * `promoteQueuedToRunning`. A separate `queuedTimeoutMs` safety net covers a
 	 * dead broker that never calls back. Only acts on a `pending` step — a
 	 * judge-phase dispatch (the step is already `running`) is a no-op here, so
@@ -515,7 +579,9 @@ export function markStepRunning(id: string, manual = false): void {
 export function markStepQueued(id: string, manual = false): void {
 	open()
 		.prepare(
-			"UPDATE steps SET status = 'queued', queued_at = ?, started_at = NULL, is_manual_run = ?, phase = 'exec' WHERE id = ? AND status = 'pending'",
+			`UPDATE steps SET status = 'queued', queued_at = ?, started_at = NULL, is_manual_run = ?, phase = 'exec',
+			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL
+			 WHERE id = ? AND status = 'pending'`,
 		)
 		.run(new Date().toISOString(), manual ? 1 : 0, id);
 }
@@ -529,10 +595,17 @@ export function markStepQueued(id: string, manual = false): void {
 	 * already done/aborted is ignored). Returns whether a row was promoted.
 	 */
 export function promoteQueuedToRunning(id: string): boolean {
+	// Seeds the idle clock too — the run starts here, so "last progress" starts
+	// here (see markStepRunning).
+	const now = new Date().toISOString();
 	return (
 		open()
-			.prepare("UPDATE steps SET status = 'running', started_at = ? WHERE id = ? AND status = 'queued'")
-			.run(new Date().toISOString(), id).changes > 0
+			.prepare(
+				`UPDATE steps SET status = 'running', started_at = ?, last_progress_at = ?,
+				 last_progress_kind = NULL, last_progress_token = NULL
+				 WHERE id = ? AND status = 'queued'`,
+			)
+			.run(now, now, id).changes > 0
 	);
 }
 
@@ -542,15 +615,20 @@ export function promoteQueuedToRunning(id: string): boolean {
  * and flips it into the `judge` phase — the self-evaluation job is about to be
  * dispatched, and its verdict (not this result) decides whether the step is
  * finally `done`. `started_at` is reset so the stale-step timeout is measured
- * against the judge run now in flight, not the exec run that already answered.
+ * against the judge run now in flight, not the exec run that already answered —
+ * and the idle clock is re-seeded with it, so the judge doesn't inherit the exec
+ * run's inactivity (nor its artifact fingerprint, which the judge's own writes
+ * will now supersede).
  */
 export function markStepJudging(id: string, outcome: { result?: string; sessionId?: string }): void {
+	const now = new Date().toISOString();
 	open()
 		.prepare(
-			`UPDATE steps SET result = ?, session_id = ?, phase = 'judge', started_at = ?, error = NULL
+			`UPDATE steps SET result = ?, session_id = ?, phase = 'judge', started_at = ?, error = NULL,
+			 last_progress_at = ?, last_progress_kind = NULL, last_progress_token = NULL
 			 WHERE id = ? AND status IN ('running', 'queued')`,
 		)
-		.run(outcome.result ?? null, outcome.sessionId ?? null, new Date().toISOString(), id);
+		.run(outcome.result ?? null, outcome.sessionId ?? null, now, now, id);
 }
 
 /** Marks a judge-accepted step `done`, preserving the exec result already stored by `markStepJudging`. */
@@ -569,7 +647,8 @@ export function beginRetry(id: string): void {
 	open()
 		.prepare(
 			`UPDATE steps SET status = 'pending', phase = 'exec', retry_count = retry_count + 1,
-			 result = NULL, error = NULL, session_id = NULL, started_at = NULL, finished_at = NULL
+			 result = NULL, error = NULL, session_id = NULL, started_at = NULL, finished_at = NULL,
+			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL
 			 WHERE id = ?`,
 		)
 		.run(id);
@@ -610,7 +689,8 @@ export function startManualRun(stepId: string): boolean {
 	const changes = open()
 		.prepare(
 			`UPDATE steps SET status = 'queued', result = NULL, error = NULL, session_id = NULL,
-			 queued_at = ?, started_at = NULL, finished_at = NULL, is_manual_run = 1, phase = 'exec', retry_count = 0
+			 queued_at = ?, started_at = NULL, finished_at = NULL, is_manual_run = 1, phase = 'exec', retry_count = 0,
+			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL
 			 WHERE id = ? AND status NOT IN ('running', 'queued')`,
 		)
 		.run(now, stepId).changes;
@@ -640,41 +720,69 @@ export function failRunningStep(stepId: string, error: string): boolean {
 	);
 }
 
+/** Why a step showed up in the timeout sweep: no sign of activity, the absolute ceiling, or a queue wait that never started. */
+export type TimeoutReason = "idle" | "hard" | "queued";
+
+export interface TimeoutCandidate {
+	stepId: string;
+	workflowId: string;
+	reason: TimeoutReason;
+}
+
 /**
- * Fails any step stuck past its timeout and, for a still-`running` workflow
- * that owned one, fails the workflow too — otherwise it would sit stuck
- * forever with no step left to dispatch. Two clocks: `running` steps time out
- * from `started_at` (the actual run start, reported by the broker's `started`
- * callback), and `queued` steps from `queued_at` against the much longer
- * `queuedTimeoutMs` — a queued step is just waiting its turn on the workdir
- * lock, so it must NOT be timed out by `stepTimeoutMs` (that was the unfair
- * countdown queued steps used to suffer). `queued_at` being null for any
- * non-queued step keeps them out of both queries. Returns the affected
- * (stepId, workflowId) pairs so the caller can decide per step whether to
- * retry it (budget left) or fail the workflow (budget spent) — see
- * `expireStale` in workflow.ts.
+ * Phase 1 of the stale sweep: lists the steps that MIGHT have to time out. It
+ * only reads — nothing is failed here, because the decision needs a fresh
+ * filesystem probe the DB can't do (see `expireStale` in workflow.ts, which
+ * re-probes each candidate and drops the ones whose agent is demonstrably still
+ * working). That split is the whole point of the change: the old version failed
+ * every step past a wall clock in the same statement, which is what killed long
+ * but healthy runs.
+ *
+ * Three clocks:
+ * - `idle` — a `running` step whose last observed progress (or, until the first
+ *   probe lands, its run start) is older than `idleTimeoutMs`.
+ * - `hard` — a `running` step older than `hardTimeoutMs` since `started_at`,
+ *   however active it looks. Takes precedence over `idle` when both apply.
+ * - `queued` — unchanged: a step still waiting on the workdir lock past
+ *   `queuedTimeoutMs` (a dead broker that never sent `started`). `queued_at`
+ *   being null for non-queued steps keeps them out of that arm.
  */
-export function expireStaleSteps(
-	timeoutMs: number,
-	queuedTimeoutMs: number,
-): { stepId: string; workflowId: string }[] {
-	const runCutoff = new Date(Date.now() - timeoutMs).toISOString();
-	const queuedCutoff = new Date(Date.now() - queuedTimeoutMs).toISOString();
+export function findTimeoutCandidates(limits: {
+	idleTimeoutMs: number;
+	hardTimeoutMs: number;
+	queuedTimeoutMs: number;
+}): TimeoutCandidate[] {
+	const now = Date.now();
+	const idleCutoff = new Date(now - limits.idleTimeoutMs).toISOString();
+	const hardCutoff = new Date(now - limits.hardTimeoutMs).toISOString();
+	const queuedCutoff = new Date(now - limits.queuedTimeoutMs).toISOString();
 	const rows = open()
 		.prepare(
-			`SELECT id, workflow_id FROM steps
-			 WHERE (status = 'running' AND started_at < ?)
+			`SELECT id, workflow_id,
+			        CASE WHEN status = 'queued' THEN 'queued'
+			             WHEN started_at < ? THEN 'hard'
+			             ELSE 'idle' END AS reason
+			 FROM steps
+			 WHERE (status = 'running' AND (COALESCE(last_progress_at, started_at) < ? OR started_at < ?))
 			    OR (status = 'queued' AND queued_at < ?)`,
 		)
-		.all(runCutoff, queuedCutoff) as Record<string, unknown>[];
-	open()
-		.prepare(
-			`UPDATE steps SET status = 'failed', error = 'timeout', finished_at = ?
-			 WHERE (status = 'running' AND started_at < ?)
-			    OR (status = 'queued' AND queued_at < ?)`,
-		)
-		.run(new Date().toISOString(), runCutoff, queuedCutoff);
-	return rows.map((r) => ({ stepId: String(r.id), workflowId: String(r.workflow_id) }));
+		.all(hardCutoff, idleCutoff, hardCutoff, queuedCutoff) as Record<string, unknown>[];
+	return rows.map((r) => ({
+		stepId: String(r.id),
+		workflowId: String(r.workflow_id),
+		reason: String(r.reason) as TimeoutReason,
+	}));
+}
+
+/**
+ * Phase 2: actually fails a step the sweep decided is stuck, with a message
+ * that says WHY (idle for how long, since which signal — or the hard cap). Same
+ * shape as `failRunningStep`, kept separate so a timeout reads differently from
+ * an operator abort in the logs and the UI. Only acts on a step still
+ * `running`/`queued`, so a run that answered while we were probing wins.
+ */
+export function failTimedOutStep(stepId: string, error: string): boolean {
+	return failRunningStep(stepId, error);
 }
 
 /**
@@ -715,7 +823,8 @@ export function resetSteps(workflowId: string): void {
 	open()
 		.prepare(
 			`UPDATE steps SET status = 'pending', result = NULL, error = NULL, session_id = NULL,
-			 started_at = NULL, finished_at = NULL, is_manual_run = 0, phase = 'exec', retry_count = 0
+			 started_at = NULL, finished_at = NULL, is_manual_run = 0, phase = 'exec', retry_count = 0,
+			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL
 			 WHERE workflow_id = ? AND selected = 1`,
 		)
 		.run(workflowId);

@@ -2,6 +2,7 @@
  * Small formatting helpers shared by the views. Everything here is display-only
  * — no business logic, which lives on the server.
  */
+import type { StepActivity } from "../api/types";
 
 /** `1234` → `1.2k`. Used for token counts, which get long fast. */
 export function compactNumber(n: number): string {
@@ -63,6 +64,18 @@ export function duration(startedAt: string | null, finishedAt: string | null, qu
 	if (minutes < 60) return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
 	const hours = Math.floor(minutes / 60);
 	return `${hours}h ${minutes % 60}m`;
+}
+
+/**
+ * Short label for a running step's progress watchdog: "active 8s ago" while the
+ * agent keeps writing, "no activity 6m" once it's gone quiet. That's the
+ * difference the old 20-minute wall clock couldn't show — a long step that is
+ * working now reads as healthy instead of "about to be killed".
+ */
+export function activityLabel(activity: StepActivity | null): string {
+	if (!activity) return "";
+	const idle = duration(new Date(Date.now() - activity.idleSeconds * 1000).toISOString(), null);
+	return activity.state === "running-active" ? `active ${idle} ago` : `no activity ${idle}`;
 }
 
 /** Collapses `$HOME/projects/x` to `~/projects/x` for display. */

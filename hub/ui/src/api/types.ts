@@ -73,6 +73,30 @@ export interface Step {
 	retryCount: number;
 	phase: StepPhase;
 	selected: boolean;
+	/** When the step's agent was last seen doing something (mtime of the freshest artifact its harness wrote). Null unless it has run. */
+	lastProgressAt: string | null;
+	/** Which artifact that signal came from. */
+	lastProgressKind: ProgressKind | null;
+	/** Derived watchdog state — null for anything that isn't `running`. */
+	activity: StepActivity | null;
+}
+
+/** Where the hub saw the agent's last sign of life (see the hub's progress.ts). */
+export type ProgressKind = "transcript" | "session-file" | "run-log";
+
+/**
+ * How alive a `running` step looks. Deliberately separate from `StepStatus`:
+ * the badge/progress bar still key off the DB status, and this only adds the
+ * "is it actually doing anything?" dimension the old wall-clock timeout lacked.
+ */
+export type StepActivityState = "running-active" | "running-idle" | "stalled" | "timed-out-hard";
+
+export interface StepActivity {
+	state: StepActivityState;
+	lastProgressAt: string | null;
+	lastProgressKind: ProgressKind | null;
+	idleSeconds: number;
+	elapsedSeconds: number;
 }
 
 export interface TemplateStep {
