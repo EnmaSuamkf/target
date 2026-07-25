@@ -2,7 +2,9 @@
 	position: fixed;
 	bottom: var(--space-5);
 	left: var(--space-5);
-	z-index: 90;
+	/* Above the modal backdrop (100) so dictation stays clickable inside
+	   text-input popups, but below toasts (200). */
+	z-index: 110;
 	display: flex;
 	align-items: center;
 	gap: var(--space-2);
