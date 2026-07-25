@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Workflow } from "../api/types.ts";
+import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { initialDraftState, isDirty, markSaved, reconcileDraft } from "./contextDraft.ts";
 import styles from "./DetailPanels.module.css";
 
@@ -74,13 +75,13 @@ export function ContextPanel({
 				{injected && " Locked — the agent is already running under it. Start the workflow over to change it."}
 			</p>
 
-			<textarea
-				className="textarea"
+			<ExpandableTextarea
 				value={draft}
 				readOnly={injected}
 				placeholder="Optional — constraints, definitions or a persona every step should share."
-				onChange={(ev) => setDraft(ev.target.value)}
+				onChange={setDraft}
 				aria-label="Conversation context"
+				expandTitle="Edit conversation context"
 			/>
 
 			{!injected && (

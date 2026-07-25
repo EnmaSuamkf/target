@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Step, StepConfigInput } from "../api/types.ts";
 import { Badge } from "../components/Badge.tsx";
+import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { duration } from "../lib/format.ts";
 import styles from "./StepItem.module.css";
 
@@ -201,23 +202,23 @@ function StepEditor({
 			<label className="label" htmlFor={`desc-${step.id}`}>
 				Task description
 			</label>
-			<textarea
+			<ExpandableTextarea
 				id={`desc-${step.id}`}
-				className="textarea"
 				value={description}
-				onChange={(ev) => setDescription(ev.target.value)}
+				onChange={setDescription}
+				expandTitle="Edit task description"
 				required
 			/>
 
 			<label className="label" htmlFor={`criteria-${step.id}`}>
 				Acceptance criteria
 			</label>
-			<textarea
+			<ExpandableTextarea
 				id={`criteria-${step.id}`}
-				className="textarea"
 				value={criteria}
 				placeholder="Optional — what a good result must satisfy. Empty = no judge."
-				onChange={(ev) => setCriteria(ev.target.value)}
+				onChange={setCriteria}
+				expandTitle="Edit acceptance criteria"
 			/>
 			<p className="hint">
 				If set, the agent self-evaluates its result against this after running. On a reject it re-runs the step up to

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { CreateWorkflowInput, PermissionMode, Template } from "../api/types.ts";
+import type { CreateWorkflowInput, PermissionMode, Runner, Template } from "../api/types.ts";
 import { Field } from "../components/Field.tsx";
 import { Modal } from "../components/Modal.tsx";
 import styles from "./CreateWorkflowModal.module.css";
@@ -30,6 +30,15 @@ const PERMISSION_OPTIONS: { value: "" | PermissionMode; label: string; descripti
 	},
 ];
 
+const RUNNER_OPTIONS: { value: Runner; label: string; description: string }[] = [
+	{ value: "claude", label: "Claude Code (default)", description: "Steps run on claude -p / claude --resume." },
+	{
+		value: "free-code",
+		label: "free-code",
+		description: "Steps run on the free-code CLI; sessions are .jsonl files chained the same way.",
+	},
+];
+
 export function CreateWorkflowModal({
 	open,
 	templates,
@@ -43,6 +52,7 @@ export function CreateWorkflowModal({
 }): React.JSX.Element {
 	const [name, setName] = useState("");
 	const [workdir, setWorkdir] = useState("");
+	const [runner, setRunner] = useState<Runner>("claude");
 	const [permissionMode, setPermissionMode] = useState<"" | PermissionMode>("");
 	const [templateId, setTemplateId] = useState("");
 	const [acceptRisk, setAcceptRisk] = useState(false);
@@ -53,6 +63,7 @@ export function CreateWorkflowModal({
 		if (!open) return;
 		setName("");
 		setWorkdir("");
+		setRunner("claude");
 		setPermissionMode("");
 		setTemplateId("");
 		setAcceptRisk(false);
@@ -68,6 +79,7 @@ export function CreateWorkflowModal({
 		try {
 			const input: CreateWorkflowInput = { name: name.trim() };
 			if (workdir.trim()) input.workdir = workdir.trim();
+			if (runner !== "claude") input.runner = runner;
 			if (permissionMode) input.permissionMode = permissionMode;
 			if (templateId) input.templateId = templateId;
 			if (bypass) input.acceptBypassRisk = true;
@@ -125,6 +137,26 @@ export function CreateWorkflowModal({
 							placeholder="~/my-project"
 							onChange={(ev) => setWorkdir(ev.target.value)}
 						/>
+					)}
+				</Field>
+
+				<Field
+					label="Agent runtime"
+					hint={RUNNER_OPTIONS.find((o) => o.value === runner)?.description ?? ""}
+				>
+					{(props) => (
+						<select
+							{...props}
+							className="select"
+							value={runner}
+							onChange={(ev) => setRunner(ev.target.value as Runner)}
+						>
+							{RUNNER_OPTIONS.map((option) => (
+								<option key={option.value} value={option.value}>
+									{option.label}
+								</option>
+							))}
+						</select>
 					)}
 				</Field>
 

@@ -33,7 +33,14 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
-import { harnessResumeCommand, hookRuntime, PUBLISHABLE_PERMISSION_MODES, type PublishablePermissionMode } from "./awb.ts";
+import {
+	harnessResumeCommand,
+	hookRuntime,
+	PUBLISHABLE_PERMISSION_MODES,
+	type PublishablePermissionMode,
+	PUBLISHABLE_RUNNERS,
+	type PublishableRunner,
+} from "./awb.ts";
 import type { HubConfig } from "./config.ts";
 import {
 	deleteTemplate,
@@ -499,6 +506,16 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					}
 					permissionMode = body.permissionMode as PublishablePermissionMode;
 				}
+				// Optional: which CLI this workflow's hook spawns. Validated against
+				// the runners awb actually ships adapters for; unset means claude.
+				let runner: PublishableRunner | undefined;
+				if (typeof body.runner === "string" && body.runner !== "") {
+					if (!PUBLISHABLE_RUNNERS.includes(body.runner as PublishableRunner)) {
+						sendJson(res, 400, { error: `invalid runner (allowed: ${PUBLISHABLE_RUNNERS.join(", ")})` });
+						return;
+					}
+					runner = body.runner as PublishableRunner;
+				}
 				// Optional: seed the new workflow with a template's steps (same order,
 				// same judge config), leaving the template itself untouched — a
 				// template's name/tags never carry over, only its steps.
@@ -511,7 +528,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					}
 				}
 				try {
-					const workflow = createWorkflow(name, { workdir, permissionMode });
+					const workflow = createWorkflow(name, { workdir, permissionMode, runner });
 					if (template) {
 						for (const step of template.steps) {
 							addStep(workflow.id, step.description, {

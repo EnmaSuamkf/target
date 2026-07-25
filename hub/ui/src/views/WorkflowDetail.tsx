@@ -3,6 +3,7 @@ import type { SessionInfo, Step, StepConfigInput, Template, Workflow } from "../
 import { startActionFor } from "../api/types.ts";
 import { Badge } from "../components/Badge.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
+import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { ProgressBar } from "../components/Progress.tsx";
 import { prettyPath, relativeTime } from "../lib/format.ts";
 import { ContextPanel } from "./ContextPanel.tsx";
@@ -316,12 +317,12 @@ function AddStepForm({
 					<label className="label" htmlFor="new-step-desc">
 						Task description
 					</label>
-					<textarea
+					<ExpandableTextarea
 						id="new-step-desc"
-						className="textarea"
 						value={description}
 						placeholder="What the agent should do in this step…"
-						onChange={(ev) => setDescription(ev.target.value)}
+						onChange={setDescription}
+						expandTitle="Edit task description"
 						required
 						autoFocus
 					/>
@@ -331,12 +332,12 @@ function AddStepForm({
 					<label className="label" htmlFor="new-step-criteria">
 						Acceptance criteria
 					</label>
-					<textarea
+					<ExpandableTextarea
 						id="new-step-criteria"
-						className="textarea"
 						value={criteria}
 						placeholder="Optional — what a good result must satisfy. Empty = no judge."
-						onChange={(ev) => setCriteria(ev.target.value)}
+						onChange={setCriteria}
+						expandTitle="Edit acceptance criteria"
 					/>
 					<p className="hint">
 						If set, the agent self-evaluates its result after running and re-runs the step on a reject, up to the

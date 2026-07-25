@@ -109,13 +109,15 @@ export function writeStatusMd(workflowId: string): void {
 
 /**
  * Creates the workflow's dedicated agent: an awb hook with its own sandbox
- * workdir, so its Claude session is isolated per workflow (mirrors
- * agentmesh's "dedicated sandbox" security default). Steps are added
- * afterwards, one at a time, from the Workflow section's "+ step" button.
+ * workdir, so its harness session is isolated per workflow (mirrors
+ * agentmesh's "dedicated sandbox" security default). `runner` picks which
+ * CLI the hook spawns — Claude Code (default) or free-code; both chain the
+ * workflow's steps on one shared session. Steps are added afterwards, one at
+ * a time, from the Workflow section's "+ step" button.
  */
 export function createWorkflow(
 	name: string,
-	options: { workdir?: string; permissionMode?: HookOptions["permissionMode"] } = {},
+	options: { workdir?: string; permissionMode?: HookOptions["permissionMode"]; runner?: HookOptions["runner"] } = {},
 ): Workflow {
 	const trimmed = name.trim();
 	if (!trimmed) throw new WorkflowError("name is required");
@@ -125,7 +127,10 @@ export function createWorkflow(
 	const agentName = `${slug}-${shortId}`;
 	const workdir = options.workdir?.trim() || path.join(targetDir(), "sandboxes", agentName);
 	const promptTemplate = `You are the agent of a Target workflow named "${trimmed}". This session is reused in order for every step of the workflow. Current step:\n\n{{payload}}\n\nCarry out the step and respond with the final result of that step.`;
-	const hook = createAwbHook(agentName, workdir, promptTemplate, { permissionMode: options.permissionMode });
+	const hook = createAwbHook(agentName, workdir, promptTemplate, {
+		permissionMode: options.permissionMode,
+		runner: options.runner,
+	});
 	const mdPath = path.join(targetDir(), `${slug}-${shortId}.md`);
 	const workflow = insertWorkflow({
 		id,

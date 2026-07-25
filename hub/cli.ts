@@ -13,12 +13,13 @@ function usage(): void {
 
 Commands:
   start                                 Run the hub (foreground)
-  create <name> [--workdir <dir>]       Create a workflow (creates its agent + awb hook too)
+  create <name> [--workdir <dir>] [--runner <claude|free-code>]
+                                         Create a workflow (creates its agent + awb hook too)
   set-context <workflowId> "<text>"   Set (or clear with "") a workflow's conversation context
   add-step <workflowId> <description...>
                                          Append a step to a workflow
   templates                             List available workflow templates
-  create-from-template <templateId> <workflowName> [--workdir <dir>]
+  create-from-template <templateId> <workflowName> [--workdir <dir>] [--runner <claude|free-code>]
                                          Create a workflow seeded with a template's steps
   list                                  List workflows with progress
   show <workflowId>                     Show a workflow's steps
@@ -89,9 +90,10 @@ async function main(): Promise<void> {
 		const name = rest.filter((a) => !a.startsWith("--"))[0];
 		const workdir = flagValue(rest, "--workdir");
 		const permissionMode = flagValue(rest, "--permission-mode");
+		const runner = flagValue(rest, "--runner");
 		if (!name) {
 			console.error(
-				"Usage: target create <name> [--workdir <dir>] [--permission-mode <mode>] [--yes-bypass-risk]\n" +
+				"Usage: target create <name> [--workdir <dir>] [--permission-mode <mode>] [--runner <claude|free-code>] [--yes-bypass-risk]\n" +
 					"  modes: acceptEdits, auto, manual, dontAsk, plan, bypassPermissions (needs --yes-bypass-risk)",
 			);
 			process.exitCode = 1;
@@ -104,6 +106,7 @@ async function main(): Promise<void> {
 				name,
 				...(workdir ? { workdir } : {}),
 				...(permissionMode ? { permissionMode } : {}),
+				...(runner ? { runner } : {}),
 				...(rest.includes("--yes-bypass-risk") ? { acceptBypassRisk: true } : {}),
 			}),
 		});
@@ -153,8 +156,11 @@ async function main(): Promise<void> {
 		const [templateId, name] = rest.filter((a) => !a.startsWith("--"));
 		const workdir = flagValue(rest, "--workdir");
 		const permissionMode = flagValue(rest, "--permission-mode");
+		const runner = flagValue(rest, "--runner");
 		if (!templateId || !name) {
-			console.error("Usage: target create-from-template <templateId> <workflowName> [--workdir <dir>] [--permission-mode <mode>]");
+			console.error(
+				"Usage: target create-from-template <templateId> <workflowName> [--workdir <dir>] [--permission-mode <mode>] [--runner <claude|free-code>]",
+			);
 			process.exitCode = 1;
 			return;
 		}
@@ -166,6 +172,7 @@ async function main(): Promise<void> {
 				templateId,
 				...(workdir ? { workdir } : {}),
 				...(permissionMode ? { permissionMode } : {}),
+				...(runner ? { runner } : {}),
 			}),
 		});
 		if (!createRes.ok) await fail(createRes);

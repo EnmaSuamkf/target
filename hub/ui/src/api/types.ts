@@ -20,6 +20,14 @@ export type StepPhase = "exec" | "judge";
 export const PERMISSION_MODES = ["acceptEdits", "auto", "dontAsk", "plan", "bypassPermissions"] as const;
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
 
+/**
+ * Runtimes a workflow's hook can spawn (server-validated). Both share the
+ * same step protocol; only the spawned CLI and the session-id shape differ
+ * (a claude uuid vs. a free-code `.jsonl` path).
+ */
+export const RUNNERS = ["claude", "free-code"] as const;
+export type Runner = (typeof RUNNERS)[number];
+
 export interface Progress {
 	done: number;
 	total: number;
@@ -102,6 +110,8 @@ export interface CreateWorkflowInput {
 	name: string;
 	workdir?: string;
 	permissionMode?: PermissionMode;
+	/** Which CLI the workflow's hook spawns; the server defaults to "claude". */
+	runner?: Runner;
 	templateId?: string;
 	/** Required confirmation when permissionMode is "bypassPermissions". */
 	acceptBypassRisk?: boolean;
