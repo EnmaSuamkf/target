@@ -31,8 +31,17 @@ const AWB_DEFAULTS: Omit<AwbConfig, "hooks"> = {
 	publicBaseUrl: null,
 };
 
+/**
+ * awb's home directory (`~/.agent-webhook-bridge`, or `AWB_HOME`). Exported
+ * because progress.ts reads the run logs and free-code session files awb keeps
+ * under it to tell whether a step's agent is still doing anything.
+ */
+export function awbDir(): string {
+	return process.env.AWB_HOME ?? path.join(os.homedir(), ".agent-webhook-bridge");
+}
+
 function awbConfigFile(): string {
-	return path.join(process.env.AWB_HOME ?? path.join(os.homedir(), ".agent-webhook-bridge"), "hooks.json");
+	return path.join(awbDir(), "hooks.json");
 }
 
 function loadAwbConfig(): AwbConfig {

@@ -462,10 +462,18 @@ test("advance() ends the run as failed, not completed, when a failed step remain
  * (`maxRetries` > retries used) must be retried instead of failing the
  * workflow — the timeout consumes one retry, the step goes back to `pending`,
  * and only a spent budget makes the timeout terminal. Driven through the real
- * `expireStale` sweep with a negative `stepTimeoutMs` so any `running` step
- * counts as expired immediately (no clock manipulation needed).
+ * `expireStale` sweep with negative timeouts so any in-flight step counts as
+ * expired immediately (no clock manipulation needed). These workflows point at
+ * an unreachable hook and their agents have written nothing under the throwaway
+ * AWB_HOME, so the progress probe finds no signal at all — the case where the
+ * watchdog degrades to the old wall-clock behaviour.
  */
-const timeoutCfg = { ...cfg, stepTimeoutMs: -1000, queuedTimeoutMs: -1000 };
+const timeoutCfg = {
+	...cfg,
+	stepIdleTimeoutMs: -1000,
+	stepHardTimeoutMs: 60 * 60 * 1000,
+	queuedTimeoutMs: -1000,
+};
 
 test("a timed-out step with retries available is retried, not failed", () => {
 	const { workflow } = makeWorkflow(0);
@@ -492,7 +500,7 @@ test("a timed-out step with no retry budget fails the step and the workflow", ()
 	expireStale(timeoutCfg, silent);
 
 	assert.equal(getStep(step.id)?.status, "failed");
-	assert.equal(getStep(step.id)?.error, "timeout");
+	assert.match(String(getStep(step.id)?.error), /^timeout \(no progress/);
 	assert.equal(getWorkflow(workflow.id)?.status, "failed");
 });
 
@@ -512,7 +520,7 @@ test("a timed-out step whose retry budget is spent fails for good", () => {
 	expireStale(timeoutCfg, silent);
 
 	assert.equal(getStep(step.id)?.status, "failed");
-	assert.equal(getStep(step.id)?.error, "timeout");
+	assert.match(String(getStep(step.id)?.error), /^timeout \(no progress/);
 	assert.equal(getWorkflow(workflow.id)?.status, "failed");
 });
 
@@ -528,6 +536,111 @@ test("a timed-out queued step also uses its retry budget", () => {
 	assert.equal(after?.status, "pending");
 	assert.equal(after?.retryCount, 1);
 	assert.equal(after?.manualRun, true); // the ▶ flag survives the retry
+});
+
+/**
+ * Idle watchdog: the regression the whole feature exists for. A step past the
+ * old wall clock whose agent is demonstrably STILL WRITING must survive the
+ * sweep — that's the reported bug, where a 20-minute-plus step was killed
+ * mid-work. The signal is faked with awb's run log (the harness-agnostic
+ * fallback), whose mtime is forced to "now" right before the sweep; the
+ * transcript paths get their own coverage in progress.test.ts.
+ */
+function touchRunLog(agentName: string, mtime: Date): string {
+	const dir = path.join(tmpHome, "logs");
+	fs.mkdirSync(dir, { recursive: true });
+	const file = path.join(dir, `${agentName}-1.log`);
+	fs.writeFileSync(file, "working…\n");
+	fs.utimesSync(file, mtime, mtime);
+	return file;
+}
+
+/** Idle timeout short enough to trip in a test, hard cap far away. */
+const idleCfg = { ...cfg, stepIdleTimeoutMs: 50, stepIdleWarnMs: 10, stepHardTimeoutMs: 60 * 60 * 1000 };
+
+test("a long step whose agent is still writing is not timed out", async () => {
+	const { workflow } = makeWorkflow(0);
+	const step = insertStep(workflow.id, "very long step"); // maxRetries 0: a timeout would be terminal
+	markStepRunning(step.id);
+	setWorkflowStatus(workflow.id, "running");
+
+	// Past the idle deadline by wall clock…
+	await new Promise((resolve) => setTimeout(resolve, 80));
+	// …but the agent just wrote something.
+	touchRunLog(workflow.agentName, new Date());
+	expireStale(idleCfg, silent);
+
+	const after = getStep(step.id);
+	assert.equal(after?.status, "running"); // still working — never failed
+	assert.equal(after?.retryCount, 0); // and no retry budget burnt
+	assert.equal(after?.lastProgressKind, "run-log"); // the signal is recorded, for diagnosis
+	assert.equal(getWorkflow(workflow.id)?.status, "running");
+});
+
+test("a step whose agent went quiet is timed out even though its artifacts exist", async () => {
+	const { workflow } = makeWorkflow(0);
+	const step = insertStep(workflow.id, "hung step");
+	markStepRunning(step.id);
+	setWorkflowStatus(workflow.id, "running");
+
+	// The log file exists but hasn't been touched in a while: existing is not progress.
+	touchRunLog(workflow.agentName, new Date(Date.now() - 60_000));
+	await new Promise((resolve) => setTimeout(resolve, 80));
+	expireStale(idleCfg, silent);
+
+	assert.equal(getStep(step.id)?.status, "failed");
+	assert.match(String(getStep(step.id)?.error), /^timeout \(no progress/);
+	assert.equal(getWorkflow(workflow.id)?.status, "failed");
+});
+
+test("the hard cap fails a step that never stops, however active it looks", () => {
+	const { workflow } = makeWorkflow(0);
+	const step = insertStep(workflow.id, "runaway step");
+	markStepRunning(step.id);
+	setWorkflowStatus(workflow.id, "running");
+	touchRunLog(workflow.agentName, new Date()); // busy right now…
+
+	// …but the absolute ceiling has passed (negative hard cap = "always past it").
+	expireStale({ ...cfg, stepIdleTimeoutMs: 60 * 60 * 1000, stepHardTimeoutMs: -1000 }, silent);
+
+	assert.equal(getStep(step.id)?.status, "failed");
+	assert.match(String(getStep(step.id)?.error), /^timeout \(hard cap/);
+});
+
+test("a retry starts the step's idle clock over", () => {
+	const { workflow } = makeWorkflow(0);
+	const step = insertStep(workflow.id, "long step", { maxRetries: 1 });
+	markStepRunning(step.id);
+	setWorkflowStatus(workflow.id, "running");
+	touchRunLog(workflow.agentName, new Date(Date.now() - 60_000));
+
+	expireStale(timeoutCfg, silent); // no progress → timeout consumes the retry
+
+	// Back to pending with a clean slate: the next attempt must not inherit the
+	// dead attempt's inactivity (or its artifact fingerprint).
+	const after = getStep(step.id);
+	assert.equal(after?.status, "pending");
+	assert.equal(after?.retryCount, 1);
+	assert.equal(after?.lastProgressAt, null);
+	assert.equal(after?.lastProgressToken, null);
+});
+
+test("entering the judge phase re-seeds the idle clock", () => {
+	const { workflow } = makeWorkflow(0);
+	const step = insertStep(workflow.id, "judged step", { acceptanceCriteria: "must be X" });
+	markStepRunning(step.id);
+	const before = getStep(step.id)?.lastProgressAt;
+	assert.ok(before); // seeded with the run start
+
+	markStepJudging(step.id, { result: "the work", sessionId: "sess-judge" });
+
+	const judging = getStep(step.id);
+	assert.ok(judging?.lastProgressAt);
+	// The judge run is a fresh clock: its stamp moves forward with started_at,
+	// and the exec run's artifact fingerprint is dropped.
+	assert.equal(judging?.lastProgressAt, judging?.startedAt);
+	assert.equal(judging?.lastProgressToken, null);
+	assert.equal(getWorkflow(workflow.id)?.status, "draft");
 });
 
 test("restart resets only the selected steps, leaving the rest done", () => {

@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { Step, StepConfigInput } from "../api/types.ts";
 import { Badge } from "../components/Badge.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
-import { duration } from "../lib/format.ts";
+import { activityLabel, duration } from "../lib/format.ts";
 import styles from "./StepItem.module.css";
 
 /**
@@ -64,6 +64,7 @@ export function StepItem({
 	}
 
 	const elapsed = duration(step.startedAt, step.finishedAt, step.queuedAt);
+	const activity = step.activity;
 	const hasResult = step.status === "done" && step.result;
 
 	return (
@@ -82,7 +83,7 @@ export function StepItem({
 				<Badge status={step.status} label={statusLabel} />
 			</div>
 
-			{(step.acceptanceCriteria || elapsed || step.manualRun) && (
+			{(step.acceptanceCriteria || elapsed || step.manualRun || activity) && (
 				<div className={styles.meta}>
 					{step.acceptanceCriteria && (
 						<span className={styles.metaItem} title={step.acceptanceCriteria}>
@@ -99,6 +100,21 @@ export function StepItem({
 					)}
 					{step.manualRun && <span className={styles.metaItem}>manual run</span>}
 					{elapsed && <span className={styles.metaItem}>{elapsed}</span>}
+					{/* Progress watchdog: a long step that is still writing reads as
+					    healthy, and one that has gone quiet is flagged before the idle
+					    timeout takes it down. */}
+					{activity && (
+						<span
+							className={`${styles.metaItem} ${activity.state === "running-active" ? "" : styles.metaItemIdle}`}
+							title={
+								activity.lastProgressAt
+									? `Last signal: ${activity.lastProgressKind ?? "run start"} at ${activity.lastProgressAt}`
+									: undefined
+							}
+						>
+							{activityLabel(activity)}
+						</span>
+					)}
 				</div>
 			)}
 

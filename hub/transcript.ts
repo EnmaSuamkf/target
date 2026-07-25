@@ -21,7 +21,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-function claudeProjectDir(workdir: string): string {
+/**
+ * Directory Claude Code keeps a workdir's session transcripts in. Exported for
+ * progress.ts, which watches that whole tree (not one session file) to tell a
+ * working agent from a hung one.
+ */
+export function claudeProjectDir(workdir: string): string {
 	const slug = workdir.replace(/[^a-zA-Z0-9-]/g, "-");
 	return path.join(os.homedir(), ".claude", "projects", slug);
 }

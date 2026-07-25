@@ -15,17 +15,20 @@ import {
 	completeStep,
 	deleteStep,
 	deleteWorkflow,
-	expireStaleSteps,
 	failRunningStep,
+	failTimedOutStep,
+	findTimeoutCandidates,
 	finishStepDone,
 	getStep,
 	getWorkflow,
 	insertStep,
 	insertWorkflow,
+	listRunningSteps,
 	listSteps,
 	listWorkflows,
 	markStepJudging,
 	nextPendingStep,
+	recordStepProgress,
 	resetSteps,
 	setContextInjected,
 	setWorkflowConversationContext,
@@ -38,30 +41,115 @@ import {
 	updateStepConfig,
 	updateStepDescription,
 	type Step,
+	type TimeoutReason,
 	type Workflow,
 	type WorkflowStatus,
 } from "./db.ts";
+import { forgetProbe, humanizeSeconds, probeStepProgress, stepActivity } from "./progress.ts";
 import { dispatchStep, type Logger } from "./runner.ts";
 
 export class WorkflowError extends Error {}
 
 /**
- * Fails any step stuck past its timeout. A timed-out step with retry budget
- * left (`retryCount < maxRetries`) is NOT terminal: it consumes one retry and
- * is re-dispatched (mirroring the judge-reject retry path), so a transient
- * hang doesn't kill the whole workflow while the operator explicitly allowed
- * retries. Only when the budget is spent (or was never granted) does the
- * timeout fail the step for good — and, for a still-`running` workflow that
- * owned it, fail the workflow too, otherwise it would sit stuck forever with
- * no step left to dispatch.
+ * Refreshes the progress clock of every in-flight step from the artifacts its
+ * harness is writing (see progress.ts). Throttled per step, so running this on
+ * every workflow read (~every 2s with the UI open) costs at most one `readdir`
+ * per running step per `progressProbeThrottleMs`. This is what makes the UI
+ * able to say "active 4s ago" instead of only finding out at the deadline.
+ */
+function refreshProgress(cfg: HubConfig): void {
+	for (const step of listRunningSteps()) {
+		const workflow = getWorkflow(step.workflowId);
+		if (workflow) recordFreshSignal(step, workflow, cfg);
+	}
+}
+
+/**
+ * Probes one step and records the signal if it's genuinely newer than what we
+ * already had. Two guards matter: an UNCHANGED fingerprint is not progress (the
+ * file still existing must never reset the clock), and a signal older than the
+ * one already stored is ignored (a stale run log must not drag the clock
+ * backwards). Returns the step as it now stands.
+ */
+function recordFreshSignal(step: Step, workflow: Workflow, cfg: HubConfig, force = false): Step {
+	const signal = probeStepProgress(workflow, step, cfg, force);
+	if (!signal || signal.token === step.lastProgressToken) return step;
+	const known = step.lastProgressAt ? Date.parse(step.lastProgressAt) : Number.NEGATIVE_INFINITY;
+	if (Date.parse(signal.at) <= known) return step;
+	if (!recordStepProgress(step.id, signal)) return step;
+	return getStep(step.id) ?? step;
+}
+
+/** The `error` a timed-out step is failed with — it must say WHY, since "timeout" alone is exactly what made this bug so hard to read. */
+function timeoutError(step: Step, reason: TimeoutReason, cfg: HubConfig): string {
+	if (reason === "queued") return "timeout (queued: the run never started)";
+	const activity = stepActivity(step, cfg);
+	if (reason === "hard") {
+		return `timeout (hard cap: ${humanizeSeconds(activity?.elapsedSeconds ?? 0)} running)`;
+	}
+	const since = step.lastProgressAt ?? step.startedAt ?? "unknown";
+	const kind = step.lastProgressKind ?? "no signal";
+	return `timeout (no progress for ${humanizeSeconds(activity?.idleSeconds ?? 0)}; last signal: ${kind} at ${since})`;
+}
+
+/**
+ * Fails any step the progress watchdog considers stuck. Two phases, on purpose:
+ *
+ * 1. `findTimeoutCandidates` (a pure SQL read) lists the steps whose clocks have
+ *    run out — no activity for `stepIdleTimeoutMs`, `stepHardTimeoutMs` of
+ *    wall time, or a queue wait past `queuedTimeoutMs`.
+ * 2. Each `idle` candidate is then RE-PROBED against the filesystem, and one
+ *    whose agent demonstrably wrote something recently is left alone.
+ *
+ * That second phase is the fix for the original bug: a step used to be failed
+ * purely because 20 minutes had passed, even while the agent was mid-task. Now
+ * only silence fails it. A candidate with no artifacts at all (unknown harness,
+ * remote hook, deleted transcripts) finds no signal and times out on the idle
+ * clock exactly as the old wall clock did — the watchdog degrades, never
+ * blocks.
+ *
+ * From there the behaviour is unchanged: a timed-out step with retry budget
+ * left (`retryCount < maxRetries`) is NOT terminal — it consumes one retry and
+ * is re-dispatched (mirroring the judge-reject retry path). Only when the budget
+ * is spent (or was never granted) does the timeout fail the step for good —
+ * and, for a still-`running` workflow that owned it, fail the workflow too,
+ * otherwise it would sit stuck forever with no step left to dispatch.
  */
 export function expireStale(cfg: HubConfig, log: Logger): void {
-	const expired = expireStaleSteps(cfg.stepTimeoutMs, cfg.queuedTimeoutMs);
+	refreshProgress(cfg);
+	const candidates = findTimeoutCandidates({
+		idleTimeoutMs: cfg.stepIdleTimeoutMs,
+		hardTimeoutMs: cfg.stepHardTimeoutMs,
+		queuedTimeoutMs: cfg.queuedTimeoutMs,
+	});
 	const failedWorkflowIds = new Set<string>();
-	for (const { stepId, workflowId } of expired) {
-		const step = getStep(stepId);
+	for (const candidate of candidates) {
+		const { stepId, workflowId } = candidate;
 		const workflow = getWorkflow(workflowId);
-		if (step && workflow && step.retryCount < step.maxRetries) {
+		let step = getStep(stepId);
+		if (!step || !workflow) continue;
+
+		// Phase 2: an idle candidate gets one last, unthrottled look at the
+		// harness's artifacts before we believe it's hung.
+		if (candidate.reason === "idle") {
+			step = recordFreshSignal(step, workflow, cfg, true);
+			const activity = stepActivity(step, cfg);
+			if (activity && activity.state !== "stalled" && activity.state !== "timed-out-hard") {
+				log(
+					`step ${stepId} is still active (${step.lastProgressKind ?? "signal"} ${humanizeSeconds(activity.idleSeconds)} ago) — not timing it out`,
+				);
+				continue;
+			}
+		}
+
+		const error = timeoutError(step, candidate.reason, cfg);
+		// The run may have answered while we were probing — then it's already
+		// settled and this sweep has nothing to do.
+		if (!failTimedOutStep(stepId, error)) continue;
+		forgetProbe(stepId);
+		log(`step ${stepId} timed out — ${error}`, "warning");
+
+		if (step.retryCount < step.maxRetries) {
 			// Retry budget left → consume one retry and re-run the step instead of
 			// failing the workflow. `beginRetry` runs synchronously here so the
 			// step is back to `pending` (and the heal below leaves the workflow
@@ -70,7 +158,7 @@ export function expireStale(cfg: HubConfig, log: Logger): void {
 			// interval or the dispatch round-trip.
 			beginRetry(stepId); // status → pending, retry_count++, keeps is_manual_run
 			writeStatusMd(workflowId);
-			log(`step ${stepId} timed out — retrying (${step.retryCount + 1}/${step.maxRetries})`, "warning");
+			log(`step ${stepId} retrying after the timeout (${step.retryCount + 1}/${step.maxRetries})`, "warning");
 			const retried = getStep(stepId);
 			if (retried) void retryTimedOutStep(retried, workflow, cfg, log);
 			continue;
@@ -185,6 +273,11 @@ export function writeStatusMd(workflowId: string): void {
 			lines.push(`   - Retries: ${step.retryCount}/${step.maxRetries}`);
 		}
 		if (step.startedAt) lines.push(`   - Started: ${step.startedAt}`);
+		// Last sign of life from the agent, so a timeout (or a long-but-healthy
+		// run) can be diagnosed from the progress file alone.
+		if (step.status === "running" && step.lastProgressAt) {
+			lines.push(`   - Last activity: ${step.lastProgressAt} (${step.lastProgressKind ?? "run start"})`);
+		}
 		if (step.finishedAt) lines.push(`   - Finished: ${step.finishedAt}`);
 		if (step.result) lines.push(`   - Result: ${step.result.slice(0, 500)}${step.result.length > 500 ? "…" : ""}`);
 		if (step.error) lines.push(`   - Error: ${step.error}`);
