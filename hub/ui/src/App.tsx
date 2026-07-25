@@ -227,9 +227,11 @@ export function App(): React.JSX.Element {
 		}
 	};
 
-	const handleSaveContext = async (context: string): Promise<void> => {
-		if (!selectedId) return;
-		await act(
+	// Returns whether the save actually reached the server, so the context
+	// panel only clears its "unsaved edits" state on a real success.
+	const handleSaveContext = async (context: string): Promise<boolean> => {
+		if (!selectedId) return false;
+		return await act(
 			"Could not save the context",
 			async () => {
 				await api.setConversationContext(selectedId, context);
