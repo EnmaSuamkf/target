@@ -42,13 +42,16 @@ export function relativeTime(iso: string | null | undefined): string {
 }
 
 /**
- * How long a step took, from its start/finish stamps. A step that started but
- * hasn't finished is measured against now, so a running step shows a live
- * duration as the 2s poll re-renders it.
+ * How long a step has been in flight, from its start/finish stamps. A step
+ * that started but hasn't finished is measured against now, so a running step
+ * shows a live duration as the 2s poll re-renders it. A `queued` step has no
+ * `started_at` yet (it's waiting on the workdir lock), so its wait is measured
+ * from `queued_at` instead — showing how long it's been queued, not 0/blank.
  */
-export function duration(startedAt: string | null, finishedAt: string | null): string {
-	if (!startedAt) return "";
-	const start = new Date(startedAt).getTime();
+export function duration(startedAt: string | null, finishedAt: string | null, queuedAt?: string | null): string {
+	const startIso = startedAt ?? queuedAt ?? null;
+	if (!startIso) return "";
+	const start = new Date(startIso).getTime();
 	if (Number.isNaN(start)) return "";
 	const end = finishedAt ? new Date(finishedAt).getTime() : Date.now();
 	if (Number.isNaN(end)) return "";

@@ -481,18 +481,46 @@ node hub/cli.ts run &lt;workflowId&gt;       # start / continue</code></pre>
           left to run → <code>draft</code>) — which is what lets retrying a single failed step
           until it passes take the whole workflow back out of <code>failed</code>.
         </p>
+        <h3>Status always matches the bar</h3>
+        <p>
+          The badge and the progress bar are recomputed from the same step data, so they can't
+          disagree: when a run ends with a step still <code>failed</code>, the workflow ends
+          <code>failed</code> (red bar, red badge) — never <code>completed</code> with a red bar.
+          And every workflow read (<code>GET /api/workflows</code>) self-heals settled
+          workflows: one whose steps are all finished but whose badge is stale (e.g. stuck
+          <code>running</code> at 100% because its remaining pending steps were deleted) is
+          reconciled to <code>completed</code>/<code>failed</code>/<code>draft</code> on the
+          next read. Workflows that still have pending or running steps are left alone.
+        </p>
         <h3>Aborting a stuck step</h3>
         <p>
           If a step's dispatch never calls back (a hung exec or judge — the agent
-          process is stuck), it stays <code>running</code> forever and blocks everything:
-          ▶ refuses to re-run a <code>running</code> step, and <code>restart</code> is
-          disabled while the workflow is <code>running</code>. The <strong>Abort</strong>
-          button (or <code>POST /api/workflows/:id/steps/:stepId/abort</code>) force-fails
-          that one stuck step — <strong>preserving its session</strong> so "Open
-          conversation" still works — which moves the workflow to <code>failed</code> so
-          you can ▶ re-run just that step. (Without it you'd have to wait for the
-          20-minute stale-step timeout, or pause+restart the whole workflow.) Any late
-          callback for the aborted step is ignored.
+          process is stuck), or it's still <code>queued</code> on the workdir lock,
+          it blocks everything: ▶ refuses to re-run an in-flight step, and
+          <code>restart</code> is disabled while the workflow is <code>running</code>.
+          The <strong>Abort</strong> button (or
+          <code>POST /api/workflows/:id/steps/:stepId/abort</code>) force-fails that one
+          stuck step — <strong>preserving its session</strong> so "Open conversation"
+          still works — and <strong>kills the spawned agent process on the broker</strong>
+          (SIGTERM, then SIGKILL), freeing the workdir lock so other workflows on the
+          same repo can proceed. The workflow moves to <code>failed</code> so you can ▶
+          re-run just that step. Any late callback for the aborted step is ignored.
+        </p>
+        <h3>Queued vs. running, and a fair timeout clock</h3>
+        <p>
+          When a step is dispatched, the broker accepts the POST right away but the
+          run may not start immediately — it's serialized per <code>workdir</code> with
+          a file lock (<code>flock</code>), so a second step on the same repo waits
+          behind the first. The hub marks such a step <code>queued</code> (not
+          <code>running</code>), and the broker fires a <code>started</code> callback the
+          instant the lock is acquired and the run actually begins — that's when the
+          step flips to <code>running</code> and its 20-minute timeout clock starts.
+          So a step queued behind a long run isn't timed out while still waiting its
+          turn. The lock is held by the spawned process itself, so it survives a broker
+          restart (an orphaned child keeps holding it; a new broker's run for that
+          workdir blocks until the orphan exits). A separate <code>queuedTimeoutMs</code>
+          (default 6h) is the safety net for a dead broker that never sends
+          <code>started</code>.
         </p>
         <h3>Selecting which steps run</h3>
         <p>
@@ -528,7 +556,10 @@ node hub/cli.ts run &lt;workflowId&gt;       # start / continue</code></pre>
 
       <section id="how-a-step-flows">
         <h2>How a step flows</h2>
-        <div class="diagram">hub    →  POST to the workflow's awb hook          {stepId, input, <span class="hl">callbackUrl</span>} + secret, sessionId to resume
+        <div class="diagram">hub    →  POST to the workflow's awb hook          {stepId, input, <span class="hl">callbackUrl</span>, <span class="hl">startedCallbackUrl</span>} + secret, sessionId to resume
+awb    →  <span class="hl">queued</span> (waiting on the workdir <span class="hl">flock</span>)   serialized per workdir; the lock survives broker restarts
+awb    →  POST startedCallbackUrl {started:true}  the instant the lock is acquired
+hub    →  step <span class="hl">running</span> (timeout clock starts here)
 awb    →  spawns <span class="hl">claude -p</span>/<span class="hl">--resume</span> or <span class="hl">free-code -p</span>/<span class="hl">--session</span>   the step's description, appended with the subagent instruction
 awb    →  POST callbackUrl {ok, result, session_id}  when the run finishes
 hub    →  step <span class="hl">done</span> or <span class="hl">judge</span>            done if no acceptance criteria; otherwise a self-evaluation run follows
@@ -536,7 +567,9 @@ hub    →  next pending, selected step dispatched     until none remain, then t
         <p>
           Like agentmesh, the flow is asynchronous end to end: the hook answers
           <code>{"ok":true}</code> immediately (meaning only "accepted"), and the hub marks the
-          step <code>running</code> on acceptance. The real result arrives later on
+          step <code>queued</code> on acceptance — <code>running</code> only once the broker's
+          <code>started</code> callback reports the run actually began (after acquiring the
+          workdir lock). The real result arrives later on
           <code>POST /api/steps/:id/result</code>, authenticated with a per-step token compared
           with <code>crypto.timingSafeEqual</code>.
         </p>
@@ -559,7 +592,7 @@ hub    →  next pending, selected step dispatched     until none remain, then t
           <table>
             <thead><tr><th>What happened</th><th>How the step ends</th></tr></thead>
             <tbody>
-              <tr><td>The step's still <code>pending</code>/<code>running</code> longer than the step timeout</td><td><code>failed</code> with a timeout error, once anything reads the workflow/step list.</td></tr>
+              <tr><td>The step's still <code>running</code> (actually executing) longer than the step timeout</td><td>If the step has retry budget left (<code>maxRetries</code> minus retries used), the timeout <strong>consumes one retry</strong>: the hung run is best-effort killed on the broker, the step goes back to <code>pending</code> and is re-dispatched on the same session with a note that the previous attempt timed out (honoring <code>retryIntervalSeconds</code>). Only with the budget spent (or <code>maxRetries: 0</code>, the default) is it marked <code>failed</code> with a timeout error, once anything reads the workflow/step list. A <code>queued</code> step waiting on the workdir lock is <em>not</em> timed out by this — it has its own much longer <code>queuedTimeoutMs</code>, which uses the same retry-then-fail rule.</td></tr>
               <tr><td>The judge's verdict rejects the result</td><td>Retried on the same step, with feedback, until <code>maxRetries</code> is exhausted — then the workflow fails.</td></tr>
               <tr><td>The judge's verdict doesn't parse as JSON</td><td>The workflow fails immediately (deliberately, rather than guessing at the intended verdict).</td></tr>
               <tr><td>awb's result callback reports a non-zero exit</td><td><code>failed</code>, with the reported error/exit code.</td></tr>
@@ -569,9 +602,13 @@ hub    →  next pending, selected step dispatched     until none remain, then t
         <p>
           Expiry is <strong>lazy</strong> — implemented in <code>db.ts</code>/<code>workflow.ts</code>'s
           <code>expireStale</code>: any read of the workflow list or a workflow's detail first
-          fails any <code>running</code> step older than <code>stepTimeoutMs</code>, so timeouts
-          are enforced without a timer and survive hub restarts for free. A callback that
-          arrives after the timeout does not resurrect the step.
+          fails any <code>running</code> step older than <code>stepTimeoutMs</code> (measured from
+          the broker's <code>started</code> callback, i.e. the true run start) and any
+          <code>queued</code> step older than <code>queuedTimeoutMs</code>, so timeouts are
+          enforced without a timer and survive hub restarts for free. A callback that
+          arrives after the timeout does not resurrect the step. A timed-out step with
+          retry budget left is retried right from that sweep instead of failing — the
+          timeout consumes one retry, exactly like a judge rejection.
         </p>
       </section>
 
@@ -589,7 +626,8 @@ hub    →  next pending, selected step dispatched     until none remain, then t
               <tr><td><code>host</code></td><td><code>127.0.0.1</code></td><td>Bind address for the hub's HTTP server.</td></tr>
               <tr><td><code>port</code></td><td><code>8893</code></td><td>Chosen away from awb's default (<code>8890</code>) and agentmesh-hub's (<code>8892</code>) so all three can share a machine.</td></tr>
               <tr><td><code>adminToken</code></td><td>random, generated on first load</td><td>Bearer token required by every mutating <code>/api</code> route. Printed at hub startup.</td></tr>
-              <tr><td><code>stepTimeoutMs</code></td><td><code>1200000</code> (20 minutes)</td><td>A step still pending/running longer than this is lazily marked <code>failed</code>.</td></tr>
+              <tr><td><code>stepTimeoutMs</code></td><td><code>1200000</code> (20 minutes)</td><td>A step still <code>running</code> (actually executing, past the <code>started</code> callback) longer than this is lazily retried (if it has retry budget left) or marked <code>failed</code>.</td></tr>
+              <tr><td><code>queuedTimeoutMs</code></td><td><code>21600000</code> (6 hours)</td><td>A step still <code>queued</code> (accepted by the broker but waiting on the workdir lock / its <code>started</code> callback) longer than this is lazily retried (if it has retry budget left) or marked <code>failed</code> — a safety net for a dead broker that never calls back.</td></tr>
               <tr><td><code>maxInputBytes</code></td><td><code>65536</code> (64 KiB)</td><td>Request body size cap enforced while reading JSON bodies; oversized bodies get <code>413</code>.</td></tr>
             </tbody>
           </table>
@@ -680,7 +718,7 @@ hub    →  next pending, selected step dispatched     until none remain, then t
               <tr><td><code>PATCH /api/workflows/:id/steps/:stepId</code></td><td>Edits a step's description / judge settings (admin token).</td></tr>
               <tr><td><code>DELETE /api/workflows/:id/steps/:stepId</code></td><td>Removes a pending step (admin token).</td></tr>
               <tr><td><code>POST /api/workflows/:id/steps/:stepId/run</code></td><td>Runs one step now, outside the sequential order, always on a fresh session (admin token).</td></tr>
-              <tr><td><code>POST /api/workflows/:id/steps/:stepId/abort</code></td><td>Force-fails a step stuck <code>running</code> (a dispatch whose callback never came back, e.g. a hung judge), preserving its session, so it can be re-run via ▶ without restarting the whole workflow (admin token).</td></tr>
+              <tr><td><code>POST /api/workflows/:id/steps/:stepId/abort</code></td><td>Force-fails a step stuck <code>running</code>/<code>queued</code> (a dispatch whose callback never came back, or one still waiting on the workdir lock), preserving its session, and kills the spawned agent process on the broker so the step can be re-run via ▶ without restarting the whole workflow (admin token).</td></tr>
               <tr><td><code>POST /api/workflows/:id/start</code></td><td>Begins/continues sequential dispatch (admin token). Body: <code>{stepIds?: string[]}</code> to restrict which steps run.</td></tr>
               <tr><td><code>POST /api/workflows/:id/pause</code></td><td>Stops dispatching further steps (admin token).</td></tr>
               <tr><td><code>POST /api/workflows/:id/resume</code></td><td>Undoes pause (admin token). Same optional <code>stepIds</code> body as start.</td></tr>

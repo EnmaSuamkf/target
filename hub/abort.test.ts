@@ -79,14 +79,15 @@ test("abort force-fails a stuck running step (exec hang: no session yet) and fai
 	const { workflow, steps } = makeWorkflow(2, url);
 
 	await startWorkflow(workflow.id, cfg, silent, [steps[0].id, steps[1].id]);
-	// Step 0 was dispatched and is stuck running in exec (the fake hook never
-	// calls back). awb only reports a session in the completion callback, so a
-	// stuck first dispatch has no session yet — that's expected, and it's why
-	// "Open conversation" is gated on a session existing.
-	assert.equal(getStep(steps[0].id)?.status, "running");
+	// Step 0 was dispatched and is stuck queued in exec (the fake hook accepts
+	// the POST but never calls back, so no `started` ever flips it to running).
+	// awb only reports a session in the completion callback, so a stuck first
+	// dispatch has no session yet — that's expected, and it's why "Open
+	// conversation" is gated on a session existing.
+	assert.equal(getStep(steps[0].id)?.status, "queued");
 	assert.equal(getStep(steps[0].id)?.sessionId, null);
 
-	const updated = abortStep(workflow.id, steps[0].id);
+	const updated = await abortStep(workflow.id, steps[0].id, silent);
 	assert.equal(updated.status, "failed");
 	const step = getStep(steps[0].id);
 	assert.equal(step?.status, "failed");
@@ -115,12 +116,14 @@ test("abort preserves an established session id (judge hang) — Open conversati
 
 	await startWorkflow(id, cfg, silent, [step.id]);
 	await finishStepOk(step.id, "sess-keep"); // exec ok → judging, judge dispatched (hung)
-	assert.equal(getStep(step.id)?.status, "running");
+	// The judge dispatch was accepted by the fake hook but no `started` came
+	// back, so the step sits `queued` in its judge phase (not `running`).
+	assert.equal(getStep(step.id)?.status, "queued");
 	assert.equal(getStep(step.id)?.phase, "judge");
 	assert.equal(getStep(step.id)?.sessionId, "sess-keep"); // set during exec→judge
 	assert.equal(getWorkflow(id)?.lastSessionId, "sess-keep");
 
-	abortStep(id, step.id);
+	await abortStep(id, step.id, silent);
 	const aborted = getStep(step.id);
 	assert.equal(aborted?.status, "failed");
 	assert.equal(aborted?.error, "aborted");
@@ -136,22 +139,24 @@ test("after abort, the step can be re-run via ▶ (startManualRun succeeds again
 	const { workflow, steps } = makeWorkflow(1, url);
 
 	await startWorkflow(workflow.id, cfg, silent, [steps[0].id]);
-	assert.equal(getStep(steps[0].id)?.status, "running");
-	abortStep(workflow.id, steps[0].id);
+	assert.equal(getStep(steps[0].id)?.status, "queued");
+	await abortStep(workflow.id, steps[0].id, silent);
 	assert.equal(getStep(steps[0].id)?.status, "failed");
 
-	// ▶ re-run: the step is no longer running, so runStep accepts it.
+	// ▶ re-run: the step is no longer running/queued, so runStep accepts it.
+	// (runStep's dispatch is also accepted by the fake hook → the step is
+	// `queued`, not `running`, until a `started` callback arrives.)
 	await runStep(workflow.id, steps[0].id, cfg, silent);
-	assert.equal(getStep(steps[0].id)?.status, "running");
+	assert.equal(getStep(steps[0].id)?.status, "queued");
 	assert.equal(getStep(steps[0].id)?.manualRun, true);
 });
 
-test("abort rejects a non-running step", async () => {
+test("abort rejects a non-running/non-queued step", async () => {
 	const { server, url } = await startFakeHook();
 	test.after(() => server.close());
 	const { workflow, steps } = makeWorkflow(1, url);
 	// Step is still pending (never dispatched).
-	assert.throws(() => abortStep(workflow.id, steps[0].id), /only a running step can be aborted/);
+	await assert.rejects(() => abortStep(workflow.id, steps[0].id, silent), /only a running step can be aborted/);
 	// Workflow/step untouched.
 	assert.equal(getStep(steps[0].id)?.status, "pending");
 	assert.equal(getWorkflow(workflow.id)?.status, "draft");
@@ -162,11 +167,11 @@ test("abort rejects an unknown step / unknown workflow", async () => {
 	test.after(() => server.close());
 	const { workflow, steps } = makeWorkflow(1, url);
 	await startWorkflow(workflow.id, cfg, silent, [steps[0].id]);
-	assert.throws(() => abortStep(workflow.id, "no-such-step"), /unknown step/);
-	assert.throws(() => abortStep("no-such-workflow", steps[0].id), /unknown workflow/);
+	await assert.rejects(() => abortStep(workflow.id, "no-such-step", silent), /unknown step/);
+	await assert.rejects(() => abortStep("no-such-workflow", steps[0].id, silent), /unknown workflow/);
 	// A step from a different workflow is also "unknown".
 	const other = makeWorkflow(1, url);
-	assert.throws(() => abortStep(workflow.id, other.steps[0].id), /unknown step/);
+	await assert.rejects(() => abortStep(workflow.id, other.steps[0].id, silent), /unknown step/);
 });
 
 test("a late awb callback for an aborted step is ignored (no corruption)", async () => {
@@ -175,7 +180,7 @@ test("a late awb callback for an aborted step is ignored (no corruption)", async
 	const { workflow, steps } = makeWorkflow(1, url);
 
 	await startWorkflow(workflow.id, cfg, silent, [steps[0].id]);
-	abortStep(workflow.id, steps[0].id);
+	await abortStep(workflow.id, steps[0].id, silent);
 	assert.equal(getStep(steps[0].id)?.status, "failed");
 
 	// The hung dispatch's callback finally arrives, claiming success — it must
@@ -193,9 +198,9 @@ test("abort does not touch a sibling done step (only the stuck one fails)", asyn
 	const { workflow, steps } = makeWorkflow(2, url);
 	await startWorkflow(workflow.id, cfg, silent, [steps[0].id, steps[1].id]);
 	await finishStepOk(steps[0].id, "sess-1"); // step 0 done, step 1 dispatched
-	assert.equal(getStep(steps[1].id)?.status, "running");
+	assert.equal(getStep(steps[1].id)?.status, "queued");
 
-	abortStep(workflow.id, steps[1].id);
+	await abortStep(workflow.id, steps[1].id, silent);
 	assert.equal(getStep(steps[0].id)?.status, "done"); // untouched
 	assert.equal(getStep(steps[1].id)?.status, "failed");
 });
@@ -213,8 +218,9 @@ function adminHeaders() {
 	return { "content-type": "application/json", authorization: `Bearer ${cfg.adminToken}` };
 }
 
-test("POST /api/workflows/:id/steps/:stepId/abort aborts a running step", async () => {
-	// Drive a step to running through the real API + a fake hook.
+test("POST /api/workflows/:id/steps/:stepId/abort aborts a queued step", async () => {
+	// Drive a step to queued through the real API + a fake hook (the fake hook
+	// accepts the POST but never sends `started`, so the step stays queued).
 	const { server, url } = await startFakeHook();
 	test.after(() => server.close());
 	const { workflow, steps } = makeWorkflow(1, url);
@@ -225,7 +231,7 @@ test("POST /api/workflows/:id/steps/:stepId/abort aborts a running step", async 
 		body: JSON.stringify({ stepIds: [steps[0].id] }),
 	});
 	assert.equal(startRes.status, 200);
-	assert.equal(getStep(steps[0].id)?.status, "running");
+	assert.equal(getStep(steps[0].id)?.status, "queued");
 
 	const res = await fetch(`${apiBase}/api/workflows/${workflow.id}/steps/${steps[0].id}/abort`, {
 		method: "POST",
@@ -250,10 +256,10 @@ test("POST .../abort requires an admin token", async () => {
 	});
 	assert.equal(res.status, 401);
 	// Untouched.
-	assert.equal(getStep(steps[0].id)?.status, "running");
+	assert.equal(getStep(steps[0].id)?.status, "queued");
 });
 
-test("POST .../abort on a non-running step returns 400", async () => {
+test("POST .../abort on a non-running/non-queued step returns 400", async () => {
 	const { server, url } = await startFakeHook();
 	test.after(() => server.close());
 	const { workflow, steps } = makeWorkflow(1, url);

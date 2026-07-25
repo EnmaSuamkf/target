@@ -254,6 +254,12 @@ kbd,
 	border-color: var(--info-200);
 	color: var(--info-700);
 }
+.badge--queued {
+	background: var(--info-50);
+	border-color: var(--info-200);
+	color: var(--info-700);
+	opacity: 0.75;
+}
 .badge--paused {
 	background: var(--warn-50);
 	border-color: var(--warn-200);
@@ -279,6 +285,11 @@ kbd,
 /* A soft pulse marks work actually in flight (running step, judging). */
 .badge--running .badge__dot {
 	animation: pulse 1.6s ease-in-out infinite;
+}
+/* A queued step is waiting its turn on the workdir lock — a steady dot
+   (no pulse) signals "accepted, not yet running" without implying activity. */
+.badge--queued .badge__dot {
+	animation: none;
 }
 
 .badge__dot {

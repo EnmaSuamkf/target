@@ -19,8 +19,10 @@ export interface HubConfig {
 	port: number;
 	/** Bearer token required by every mutating /api route. */
 	adminToken: string;
-	/** A step's job still pending/running after this long is marked failed. */
+	/** A step's job still `running` (actually executing) after this long is marked failed. */
 	stepTimeoutMs: number;
+	/** A step still `queued` (accepted by the broker but not yet started — waiting on the workdir lock behind another run) after this long is marked failed. Safety net so a dead broker (which never sends the `started` callback) can't leave a step queued forever; well above any real queue wait. */
+	queuedTimeoutMs: number;
 	maxInputBytes: number;
 }
 
@@ -30,6 +32,11 @@ const DEFAULTS: Omit<HubConfig, "adminToken"> = {
 	host: "127.0.0.1",
 	port: 8893,
 	stepTimeoutMs: 20 * 60 * 1000,
+	// Six hours: a genuinely-queued step starts as soon as the run ahead of it
+	// on the same workdir finishes (minutes, not hours), so this only ever trips
+	// when the broker died and never sent `started` — exactly the case the
+	// operator should see failed (and abortable) instead of stuck forever.
+	queuedTimeoutMs: 6 * 60 * 60 * 1000,
 	maxInputBytes: 64 * 1024,
 };
 

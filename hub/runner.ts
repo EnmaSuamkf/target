@@ -17,7 +17,7 @@
  */
 import type { HubConfig } from "./config.ts";
 import type { Step, Workflow } from "./db.ts";
-import { completeStep, markStepRunning } from "./db.ts";
+import { completeStep, markStepQueued } from "./db.ts";
 
 export type Logger = (message: string, type?: "info" | "warning" | "error") => void;
 
@@ -37,6 +37,14 @@ function retryNote(reason: string): string {
 		trimmed ? `. Reason: "${trimmed}"` : ""
 	}. Fix that and redo the step so it meets the criterion.`;
 }
+
+/**
+ * Note appended to the re-run of a step whose previous attempt timed out.
+ * The retry resumes the same session, so partial progress from the timed-out
+ * run may already exist — the agent should continue, not start from scratch.
+ */
+const TIMEOUT_NOTE =
+	"\n\nNote: the previous attempt at this step timed out before finishing. Continue from any partial progress already made and complete the step.";
 
 /**
  * Appends the acceptance criterion to the exec input so the agent aims for it
@@ -116,6 +124,8 @@ export async function dispatchStep(
 		resumeSession?: boolean;
 		mode?: "exec" | "judge";
 		retryReason?: string;
+		/** The previous attempt timed out — append TIMEOUT_NOTE so the re-run continues the partial work. */
+		timedOut?: boolean;
 		manual?: boolean;
 	} = {},
 ): Promise<void> {
@@ -132,6 +142,12 @@ export async function dispatchStep(
 				? workflow.lastSessionId
 				: null;
 	const callbackUrl = `http://${cfg.host}:${cfg.port}/api/steps/${step.id}/result?token=${step.callbackToken}`;
+	// The broker POSTs `{started: true}` here the instant the run actually
+	// begins (after the workdir `flock` is acquired — see awb's runHidden).
+	// That flips the step `queued → running` and starts its timeout clock at the
+	// true run start, so a step queued behind another on the same workdir isn't
+	// timed out while still waiting its turn.
+	const startedCallbackUrl = `http://${cfg.host}:${cfg.port}/api/steps/${step.id}/started?token=${step.callbackToken}`;
 	// Inject the conversation context ONLY on the first dispatch of a fresh
 	// conversation: exec mode, no session to resume (awb starts a fresh
 	// `claude`), and the workflow's `context_injected` guard still false. Later
@@ -148,7 +164,7 @@ export async function dispatchStep(
 			? judgeInput(step.acceptanceCriteria ?? "")
 			: `${preamble}${step.description}${criteriaNote(step.acceptanceCriteria)}${SUBAGENT_SUFFIX}${
 					options.retryReason ? retryNote(options.retryReason) : ""
-				}`;
+				}${options.timedOut ? TIMEOUT_NOTE : ""}`;
 	try {
 		const res = await fetch(workflow.hookUrl, {
 			method: "POST",
@@ -160,15 +176,19 @@ export async function dispatchStep(
 				// after the first, and every judge pass.
 				...(sessionToResume ? { sessionid: sessionToResume } : {}),
 			},
-			body: JSON.stringify({ jobId: step.id, input, callbackUrl }),
+			body: JSON.stringify({ jobId: step.id, input, callbackUrl, startedCallbackUrl }),
 			signal: AbortSignal.timeout(DISPATCH_TIMEOUT_MS),
 		});
 		if (res.ok) {
 			// In judge mode the step is already `running` in its judge phase, so
-			// this is a no-op (it only fires on a `pending` step) — the exec dispatch
-			// is what it's really for.
-			markStepRunning(step.id, options.manual ?? false);
-			log(`step ${step.id} (workflow ${workflow.id}, ${mode}) -> '${workflow.agentName}' accepted`);
+			// this is a no-op (it only acts on a `pending` step) — the exec dispatch
+			// is what it's really for. Mark the step `queued` (NOT `running`): the
+			// broker accepted the POST, but the run hasn't started yet — it may be
+			// waiting on the workdir `flock` behind another run. The broker's
+			// `started` callback flips it to `running` and starts the timeout clock
+			// at the real run start (fair to queued steps).
+			markStepQueued(step.id, options.manual ?? false);
+			log(`step ${step.id} (workflow ${workflow.id}, ${mode}) -> '${workflow.agentName}' accepted (queued)`);
 		} else {
 			completeStep(step.id, { ok: false, error: `hook answered ${res.status}` });
 			log(`step ${step.id} (workflow ${workflow.id}) -> '${workflow.agentName}' rejected (${res.status})`, "error");
