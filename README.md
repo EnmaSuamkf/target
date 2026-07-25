@@ -1,4 +1,4 @@
-# target
+# The Target Project
 
 Define **workflows** made of N sequential **steps**. It reuses agentmesh's
 mechanism (agent = `agent-webhook-bridge` hook, step = async job with a
@@ -26,7 +26,7 @@ the session-id shape differ (a claude uuid vs. a free-code `.jsonl` path).
 
 ## What changes relative to agentmesh
 
-| agentmesh | target |
+| agentmesh | The Target Project |
 |---|---|
 | Agent = reusable row in a registry | Agent = 1 per workflow, created automatically when the workflow is created |
 | Job = loose task, optional session | Step = task of a workflow, always chained to the previous session |

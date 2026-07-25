@@ -52,7 +52,7 @@ export function Header({
 							<circle cx="12" cy="12" r="1" fill="currentColor" />
 						</svg>
 					</span>
-					<span className={styles.name}>Target</span>
+					<span className={styles.name}>The Target Project</span>
 				</div>
 
 				<nav className={styles.tabs} aria-label="Views">

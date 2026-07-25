@@ -126,7 +126,7 @@ export function createWorkflow(
 	const slug = slugify(trimmed);
 	const agentName = `${slug}-${shortId}`;
 	const workdir = options.workdir?.trim() || path.join(targetDir(), "sandboxes", agentName);
-	const promptTemplate = `You are the agent of a Target workflow named "${trimmed}". This session is reused in order for every step of the workflow. Current step:\n\n{{payload}}\n\nCarry out the step and respond with the final result of that step.`;
+	const promptTemplate = `You are the agent of a workflow in The Target Project named "${trimmed}". This session is reused in order for every step of the workflow. Current step:\n\n{{payload}}\n\nCarry out the step and respond with the final result of that step.`;
 	const hook = createAwbHook(agentName, workdir, promptTemplate, {
 		permissionMode: options.permissionMode,
 		runner: options.runner,

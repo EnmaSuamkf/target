@@ -7,11 +7,11 @@ runtimes agent-webhook-bridge's spawn adapter and agentmesh already support.
 
 ## Why
 
-target's engine was already runtime-agnostic in everything that matters: it
+The Target Project's engine was already runtime-agnostic in everything that matters: it
 talks to the awb hook over the shared hook protocol (secret, `callbackUrl`,
 `sessionId` header), and awb ships both a `spawn:claude` and a
 `spawn:free-code` adapter that produce the same `{result, session_id}`
-callback envelope. The only thing pinning target to Claude was that
+callback envelope. The only thing pinning The Target Project to Claude was that
 `createAwbHook` hard-coded `consumers: ["spawn:claude"]`, plus a few places
 that assumed Claude's session/transcript conventions.
 

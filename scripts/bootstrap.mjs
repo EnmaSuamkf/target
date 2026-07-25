@@ -64,6 +64,6 @@ if (viaFnm !== null) process.exit(viaFnm);
 const viaNvm = runVia("nvm");
 if (viaNvm !== null) process.exit(viaNvm);
 
-log(`target needs node >= ${REQUIRED_MAJOR} (running ${process.version}) and found no nvm or fnm to install it.`, "error");
+log(`The Target Project needs node >= ${REQUIRED_MAJOR} (running ${process.version}) and found no nvm or fnm to install it.`, "error");
 log(`Install it and re-run: nvm install ${REQUIRED_MAJOR} && nvm use ${REQUIRED_MAJOR} (the repo's .nvmrc pins it), or grab it from https://nodejs.org`, "error");
 process.exit(1);

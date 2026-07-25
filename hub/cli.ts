@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * `target` — CLI for the target hub: create workflows, add steps, and drive
+ * `target` — CLI for The Target Project hub: create workflows, add steps, and drive
  * them without the web UI. Mutating calls attach the admin token straight
  * from ~/.target/config.json (same trust boundary as reading that file
  * directly) so there's no token to type locally.

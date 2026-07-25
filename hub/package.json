@@ -1,7 +1,7 @@
 {
   "name": "target-hub",
   "version": "0.1.0",
-  "description": "Target hub: define workflows made of sequential steps; each step runs as a job against one dedicated agent+hook (agent-webhook-bridge), reusing the same Claude session across steps.",
+  "description": "The Target Project hub: define workflows made of sequential steps; each step runs as a job against one dedicated agent+hook (agent-webhook-bridge), reusing the same Claude session across steps.",
   "private": true,
   "type": "module",
   "bin": {

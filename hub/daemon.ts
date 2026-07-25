@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Target hub daemon entry point. Run directly (`node hub/daemon.ts`) or via
+ * The Target Project hub daemon entry point. Run directly (`node hub/daemon.ts`) or via
  * `target start`; stays alive serving the API + UI and receiving awb's
  * step-result callbacks.
  */
