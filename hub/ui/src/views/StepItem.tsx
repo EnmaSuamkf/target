@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { Step, StepConfigInput } from "../api/types.ts";
 import { Badge } from "../components/Badge.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
+import { Switch } from "../components/Switch.tsx";
 import { activityLabel, duration } from "../lib/format.ts";
 import styles from "./StepItem.module.css";
 
@@ -12,6 +13,9 @@ import styles from "./StepItem.module.css";
  * constraints, not styling choices:
  *
  * - A `running` step can't be edited, and only a `pending` one can be removed.
+ * - A `waiting` step (held at its manual-review gate) can't be edited or ▶ re-run
+ *   either — the server refuses both — so `Continue` is the only action offered
+ *   on it, and it's the only status that offers one.
  * - `Abort` is only meaningful while running (it force-fails a dispatch that
  *   never called back, keeping the session so the step can be re-run).
  * - The retry interval only applies with more than one retry, so the field is
@@ -29,6 +33,7 @@ export function StepItem({
 	onRemove,
 	onRun,
 	onAbort,
+	onContinue,
 	busy,
 }: {
 	step: Step;
@@ -38,13 +43,15 @@ export function StepItem({
 	onRemove: (id: string) => void;
 	onRun: (id: string) => void;
 	onAbort: (id: string) => void;
+	onContinue: (id: string) => void;
 	busy: boolean;
 }): React.JSX.Element {
 	const [editing, setEditing] = useState(false);
 	const [expanded, setExpanded] = useState(false);
 
 	const running = step.status === "running";
-	const editable = !running;
+	const waiting = step.status === "waiting";
+	const editable = !running && !waiting;
 	const removable = step.status === "pending";
 	const statusLabel = running && step.phase === "judge" ? "judging" : step.status;
 
@@ -65,10 +72,12 @@ export function StepItem({
 
 	const elapsed = duration(step.startedAt, step.finishedAt, step.queuedAt);
 	const activity = step.activity;
-	const hasResult = step.status === "done" && step.result;
+	// A held step's result is exactly what the human is being asked to approve,
+	// so it's shown before the step is done, not only after.
+	const hasResult = (step.status === "done" || waiting) && step.result;
 
 	return (
-		<li className={`${styles.step} ${running ? styles.stepRunning : ""}`}>
+		<li className={`${styles.step} ${running ? styles.stepRunning : ""} ${waiting ? styles.stepWaiting : ""}`}>
 			<div className={styles.head}>
 				<input
 					type="checkbox"
@@ -83,7 +92,7 @@ export function StepItem({
 				<Badge status={step.status} label={statusLabel} />
 			</div>
 
-			{(step.acceptanceCriteria || elapsed || step.manualRun || activity) && (
+			{(step.acceptanceCriteria || elapsed || step.manualRun || step.manualReview || activity) && (
 				<div className={styles.meta}>
 					{step.acceptanceCriteria && (
 						<span className={styles.metaItem} title={step.acceptanceCriteria}>
@@ -96,6 +105,17 @@ export function StepItem({
 									{step.retryCount}/{step.maxRetries}
 								</span>
 							)}
+						</span>
+					)}
+					{/* Flagged for a human sign-off, so the gate is visible before the
+					    step ever reaches it — not just once it's already holding. */}
+					{step.manualReview && (
+						<span className={styles.metaItem} title="This step stops the workflow until you press Continue on it.">
+							<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+								<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z" />
+								<circle cx="12" cy="12" r="3" />
+							</svg>
+							manual review
 						</span>
 					)}
 					{step.manualRun && <span className={styles.metaItem}>manual run</span>}
@@ -143,7 +163,27 @@ export function StepItem({
 			)}
 
 			<div className={styles.actions}>
-				<button type="button" className="btn btn--sm" onClick={() => onRun(step.id)} disabled={running || busy}>
+				{/* Only offered while the gate is actually holding: the server refuses
+				    Continue on any other status, so a button that's always there would
+				    just be a 400 waiting to happen. */}
+				{waiting && (
+					<button
+						type="button"
+						className="btn btn--primary btn--sm"
+						onClick={() => onContinue(step.id)}
+						disabled={busy}
+						title="Approve this step's result: it's marked done and the workflow carries on with the next step."
+					>
+						Continue
+					</button>
+				)}
+				<button
+					type="button"
+					className="btn btn--sm"
+					onClick={() => onRun(step.id)}
+					disabled={running || waiting || busy}
+					{...(waiting ? { title: "This step is waiting for your review — continue it instead." } : {})}
+				>
 					{step.status === "running" ? "Running…" : step.status === "queued" ? "Queued…" : "▶ Run"}
 				</button>
 				<button
@@ -172,7 +212,7 @@ export function StepItem({
 	);
 }
 
-/** Inline editor for a step's description and judge configuration. */
+/** Inline editor for a step's description and verification configuration. */
 function StepEditor({
 	step,
 	onCancel,
@@ -184,6 +224,7 @@ function StepEditor({
 }): React.JSX.Element {
 	const [description, setDescription] = useState(step.description);
 	const [criteria, setCriteria] = useState(step.acceptanceCriteria ?? "");
+	const [manualReview, setManualReview] = useState(step.manualReview);
 	const [maxRetries, setMaxRetries] = useState(String(step.maxRetries ?? 0));
 	const [interval, setInterval] = useState(String(step.retryIntervalSeconds ?? 0));
 	const [saving, setSaving] = useState(false);
@@ -200,6 +241,9 @@ function StepEditor({
 			await onSave({
 				description: trimmed,
 				acceptanceCriteria: criteria.trim(),
+				// Always sent: the server only touches the stored gate when the field
+				// is present, so an omitted false could never turn it back off.
+				manualReview,
 				maxRetries: Math.max(0, parseInt(maxRetries, 10) || 0),
 				retryIntervalSeconds: intervalEnabled ? Math.max(0, parseInt(interval, 10) || 0) : 0,
 			});
@@ -240,6 +284,23 @@ function StepEditor({
 				If set, the agent self-evaluates its result against this after running. On a reject it re-runs the step up to
 				the retry budget before the workflow fails.
 			</p>
+
+			<div className={styles.gateRow}>
+				<div className={styles.gateText}>
+					<span className="label">Manual review</span>
+					<p className="hint" id={`review-hint-${step.id}`}>
+						The workflow stops after this step and waits for you: it's marked <em>waiting</em> until you press
+						Continue, and no further step runs meanwhile.
+					</p>
+				</div>
+				<Switch
+					checked={manualReview}
+					onChange={setManualReview}
+					label="Manual review"
+					describedBy={`review-hint-${step.id}`}
+					disabled={saving}
+				/>
+			</div>
 
 			<div className={styles.editorGrid}>
 				<div className="field">

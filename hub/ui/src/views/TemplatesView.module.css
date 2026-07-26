@@ -227,6 +227,15 @@
 	gap: var(--space-1);
 }
 
+/* The step's manual-review switch, laid out like every other boolean row in
+   the app (see StepItem.module.css / SettingsView.module.css). */
+.stepRowToggle {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-3);
+}
+
 .addStep {
 	padding: var(--space-2);
 	border: 1px dashed var(--border-strong);

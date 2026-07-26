@@ -19,6 +19,13 @@
 	background: linear-gradient(to right, var(--info-50), var(--surface) 40%);
 }
 
+/* Held at its manual-review gate: the same rail treatment as a running step,
+   in the attention orange, because this is the step the operator has to act on. */
+.stepWaiting {
+	border-color: var(--attention-200);
+	background: linear-gradient(to right, var(--attention-50), var(--surface) 40%);
+}
+
 .editing {
 	border-color: var(--accent-200);
 	background: var(--accent-50);
@@ -194,6 +201,22 @@
 	font-size: var(--text-sm);
 	font-weight: 600;
 	color: var(--gray-700);
+}
+
+/* The manual-review switch and the text explaining what it does — same shape as
+   the Settings view's toggle rows, so a boolean preference reads the same way
+   wherever it appears. */
+.gateRow {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-4);
+}
+
+.gateText {
+	display: grid;
+	gap: var(--space-1);
+	min-width: 0;
 }
 
 .editorGrid {

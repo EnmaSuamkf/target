@@ -6,8 +6,14 @@
  * type here would describe fields that never reach the browser.
  */
 
-export type WorkflowStatus = "draft" | "running" | "paused" | "completed" | "failed";
-export type StepStatus = "pending" | "queued" | "running" | "done" | "failed";
+/**
+ * `waiting` is the manual-review hold: a step with the gate on finished its work
+ * and passed its judge, so the engine stopped there instead of advancing. It's
+ * not terminal and not an error — only the step's Continue button moves it on,
+ * which is why it's rendered in the same warning orange as `paused`.
+ */
+export type WorkflowStatus = "draft" | "running" | "paused" | "waiting" | "completed" | "failed";
+export type StepStatus = "pending" | "queued" | "running" | "waiting" | "done" | "failed";
 
 /**
  * Which job a `running` step is waiting on: its own execution (`exec`) or the
@@ -67,6 +73,8 @@ export interface Step {
 	queuedAt: string | null;
 	finishedAt: string | null;
 	manualRun: boolean;
+	/** The per-step gate: when on, the step holds at `waiting` once its work is accepted, until a human presses Continue. */
+	manualReview: boolean;
 	acceptanceCriteria: string | null;
 	maxRetries: number;
 	retryIntervalSeconds: number;
@@ -102,6 +110,8 @@ export interface StepActivity {
 export interface TemplateStep {
 	description: string;
 	acceptanceCriteria: string | null;
+	/** Seeds the same flag on the real steps this template creates. */
+	manualReview: boolean;
 	maxRetries: number;
 	retryIntervalSeconds: number;
 }
@@ -181,10 +191,12 @@ export interface CreateWorkflowInput {
 	acceptBypassRisk?: boolean;
 }
 
-/** The judge config shared by step create and step edit. */
+/** The verification config shared by step create and step edit. */
 export interface StepConfigInput {
 	description: string;
 	acceptanceCriteria?: string;
+	/** Omitting it leaves the stored gate untouched; the forms always send it, so a toggle-off really turns it off. */
+	manualReview?: boolean;
 	maxRetries?: number;
 	retryIntervalSeconds?: number;
 }
@@ -207,5 +219,8 @@ export function startActionFor(status: WorkflowStatus): StartAction | null {
 	if (status === "draft") return "start";
 	if (status === "paused") return "resume";
 	if (status === "completed" || status === "failed") return "restart";
+	// `running` and `waiting` have no Start: the engine owns the first, and the
+	// second is released by the held step's own Continue button (the server
+	// refuses a Start on a workflow waiting for a manual review).
 	return null;
 }

@@ -5,6 +5,7 @@ import { Badge } from "../components/Badge.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { ProgressBar } from "../components/Progress.tsx";
+import { Switch } from "../components/Switch.tsx";
 import { prettyPath, relativeTime } from "../lib/format.ts";
 import { ContextPanel } from "./ContextPanel.tsx";
 import { SessionPanel } from "./SessionPanel.tsx";
@@ -23,6 +24,9 @@ import styles from "./WorkflowDetail.module.css";
  * - **Selection is explicit.** `start`/`resume`/`restart` send the checked step
  *   ids and the engine runs exactly those. An empty selection runs nothing, so
  *   the button is disabled and says why rather than silently no-op'ing.
+ * - **A `waiting` workflow has no Start at all.** It's held at a step's
+ *   manual-review gate, and only that step's Continue button releases it (the
+ *   server refuses a Start on it), so the button says so instead of failing.
  */
 export function WorkflowDetail({
 	workflow,
@@ -40,6 +44,7 @@ export function WorkflowDetail({
 	onRemoveStep,
 	onRunStep,
 	onAbortStep,
+	onContinueStep,
 	onAddStepsFromTemplate,
 }: {
 	workflow: Workflow;
@@ -58,6 +63,7 @@ export function WorkflowDetail({
 	onRemoveStep: (id: string) => void;
 	onRunStep: (id: string) => void;
 	onAbortStep: (id: string) => void;
+	onContinueStep: (id: string) => void;
 	onAddStepsFromTemplate: (templateId: string) => Promise<void>;
 }): React.JSX.Element {
 	// Which steps the next run should dispatch. Seeded from the server's
@@ -160,7 +166,9 @@ export function WorkflowDetail({
 						disabled={!startAction || busy || selectedCount === 0}
 						title={
 							!startAction
-								? "Already running."
+								? workflow.status === "waiting"
+									? "A step is waiting for your review — press Continue on it to carry on."
+									: "Already running."
 								: selectedCount === 0
 									? "Select at least one step to run."
 									: `${startLabel} the ${selectedCount} selected step${selectedCount === 1 ? "" : "s"}.`
@@ -218,6 +226,7 @@ export function WorkflowDetail({
 									onRemove={onRemoveStep}
 									onRun={onRunStep}
 									onAbort={onAbortStep}
+									onContinue={onContinueStep}
 									busy={busy}
 								/>
 							))}
@@ -256,6 +265,7 @@ function AddStepForm({
 	const [open, setOpen] = useState(false);
 	const [description, setDescription] = useState("");
 	const [criteria, setCriteria] = useState("");
+	const [manualReview, setManualReview] = useState(false);
 	const [maxRetries, setMaxRetries] = useState("0");
 	const [interval, setInterval] = useState("0");
 	const [templateId, setTemplateId] = useState("");
@@ -266,6 +276,7 @@ function AddStepForm({
 	const reset = (): void => {
 		setDescription("");
 		setCriteria("");
+		setManualReview(false);
 		setMaxRetries("0");
 		setInterval("0");
 	};
@@ -279,6 +290,7 @@ function AddStepForm({
 			await onAdd({
 				description: trimmed,
 				acceptanceCriteria: criteria.trim(),
+				manualReview,
 				maxRetries: Math.max(0, parseInt(maxRetries, 10) || 0),
 				retryIntervalSeconds: intervalEnabled ? Math.max(0, parseInt(interval, 10) || 0) : 0,
 			});
@@ -343,6 +355,23 @@ function AddStepForm({
 						If set, the agent self-evaluates its result after running and re-runs the step on a reject, up to the
 						retry budget.
 					</p>
+				</div>
+
+				<div className={styles.gateRow}>
+					<div className={styles.gateText}>
+						<span className="label">Manual review</span>
+						<p className="hint" id="new-step-review-hint">
+							The workflow stops after this step and waits for you: it's marked <em>waiting</em> until you press
+							Continue on it, and no further step runs meanwhile.
+						</p>
+					</div>
+					<Switch
+						checked={manualReview}
+						onChange={setManualReview}
+						label="Manual review"
+						describedBy="new-step-review-hint"
+						disabled={saving}
+					/>
 				</div>
 
 				<div className={styles.addGrid}>

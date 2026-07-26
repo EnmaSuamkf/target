@@ -7,6 +7,11 @@
  *  - POST /api/workflows/:id/steps/from-template does the same thing for an
  *    already-existing workflow, appending after whatever steps it already has.
  *
+ * …plus the HTTP surface of the per-step manual-review gate: the `manualReview`
+ * flag through create/edit/publicStep, and POST .../steps/:stepId/continue.
+ * (The gate's behaviour itself lives in manual-review.test.ts; here it's only
+ * the routing, the admin gate and the status codes.)
+ *
  * Everything else about workflow creation/step management is already covered
  * elsewhere (workflow.test.ts); this only exercises the templateId paths,
  * through the real HTTP server so the wiring in server.ts is covered too.
@@ -28,7 +33,8 @@ process.env.TARGET_HOME = tmpHome;
 // same throwaway dir so each suite gets its own empty hooks.json.
 process.env.AWB_HOME = tmpHome;
 
-const { insertTemplate, setWorkflowSessionId } = await import("./db.ts");
+const { getStep, insertTemplate, markStepRunning, markStepWaiting, setWorkflowSessionId, setWorkflowStatus } =
+	await import("./db.ts");
 const { deleteAwbHook } = await import("./awb.ts");
 const { loadConfig } = await import("./config.ts");
 const { createServer } = await import("./server.ts");
@@ -470,4 +476,234 @@ test("GET /api/workflows/:id/session-info with a resolvable session returns the 
 	assert.equal(body.usage.contextTokens, 1700);
 	assert.equal(body.usage.contextWindow, 200_000);
 	assert.equal(body.usage.includesSubagents, false);
+});
+
+/**
+ * The manual-review gate over HTTP: the flag on step create/edit (and through
+ * `publicStep`), and the Continue route that releases a held step. The engine
+ * rules it relies on are covered in manual-review.test.ts — here we only prove
+ * the wiring, the admin gate and the status codes match the other step routes.
+ */
+
+interface StepBody {
+	step: { id: string; status: string; manualReview: boolean; acceptanceCriteria: string | null; description: string };
+}
+
+/** A fresh workflow with one step, created the way the UI creates them. */
+async function createWorkflowWithStep(name: string, step: Record<string, unknown>) {
+	const createRes = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ name }),
+	});
+	const created = (await createRes.json()) as { workflow: { id: string } };
+	const stepRes = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}/steps`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify(step),
+	});
+	assert.equal(stepRes.status, 200);
+	const body = (await stepRes.json()) as StepBody;
+	return { workflowId: created.workflow.id, step: body.step };
+}
+
+/** Drives a step into the hold the way a finished, accepted run would. */
+function holdStep(workflowId: string, stepId: string): void {
+	markStepRunning(stepId);
+	assert.ok(markStepWaiting(stepId, { result: "the work" }));
+	setWorkflowStatus(workflowId, "waiting");
+}
+
+test("POST /api/workflows/:id/steps with manualReview: true round-trips through publicStep", async () => {
+	const { workflowId, step } = await createWorkflowWithStep("gated step", {
+		description: "ship it",
+		manualReview: true,
+	});
+	assert.equal(step.manualReview, true);
+
+	// And on the read path, not just the create response.
+	const detailRes = await fetch(`${baseUrl}/api/workflows/${workflowId}`);
+	const detail = (await detailRes.json()) as { steps: { manualReview: boolean }[] };
+	assert.equal(detail.steps[0].manualReview, true);
+});
+
+test("a step created without the field is not gated", async () => {
+	const { step } = await createWorkflowWithStep("ungated step", { description: "just run" });
+	assert.equal(step.manualReview, false);
+});
+
+test("PATCH of a step without manualReview leaves the gate as it was", async () => {
+	const { workflowId, step } = await createWorkflowWithStep("gate preserved", {
+		description: "ship it",
+		manualReview: true,
+	});
+
+	// A plain description edit — the field is absent from the body entirely.
+	const res = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/${step.id}`, {
+		method: "PATCH",
+		headers: adminHeaders(),
+		body: JSON.stringify({ description: "ship it, carefully" }),
+	});
+	assert.equal(res.status, 200);
+	const body = (await res.json()) as StepBody;
+	assert.equal(body.step.description, "ship it, carefully");
+	assert.equal(body.step.manualReview, true);
+});
+
+test("PATCH with manualReview: false turns the gate off", async () => {
+	const { workflowId, step } = await createWorkflowWithStep("gate cleared", {
+		description: "ship it",
+		manualReview: true,
+	});
+
+	const res = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/${step.id}`, {
+		method: "PATCH",
+		headers: adminHeaders(),
+		body: JSON.stringify({ description: "ship it", manualReview: false }),
+	});
+	assert.equal(res.status, 200);
+	assert.equal(((await res.json()) as StepBody).step.manualReview, false);
+	assert.equal(getStep(step.id)?.manualReview, false);
+});
+
+test("POST .../continue requires an admin token", async () => {
+	const { workflowId, step } = await createWorkflowWithStep("continue auth", {
+		description: "ship it",
+		manualReview: true,
+	});
+	holdStep(workflowId, step.id);
+
+	const noToken = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/${step.id}/continue`, { method: "POST" });
+	assert.equal(noToken.status, 401);
+	assert.equal(((await noToken.json()) as { error: string }).error, "unauthorized");
+
+	const badToken = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/${step.id}/continue`, {
+		method: "POST",
+		headers: { "content-type": "application/json", authorization: "Bearer not-the-admin-token" },
+	});
+	assert.equal(badToken.status, 401);
+
+	// The hold is untouched by either attempt.
+	assert.equal(getStep(step.id)?.status, "waiting");
+});
+
+test("POST .../continue on a waiting step returns the step, now done", async () => {
+	const { workflowId, step } = await createWorkflowWithStep("continue ok", {
+		description: "ship it",
+		manualReview: true,
+	});
+	holdStep(workflowId, step.id);
+
+	const res = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/${step.id}/continue`, {
+		method: "POST",
+		headers: adminHeaders(),
+	});
+	assert.equal(res.status, 200);
+	const body = (await res.json()) as StepBody;
+	assert.equal(body.step.id, step.id);
+	assert.equal(body.step.status, "done");
+	assert.equal(getStep(step.id)?.status, "done");
+
+	// It was the only step, so the workflow finished on the release.
+	const detailRes = await fetch(`${baseUrl}/api/workflows/${workflowId}`);
+	const detail = (await detailRes.json()) as { workflow: { status: string } };
+	assert.equal(detail.workflow.status, "completed");
+});
+
+test("POST .../continue on a step that is not waiting returns 400", async () => {
+	const { workflowId, step } = await createWorkflowWithStep("continue not waiting", {
+		description: "ship it",
+		manualReview: true,
+	});
+	// Still pending — nothing has run, so there is no hold to release.
+	const res = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/${step.id}/continue`, {
+		method: "POST",
+		headers: adminHeaders(),
+	});
+	assert.equal(res.status, 400);
+	assert.match(((await res.json()) as { error: string }).error, /only a step waiting for its manual review/);
+	assert.equal(getStep(step.id)?.status, "pending");
+});
+
+test("POST .../continue twice: the second call is a 400, not a second release", async () => {
+	const { workflowId, step } = await createWorkflowWithStep("continue twice", {
+		description: "ship it",
+		manualReview: true,
+	});
+	holdStep(workflowId, step.id);
+
+	const first = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/${step.id}/continue`, {
+		method: "POST",
+		headers: adminHeaders(),
+	});
+	assert.equal(first.status, 200);
+	// The UI polls every 2s, so a double click on a stale view is expected.
+	const second = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/${step.id}/continue`, {
+		method: "POST",
+		headers: adminHeaders(),
+	});
+	assert.equal(second.status, 400);
+	assert.equal(getStep(step.id)?.status, "done");
+});
+
+test("POST .../continue on an unknown step returns 400", async () => {
+	const { workflowId } = await createWorkflowWithStep("continue unknown step", { description: "ship it" });
+	const res = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/no-such-step/continue`, {
+		method: "POST",
+		headers: adminHeaders(),
+	});
+	assert.equal(res.status, 400);
+	assert.equal(((await res.json()) as { error: string }).error, "unknown step");
+});
+
+test("POST .../continue on an unknown workflow returns 400", async () => {
+	const res = await fetch(`${baseUrl}/api/workflows/does-not-exist/steps/whatever/continue`, {
+		method: "POST",
+		headers: adminHeaders(),
+	});
+	assert.equal(res.status, 400);
+	assert.equal(((await res.json()) as { error: string }).error, "unknown workflow");
+});
+
+test("a template's manualReview flag is carried onto the steps it seeds, both ways", async () => {
+	const template = insertTemplate({
+		name: "gated checklist",
+		tags: ["gated"],
+		steps: [
+			{ description: "prepare the release" },
+			{ description: "sign the release off", manualReview: true, acceptanceCriteria: "the changelog is right" },
+		],
+	});
+	assert.equal(template.steps[1].manualReview, true);
+	assert.equal(template.steps[0].manualReview, false);
+
+	// (a) seeding a brand-new workflow with ?templateId.
+	const createRes = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ name: "from gated template", templateId: template.id }),
+	});
+	const created = (await createRes.json()) as { workflow: { id: string } };
+	const seeded = (await (await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`)).json()) as {
+		steps: { orderIndex: number; manualReview: boolean }[];
+	};
+	const seededByOrder = [...seeded.steps].sort((a, b) => a.orderIndex - b.orderIndex);
+	assert.deepEqual(seededByOrder.map((s) => s.manualReview), [false, true]);
+
+	// (b) appending it to an existing workflow.
+	const plainRes = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ name: "gated template appended" }),
+	});
+	const plain = (await plainRes.json()) as { workflow: { id: string } };
+	const appendRes = await fetch(`${baseUrl}/api/workflows/${plain.workflow.id}/steps/from-template`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ templateId: template.id }),
+	});
+	assert.equal(appendRes.status, 200);
+	const appended = (await appendRes.json()) as { steps: { orderIndex: number; manualReview: boolean }[] };
+	const appendedByOrder = [...appended.steps].sort((a, b) => a.orderIndex - b.orderIndex);
+	assert.deepEqual(appendedByOrder.map((s) => s.manualReview), [false, true]);
 });

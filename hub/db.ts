@@ -17,8 +17,15 @@ import * as path from "node:path";
 import { dbFile } from "./config.ts";
 import type { ProgressKind } from "./progress.ts";
 
-export type WorkflowStatus = "draft" | "running" | "paused" | "completed" | "failed";
-export type StepStatus = "pending" | "queued" | "running" | "done" | "failed";
+/**
+ * `waiting` is the manual-review hold: a step of the workflow finished its work
+ * and passed its judge, but carries the per-step "Manual review" gate, so the
+ * engine stopped there instead of advancing. It is not terminal and not an
+ * error — only a human pressing Continue (or a restart) moves it on.
+ */
+export type WorkflowStatus = "draft" | "running" | "paused" | "waiting" | "completed" | "failed";
+/** `waiting`: the step's work is done and verified, but its manual-review gate is holding it (see WorkflowStatus). */
+export type StepStatus = "pending" | "queued" | "running" | "waiting" | "done" | "failed";
 /**
  * Which job a `running` step is currently waiting on: its own execution
  * (`exec`) or the self-evaluation that runs afterwards (`judge`). Both come
@@ -83,6 +90,17 @@ export interface Step {
 	 * soon as it runs, exactly like before this feature existed.
 	 */
 	acceptanceCriteria: string | null;
+	/**
+	 * Whether this step is gated on a HUMAN before the workflow may advance.
+	 * With it on, a step that finished and passed its judge doesn't go `done` —
+	 * it (and its workflow) go `waiting` until someone presses Continue. Off by
+	 * default, so a workflow that never touches this feature runs exactly as
+	 * before.
+	 *
+	 * Not to be confused with `manualRun`, which is about WHO started the step
+	 * (the ▶ button vs. the engine); this is about who ends it.
+	 */
+	manualReview: boolean;
 	/** How many times the judge may reject this step and re-run it before the workflow is failed. 0 = no retries (one shot, then fail if rejected). */
 	maxRetries: number;
 	/** Seconds to wait before each re-run after a judge reject. 0 = retry immediately. */
@@ -124,6 +142,8 @@ export interface Step {
 export interface TemplateStep {
 	description: string;
 	acceptanceCriteria: string | null;
+	/** Seeds `Step.manualReview` — a template that encodes "a human signs this step off" would be useless if the flag were dropped on use. */
+	manualReview: boolean;
 	maxRetries: number;
 	retryIntervalSeconds: number;
 }
@@ -175,6 +195,7 @@ function open(): DatabaseSync {
 			queued_at TEXT,
 			finished_at TEXT,
 			is_manual_run INTEGER NOT NULL DEFAULT 0,
+			manual_review INTEGER NOT NULL DEFAULT 0,
 			acceptance_criteria TEXT,
 			max_retries INTEGER NOT NULL DEFAULT 0,
 			retry_interval_seconds INTEGER NOT NULL DEFAULT 0,
@@ -213,6 +234,7 @@ function open(): DatabaseSync {
 		if (!existingColumns.has(name)) database.exec(`ALTER TABLE steps ADD COLUMN ${ddl};`);
 	};
 	addColumn("is_manual_run", "is_manual_run INTEGER NOT NULL DEFAULT 0");
+	addColumn("manual_review", "manual_review INTEGER NOT NULL DEFAULT 0");
 	addColumn("acceptance_criteria", "acceptance_criteria TEXT");
 	addColumn("max_retries", "max_retries INTEGER NOT NULL DEFAULT 0");
 	addColumn("retry_interval_seconds", "retry_interval_seconds INTEGER NOT NULL DEFAULT 0");
@@ -233,6 +255,7 @@ function open(): DatabaseSync {
 	};
 	addWorkflowColumn("conversation_context", "conversation_context TEXT");
 	addWorkflowColumn("context_injected", "context_injected INTEGER NOT NULL DEFAULT 0");
+	addWorkflowColumn("status_before_review", "status_before_review TEXT");
 	return db;
 }
 
@@ -330,6 +353,32 @@ export function setWorkflowStatus(id: string, status: WorkflowStatus): void {
 		.run(status, new Date().toISOString(), id);
 }
 
+/**
+ * Remembers what a workflow's status was just before a manual-review hold set
+ * it to `waiting`, so releasing the hold can put it back.
+ *
+ * Only an on-demand ▶ run needs this. A step the ENGINE dispatched was, by
+ * definition, part of a `running` workflow, and Continue resumes exactly that.
+ * A ▶ run is different: it happens outside the engine, on a workflow that may
+ * be `draft`, `completed`, `failed` or deliberately `paused`, and the gate must
+ * hand that status back untouched rather than inventing one — a `paused`
+ * workflow that silently became `draft` because someone re-ran one step would
+ * be a state nobody asked for.
+ */
+export function setStatusBeforeReview(id: string, status: WorkflowStatus | null): void {
+	open().prepare("UPDATE workflows SET status_before_review = ? WHERE id = ?").run(status, id);
+}
+
+/** Reads back the status stashed by `setStatusBeforeReview` AND clears it — a hold's stash is consumed exactly once, by the Continue that releases it. */
+export function takeStatusBeforeReview(id: string): WorkflowStatus | null {
+	const row = open().prepare("SELECT status_before_review AS s FROM workflows WHERE id = ?").get(id) as
+		| Record<string, unknown>
+		| undefined;
+	const stashed = row?.s == null ? null : (String(row.s) as WorkflowStatus);
+	if (stashed !== null) setStatusBeforeReview(id, null);
+	return stashed;
+}
+
 export function setWorkflowSessionId(id: string, sessionId: string | null): void {
 	open()
 		.prepare("UPDATE workflows SET last_session_id = ?, updated_at = ? WHERE id = ?")
@@ -387,6 +436,7 @@ function rowToStep(row: Record<string, unknown>): Step {
 		queuedAt: row.queued_at == null ? null : String(row.queued_at),
 		finishedAt: row.finished_at == null ? null : String(row.finished_at),
 		manualRun: Number(row.is_manual_run ?? 0) === 1,
+		manualReview: Number(row.manual_review ?? 0) === 1,
 		acceptanceCriteria: row.acceptance_criteria == null ? null : String(row.acceptance_criteria),
 		maxRetries: Number(row.max_retries ?? 0),
 		retryIntervalSeconds: Number(row.retry_interval_seconds ?? 0),
@@ -402,7 +452,12 @@ function rowToStep(row: Record<string, unknown>): Step {
 export function insertStep(
 	workflowId: string,
 	description: string,
-	options: { acceptanceCriteria?: string | null; maxRetries?: number; retryIntervalSeconds?: number } = {},
+	options: {
+		acceptanceCriteria?: string | null;
+		manualReview?: boolean;
+		maxRetries?: number;
+		retryIntervalSeconds?: number;
+	} = {},
 ): Step {
 	const database = open();
 	const maxRow = database
@@ -410,6 +465,8 @@ export function insertStep(
 		.get(workflowId) as Record<string, unknown>;
 	const orderIndex = Number(maxRow.maxIdx) + 1;
 	const acceptanceCriteria = options.acceptanceCriteria?.trim() || null;
+	// The gate is opt-in: a step nobody configured never holds the workflow.
+	const manualReview = options.manualReview === true;
 	const maxRetries = Math.max(0, Math.floor(options.maxRetries ?? 0));
 	const retryIntervalSeconds = Math.max(0, Math.floor(options.retryIntervalSeconds ?? 0));
 	const step: Step = {
@@ -427,6 +484,7 @@ export function insertStep(
 		queuedAt: null,
 		finishedAt: null,
 		manualRun: false,
+		manualReview,
 		acceptanceCriteria,
 		maxRetries,
 		retryIntervalSeconds,
@@ -439,8 +497,8 @@ export function insertStep(
 	};
 	database
 		.prepare(
-			`INSERT INTO steps (id, workflow_id, order_index, description, status, callback_token, created_at, acceptance_criteria, max_retries, retry_interval_seconds)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO steps (id, workflow_id, order_index, description, status, callback_token, created_at, acceptance_criteria, manual_review, max_retries, retry_interval_seconds)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			step.id,
@@ -451,6 +509,7 @@ export function insertStep(
 			step.callbackToken,
 			step.createdAt,
 			step.acceptanceCriteria,
+			step.manualReview ? 1 : 0,
 			step.maxRetries,
 			step.retryIntervalSeconds,
 		);
@@ -508,15 +567,23 @@ export function updateStepDescription(id: string, description: string): void {
 	open().prepare("UPDATE steps SET description = ? WHERE id = ?").run(description, id);
 }
 
-/** Updates a step's judge config (acceptance criteria + retry budget + retry wait). Editing a step is the only place these change after creation. */
+/** Updates a step's verification config (acceptance criteria + manual-review gate + retry budget + retry wait). Editing a step is the only place these change after creation. */
 export function updateStepConfig(
 	id: string,
-	config: { acceptanceCriteria: string | null; maxRetries: number; retryIntervalSeconds: number },
+	config: {
+		acceptanceCriteria: string | null;
+		manualReview: boolean;
+		maxRetries: number;
+		retryIntervalSeconds: number;
+	},
 ): void {
 	open()
-		.prepare("UPDATE steps SET acceptance_criteria = ?, max_retries = ?, retry_interval_seconds = ? WHERE id = ?")
+		.prepare(
+			"UPDATE steps SET acceptance_criteria = ?, manual_review = ?, max_retries = ?, retry_interval_seconds = ? WHERE id = ?",
+		)
 		.run(
 			config.acceptanceCriteria?.trim() || null,
+			config.manualReview ? 1 : 0,
 			Math.max(0, Math.floor(config.maxRetries)),
 			Math.max(0, Math.floor(config.retryIntervalSeconds)),
 			id,
@@ -636,6 +703,46 @@ export function markStepJudging(id: string, outcome: { result?: string; sessionI
 		.run(outcome.result ?? null, outcome.sessionId ?? null, now, now, id);
 }
 
+/**
+ * Puts a verified step into the manual-review hold: its work finished and (if
+ * it had one) its judge accepted it, but the step carries the `manual_review`
+ * gate, so it becomes `waiting` instead of `done` and the engine stops there.
+ *
+ * `finished_at` is deliberately NOT set — the step hasn't finished, it's held —
+ * and neither is the timeout clock touched: `findTimeoutCandidates` only looks
+ * at `running`/`queued` steps, so a step can sit `waiting` for a human as long
+ * as it takes without any watchdog failing it. The exec result is carried
+ * through so nothing is lost while it waits (the judge path already stored it
+ * via `markStepJudging`, hence the COALESCE rather than a plain overwrite).
+ * Only acts on a step still `running`/`queued`; returns whether it took.
+ */
+export function markStepWaiting(id: string, outcome: { result?: string; sessionId?: string } = {}): boolean {
+	return (
+		open()
+			.prepare(
+				`UPDATE steps SET status = 'waiting', result = COALESCE(?, result), session_id = COALESCE(?, session_id), error = NULL
+				 WHERE id = ? AND status IN ('running', 'queued')`,
+			)
+			.run(outcome.result ?? null, outcome.sessionId ?? null, id).changes > 0
+	);
+}
+
+/**
+ * Releases a step from the manual-review hold: the human pressed Continue, so
+ * it finally becomes `done` exactly as it would have without the gate, and the
+ * engine can advance. Only acts on a `waiting` step — Continue on anything else
+ * is a caller error (see `continueStep` in workflow.ts), not a silent no-op that
+ * would leave the workflow in a state nobody asked for. Returns whether a row
+ * changed.
+ */
+export function releaseWaitingStep(id: string): boolean {
+	return (
+		open()
+			.prepare("UPDATE steps SET status = 'done', finished_at = ? WHERE id = ? AND status = 'waiting'")
+			.run(new Date().toISOString(), id).changes > 0
+	);
+}
+
 /** Marks a judge-accepted step `done`, preserving the exec result already stored by `markStepJudging`. */
 export function finishStepDone(id: string): void {
 	open()
@@ -687,7 +794,9 @@ export function completeStep(
  * `started` callback then promotes `queued → running` (`promoteQueuedToRunning`),
  * so the timeout clock starts at the real run start just like a sequential
  * step. No-op (returns false) if it's already `running` OR `queued`, so the
- * caller doesn't double-dispatch it.
+ * caller doesn't double-dispatch it — or if it's `waiting` on its manual
+ * review, which only Continue may release: a ▶ re-run would otherwise silently
+ * discard the gate the operator asked for.
  */
 export function startManualRun(stepId: string): boolean {
 	const now = new Date().toISOString();
@@ -696,7 +805,7 @@ export function startManualRun(stepId: string): boolean {
 			`UPDATE steps SET status = 'queued', result = NULL, error = NULL, session_id = NULL,
 			 queued_at = ?, started_at = NULL, finished_at = NULL, is_manual_run = 1, phase = 'exec', retry_count = 0,
 			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL
-			 WHERE id = ? AND status NOT IN ('running', 'queued')`,
+			 WHERE id = ? AND status NOT IN ('running', 'queued', 'waiting')`,
 		)
 		.run(now, stepId).changes;
 	return changes > 0;
@@ -880,9 +989,12 @@ function normalizeTemplateSteps(steps: unknown): TemplateStep[] {
 				typeof obj.acceptanceCriteria === "string" && obj.acceptanceCriteria.trim() !== ""
 					? obj.acceptanceCriteria.trim()
 					: null;
+			// Opt-in, exactly like `insertStep`: a template stored before this field
+			// existed (or one that simply doesn't want the gate) reads as false.
+			const manualReview = obj.manualReview === true;
 			const maxRetries = Math.max(0, Math.floor(Number(obj.maxRetries ?? 0)) || 0);
 			const retryIntervalSeconds = Math.max(0, Math.floor(Number(obj.retryIntervalSeconds ?? 0)) || 0);
-			return { description, acceptanceCriteria, maxRetries, retryIntervalSeconds };
+			return { description, acceptanceCriteria, manualReview, maxRetries, retryIntervalSeconds };
 		})
 		.filter((s) => s.description !== "");
 }

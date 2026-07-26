@@ -195,6 +195,19 @@ export async function runStep(workflowId: string, stepId: string): Promise<Step>
 	return data.step;
 }
 
+/**
+ * Releases a step held at its manual-review gate: it goes `done` and the
+ * workflow resumes. Only a `waiting` step can be continued — anything else
+ * answers 400, which is why the button only appears on that status.
+ */
+export async function continueStep(workflowId: string, stepId: string): Promise<Step> {
+	const data = await request<{ step: Step }>(`/api/workflows/${workflowId}/steps/${stepId}/continue`, {
+		method: "POST",
+		admin: true,
+	});
+	return data.step;
+}
+
 /** Force-fails a step whose dispatch never called back, preserving its session. */
 export async function abortStep(workflowId: string, stepId: string): Promise<Workflow> {
 	const data = await request<{ workflow: Workflow }>(`/api/workflows/${workflowId}/steps/${stepId}/abort`, {
