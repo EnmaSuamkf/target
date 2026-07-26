@@ -27,6 +27,8 @@
  *   GET    /api/fs/dirs?path=<dir>                        → list subdirectories (admin token; for the UI's directory picker)
  *   PATCH  /api/templates/:id                            → update a template (admin token)
  *   DELETE /api/templates/:id                            → remove a template (admin token)
+ *   GET    /api/settings/notifications                     → notification preferences (master switch + per-channel config)
+ *   PUT    /api/settings/notifications                     → replace the notification preferences (admin token)
  *   GET    /                                           → ui/index.html
  */
 import * as crypto from "node:crypto";
@@ -46,6 +48,7 @@ import type { HubConfig } from "./config.ts";
 import {
 	promoteQueuedToRunning,
 	deleteTemplate,
+	getNotificationSettings,
 	getWorkflow,
 	insertTemplate,
 	getTemplate,
@@ -53,6 +56,8 @@ import {
 	listSteps,
 	listTemplates,
 	listWorkflows,
+	normalizeNotificationChannels,
+	saveNotificationSettings,
 	stepProgress,
 	updateTemplate,
 	type Step,
@@ -494,6 +499,48 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			return;
 		}
 
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
+	// --- /api/settings/notifications ---
+	//
+	// The notification preferences behind the UI's Settings view: one master
+	// switch plus the per-channel config it gates (see `NotificationChannels` in
+	// db.ts — Slack is the only channel specified so far). Reading is open, like
+	// GET /api/templates; the PUT replaces the whole object and is admin-gated
+	// like every other mutating route.
+	//
+	// Enabling notifications with no Slack username is rejected rather than
+	// stored: "on, but with nowhere to deliver" is a half-saved state the UI
+	// would then show back as valid.
+
+	if (parts[1] === "settings" && parts[2] === "notifications" && !parts[3]) {
+		if (req.method === "GET") {
+			sendJson(res, 200, { settings: getNotificationSettings() });
+			return;
+		}
+		if (req.method === "PUT" || req.method === "PATCH") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				const enabled = body.enabled === true;
+				// Omitting `channels` keeps whatever is stored, so a client that only
+				// flips the switch can't silently wipe the configured username.
+				const channels =
+					"channels" in body ? normalizeNotificationChannels(body.channels) : getNotificationSettings().channels;
+				if (enabled && channels.slack.username === "") {
+					sendJson(res, 400, { error: "slack username is required when notifications are enabled" });
+					return;
+				}
+				const settings = saveNotificationSettings({ enabled, channels });
+				log(`notification settings updated (notifications ${enabled ? "enabled" : "disabled"})`);
+				sendJson(res, 200, { settings });
+			});
+			return;
+		}
 		sendJson(res, 404, { error: "not_found" });
 		return;
 	}

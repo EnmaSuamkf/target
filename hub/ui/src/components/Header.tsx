@@ -3,7 +3,13 @@ import { Field } from "./Field.tsx";
 import { Modal } from "./Modal.tsx";
 import styles from "./Header.module.css";
 
-export type View = "workflows" | "templates";
+export type View = "workflows" | "templates" | "settings";
+
+const VIEW_LABELS: Record<View, string> = {
+	workflows: "Workflows",
+	templates: "Templates",
+	settings: "Settings",
+};
 
 /**
  * App bar: brand, view tabs, and the admin-token control.
@@ -56,7 +62,7 @@ export function Header({
 				</div>
 
 				<nav className={styles.tabs} aria-label="Views">
-					{(["workflows", "templates"] as const).map((item) => (
+					{(["workflows", "templates", "settings"] as const).map((item) => (
 						<button
 							key={item}
 							type="button"
@@ -64,7 +70,7 @@ export function Header({
 							onClick={() => onViewChange(item)}
 							aria-current={view === item ? "page" : undefined}
 						>
-							{item === "workflows" ? "Workflows" : "Templates"}
+							{VIEW_LABELS[item]}
 						</button>
 					))}
 				</nav>
