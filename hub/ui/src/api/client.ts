@@ -15,6 +15,8 @@
 import type {
 	CreateWorkflowInput,
 	DirListing,
+	NotificationSettings,
+	NotificationSettingsInput,
 	SessionInfo,
 	Step,
 	StepConfigInput,
@@ -258,4 +260,26 @@ export async function updateTemplate(id: string, input: TemplateInput): Promise<
 
 export function deleteTemplate(id: string): Promise<{ ok: true }> {
 	return request<{ ok: true }>(`/api/templates/${id}`, { method: "DELETE", admin: true });
+}
+
+// --- settings ---
+
+/** Notification preferences: the master switch plus the config it gates. */
+export async function getNotificationSettings(): Promise<NotificationSettings> {
+	const data = await request<{ settings: NotificationSettings }>("/api/settings/notifications");
+	return data.settings;
+}
+
+/**
+ * Replaces the stored preferences. The server refuses `enabled: true` with an
+ * empty Slack username (400), so the Settings form validates that inline first
+ * rather than relying on the round-trip to say no.
+ */
+export async function saveNotificationSettings(input: NotificationSettingsInput): Promise<NotificationSettings> {
+	const data = await request<{ settings: NotificationSettings }>("/api/settings/notifications", {
+		method: "PUT",
+		admin: true,
+		body: json(input),
+	});
+	return data.settings;
 }

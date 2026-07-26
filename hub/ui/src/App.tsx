@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "./api/client.ts";
 import { ApiError } from "./api/client.ts";
-import type { CreateWorkflowInput, SessionInfo, Step, StepConfigInput, Template, TemplateInput, Workflow } from "./api/types.ts";
+import type {
+	CreateWorkflowInput,
+	NotificationSettings,
+	NotificationSettingsInput,
+	SessionInfo,
+	Step,
+	StepConfigInput,
+	Template,
+	TemplateInput,
+	Workflow,
+} from "./api/types.ts";
 import { useConfirm } from "./components/ConfirmDialog.tsx";
 import { EmptyState } from "./components/EmptyState.tsx";
 import { Header, type View } from "./components/Header.tsx";
@@ -11,6 +21,7 @@ import { useAdminToken } from "./hooks/useAdminToken.ts";
 import { useDictation } from "./hooks/useDictation.ts";
 import { usePolling } from "./hooks/usePolling.ts";
 import { CreateWorkflowModal } from "./views/CreateWorkflowModal.tsx";
+import { SettingsView } from "./views/SettingsView.tsx";
 import { TemplatesView } from "./views/TemplatesView.tsx";
 import { WorkflowDetail } from "./views/WorkflowDetail.tsx";
 import { WorkflowList } from "./views/WorkflowList.tsx";
@@ -42,6 +53,7 @@ export function App(): React.JSX.Element {
 	const [view, setView] = useState<View>("workflows");
 	const [workflows, setWorkflows] = useState<Workflow[]>([]);
 	const [templates, setTemplates] = useState<Template[]>([]);
+	const [settings, setSettings] = useState<NotificationSettings | null>(null);
 	const [selectedId, setSelectedId] = useState<string | null>(readHashSelection);
 	const [steps, setSteps] = useState<Step[]>([]);
 	const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
@@ -90,6 +102,10 @@ export function App(): React.JSX.Element {
 		setTemplates(list);
 	}, []);
 
+	const refreshSettings = useCallback(async (): Promise<void> => {
+		setSettings(await api.getNotificationSettings());
+	}, []);
+
 	const refreshDetail = useCallback(async (id: string): Promise<void> => {
 		const [detail, session] = await Promise.all([
 			api.getWorkflow(id),
@@ -107,14 +123,14 @@ export function App(): React.JSX.Element {
 	useEffect(() => {
 		void (async () => {
 			try {
-				await Promise.all([refreshWorkflows(), refreshTemplates()]);
+				await Promise.all([refreshWorkflows(), refreshTemplates(), refreshSettings()]);
 			} catch (err) {
 				reportError(err, "Could not load data");
 			} finally {
 				setLoaded(true);
 			}
 		})();
-	}, [refreshWorkflows, refreshTemplates, reportError]);
+	}, [refreshWorkflows, refreshTemplates, refreshSettings, reportError]);
 
 	// Detail for the selected workflow, and clearing it when nothing is selected.
 	useEffect(() => {
@@ -349,6 +365,18 @@ export function App(): React.JSX.Element {
 		);
 	};
 
+	// --- settings actions ---
+
+	// The response carries the stored values, so there's nothing to re-fetch —
+	// they're folded straight back into state. Returns whether the save landed,
+	// like handleSaveContext, so the form knows a real success from a rejection.
+	const handleSaveNotificationSettings = async (input: NotificationSettingsInput): Promise<boolean> => {
+		return await act("Could not save the settings", async () => {
+			setSettings(await api.saveNotificationSettings(input));
+			toast.success("Settings saved.");
+		});
+	};
+
 	return (
 		<div className={styles.app}>
 			<Header view={view} onViewChange={setView} hasToken={hasToken} onSaveToken={saveToken} />
@@ -407,7 +435,7 @@ export function App(): React.JSX.Element {
 							</section>
 						)}
 					</div>
-				) : (
+				) : view === "templates" ? (
 					<TemplatesView
 						templates={templates}
 						busy={busy}
@@ -415,6 +443,26 @@ export function App(): React.JSX.Element {
 						onUpdate={handleUpdateTemplate}
 						onDelete={(id) => void handleDeleteTemplate(id)}
 					/>
+				) : settings ? (
+					// Keyed on the save stamp: a successful save re-seeds the form's
+					// local fields from what the hub actually stored.
+					<SettingsView
+						key={settings.updatedAt ?? "unsaved"}
+						settings={settings}
+						busy={busy}
+						onSave={handleSaveNotificationSettings}
+					/>
+				) : (
+					<section className={styles.placeholder}>
+						<EmptyState
+							title={loaded ? "Settings unavailable" : "Loading settings…"}
+							description={
+								loaded
+									? "The hub didn't return the notification preferences. Check that it's running and reload."
+									: "Reading the notification preferences from the hub."
+							}
+						/>
+					</section>
 				)}
 			</main>
 

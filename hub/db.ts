@@ -194,6 +194,11 @@ function open(): DatabaseSync {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
 	`);
 	// `CREATE TABLE IF NOT EXISTS` above is a no-op on a `steps` table that
 	// already existed before these columns were added — add any that are missing
@@ -960,4 +965,90 @@ export function updateTemplate(
 
 export function deleteTemplate(id: string): boolean {
 	return open().prepare("DELETE FROM templates WHERE id = ?").run(id).changes > 0;
+}
+
+// --- Settings ---------------------------------------------------------
+//
+// Hub-wide preferences, stored as one JSON blob per key in `settings` (same
+// "the whole shape is one column" approach as a template's step list — these
+// are read and written whole, never queried by field). Only the notification
+// preferences live here so far; a future setting adds a key, not a table.
+
+/** The single `settings` row the notification preferences live in. */
+const NOTIFICATION_SETTINGS_KEY = "notifications";
+
+/**
+ * Per-channel delivery config, keyed by channel id.
+ *
+ * Slack is the only channel that's been specified (the user asked for four ways
+ * to receive notifications but only described this one), so the rest are
+ * deliberately absent rather than invented with made-up fields. Adding one is a
+ * new key here plus its normalisation below.
+ */
+export interface NotificationChannels {
+	slack: { username: string };
+}
+
+export interface NotificationSettings {
+	/** Master switch: false means the user wants no notifications at all. */
+	enabled: boolean;
+	channels: NotificationChannels;
+	/** Null until the settings have been saved at least once. */
+	updatedAt: string | null;
+}
+
+/** What a hub with no saved preferences reports: notifications off, nothing configured. */
+export function defaultNotificationSettings(): NotificationSettings {
+	return { enabled: false, channels: { slack: { username: "" } }, updatedAt: null };
+}
+
+/**
+ * Coerces whatever a client sent into the channel shape, trimming each value.
+ * An absent/malformed channel becomes its empty config rather than an error —
+ * the "is this enough to enable notifications?" judgement belongs to the route
+ * (see server.ts), not to storage.
+ */
+export function normalizeNotificationChannels(channels: unknown): NotificationChannels {
+	const obj = (channels ?? {}) as Record<string, unknown>;
+	const slack = (obj.slack ?? {}) as Record<string, unknown>;
+	return { slack: { username: typeof slack.username === "string" ? slack.username.trim() : "" } };
+}
+
+export function getNotificationSettings(): NotificationSettings {
+	const row = open().prepare("SELECT * FROM settings WHERE key = ?").get(NOTIFICATION_SETTINGS_KEY) as
+		| Record<string, unknown>
+		| undefined;
+	if (!row) return defaultNotificationSettings();
+	try {
+		const parsed = JSON.parse(String(row.value)) as Record<string, unknown>;
+		return {
+			enabled: parsed.enabled === true,
+			channels: normalizeNotificationChannels(parsed.channels),
+			updatedAt: row.updated_at == null ? null : String(row.updated_at),
+		};
+	} catch {
+		// Tolerate malformed/legacy data rather than break the settings page
+		// (same rationale as rowToTemplate).
+		return defaultNotificationSettings();
+	}
+}
+
+/** Replaces the stored preferences wholesale and returns what was written. */
+export function saveNotificationSettings(input: { enabled: boolean; channels: NotificationChannels }): NotificationSettings {
+	const settings: NotificationSettings = {
+		enabled: input.enabled,
+		channels: normalizeNotificationChannels(input.channels),
+		updatedAt: new Date().toISOString(),
+	};
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(
+			NOTIFICATION_SETTINGS_KEY,
+			JSON.stringify({ enabled: settings.enabled, channels: settings.channels }),
+			settings.updatedAt,
+		);
+	return settings;
 }

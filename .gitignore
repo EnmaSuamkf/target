@@ -1,5 +1,7 @@
 node_modules/
 vendor/
+# Stray backup copy of the vendored bridge (nested git repo, not part of this project).
+vendor___/
 *.log
 .env
 .env.*

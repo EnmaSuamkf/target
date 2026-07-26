@@ -1,0 +1,86 @@
+.panel {
+	display: grid;
+	gap: var(--space-5);
+	max-width: 40rem;
+	padding: var(--space-5);
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-md);
+	box-shadow: var(--shadow-xs);
+}
+
+.head {
+	display: grid;
+	gap: var(--space-1);
+}
+
+.heading {
+	font-size: var(--text-lg);
+	color: var(--text);
+}
+
+.section {
+	display: grid;
+	gap: var(--space-4);
+	padding-top: var(--space-5);
+	border-top: 1px solid var(--border);
+}
+
+.sectionHeading {
+	font-size: var(--text-md);
+	color: var(--text);
+}
+
+.toggleRow {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-4);
+}
+
+.toggleText {
+	display: grid;
+	gap: var(--space-1);
+	min-width: 0;
+}
+
+.channels {
+	display: grid;
+	gap: var(--space-3);
+}
+
+.channel {
+	display: grid;
+	gap: var(--space-3);
+	padding: var(--space-4);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--gray-50);
+}
+
+.channelHead {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: var(--space-3);
+}
+
+.channelName {
+	font-size: var(--text-sm);
+	font-weight: 550;
+	color: var(--text);
+}
+
+.actions {
+	display: flex;
+	align-items: center;
+	gap: var(--space-3);
+	padding-top: var(--space-4);
+	border-top: 1px solid var(--border);
+}
+
+@media (max-width: 560px) {
+	.panel {
+		padding: var(--space-4);
+	}
+}

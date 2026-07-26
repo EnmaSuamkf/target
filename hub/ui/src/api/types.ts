@@ -115,6 +115,32 @@ export interface Template {
 	updatedAt: string;
 }
 
+/**
+ * Per-channel notification config, keyed by channel id.
+ *
+ * Slack is the only channel that's been specified, so it's the only one here —
+ * the remaining ways to receive notifications were asked for but never
+ * described, and inventing their fields would put controls on the page that
+ * save nothing. A new channel is a new key (here and in the hub's db.ts).
+ */
+export interface NotificationChannels {
+	slack: { username: string };
+}
+
+export interface NotificationSettings {
+	/** Master switch: false means the user wants no notifications at all. */
+	enabled: boolean;
+	channels: NotificationChannels;
+	/** Null until the settings have been saved at least once. */
+	updatedAt: string | null;
+}
+
+/** Payload accepted by PUT /api/settings/notifications (a full replace). */
+export interface NotificationSettingsInput {
+	enabled: boolean;
+	channels: NotificationChannels;
+}
+
 /** Token usage for the workflow's session, read off the harness transcript. */
 export interface TokenUsage {
 	turns: number;
