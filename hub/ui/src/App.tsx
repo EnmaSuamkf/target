@@ -306,6 +306,21 @@ export function App(): React.JSX.Element {
 		await act("Could not abort the step", () => api.abortStep(selectedId, stepId), refreshCurrent);
 	};
 
+	// Releasing a manual-review gate is not destructive (it approves work that
+	// already happened) and it's the one action the operator is being actively
+	// waited on for, so unlike Abort it doesn't ask for a confirmation.
+	const handleContinueStep = async (stepId: string): Promise<void> => {
+		if (!selectedId) return;
+		await act(
+			"Could not continue the step",
+			async () => {
+				await api.continueStep(selectedId, stepId);
+				toast.success("Step approved — the workflow continues.");
+			},
+			refreshCurrent,
+		);
+	};
+
 	const handleAddStepsFromTemplate = async (templateId: string): Promise<void> => {
 		if (!selectedId) return;
 		await act(
@@ -415,6 +430,7 @@ export function App(): React.JSX.Element {
 								onRemoveStep={(id) => void handleRemoveStep(id)}
 								onRunStep={(id) => void handleRunStep(id)}
 								onAbortStep={(id) => void handleAbortStep(id)}
+								onContinueStep={(id) => void handleContinueStep(id)}
 								onAddStepsFromTemplate={handleAddStepsFromTemplate}
 							/>
 						) : (

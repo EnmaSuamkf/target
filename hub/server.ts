@@ -16,6 +16,7 @@
  *   DELETE /api/workflows/:id/steps/:stepId             → remove a pending step (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/run         → run one step now, outside the sequential order (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/abort        → abort a step stuck running, so it can be re-run (admin token)
+ *   POST   /api/workflows/:id/steps/:stepId/continue      → release a step waiting for its manual review (admin token)
  *   POST   /api/workflows/:id/start                    → begin/continue sequential dispatch (admin token)
  *   POST   /api/workflows/:id/pause                    → stop dispatching further steps (admin token)
  *   POST   /api/workflows/:id/resume                   → undo pause (admin token)
@@ -71,6 +72,7 @@ import { readTokenUsage } from "./transcript.ts";
 import {
 	abortStep,
 	addStep,
+	continueStep,
 	createWorkflow,
 	editStep,
 	expireStale,
@@ -206,6 +208,7 @@ function publicStep(step: Step, cfg: HubConfig): Record<string, unknown> {
 		queuedAt: step.queuedAt,
 		finishedAt: step.finishedAt,
 		manualRun: step.manualRun,
+		manualReview: step.manualReview,
 		acceptanceCriteria: step.acceptanceCriteria,
 		maxRetries: step.maxRetries,
 		retryIntervalSeconds: step.retryIntervalSeconds,
@@ -232,16 +235,25 @@ function publicTemplate(template: Template): Record<string, unknown> {
 	};
 }
 
-/** Reads the optional judge config (acceptance criteria + retry budget + retry wait) from a step create/edit body. */
+/** Reads the optional verification config (acceptance criteria + manual-review gate + retry budget + retry wait) from a step create/edit body. */
 function readStepConfig(body: Record<string, unknown>): {
 	acceptanceCriteria?: string | null;
+	manualReview?: boolean;
 	maxRetries?: number;
 	retryIntervalSeconds?: number;
 } {
-	const config: { acceptanceCriteria?: string | null; maxRetries?: number; retryIntervalSeconds?: number } = {};
+	const config: {
+		acceptanceCriteria?: string | null;
+		manualReview?: boolean;
+		maxRetries?: number;
+		retryIntervalSeconds?: number;
+	} = {};
 	if ("acceptanceCriteria" in body) {
 		config.acceptanceCriteria = typeof body.acceptanceCriteria === "string" ? body.acceptanceCriteria : null;
 	}
+	// Only when the client actually sent the field — an edit that omits it must
+	// leave the gate as it was, never silently clear it (see `editStep`).
+	if ("manualReview" in body) config.manualReview = body.manualReview === true;
 	if (body.maxRetries != null && Number.isFinite(Number(body.maxRetries))) {
 		config.maxRetries = Math.max(0, Math.floor(Number(body.maxRetries)));
 	}
@@ -678,6 +690,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						for (const step of template.steps) {
 							addStep(workflow.id, step.description, {
 								acceptanceCriteria: step.acceptanceCriteria,
+								manualReview: step.manualReview,
 								maxRetries: step.maxRetries,
 								retryIntervalSeconds: step.retryIntervalSeconds,
 							});
@@ -871,6 +884,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					}
 					addStep(workflowId, step.description, {
 						acceptanceCriteria: step.acceptanceCriteria,
+						manualReview: step.manualReview,
 						maxRetries: step.maxRetries,
 						retryIntervalSeconds: step.retryIntervalSeconds,
 					});
@@ -937,6 +951,32 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					sendJson(res, 404, { error: "unknown_step" });
 					return;
 				}
+				sendJson(res, 200, { step: publicStep(step, cfg) });
+			} catch (err) {
+				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		})();
+		return;
+	}
+
+	// --- /api/workflows/:id/steps/:stepId/continue (release a step held by its manual review) ---
+	//
+	// The "Continue" button on a step sitting in `waiting`: its work finished and
+	// its judge (if any) accepted it, but the step carries the Manual review gate,
+	// so the engine stopped there. This is the only way past it — the step goes
+	// `done` and the workflow resumes (next step dispatched, or `completed`).
+	// Admin-gated like every other mutating action. Async because releasing the
+	// gate advances the workflow, which dispatches the next step.
+
+	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "continue" && !parts[6] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		(async () => {
+			try {
+				const step = await continueStep(workflowId, parts[4], cfg, log);
+				log(`workflow ${workflowId} step ${parts[4]} continued past its manual review`);
 				sendJson(res, 200, { step: publicStep(step, cfg) });
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });

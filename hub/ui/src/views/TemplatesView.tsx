@@ -3,13 +3,16 @@ import type { Template, TemplateInput, TemplateStep } from "../api/types.ts";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { Field } from "../components/Field.tsx";
+import { Switch } from "../components/Switch.tsx";
 import { relativeTime } from "../lib/format.ts";
 import styles from "./TemplatesView.module.css";
 
 /**
  * Templates: reusable ordered step lists that seed a new workflow or get
  * appended to an existing one. They never execute, so there's no status or
- * session here — just a name, tags, and the steps with their judge config.
+ * session here — just a name, tags, and the steps with their verification
+ * config (acceptance criteria, retries, and the manual-review gate), all of
+ * which are copied onto the real steps the template creates.
  *
  * Search filters locally on name and tags (the API also accepts `?q=`, but
  * filtering in the browser is instant and the list is small by nature).
@@ -384,6 +387,17 @@ function TemplateForm({
 									/>
 								</label>
 							</div>
+
+							{/* Carried onto every step this template creates: a checklist whose
+							    sign-off step is gated is only reusable if the gate travels with it. */}
+							<div className={styles.stepRowToggle}>
+								<span className="hint">Manual review — the workflow waits for a human after this step</span>
+								<Switch
+									checked={step.manualReview}
+									onChange={(next) => updateStep(index, { manualReview: next })}
+									label={`Step ${index + 1} manual review`}
+								/>
+							</div>
 						</div>
 					))}
 				</div>
@@ -394,7 +408,7 @@ function TemplateForm({
 					onClick={() =>
 						setSteps((current) => [
 							...current,
-							{ description: "", acceptanceCriteria: null, maxRetries: 0, retryIntervalSeconds: 0 },
+							{ description: "", acceptanceCriteria: null, manualReview: false, maxRetries: 0, retryIntervalSeconds: 0 },
 						])
 					}
 				>

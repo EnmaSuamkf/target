@@ -41,6 +41,16 @@
 	--warn-500: #f59e0b;
 	--warn-700: #b45309;
 
+	/* Attention — a run stopped ON PURPOSE and waiting for a person (the
+	   per-step manual-review gate). Its own orange rather than reusing --warn's
+	   amber: "waiting for you to act" and "paused" are different states, and a
+	   shared colour would make the one that needs a human indistinguishable from
+	   the one that doesn't. */
+	--attention-50: #fff7ed;
+	--attention-200: #fed7aa;
+	--attention-500: #f97316;
+	--attention-700: #c2410c;
+
 	--danger-50: #fef2f2;
 	--danger-200: #fecaca;
 	--danger-500: #ef4444;

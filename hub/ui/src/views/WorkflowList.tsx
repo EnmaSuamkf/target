@@ -11,16 +11,20 @@ import styles from "./WorkflowList.module.css";
  * previous UI didn't have — it rendered every workflow as one flat column,
  * which stops being navigable after a dozen or so.
  *
- * Sorting puts active work first (running, then paused), then everything else
- * by recency, so the workflow you're most likely to want is at the top.
+ * Sorting puts the work that needs you first (waiting on a manual review), then
+ * active work (running, then paused), then everything else by recency, so the
+ * workflow you're most likely to want is at the top.
  */
 
+// `waiting` sorts above even `running`: it's the only status that can't move
+// until the operator does something, so it's what they need to find first.
 const STATUS_ORDER: Record<WorkflowStatus, number> = {
-	running: 0,
-	paused: 1,
-	draft: 2,
-	failed: 3,
-	completed: 4,
+	waiting: 0,
+	running: 1,
+	paused: 2,
+	draft: 3,
+	failed: 4,
+	completed: 5,
 };
 
 type Filter = "all" | WorkflowStatus;

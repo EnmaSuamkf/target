@@ -3,7 +3,9 @@
  * to the ONE awb hook/agent created for that workflow. Steps run one at a
  * time, in order, resuming the same Claude session across steps
  * (see runner.ts). This module owns the state machine (draft → running →
- * paused/completed/failed) and the ~/.target/<name>-<id>.md progress file.
+ * paused/waiting/completed/failed) and the ~/.target/<name>-<id>.md progress
+ * file. `waiting` is the manual-review gate: a step flagged for it holds the
+ * whole run until a human continues it (see "manual review gate" below).
  */
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
@@ -27,17 +29,21 @@ import {
 	listSteps,
 	listWorkflows,
 	markStepJudging,
+	markStepWaiting,
 	nextPendingStep,
 	recordStepProgress,
+	releaseWaitingStep,
 	resetSteps,
 	setContextInjected,
 	setWorkflowConversationContext,
+	setStatusBeforeReview,
 	setStepSelection,
 	setWorkflowSessionId,
 	setWorkflowStatus,
 	slugify,
 	startManualRun,
 	stepProgress,
+	takeStatusBeforeReview,
 	updateStepConfig,
 	updateStepDescription,
 	type Step,
@@ -45,6 +51,7 @@ import {
 	type Workflow,
 	type WorkflowStatus,
 } from "./db.ts";
+import { sendManualReviewNotification } from "./notifier.ts";
 import { forgetProbe, humanizeSeconds, probeStepProgress, pruneProbes, stepActivity } from "./progress.ts";
 import { dispatchStep, type Logger } from "./runner.ts";
 
@@ -217,6 +224,118 @@ async function retryTimedOutStep(step: Step, workflow: Workflow, cfg: HubConfig,
 	}
 }
 
+// --- manual review gate ------------------------------------------------
+//
+// A step may be flagged `manualReview`. Where the engine would normally accept
+// a finished, verified step and move on, a flagged step stops: it goes
+// `waiting`, its workflow goes `waiting`, and nothing else happens until a
+// human presses Continue (`continueStep`), which completes the step and
+// advances exactly as the engine would have. The gate is per STEP — it's an
+// extra verification of that step's result, alongside its acceptance criterion
+// — so it hooks in at the two places a step is accepted: the no-judge exec
+// path and the judge's `ok` verdict.
+//
+// It applies to on-demand ▶ runs too. Those sit outside the sequential engine,
+// so at first glance there is nothing to "hold back" — but the gate is a
+// property of the STEP, not of the engine: it says this step's result needs a
+// human before it counts as done, however the step was started. Skipping ▶ runs
+// would make the toggle look broken for anyone who runs their steps one at a
+// time. The difference is only in what Continue does afterwards: an engine step
+// resumes the run, a ▶ run just settles back into the status it interrupted
+// (see `continueStep`).
+
+/** What the notification tells the human to look at — the acceptance criterion when there is one, otherwise the result itself. */
+function manualReviewReason(step: Step): string {
+	const base = "this step has Manual review enabled, so its result needs your approval before the workflow moves on";
+	return step.acceptanceCriteria
+		? `${base}. Check it satisfies its acceptance criterion: "${step.acceptanceCriteria}"`
+		: `${base}. Check that the work it reports is what you wanted`;
+}
+
+/**
+ * Tries to notify the user that a step is waiting on them. Purely advisory: the
+ * step is ALREADY `waiting` by the time this runs, `sendManualReviewNotification`
+ * never throws, and every outcome (notifications off, no username configured,
+ * no Slack MCP, a send that failed) is only logged — see notifier.ts for the
+ * five cases. The engine's state must never depend on a message getting out.
+ */
+async function notifyManualReview(step: Step, workflow: Workflow, log: Logger): Promise<void> {
+	const outcome = await sendManualReviewNotification({
+		workflowName: workflow.name,
+		stepNumber: step.orderIndex + 1,
+		stepDescription: step.description,
+		reason: manualReviewReason(step),
+	});
+	log(
+		outcome.sent
+			? `manual-review notification sent for step ${step.id}`
+			: `manual-review notification not sent for step ${step.id} (${outcome.reason})`,
+	);
+}
+
+/**
+ * Holds an accepted step at its manual-review gate: step → `waiting`, workflow
+ * → `waiting`, then a best-effort notification. Returns whether the hold took;
+ * false means the step was no longer `running`/`queued` (aborted, restarted,
+ * timed out while its callback was in flight), in which case the caller settles
+ * it normally and the gate simply doesn't apply anymore.
+ */
+async function holdForManualReview(
+	step: Step,
+	outcome: { result?: string; sessionId?: string },
+	log: Logger,
+): Promise<boolean> {
+	if (!markStepWaiting(step.id, outcome)) return false;
+	// Stash what the badge said before the hold, so releasing a ▶ run can hand it
+	// back (an engine step always resumes `running`, so it ignores this).
+	const before = getWorkflow(step.workflowId)?.status;
+	setStatusBeforeReview(step.workflowId, before === undefined || before === "waiting" ? null : before);
+	setWorkflowStatus(step.workflowId, "waiting");
+	writeStatusMd(step.workflowId);
+	log(`step ${step.id} is waiting for a manual review — workflow ${step.workflowId} paused`, "warning");
+	const workflow = getWorkflow(step.workflowId);
+	if (workflow) await notifyManualReview(step, workflow, log);
+	return true;
+}
+
+/**
+ * Releases a step from its manual-review hold (the UI's "Continue" button): the
+ * step completes and the workflow picks up exactly where the gate stopped it —
+ * next step dispatched, or `completed` if that was the last one. Only a
+ * `waiting` step can be continued; anything else throws and changes nothing, so
+ * a stale button click (the poll is 2s behind) can't corrupt a step that has
+ * since moved on.
+ */
+export async function continueStep(workflowId: string, stepId: string, cfg: HubConfig, log: Logger): Promise<Step> {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	const step = getStep(stepId);
+	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
+	if (step.status !== "waiting") throw new WorkflowError("only a step waiting for its manual review can be continued");
+	if (!releaseWaitingStep(stepId)) throw new WorkflowError("only a step waiting for its manual review can be continued");
+	const stashed = takeStatusBeforeReview(workflowId);
+	log(`step ${stepId} released by its manual review`);
+	if (step.manualRun) {
+		// An on-demand ▶ run never drove the workflow and must not start driving it
+		// now: releasing it puts back the status the hold interrupted and settles
+		// the badge from the steps, exactly like any other ▶ run finishing. It must
+		// NOT advance — dispatching the next pending step is something only Start
+		// ever does.
+		if (stashed) setWorkflowStatus(workflowId, stashed);
+		settleManual(workflowId, log);
+	} else {
+		// The gate was the only thing holding the run, so the workflow goes back to
+		// `running` before advancing — `advance()` acts on nothing else, and it's
+		// what turns the last step's release into `completed`.
+		setWorkflowStatus(workflowId, "running");
+		writeStatusMd(workflowId);
+		await advance(workflowId, cfg, log);
+	}
+	const updated = getStep(stepId);
+	if (!updated) throw new WorkflowError("step disappeared");
+	return updated;
+}
+
 /**
  * Read-path self-heal, run on every workflow GET (via `expireStale`): any
  * workflow whose steps are ALL settled (none pending, none running) must show
@@ -233,13 +352,19 @@ async function retryTimedOutStep(step: Step, workflow: Workflow, cfg: HubConfig,
 function healSettledStatuses(log: Logger): void {
 	for (const workflow of listWorkflows()) {
 		const steps = listSteps(workflow.id);
-		if (steps.some((s) => s.status === "pending" || s.status === "running" || s.status === "queued")) continue;
+		if (
+			steps.some(
+				(s) => s.status === "pending" || s.status === "running" || s.status === "queued" || s.status === "waiting",
+			)
+		) {
+			continue;
+		}
 		if (reconcileStatus(workflow.id, log)) writeStatusMd(workflow.id);
 	}
 }
 
 function statusMark(status: Step["status"]): string {
-	return { pending: " ", queued: ".", running: "~", done: "x", failed: "!" }[status];
+	return { pending: " ", queued: ".", running: "~", waiting: "?", done: "x", failed: "!" }[status];
 }
 
 /** Truncates the conversation context for the one-line summary in the progress .md. */
@@ -277,6 +402,15 @@ export function writeStatusMd(workflowId: string): void {
 		if (step.acceptanceCriteria) {
 			lines.push(`   - Acceptance criterion: ${step.acceptanceCriteria}`);
 			lines.push(`   - Retries: ${step.retryCount}/${step.maxRetries}`);
+		}
+		// The gate is worth stating in the file too: it explains, without the UI,
+		// why a workflow is sitting at `waiting` instead of moving on.
+		if (step.manualReview) {
+			lines.push(
+				step.status === "waiting"
+					? "   - Manual review: WAITING for a human to continue this step"
+					: "   - Manual review: required before the workflow advances past this step",
+			);
 		}
 		if (step.startedAt) lines.push(`   - Started: ${step.startedAt}`);
 		// Last sign of life from the agent, so a timeout (or a long-but-healthy
@@ -389,7 +523,12 @@ export function removeWorkflow(workflowId: string): void {
 export function addStep(
 	workflowId: string,
 	description: string,
-	options: { acceptanceCriteria?: string | null; maxRetries?: number; retryIntervalSeconds?: number } = {},
+	options: {
+		acceptanceCriteria?: string | null;
+		manualReview?: boolean;
+		maxRetries?: number;
+		retryIntervalSeconds?: number;
+	} = {},
 ): Step {
 	const trimmed = description.trim();
 	if (!trimmed) throw new WorkflowError("description is required");
@@ -409,23 +548,35 @@ export function editStep(
 	workflowId: string,
 	stepId: string,
 	description: string,
-	options: { acceptanceCriteria?: string | null; maxRetries?: number; retryIntervalSeconds?: number } = {},
+	options: {
+		acceptanceCriteria?: string | null;
+		manualReview?: boolean;
+		maxRetries?: number;
+		retryIntervalSeconds?: number;
+	} = {},
 ): Step {
 	const trimmed = description.trim();
 	if (!trimmed) throw new WorkflowError("description is required");
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
 	if (step.status === "running" || step.status === "queued") throw new WorkflowError("cannot edit a step while its job is running");
+	// A step held at its gate has already produced the result the human is
+	// reviewing — editing the task under them (or switching the gate off from
+	// beneath the hold) would make that review meaningless. Continue it first.
+	if (step.status === "waiting") throw new WorkflowError("cannot edit a step while it waits for its manual review");
 	updateStepDescription(stepId, trimmed);
-	// Only touch the judge config when the caller actually sent fields — a plain
-	// description edit shouldn't silently wipe an existing criterion.
+	// Only touch the verification config when the caller actually sent fields — a
+	// plain description edit shouldn't silently wipe an existing criterion (or
+	// clear the manual-review gate).
 	if (
 		options.acceptanceCriteria !== undefined ||
+		options.manualReview !== undefined ||
 		options.maxRetries !== undefined ||
 		options.retryIntervalSeconds !== undefined
 	) {
 		updateStepConfig(stepId, {
 			acceptanceCriteria: options.acceptanceCriteria ?? step.acceptanceCriteria,
+			manualReview: options.manualReview ?? step.manualReview,
 			maxRetries: options.maxRetries ?? step.maxRetries,
 			retryIntervalSeconds: options.retryIntervalSeconds ?? step.retryIntervalSeconds,
 		});
@@ -468,6 +619,11 @@ export function removeStep(workflowId: string, stepId: string): void {
 function reconcileStatus(workflowId: string, log?: Logger): boolean {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) return false;
+	// A step held at its manual-review gate owns the badge: the workflow is
+	// `waiting` until a human releases it, whatever the other steps add up to.
+	// Without this the heal would "settle" a workflow whose only unfinished step
+	// is one waiting on a person.
+	if (listSteps(workflowId).some((s) => s.status === "waiting")) return false;
 	if (workflow.status === "running") {
 		const steps = listSteps(workflowId);
 		// Any step still pending or in flight — the engine may yet act; hands off.
@@ -511,6 +667,11 @@ async function advance(workflowId: string, cfg: HubConfig, log: Logger): Promise
 	if (!workflow || workflow.status !== "running") return;
 	const steps = listSteps(workflowId);
 	if (steps.some((s) => s.status === "running" || s.status === "queued")) return; // a step is already in flight (running or queued on the workdir lock)
+	// A step held at its manual-review gate stops the run just as firmly as one
+	// in flight: only Continue may move it, and only Continue may advance past
+	// it. (Belt and braces — such a workflow is `waiting`, not `running`, so the
+	// status check above already returned.)
+	if (steps.some((s) => s.status === "waiting")) return;
 	const next = nextPendingStep(workflowId);
 	if (!next) {
 		if (steps.some((s) => s.status === "pending")) return; // unselected steps still pending — not actually done
@@ -538,6 +699,12 @@ export async function startWorkflow(
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	if (workflow.status === "completed" || workflow.status === "failed") {
 		throw new WorkflowError(`workflow is ${workflow.status} — use restart instead`);
+	}
+	// A workflow stopped at a manual-review gate is resumed by continuing that
+	// step, not by starting the run again: Start would flip it back to `running`
+	// while the step still sits `waiting`, so nothing would ever dispatch.
+	if (workflow.status === "waiting") {
+		throw new WorkflowError("workflow is waiting for a manual review — continue that step instead");
 	}
 	// Persist the run selection so the sequential engine (which advances across
 	// async job callbacks) only ever dispatches the chosen steps. Empty = none.
@@ -740,6 +907,11 @@ export async function onStepResult(
 
 	// No acceptance criteria → no judge; accept the result as before.
 	if (!step.acceptanceCriteria) {
+		// …unless the step is gated: this is exactly the moment it would have gone
+		// `done` and the engine would have advanced, so it holds here instead.
+		if (step.manualReview && (await holdForManualReview(step, { result: outcome.result, sessionId: outcome.sessionId }, log))) {
+			return;
+		}
 		completeStep(stepId, outcome);
 		writeStatusMd(step.workflowId);
 		await advance(step.workflowId, cfg, log);
@@ -793,8 +965,13 @@ async function onManualRun(
 	// Chain the shared session now — the judge (and any retry) resumes this same
 	// one, and a later step or ▶ run continues the same conversation.
 	chainSession(step.workflowId, outcome.sessionId);
-	// No acceptance criteria → no judge; record the result as-is (unchanged).
+	// No acceptance criteria → no judge; record the result as-is (unchanged)…
 	if (!step.acceptanceCriteria) {
+		// …unless the step is gated, in which case it holds here for its human
+		// instead of being recorded done — same rule as the engine path.
+		if (step.manualReview && (await holdForManualReview(step, { result: outcome.result, sessionId: outcome.sessionId }, log))) {
+			return;
+		}
 		completeStep(step.id, outcome);
 		log(`step ${step.id} (on-demand run) done`);
 		settleManual(step.workflowId, log);
@@ -845,6 +1022,8 @@ async function onManualJudgeVerdict(
 		return;
 	}
 	if (verdict.ok) {
+		// Judged good, but a gated step still needs a human on top of that.
+		if (step.manualReview && (await holdForManualReview(step, {}, log))) return;
 		finishStepDone(step.id);
 		log(`step ${step.id} (on-demand run) passed the judge`);
 		settleManual(step.workflowId, log);
@@ -906,6 +1085,10 @@ async function onJudgeVerdict(
 	}
 
 	if (verdict.ok) {
+		// The judge verified it, but a gated step needs a human on top of that:
+		// hold instead of finishing. Its result is already stored (markStepJudging),
+		// so the hold has nothing new to carry.
+		if (step.manualReview && (await holdForManualReview(step, {}, log))) return;
 		finishStepDone(step.id);
 		writeStatusMd(step.workflowId);
 		log(`step ${step.id} passed the judge`);
@@ -962,6 +1145,11 @@ export async function runStep(workflowId: string, stepId: string, cfg: HubConfig
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
 	if (listSteps(workflowId).some((s) => s.status === "running" || s.status === "queued")) {
 		throw new WorkflowError("a step is already running for this workflow");
+	}
+	// A ▶ re-run would wipe the result the human was asked to review and drop the
+	// hold silently — Continue is the only way out of the gate.
+	if (step.status === "waiting") {
+		throw new WorkflowError("this step is waiting for its manual review — continue it instead");
 	}
 	if (!startManualRun(stepId)) throw new WorkflowError("this step is already running");
 	writeStatusMd(workflowId);

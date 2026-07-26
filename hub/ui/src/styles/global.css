@@ -265,6 +265,13 @@ kbd,
 	border-color: var(--warn-200);
 	color: var(--warn-700);
 }
+/* Held at a manual-review gate: orange, because it's the one status that is
+   waiting on the operator rather than on the engine. */
+.badge--waiting {
+	background: var(--attention-50);
+	border-color: var(--attention-200);
+	color: var(--attention-700);
+}
 .badge--completed,
 .badge--done {
 	background: var(--success-50);
@@ -287,8 +294,11 @@ kbd,
 	animation: pulse 1.6s ease-in-out infinite;
 }
 /* A queued step is waiting its turn on the workdir lock — a steady dot
-   (no pulse) signals "accepted, not yet running" without implying activity. */
-.badge--queued .badge__dot {
+   (no pulse) signals "accepted, not yet running" without implying activity.
+   A step held for its manual review carries the same steady dot: it's stopped,
+   but it's the state most worth spotting in a long list. */
+.badge--queued .badge__dot,
+.badge--waiting .badge__dot {
 	animation: none;
 }
 
