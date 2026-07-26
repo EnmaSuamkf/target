@@ -177,6 +177,7 @@ function open(): DatabaseSync {
 			md_path TEXT NOT NULL,
 			conversation_context TEXT,
 			context_injected INTEGER NOT NULL DEFAULT 0,
+			completion_notified INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
@@ -256,6 +257,7 @@ function open(): DatabaseSync {
 	addWorkflowColumn("conversation_context", "conversation_context TEXT");
 	addWorkflowColumn("context_injected", "context_injected INTEGER NOT NULL DEFAULT 0");
 	addWorkflowColumn("status_before_review", "status_before_review TEXT");
+	addWorkflowColumn("completion_notified", "completion_notified INTEGER NOT NULL DEFAULT 0");
 	return db;
 }
 
@@ -348,9 +350,43 @@ export function listWorkflows(): Workflow[] {
 }
 
 export function setWorkflowStatus(id: string, status: WorkflowStatus): void {
+	// Any status that ISN'T `completed` re-arms the "workflow finished" notice
+	// (see `claimWorkflowCompletionNotice`). This is what makes a restart — or an
+	// "+ step" that pushes a terminal workflow back to `draft` — notify again on
+	// the NEXT completion: leaving `completed` means the completion that was
+	// already announced is over, and whatever finishes later is a new one.
+	// Writing `completed` itself deliberately leaves the marker alone, so a
+	// status re-write on an already-completed workflow can't re-arm it.
 	open()
-		.prepare("UPDATE workflows SET status = ?, updated_at = ? WHERE id = ?")
-		.run(status, new Date().toISOString(), id);
+		.prepare(
+			`UPDATE workflows SET status = ?, updated_at = ?,
+			 completion_notified = CASE WHEN ? = 'completed' THEN completion_notified ELSE 0 END
+			 WHERE id = ?`,
+		)
+		.run(status, new Date().toISOString(), status, id);
+}
+
+/**
+ * Claims the right to send this workflow's "it finished" notification, and
+ * answers whether the claim was won.
+ *
+ * This is the whole once-only guarantee, and it lives in SQL on purpose. The UI
+ * polls the hub every ~2s and those reads run `expireStale`/`reconcileStatus`,
+ * so any check of the shape "is it completed? then notify" would fire a Slack DM
+ * on every poll forever. A single conditional UPDATE is atomic: the first caller
+ * after a completion flips 0 → 1 and gets true, every later one matches no row
+ * and gets false — including a caller racing on another request.
+ *
+ * Deliberately does NOT touch `updated_at`: this is delivery bookkeeping, not a
+ * change to the workflow the operator should see. The marker is reset by
+ * `setWorkflowStatus` whenever the workflow leaves `completed`.
+ */
+export function claimWorkflowCompletionNotice(id: string): boolean {
+	return (
+		open()
+			.prepare("UPDATE workflows SET completion_notified = 1 WHERE id = ? AND completion_notified = 0")
+			.run(id).changes > 0
+	);
 }
 
 /**

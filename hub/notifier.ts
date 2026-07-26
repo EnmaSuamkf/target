@@ -1,10 +1,21 @@
 /**
- * Best-effort notifications, currently one: "a step is waiting for your manual
- * review". The engine calls `sendManualReviewNotification` the moment a step
- * enters the `waiting` hold — and then carries on regardless of what it
- * answers. Delivery is strictly advisory: the hold itself is the feature, the
- * message is a courtesy, so nothing here may ever throw into the engine path.
- * Every failure mode is a `{ sent: false, reason }`, never an exception.
+ * Best-effort notifications. Two so far, both about a moment the user would
+ * otherwise only discover by having the UI open:
+ *
+ *  - "a step is waiting for your manual review" — sent the moment a gated step
+ *    enters the `waiting` hold;
+ *  - "your workflow finished" — sent the moment a workflow becomes `completed`,
+ *    carrying the result it ended on.
+ *
+ * The engine calls them and then carries on regardless of what they answer.
+ * Delivery is strictly advisory: the hold (and the completion) is the feature,
+ * the message is a courtesy, so nothing here may ever throw into the engine
+ * path. Every failure mode is a `{ sent: false, reason }`, never an exception.
+ *
+ * Both go through the SAME decision (`deliver` below), so "notifications are
+ * off", "no username", "no Slack MCP", "sent" and "the send blew up" mean
+ * exactly the same thing whichever notification is being attempted — there is
+ * one policy here, not one per message.
  *
  * ## How the hub reaches Slack
  *
@@ -64,6 +75,22 @@ export interface ManualReviewNotice {
 	stepDescription: string;
 	/** What they must review / why they were pulled in. */
 	reason: string;
+}
+
+/**
+ * What a finished workflow is reporting. Same "nothing from the DB layer"
+ * rule as `ManualReviewNotice`: the engine reads the steps and hands over the
+ * few strings the message needs, already truncated — this module composes text
+ * and talks to Slack, it does not know what a `Step` is.
+ */
+export interface WorkflowCompletedNotice {
+	workflowName: string;
+	/** How many steps the run finished — every one of them is `done`, or the workflow would not be `completed`. */
+	stepCount: number;
+	/** The last step's description, so the result below has something to be the result OF. Empty when the workflow had no steps at all. */
+	lastStepDescription: string;
+	/** The workflow's outcome: the last step's result, truncated by the caller to something a chat window can hold. */
+	result: string;
 }
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
@@ -246,8 +273,34 @@ export function manualReviewMessage(notice: ManualReviewNotice): string {
 }
 
 /**
- * Attempts to tell the user a step is waiting for them. Five outcomes, in the
- * order they're decided:
+ * The message a finished workflow sends. It has to answer, on its own and
+ * without the UI open: WHICH workflow finished and WHAT it ended up producing —
+ * "workflow done" with no result is a notification that only tells you to go
+ * and look, which is the thing this is meant to save.
+ *
+ * The result is the last step's, already truncated by the caller: a step can
+ * answer with pages of text, and a chat message that has to be scrolled is
+ * worse than one that says "here's the gist, open the workflow for the rest".
+ */
+export function workflowCompletedMessage(notice: WorkflowCompletedNotice): string {
+	const lines = [
+		`:white_check_mark: *Workflow finished* — *${notice.workflowName}* is completed.`,
+		"",
+		`*Steps:* all ${notice.stepCount} done`,
+	];
+	// A workflow can legitimately complete with no steps at all (start a draft
+	// that has none), and then there is no "last step" to name — say nothing
+	// rather than print an empty label.
+	if (notice.lastStepDescription !== "") {
+		lines.push(`*Last step (${notice.stepCount}):* ${notice.lastStepDescription}`);
+	}
+	lines.push("", "*Result:*", notice.result === "" ? "_(the last step reported no result)_" : notice.result);
+	return lines.join("\n");
+}
+
+/**
+ * The ONE place the five notification outcomes are decided, shared by every
+ * notification the hub sends, in the order they're decided:
  *
  * 1. notifications off        → `notifications-disabled`, nothing sent
  * 2. no Slack username        → `no-slack-username`, nothing sent
@@ -255,10 +308,14 @@ export function manualReviewMessage(notice: ManualReviewNotice): string {
  * 4. sent                     → `{ sent: true }`
  * 5. the send threw           → `send-failed`, swallowed here
  *
- * The step is already `waiting` by the time this runs and stays that way in
- * every one of them: this function never throws and never touches state.
+ * The message is a thunk, not a string, so nothing is composed for a hub that
+ * has notifications switched off — and so each notification owns its own
+ * wording while sharing this policy exactly.
+ *
+ * Whatever the engine did before calling this is already done and stays done in
+ * every one of the five: this never throws and never touches state.
  */
-export async function sendManualReviewNotification(notice: ManualReviewNotice): Promise<NotificationResult> {
+async function deliver(buildMessage: () => string): Promise<NotificationResult> {
 	try {
 		const settings = getNotificationSettings();
 		if (!settings.enabled) return { sent: false, reason: "notifications-disabled" };
@@ -266,7 +323,7 @@ export async function sendManualReviewNotification(notice: ManualReviewNotice): 
 		if (username === "") return { sent: false, reason: "no-slack-username" };
 		const endpoint = _impl.detect();
 		if (!endpoint) return { sent: false, reason: "mcp-unavailable" };
-		await _impl.send(endpoint, username, manualReviewMessage(notice));
+		await _impl.send(endpoint, username, buildMessage());
 		return { sent: true };
 	} catch {
 		// Case 5, plus anything unexpected above it (an unreadable settings row,
@@ -274,4 +331,23 @@ export async function sendManualReviewNotification(notice: ManualReviewNotice): 
 		// silently rather than taking the workflow with it.
 		return { sent: false, reason: "send-failed" };
 	}
+}
+
+/** Attempts to tell the user a step is waiting for them. See `deliver` for the five outcomes; the step is already `waiting` and stays that way in all of them. */
+export function sendManualReviewNotification(notice: ManualReviewNotice): Promise<NotificationResult> {
+	return deliver(() => manualReviewMessage(notice));
+}
+
+/**
+ * Attempts to tell the user a workflow has finished, naming it and quoting the
+ * result it ended on. See `deliver` for the five outcomes — identical to the
+ * manual-review notification's, deliberately: the user configured ONE Slack
+ * destination and one master switch, so both messages have to obey them the
+ * same way.
+ *
+ * The workflow is already `completed` and stays `completed` whatever this
+ * answers; the engine only logs the outcome.
+ */
+export function sendWorkflowCompletedNotification(notice: WorkflowCompletedNotice): Promise<NotificationResult> {
+	return deliver(() => workflowCompletedMessage(notice));
 }

@@ -14,6 +14,7 @@ import { createAwbHook, deleteAwbHook, abortAwbRun, type HookOptions } from "./a
 import { targetDir, type HubConfig } from "./config.ts";
 import {
 	beginRetry,
+	claimWorkflowCompletionNotice,
 	completeStep,
 	deleteStep,
 	deleteWorkflow,
@@ -51,7 +52,7 @@ import {
 	type Workflow,
 	type WorkflowStatus,
 } from "./db.ts";
-import { sendManualReviewNotification } from "./notifier.ts";
+import { sendManualReviewNotification, sendWorkflowCompletedNotification } from "./notifier.ts";
 import { forgetProbe, humanizeSeconds, probeStepProgress, pruneProbes, stepActivity } from "./progress.ts";
 import { dispatchStep, type Logger } from "./runner.ts";
 
@@ -596,6 +597,71 @@ export function removeStep(workflowId: string, stepId: string): void {
 	writeStatusMd(workflowId);
 }
 
+// --- the "workflow finished" notification -------------------------------
+//
+// When a workflow's last step lands and it becomes `completed`, the user gets a
+// Slack DM naming the workflow and quoting the result it ended on — the point
+// being that they don't have to keep the UI open to find out.
+//
+// The hazard this section exists to solve is DUPLICATE delivery, not delivery.
+// A workflow sits `completed` forever, and the UI polls the hub every ~2s
+// through read paths that call `expireStale` → `healSettledStatuses` →
+// `reconcileStatus`. A hook that asked "is this workflow completed?" would
+// therefore answer yes on every poll and DM the user every two seconds, for as
+// long as the workflow exists. So the trigger is not the STATE, it's the
+// TRANSITION, and the transition is claimed once in the database
+// (`claimWorkflowCompletionNotice`) rather than remembered in this process —
+// otherwise a hub restart would re-announce every workflow that finished before
+// it went down.
+//
+// There are exactly two places a workflow's status becomes `completed`:
+// `advance()` (the engine reaching the end of the run, which is also what
+// `continueStep` triggers when it releases the last gated step) and
+// `reconcileStatus()` (the read-path heal, and the ▶-run settle that goes
+// through it). Both call in here; the claim is what makes "both" safe.
+
+/** How much of the last step's result the chat message carries. Longer than the .md's inline preview would be unreadable in a DM; shorter would stop being an answer. */
+const COMPLETION_RESULT_CHARS = 600;
+
+/**
+ * Best-effort "this workflow finished" notification. Must be called at the
+ * moment a workflow's status BECOMES `completed`, and it is safe to call it
+ * more often than that: the first call after each completion wins the claim and
+ * every other one returns having done nothing.
+ *
+ * Purely advisory, exactly like the manual-review notification: the workflow is
+ * already `completed` before this runs, `sendWorkflowCompletedNotification`
+ * never throws, and all five outcomes (notifications off, no username, no Slack
+ * MCP, sent, send failed) are only logged. The workflow's state must never
+ * depend on a message getting out.
+ *
+ * Note the claim happens BEFORE the first `await`, so a caller that can only
+ * fire-and-forget this (the synchronous `reconcileStatus`) still gets the
+ * once-only guarantee at the instant of the transition.
+ */
+async function notifyWorkflowCompleted(workflowId: string, log?: Logger): Promise<void> {
+	if (!claimWorkflowCompletionNotice(workflowId)) return;
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) return;
+	const steps = listSteps(workflowId);
+	// The workflow's "result" is the last step's — it's the one whose output the
+	// run ended on, and every earlier step's result is already folded into it by
+	// the shared session. A completed workflow with no steps at all (starting an
+	// empty draft) has neither, and the message says so rather than lying.
+	const last = steps.at(-1);
+	const outcome = await sendWorkflowCompletedNotification({
+		workflowName: workflow.name,
+		stepCount: steps.length,
+		lastStepDescription: last?.description ?? "",
+		result: truncateText(last?.result ?? "", COMPLETION_RESULT_CHARS),
+	});
+	log?.(
+		outcome.sent
+			? `workflow-completed notification sent for workflow ${workflowId}`
+			: `workflow-completed notification not sent for workflow ${workflowId} (${outcome.reason})`,
+	);
+}
+
 /**
  * Derives a non-`running` workflow's status from the CURRENT state of its
  * steps: every step `done` → `completed`, any step still `failed` → `failed`,
@@ -646,6 +712,14 @@ function reconcileStatus(workflowId: string, log?: Logger): boolean {
 	if (derived === "draft" && workflow.status === "paused") return false;
 	setWorkflowStatus(workflowId, derived);
 	log?.(`workflow ${workflowId} ${derived}`);
+	// A real completion transition — the badge was something else a statement
+	// ago. This is the path a ▶ run finishing the last outstanding step takes
+	// (via `settleManual`), so it has to notify like any other completion.
+	// Fire-and-forget because this function is synchronous and sits on read
+	// paths: a Slack round trip must not be something a workflow GET waits on,
+	// and the claim above has already been won synchronously, so a later poll
+	// cannot duplicate it. `notifyWorkflowCompleted` never rejects.
+	if (derived === "completed") void notifyWorkflowCompleted(workflowId, log);
 	return true;
 }
 
@@ -683,6 +757,12 @@ async function advance(workflowId: string, cfg: HubConfig, log: Logger): Promise
 		setWorkflowStatus(workflowId, terminal);
 		writeStatusMd(workflowId);
 		log(`workflow ${workflowId} ${terminal}`, terminal === "failed" ? "error" : "info");
+		// The main completion path: the engine ran out of work. Only `completed`
+		// notifies — a run that ended `failed` is a different message nobody asked
+		// for, and shipping it "because the branch is right here" would be inventing
+		// a feature. Awaited (unlike the `reconcileStatus` call) because this is
+		// already an async engine path and nothing is blocked by it.
+		if (terminal === "completed") await notifyWorkflowCompleted(workflowId, log);
 		return;
 	}
 	await dispatchStep(next, workflow, cfg, log);
