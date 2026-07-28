@@ -414,3 +414,104 @@ kbd,
 	background: var(--gray-400);
 	background-clip: content-box;
 }
+
+/* --- touch targets ---
+ *
+ * A hit area smaller than ~44px is a coin toss with a thumb, and this app is
+ * mostly small buttons. Rather than growing every control (which would wreck
+ * the dense desktop layout), the visual size stays put and an invisible
+ * pseudo-element grows the *hit* area around it. Applied on coarse pointers
+ * only, so a mouse never gains an invisible click region it can't see.
+ *
+ * The host has to be positioned; every user of this class already is, or sets
+ * `position: relative` alongside it.
+ */
+@media (pointer: coarse) {
+	.tap-target::after {
+		content: "";
+		position: absolute;
+		top: 50%;
+		left: 50%;
+		width: max(100%, var(--tap-target));
+		height: max(100%, var(--tap-target));
+		transform: translate(-50%, -50%);
+	}
+}
+
+/* --- small screens ---
+ *
+ * Keep in sync with MOBILE_QUERY in hooks/useIsMobile.ts.
+ */
+@media (max-width: 768px) {
+	/* Under 16px, iOS Safari zooms the page when a control takes focus and never
+	   zooms back out — the single most disorienting thing a form can do on a
+	   phone. The `:not()` chain is only there to out-specify the `.input` /
+	   `.searchInput` class rules that come later in the cascade. */
+	input:not([type="checkbox"]):not([type="radio"]),
+	textarea,
+	select {
+		font-size: 16px;
+	}
+
+	/* Bigger, and no 300ms tap delay or grey flash on press. */
+	.btn {
+		min-height: var(--tap-target);
+		padding: var(--space-2) var(--space-4);
+		font-size: var(--text-base);
+	}
+
+	/* `--sm` stays visually lighter than a full button but is not allowed to be
+	   smaller than a thumb: the step row's Run/Abort/Edit/Remove are all `--sm`. */
+	.btn--sm {
+		min-height: var(--tap-target);
+		padding: var(--space-2) var(--space-3);
+		font-size: var(--text-sm);
+	}
+
+	/* Hover states never resolve on touch and leave the last-tapped control
+	   looking stuck; the press state is what reads there. */
+	.btn:hover:not(:disabled) {
+		background: var(--surface);
+		border-color: var(--border-strong);
+	}
+	.btn--primary:hover:not(:disabled) {
+		background: var(--accent-600);
+		border-color: var(--accent-600);
+	}
+	.btn--ghost:hover:not(:disabled) {
+		background: transparent;
+		color: var(--text-muted);
+	}
+	.btn--danger:hover:not(:disabled) {
+		background: var(--surface);
+		border-color: var(--danger-200);
+	}
+
+	.input,
+	.textarea,
+	.select {
+		padding: var(--space-2) var(--space-3);
+		min-height: var(--tap-target);
+	}
+
+	.textarea {
+		min-height: 6.5rem;
+	}
+
+	.select {
+		padding-right: var(--space-8);
+	}
+
+	.hint {
+		font-size: var(--text-sm);
+	}
+}
+
+@media (pointer: coarse) {
+	button,
+	[role="switch"],
+	a {
+		-webkit-tap-highlight-color: transparent;
+		touch-action: manipulation;
+	}
+}

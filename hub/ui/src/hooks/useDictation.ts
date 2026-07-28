@@ -93,6 +93,13 @@ function readSavedLang(): DictationLang {
 export interface Dictation {
 	supported: boolean;
 	listening: boolean;
+	/**
+	 * Whether a text field has been focused, i.e. whether the mic has anywhere to
+	 * write. Lets the dock stay out of the way until it's actually usable — it
+	 * costs nothing on a desktop, but on a phone a floating control that can only
+	 * say "click a text field first" is just something covering the page.
+	 */
+	hasTarget: boolean;
 	lang: DictationLang;
 	setLang: (lang: DictationLang) => void;
 	toggle: () => void;
@@ -107,6 +114,7 @@ export function useDictation(): Dictation {
 	const [lang, setLangState] = useState<DictationLang>(readSavedLang);
 	const [hint, setHint] = useState("");
 	const [hintIsError, setHintIsError] = useState(false);
+	const [hasTarget, setHasTarget] = useState(false);
 
 	const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
 	const lastFieldRef = useRef<DictationTarget | null>(null);
@@ -130,7 +138,12 @@ export function useDictation(): Dictation {
 	// Track the last editable field so the mic knows where to write.
 	useEffect(() => {
 		const onFocusIn = (ev: FocusEvent): void => {
-			if (isEditable(ev.target)) lastFieldRef.current = ev.target;
+			if (!isEditable(ev.target)) return;
+			lastFieldRef.current = ev.target;
+			// Latched rather than cleared on blur: pressing the mic necessarily
+			// takes focus off the field, and a control that disappears as you reach
+			// for it is worse than one that lingers.
+			setHasTarget(true);
 		};
 		document.addEventListener("focusin", onFocusIn);
 		return () => document.removeEventListener("focusin", onFocusIn);
@@ -290,5 +303,5 @@ export function useDictation(): Dictation {
 		start();
 	}, [start]);
 
-	return { supported, listening, lang, setLang, toggle, hint, hintIsError };
+	return { supported, listening, hasTarget, lang, setLang, toggle, hint, hintIsError };
 }

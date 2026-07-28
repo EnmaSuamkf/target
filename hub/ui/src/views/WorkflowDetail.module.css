@@ -19,6 +19,25 @@
 	background: linear-gradient(to bottom, var(--gray-50), var(--surface));
 }
 
+/* Back to the workflow list — only rendered when this pane is the whole screen
+   (see the `onBack` note in WorkflowDetail.tsx). */
+.back {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--space-1);
+	justify-self: start;
+	min-height: var(--tap-target);
+	margin: calc(var(--space-2) * -1) 0 calc(var(--space-3) * -1) calc(var(--space-2) * -1);
+	padding: var(--space-2);
+	border: none;
+	background: transparent;
+	color: var(--accent-600);
+	font-family: inherit;
+	font-size: var(--text-sm);
+	font-weight: 550;
+	cursor: pointer;
+}
+
 .titleRow {
 	display: flex;
 	align-items: center;
@@ -228,8 +247,78 @@
 	.addGrid {
 		grid-template-columns: 1fr;
 	}
+}
+
+/* --- phone ---
+ *
+ * Keep in sync with MOBILE_QUERY in hooks/useIsMobile.ts.
+ */
+@media (max-width: 768px) {
 	.header,
 	.body {
 		padding: var(--space-4);
+	}
+
+	/* The pane is the page here, so it stops being an inner scroller: one
+	   scrollbar per screen, and the run controls scroll away with the rest
+	   instead of being pinned above a second scroll region. */
+	.body {
+		overflow: visible;
+	}
+
+	.title {
+		font-size: var(--text-lg);
+	}
+
+	/* Two facts per row rather than one long column of label/value pairs. */
+	.facts {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: var(--space-3);
+	}
+
+	.fact dt,
+	.fact dd {
+		font-size: var(--text-sm);
+	}
+
+	/* Start and Stop share the top row at full width; Delete drops to its own
+	   row, right-aligned and no wider than its label — a destructive action
+	   shouldn't be the biggest target on the screen or sit against the thumb
+	   that just pressed Start. */
+	.controls {
+		display: grid;
+		grid-template-columns: 2fr 1fr;
+		gap: var(--space-2);
+	}
+
+	.controlsSpacer {
+		display: none;
+	}
+
+	.delete {
+		grid-column: 1 / -1;
+		justify-self: end;
+	}
+
+	.addTrigger {
+		min-height: var(--tap-target);
+		font-size: var(--text-base);
+	}
+
+	.gateRow {
+		align-items: flex-start;
+		gap: var(--space-3);
+	}
+
+	.templateControls {
+		flex-wrap: wrap;
+	}
+
+	.templateControls select {
+		flex: 1 0 100%;
+	}
+
+	.templateControls :global(.btn) {
+		flex: 1;
 	}
 }

@@ -1,3 +1,4 @@
+import { useIsMobile } from "../hooks/useIsMobile.ts";
 import type { Dictation, DictationLang } from "../hooks/useDictation.ts";
 import styles from "./VoiceDock.module.css";
 
@@ -6,9 +7,18 @@ import styles from "./VoiceDock.module.css";
  * doesn't move focus out of the field being dictated into — the hook targets
  * the last focused editable element, and stealing focus here would leave it
  * with nowhere to write.
+ *
+ * On a phone it stays hidden until some text field has been focused. A desktop
+ * has room to park a dock in a corner indefinitely; a phone screen doesn't, and
+ * while you're reading a list of workflows the mic has nothing to dictate into
+ * anyway — it would be a floating button whose only function is to cover the
+ * bottom row. Once there's somewhere to write, it appears and stays.
  */
-export function VoiceDock({ dictation }: { dictation: Dictation }): React.JSX.Element {
-	const { supported, listening, lang, setLang, toggle, hint, hintIsError } = dictation;
+export function VoiceDock({ dictation }: { dictation: Dictation }): React.JSX.Element | null {
+	const { supported, listening, hasTarget, lang, setLang, toggle, hint, hintIsError } = dictation;
+	const isMobile = useIsMobile();
+
+	if (isMobile && !hasTarget) return null;
 
 	return (
 		<div className={styles.dock}>

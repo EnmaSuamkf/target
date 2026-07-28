@@ -48,3 +48,36 @@
 .on .thumb {
 	left: calc(100% - 1rem - 2px);
 }
+
+/* A 40×22px track is a fine mouse target and a poor thumb one. Rather than
+   drawing a switch big enough to hit, an invisible pseudo-element extends the
+   hit area to the 44px minimum around the visible track — the control looks
+   identical, it just stops being a near-miss. Coarse pointers only, so a mouse
+   never gets an invisible click region. */
+@media (pointer: coarse) {
+	.switch::after {
+		content: "";
+		position: absolute;
+		top: 50%;
+		left: 50%;
+		width: max(100%, var(--tap-target));
+		height: var(--tap-target);
+		transform: translate(-50%, -50%);
+	}
+}
+
+@media (max-width: 768px) {
+	.switch {
+		width: 2.75rem;
+		height: 1.625rem;
+	}
+
+	.thumb {
+		width: 1.25rem;
+		height: 1.25rem;
+	}
+
+	.on .thumb {
+		left: calc(100% - 1.25rem - 2px);
+	}
+}

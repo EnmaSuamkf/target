@@ -67,8 +67,23 @@
 	}
 }
 
-@media (max-width: 640px) {
+/* --- phone ---
+ *
+ * Keep in sync with MOBILE_QUERY in hooks/useIsMobile.ts.
+ */
+@media (max-width: 768px) {
 	.main {
-		padding: var(--space-4);
+		/* Horizontal insets cover a landscape notch; the bottom one clears the
+		   fixed tab bar (Header.module.css) so the last card is never stuck
+		   underneath it. */
+		padding: var(--space-4) calc(var(--space-4) + var(--safe-right)) 0 calc(var(--space-4) + var(--safe-left));
+		padding-bottom: calc(var(--bottom-nav-height) + var(--safe-bottom) + var(--space-6));
+		gap: var(--space-3);
+	}
+
+	/* Only one of the two panes is mounted at a time here (see App.tsx), so the
+	   grid is a single column carrying whichever it is. */
+	.workflowLayout {
+		gap: var(--space-4);
 	}
 }

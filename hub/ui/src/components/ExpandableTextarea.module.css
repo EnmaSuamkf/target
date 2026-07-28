@@ -38,3 +38,22 @@
 .expand:active {
 	background: var(--gray-200);
 }
+
+@media (max-width: 768px) {
+	/* Bigger and further from the edge: on a phone this button is the entry to
+	   the comfortable editor, so it's the one thing in the corner worth hitting
+	   first. The `tap-target` utility takes care of the invisible 44px area. */
+	.expand {
+		top: var(--space-2);
+		right: var(--space-2);
+		width: 1.75rem;
+		height: 1.75rem;
+		border-color: var(--border);
+		background: var(--surface);
+		color: var(--text-muted);
+	}
+
+	.wrap > textarea {
+		padding-right: var(--space-10);
+	}
+}

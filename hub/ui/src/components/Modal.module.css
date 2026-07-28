@@ -45,6 +45,18 @@
 	color: var(--text);
 }
 
+/* Square hit area for the ✕, which the shared `.btn--sm` only sizes vertically. */
+.close {
+	flex: none;
+	min-width: var(--tap-target);
+}
+
+/* The sheet's drag handle. It's a phone affordance only, so on desktop — where
+   the dialog is a centred box that can't be dragged anywhere — it isn't drawn. */
+.grabber {
+	display: none;
+}
+
 .description {
 	padding: var(--space-2) var(--space-5) 0;
 	font-size: var(--text-sm);
@@ -55,6 +67,9 @@
 .body {
 	padding: var(--space-5);
 	overflow-y: auto;
+	/* Stop a flick that reaches the end of this list from scrolling whatever is
+	   behind the dialog. */
+	overscroll-behavior: contain;
 }
 
 .footer {
@@ -90,5 +105,102 @@
 	to {
 		opacity: 1;
 		transform: translateY(0) scale(1);
+	}
+}
+
+/* --- phone: the dialog becomes a bottom sheet ---
+ *
+ * Keep in sync with MOBILE_QUERY in hooks/useIsMobile.ts. Nothing above this
+ * point changes; a wide viewport still gets the centred box.
+ */
+@media (max-width: 768px) {
+	.backdrop {
+		align-items: flex-end;
+		padding: 0;
+	}
+
+	.box {
+		/* Full width, and every size variant collapses to it — a `sm` confirm and
+		   an `lg` editor are the same shape here, they just differ in height. */
+		max-width: none;
+		/* Deliberately short of the full viewport: the strip of backdrop left
+		   above the sheet is what marks it as a layer over the page (and is where
+		   the dictation dock parks itself, see VoiceDock.module.css — which reads
+		   the same token so the two can't drift apart). */
+		max-height: var(--sheet-max-height);
+		border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+		box-shadow: 0 -8px 32px rgba(15, 23, 42, 0.18);
+		animation: sheet-up 220ms cubic-bezier(0.16, 1, 0.3, 1);
+		transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1);
+	}
+
+	.sm,
+	.md,
+	.lg {
+		max-width: none;
+	}
+
+	/* While a finger is on it the sheet tracks that finger exactly — an eased
+	   transition here would feel like dragging something through syrup. */
+	.dragging {
+		transition: none;
+		animation: none;
+	}
+
+	.header {
+		position: relative;
+		align-items: center;
+		padding: var(--space-5) var(--space-4) 0;
+		/* The header is the drag surface: the browser must not claim the vertical
+		   pan for a scroll before the pointer handlers see it. */
+		touch-action: none;
+	}
+
+	.grabber {
+		display: block;
+		position: absolute;
+		top: var(--space-2);
+		left: 50%;
+		width: 2.25rem;
+		height: 4px;
+		border-radius: var(--radius-full);
+		background: var(--gray-300);
+		transform: translateX(-50%);
+	}
+
+	.description {
+		padding: var(--space-2) var(--space-4) 0;
+		font-size: var(--text-base);
+	}
+
+	.body {
+		padding: var(--space-4);
+		/* Momentum scrolling inside the sheet, which is now the only scroller. */
+		-webkit-overflow-scrolling: touch;
+	}
+
+	/* Actions sit on the bottom edge, over the home indicator's inset, at full
+	   width — the part of the screen a thumb reaches without regripping. */
+	.footer {
+		gap: var(--space-3);
+		padding: var(--space-3) var(--space-4) calc(var(--space-3) + var(--safe-bottom));
+		background: var(--surface);
+	}
+
+	.footer > :global(.btn) {
+		flex: 1;
+	}
+
+	.box > .footer:nth-child(3) {
+		padding-top: var(--space-4);
+	}
+}
+
+@keyframes sheet-up {
+	from {
+		transform: translateY(100%);
+	}
+	to {
+		transform: translateY(0);
 	}
 }

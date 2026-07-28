@@ -66,6 +66,7 @@
 }
 
 .close {
+	position: relative;
 	flex: none;
 	display: grid;
 	place-items: center;
@@ -93,5 +94,40 @@
 	to {
 		opacity: 1;
 		transform: translateX(0);
+	}
+}
+
+/* --- phone ---
+ *
+ * The bottom of a phone screen already belongs to the tab bar, the dictation
+ * dock and the sheet footers, so toasts move to the top — the one strip nothing
+ * else is anchored to, and directly under the header where the eye already is.
+ */
+@media (max-width: 768px) {
+	.region {
+		top: calc(var(--header-height) + var(--safe-top) + var(--space-2));
+		right: var(--space-3);
+		bottom: auto;
+		left: var(--space-3);
+		max-width: none;
+	}
+
+	.toast {
+		animation-name: drop-in;
+	}
+
+	.message {
+		font-size: var(--text-base);
+	}
+}
+
+@keyframes drop-in {
+	from {
+		opacity: 0;
+		transform: translateY(-12px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
 	}
 }
