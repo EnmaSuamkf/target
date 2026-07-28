@@ -297,6 +297,17 @@ docker build -t target-agent:latest .            # once; see ./Dockerfile
 node hub/cli.ts create "release-notes" --sandbox docker --permission-mode acceptEdits
 ```
 
+The default image only ships `claude`. A workflow whose runner is `free-code`
+invokes `free-code` as the container command, so it needs an image that has
+it — otherwise the step dies with `exit 127` before an agent exists. Build the
+derived image and point the workflow at it:
+
+```bash
+docker build -t target-agent-freecode:latest -f Dockerfile.free-code .
+node hub/cli.ts create "release-notes" --runner free-code --sandbox docker \
+  --image target-agent-freecode:latest
+```
+
 - **The broker stays on the host.** It shells out to `docker run --rm` per
   step and posts the callback itself, so the container needs no port, no
   `--network host` and no route to the hub — only outbound internet for the

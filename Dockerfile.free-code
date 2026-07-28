@@ -1,0 +1,45 @@
+# The Target Project — agent image for `runner: free-code` + `sandbox: docker`.
+#
+# Needed because the broker invokes the runner's binary as the *container
+# command*: a workflow using the free-code runner runs
+#   docker run --rm ... <image> free-code ...
+# and the default image (./Dockerfile) only ships `claude`. Without this image
+# the step dies with `exit 127` before an agent ever exists.
+#
+# @free/pi-coding-agent is NOT published to the public npm registry (404), so
+# it is installed from the repo, mirroring
+# installation/install-free-code-linux.sh.
+#
+#   docker build -t target-agent-freecode:latest -f Dockerfile.free-code .
+#
+# Requires target-agent:latest to exist already (see ./Dockerfile).
+#
+# Point a workflow at this image with `--image target-agent-freecode:latest`,
+# or via the "Container image" box in the New-workflow modal.
+#
+# Both of ./Dockerfile's rules still hold here: no mounted docker socket, and
+# no baked-in API key.
+
+FROM target-agent:latest
+
+# apt/npm -g need root; we drop back to the non-root user at the end.
+USER root
+
+# Pin this to a tag or a commit for reproducible builds. With `master`, two
+# builds on different days can produce different versions.
+ARG FREE_CODE_REF=master
+
+RUN git clone --depth 1 --branch "${FREE_CODE_REF}" \
+      https://github.com/EnmaSuamkf/free-code.git /opt/free-code \
+ && cd /opt/free-code \
+ && npm install --no-audit --no-fund \
+ && (cd packages/tui          && npm run build) \
+ && (cd packages/ai           && npm run build) \
+ && (cd packages/agent        && npm run build) \
+ && (cd packages/code-graph   && npm run build) \
+ && (cd packages/coding-agent && npm run build) \
+ && npm install -g /opt/free-code/packages/coding-agent \
+ && npm cache clean --force
+
+# Same rule as the base image: nothing runs as root.
+USER 1000:1000

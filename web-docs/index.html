@@ -688,9 +688,36 @@ target create my-flow --workdir ~/repos/thing --sandbox docker --image my-python
         <p>
           The mounts are exactly three things: the working directory, the harness&rsquo;s home
           state (<code>~/.claude</code> and <code>~/.claude.json</code>, plus awb&rsquo;s
-          <code>sessions/</code> directory for free-code, whose session ids <em>are</em>
-          absolute paths), and whatever extra paths the hook was configured with. Nothing is
-          derived from a step&rsquo;s text.
+          <code>sessions/</code> directory and <code>~/.free-code</code> for free-code, whose
+          session ids <em>are</em> absolute paths), and whatever extra paths the hook was
+          configured with. Nothing is derived from a step&rsquo;s text.
+        </p>
+
+        <h3>Both runtimes are containerised &mdash; but they need different images</h3>
+        <p>
+          Docker is orthogonal to the runtime: a <code>claude</code> workflow and a
+          <code>free-code</code> workflow both containerise through the same code path. What
+          differs is the image, because the runner&rsquo;s binary <em>is</em> the container
+          command. The image this repo&rsquo;s <code>Dockerfile</code> builds ships
+          <code>claude</code> only, so pointing a free-code workflow at it makes the step die
+          with <code>exit 127</code> before an agent ever exists. Build the derived image once
+          and name it when you create the workflow:
+        </p>
+        <pre><code>docker build -t target-agent:latest .                                    # claude
+docker build -t target-agent-freecode:latest -f Dockerfile.free-code .   # + free-code
+
+target create my-flow --runner free-code --sandbox docker \
+  --image target-agent-freecode:latest</code></pre>
+        <p>
+          Two things the free-code image needs that the claude one doesn&rsquo;t.
+          <code>~/.free-code</code> is mounted <em>writable</em>: free-code runs migrations at
+          startup and aborts with <code>EACCES</code> if it can&rsquo;t create its state there
+          &mdash; <code>--no-themes</code> does not skip that. And subagents arrive as an
+          extension: the adapter keeps <code>--no-extensions</code>, so a
+          <code>.free-code/agent/extensions/</code> planted in the untrusted working directory
+          is never loaded, then re-adds the bundled subagent widget by absolute path with
+          <code>-e</code>. That is what makes <code>subagent_create</code> work inside the
+          container while the workdir stays untrusted.
         </p>
 
         <div class="callout warn">
