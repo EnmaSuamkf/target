@@ -41,15 +41,32 @@
 }
 
 @media (max-width: 768px) {
+	/* Most fields here carry a two- or three-line hint, so the thing that has to
+	   be obvious is where one field ends and the next begins. The gap has to beat
+	   the 12px inside a field by enough that the trio label/control/hint groups
+	   on sight; at the desktop 16px — or the 20px this was first raised to — the
+	   hint of one field and the label of the next read as one paragraph. */
+	.form {
+		gap: var(--space-8);
+	}
+
 	/* The "…" browse button is icon-sized text; without a floor it ends up the
-	   narrowest target in the form. */
+	   narrowest target in the form. The wider gap keeps a thumb aimed at the
+	   button from landing in the path input beside it. */
+	.workdirRow {
+		gap: var(--space-3);
+	}
+
 	.workdirRow button {
 		min-width: var(--tap-target);
 	}
 
 	.risk {
 		padding: var(--space-4);
-		font-size: var(--text-sm);
+		/* Matches the hints around it — this is the longest prose in the form and
+		   the one paragraph nobody should skim. */
+		font-size: var(--text-base);
+		line-height: 1.6;
 	}
 
 	/* A consequential checkbox that needs a precise tap is the wrong place to

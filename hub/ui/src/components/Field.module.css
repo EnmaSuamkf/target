@@ -7,3 +7,14 @@
 	color: var(--danger-500);
 	font-weight: 400;
 }
+
+/* Keep in sync with MOBILE_QUERY in hooks/useIsMobile.ts, and with the `.field`
+   rule in styles/global.css — the plain-class version of this same wrapper is
+   used by the step and workflow editors and has to breathe identically. The
+   controls are 44px tall here, so the desktop 8px leaves the label sitting on
+   the box instead of over it. */
+@media (max-width: 768px) {
+	.field {
+		gap: var(--space-3);
+	}
+}

@@ -132,6 +132,11 @@
 		box-shadow: 0 -8px 32px rgba(15, 23, 42, 0.18);
 		animation: sheet-up 220ms cubic-bezier(0.16, 1, 0.3, 1);
 		transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1);
+		/* The sheet is full-bleed, so its own padding is all that stands between
+		   the content and the screen edge — and in landscape that edge can be a
+		   notch. Paid once here rather than in every row inside. */
+		padding-left: var(--safe-left);
+		padding-right: var(--safe-right);
 	}
 
 	.sm,
@@ -150,7 +155,10 @@
 	.header {
 		position: relative;
 		align-items: center;
-		padding: var(--space-5) var(--space-4) 0;
+		/* Same horizontal inset as the desktop dialog. Trimming it here only ever
+		   bought a few characters per line and made the sheet read as if it were
+		   pressed against the glass. */
+		padding: var(--space-6) var(--space-5) 0;
 		/* The header is the drag surface: the browser must not claim the vertical
 		   pan for a scroll before the pointer handlers see it. */
 		touch-action: none;
@@ -168,22 +176,38 @@
 		transform: translateX(-50%);
 	}
 
+	/* The sheet's heading has to out-rank a body where every control is now 16px
+	   (the iOS anti-zoom floor in global.css). At the desktop --text-lg it sat
+	   *below* its own form's type and the whole sheet read as one flat block. */
+	.title {
+		font-size: var(--text-xl);
+		line-height: 1.25;
+	}
+
 	.description {
-		padding: var(--space-2) var(--space-4) 0;
-		font-size: var(--text-base);
+		/* Its own line of air under the title rather than the 8px that let the two
+		   read as a single wrapped paragraph. */
+		padding: var(--space-3) var(--space-5) 0;
+		font-size: var(--text-md);
+		line-height: 1.55;
 	}
 
 	.body {
-		padding: var(--space-4);
+		/* Top: separates the first field from the description above it. Bottom: the
+		   last field has to clear the footer by more than a hairline, otherwise the
+		   sheet looks cut off rather than scrolled. */
+		padding: var(--space-6) var(--space-5) var(--space-8);
 		/* Momentum scrolling inside the sheet, which is now the only scroller. */
 		-webkit-overflow-scrolling: touch;
 	}
 
 	/* Actions sit on the bottom edge, over the home indicator's inset, at full
-	   width — the part of the screen a thumb reaches without regripping. */
+	   width — the part of the screen a thumb reaches without regripping. The
+	   buttons are 44px tall here, so the padding around them has to grow with
+	   them or the bar reads as a strip the buttons are wedged into. */
 	.footer {
 		gap: var(--space-3);
-		padding: var(--space-3) var(--space-4) calc(var(--space-3) + var(--safe-bottom));
+		padding: var(--space-5) var(--space-5) calc(var(--space-5) + var(--safe-bottom));
 		background: var(--surface);
 	}
 
@@ -192,7 +216,7 @@
 	}
 
 	.box > .footer:nth-child(3) {
-		padding-top: var(--space-4);
+		padding-top: var(--space-6);
 	}
 }
 

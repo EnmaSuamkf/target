@@ -344,12 +344,13 @@
 
 	/* The picker takes the full width of the grid and a thumb-sized height: a
 	   native select is the one control here that opens a system sheet, so a
-	   mis-tap costs more than on a button. */
+	   mis-tap costs more than on a button. Its type size is deliberately left
+	   to the 16px anti-zoom floor in global.css — it has the full row to sit
+	   in, and anything smaller makes iOS zoom the page open on focus. */
 	.statusSelect {
 		grid-column: 1 / -1;
 		width: 100%;
 		min-height: var(--tap-target);
-		font-size: var(--text-sm);
 	}
 
 	.resultToggle {
