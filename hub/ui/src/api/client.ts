@@ -17,6 +17,8 @@ import type {
 	DirListing,
 	NotificationSettings,
 	NotificationSettingsInput,
+	OverridableStepStatus,
+	OverridableWorkflowStatus,
 	SessionInfo,
 	Step,
 	StepConfigInput,
@@ -153,6 +155,22 @@ export async function setConversationContext(id: string, conversationContext: st
 	return data.workflow;
 }
 
+/**
+ * Forces the workflow's status by hand — for when the engine's verdict is
+ * wrong (a run that ran out of tokens, a callback that never landed). It
+ * doesn't run anything; it only records the status, and the hub then leaves
+ * that status alone until the workflow is run again. Refused (400) while a step
+ * is still in flight.
+ */
+export async function setWorkflowStatus(id: string, status: OverridableWorkflowStatus): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/status`, {
+		method: "POST",
+		admin: true,
+		body: json({ status }),
+	});
+	return data.workflow;
+}
+
 export function getSessionInfo(id: string): Promise<SessionInfo> {
 	return request<SessionInfo>(`/api/workflows/${id}/session-info`);
 }
@@ -204,6 +222,26 @@ export async function continueStep(workflowId: string, stepId: string): Promise<
 	const data = await request<{ step: Step }>(`/api/workflows/${workflowId}/steps/${stepId}/continue`, {
 		method: "POST",
 		admin: true,
+	});
+	return data.step;
+}
+
+/**
+ * Forces one step's status by hand: "the agent did do this" (`done`), "it
+ * didn't" (`failed`) or "put it back in the queue" (`pending`). Never
+ * re-dispatches the step — a step corrected to `done` is not re-run, and one
+ * put back to `pending` only runs on the next Start. Refused (400) while the
+ * step has a job in flight; abort it first.
+ */
+export async function setStepStatus(
+	workflowId: string,
+	stepId: string,
+	status: OverridableStepStatus,
+): Promise<Step> {
+	const data = await request<{ step: Step }>(`/api/workflows/${workflowId}/steps/${stepId}/status`, {
+		method: "POST",
+		admin: true,
+		body: json({ status }),
 	});
 	return data.step;
 }

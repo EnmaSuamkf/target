@@ -32,6 +32,9 @@ import {
 	markStepJudging,
 	markStepWaiting,
 	nextPendingStep,
+	overrideStepStatus,
+	OVERRIDABLE_STEP_STATUSES,
+	OVERRIDABLE_WORKFLOW_STATUSES,
 	recordStepProgress,
 	releaseWaitingStep,
 	resetSteps,
@@ -47,6 +50,8 @@ import {
 	takeStatusBeforeReview,
 	updateStepConfig,
 	updateStepDescription,
+	type OverridableStepStatus,
+	type OverridableWorkflowStatus,
 	type Step,
 	type TimeoutReason,
 	type Workflow,
@@ -337,6 +342,94 @@ export async function continueStep(workflowId: string, stepId: string, cfg: HubC
 	return updated;
 }
 
+// --- manual status override ------------------------------------------------
+//
+// Every status in this engine is otherwise derived: a step's from its run's
+// callback, a workflow's from its steps. That's right almost always and wrong in
+// one recurring case — the agent DID the work, but the run was cut short (out of
+// tokens) or its result callback never arrived, so the step is `failed` and the
+// workflow reads `failed` with it. There was no way to say otherwise; these two
+// functions are it.
+//
+// The semantics, in full, because "force a status" invites more than it should:
+//
+//  - **Nothing is dispatched, ever.** An override records a verdict; it does not
+//    run, re-run or resume anything. Correcting a failed step to `done` cannot
+//    re-fire it (`nextPendingStep` only ever returns a `pending` step) and
+//    cannot advance the workflow (only `advance()` dispatches, and only Start /
+//    Continue / a callback reach it).
+//  - **A job in flight is off limits.** A `running`/`queued` step still has a
+//    callback coming; overwriting its status would either be undone by that
+//    callback or leave a live agent writing into a step that says it's finished.
+//    Abort it first — that's exactly what Abort is for — then override it.
+//  - **A step override still reconciles the workflow.** Fixing the last failed
+//    step of a workflow should make the workflow stop saying `failed` without a
+//    second action, so the normal derivation runs afterwards. It's the ordinary
+//    one, so it leaves a `running` workflow and a manually-pinned one alone.
+//  - **A workflow override is sticky, but not permanent.** It's pinned against
+//    re-derivation (`reconcileStatus`) until the engine authors a status again —
+//    Start, Stop, Resume, Start over, or any step callback. An override survives
+//    reads, polls and hub restarts; it does not survive a re-run, because after a
+//    re-run the steps are telling the truth again.
+
+/**
+ * Forces one step's status by hand (see the block above). Only the settled
+ * statuses are offered (`OVERRIDABLE_STEP_STATUSES`) and only when no job is in
+ * flight for that step. Rewrites the .md and re-derives the workflow's badge,
+ * so progress %, the status file and the list all agree the moment it returns.
+ */
+export function forceStepStatus(
+	workflowId: string,
+	stepId: string,
+	status: OverridableStepStatus,
+	log: Logger,
+): Step {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	const step = getStep(stepId);
+	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
+	if (!OVERRIDABLE_STEP_STATUSES.includes(status)) {
+		throw new WorkflowError(`a step's status can only be set to ${OVERRIDABLE_STEP_STATUSES.join(", ")}`);
+	}
+	if (step.status === "running" || step.status === "queued") {
+		throw new WorkflowError("this step still has a job in flight — abort it first, then set its status");
+	}
+	if (!overrideStepStatus(stepId, status)) throw new WorkflowError("step disappeared");
+	log(`step ${stepId} status set manually to ${status}`);
+	// The workflow's badge is a function of its steps, so it has to follow. This
+	// is the ordinary derivation: it leaves a `running` workflow to the engine and
+	// a manually-pinned one to whoever pinned it.
+	reconcileStatus(workflowId, log);
+	writeStatusMd(workflowId);
+	const updated = getStep(stepId);
+	if (!updated) throw new WorkflowError("step disappeared");
+	return updated;
+}
+
+/**
+ * Forces the workflow's own status by hand (see the block above) and pins it
+ * against re-derivation until the engine next authors a status. Refused while a
+ * step is actually in flight: that step's callback is about to write a status of
+ * its own, so an override there would be silently overwritten seconds later.
+ */
+export function forceWorkflowStatus(workflowId: string, status: OverridableWorkflowStatus, log: Logger): Workflow {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	if (!OVERRIDABLE_WORKFLOW_STATUSES.includes(status)) {
+		throw new WorkflowError(`a workflow's status can only be set to ${OVERRIDABLE_WORKFLOW_STATUSES.join(", ")}`);
+	}
+	const inFlight = listSteps(workflowId).find((s) => s.status === "running" || s.status === "queued");
+	if (inFlight) {
+		throw new WorkflowError("a step is still in flight — stop or abort it first, then set the workflow's status");
+	}
+	setWorkflowStatus(workflowId, status, { manual: true });
+	writeStatusMd(workflowId);
+	log(`workflow ${workflowId} status set manually to ${status}`);
+	const updated = getWorkflow(workflowId);
+	if (!updated) throw new WorkflowError("workflow disappeared");
+	return updated;
+}
+
 /**
  * Read-path self-heal, run on every workflow GET (via `expireStale`): any
  * workflow whose steps are ALL settled (none pending, none running) must show
@@ -384,7 +477,7 @@ export function writeStatusMd(workflowId: string): void {
 		`# Workflow: ${workflow.name}`,
 		"",
 		`- ID: ${workflow.id}`,
-		`- Status: ${workflow.status}`,
+		`- Status: ${workflow.status}${workflow.statusManual ? ` (set manually${workflow.statusManualAt ? ` at ${workflow.statusManualAt}` : ""})` : ""}`,
 		`- Progress: ${progress.done}/${progress.total} steps done (${progress.pct}%)${progress.failed ? `, ${progress.failed} failed` : ""}`,
 		`- Agent: ${workflow.agentName}`,
 		`- Session: ${workflow.lastSessionId ?? "(none yet)"}`,
@@ -420,6 +513,11 @@ export function writeStatusMd(workflowId: string): void {
 			lines.push(`   - Last activity: ${step.lastProgressAt} (${step.lastProgressKind ?? "run start"})`);
 		}
 		if (step.finishedAt) lines.push(`   - Finished: ${step.finishedAt}`);
+		// A status nobody's run produced has to say so, or this file reads as
+		// evidence of something that never happened.
+		if (step.statusManual) {
+			lines.push(`   - Status set manually${step.statusManualAt ? ` at ${step.statusManualAt}` : ""}`);
+		}
 		if (step.result) lines.push(`   - Result: ${step.result.slice(0, 500)}${step.result.length > 500 ? "…" : ""}`);
 		if (step.error) lines.push(`   - Error: ${step.error}`);
 		lines.push("");
@@ -696,6 +794,11 @@ async function notifyWorkflowCompleted(workflowId: string, log?: Logger): Promis
 function reconcileStatus(workflowId: string, log?: Logger): boolean {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) return false;
+	// A status a HUMAN asserted outranks the one the steps add up to, and stays
+	// asserted until the engine legitimately authors a status again (see
+	// `setWorkflowStatus`'s `manual` option). Without this the whole override
+	// feature would be undone by the next poll: this function runs on every read.
+	if (workflow.statusManual) return false;
 	// A step held at its manual-review gate owns the badge: the workflow is
 	// `waiting` until a human releases it, whatever the other steps add up to.
 	// Without this the heal would "settle" a workflow whose only unfinished step

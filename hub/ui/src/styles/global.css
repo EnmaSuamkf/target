@@ -310,6 +310,18 @@ kbd,
 	flex: none;
 }
 
+/* A status a human forced rather than one a run reported. It borrows the
+   badge's own colour instead of introducing another, because the status still
+   means what it says — only its provenance differs. Slightly dimmed so it reads
+   as an annotation on the pill, not as part of the label. */
+.badge__manual {
+	display: inline-flex;
+	align-items: center;
+	margin-left: 1px;
+	opacity: 0.7;
+	flex: none;
+}
+
 @keyframes pulse {
 	0%,
 	100% {

@@ -98,6 +98,13 @@
 	flex: 1;
 }
 
+/* The manual status picker sits among the run controls, so it's sized to the
+   buttons beside it instead of stretching like a form field. */
+.statusSelect {
+	width: auto;
+	min-width: 10rem;
+}
+
 .countPill {
 	padding: 0 0.375rem;
 	border-radius: var(--radius-full);
@@ -293,6 +300,14 @@
 
 	.controlsSpacer {
 		display: none;
+	}
+
+	/* Its own full-width row under Start/Stop: it isn't a run control, and a
+	   native select opening a system sheet wants a thumb-sized target. */
+	.statusSelect {
+		grid-column: 1 / -1;
+		width: 100%;
+		min-height: var(--tap-target);
 	}
 
 	.delete {
