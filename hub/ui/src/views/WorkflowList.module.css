@@ -175,6 +175,20 @@
 	flex: none;
 }
 
+/* Containment marker, deliberately quieter than the status badge: it's a
+   property of the workflow, not a thing that changes while you watch it. */
+.sandbox {
+	flex: none;
+	padding: 0 var(--space-2);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-full);
+	background: var(--surface-sunken);
+	color: var(--text-muted);
+	font-size: var(--text-xs);
+	font-weight: 500;
+	letter-spacing: 0.01em;
+}
+
 .cardMeta {
 	display: flex;
 	align-items: center;

@@ -1,0 +1,836 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>The Target Project — agentes locales, opcionalmente en Docker</title>
+    <meta name="description" content="Plan de implementación: mantener el hub y el broker en local, y dejar que cada workflow elija si su agente corre en el host o dentro de un contenedor Docker." />
+    <style>
+      :root{
+        --bg: #0e1416;
+        --surface: #141c1f;
+        --surface-2: #182124;
+        --border: #253034;
+        --text: #e6edee;
+        --muted: #8ea1a6;
+        --faint: #5d7378;
+        --accent: #5ed6a4;
+        --accent-dim: #2f6b54;
+        --warn: #e7b563;
+        --danger: #e07b6b;
+        --mono: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      *{ box-sizing: border-box; }
+      html{ scroll-behavior: smooth; }
+      body{
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
+        line-height: 1.65;
+      }
+      a{ color: var(--accent); }
+      a:focus-visible{ outline: 2px solid var(--accent); outline-offset: 2px; }
+      code, kbd{
+        font-family: var(--mono);
+        font-size: 0.88em;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        padding: 0.05em 0.4em;
+        border-radius: 4px;
+        white-space: nowrap;
+      }
+      pre{
+        font-family: var(--mono);
+        font-size: 0.82rem;
+        line-height: 1.6;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1rem 1.15rem;
+        overflow-x: auto;
+        margin: 0 0 1rem;
+      }
+      pre code{ background: none; border: none; padding: 0; white-space: pre; }
+
+      .shell{ max-width: 900px; margin: 0 auto; padding: 3.2rem 1.5rem 5rem; }
+
+      header.hero{ margin-bottom: 2.6rem; }
+      .eyebrow{
+        font-family: var(--mono);
+        font-size: 0.74rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--accent);
+        display: flex;
+        align-items: center;
+        gap: 0.6em;
+        margin-bottom: 0.6rem;
+      }
+      .eyebrow::before{
+        content: "";
+        width: 6px; height: 6px;
+        background: var(--accent);
+        border-radius: 50%;
+        box-shadow: 0 0 0 3px var(--accent-dim);
+      }
+      h1{
+        font-family: var(--mono);
+        font-size: clamp(1.6rem, 4vw, 2.2rem);
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        margin: 0 0 0.8rem;
+        line-height: 1.25;
+      }
+      .lede{ color: var(--muted); font-size: 1.02rem; margin: 0; max-width: 68ch; }
+
+      h2{
+        font-family: var(--mono);
+        font-size: 1.08rem;
+        font-weight: 600;
+        margin: 3.2rem 0 1rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 1px solid var(--border);
+        letter-spacing: -0.01em;
+      }
+      h2 .num{ color: var(--accent); margin-right: 0.55em; }
+      h3{
+        font-family: var(--mono);
+        font-size: 0.94rem;
+        font-weight: 600;
+        margin: 2rem 0 0.7rem;
+        color: var(--text);
+      }
+      p{ margin: 0 0 1rem; }
+      ul, ol{ margin: 0 0 1rem; padding-left: 1.3rem; }
+      li{ margin-bottom: 0.45rem; }
+      strong{ color: #f2f8f9; }
+
+      figure{ margin: 1.6rem 0 1.9rem; }
+      .diagram{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.4rem 1.2rem 1rem;
+        overflow-x: auto;
+      }
+      .diagram svg{ display: block; width: 100%; height: auto; min-width: 620px; }
+      figcaption{
+        color: var(--faint);
+        font-size: 0.82rem;
+        margin-top: 0.7rem;
+        font-family: var(--mono);
+      }
+
+      /* shared SVG vocabulary */
+      .s-box{ fill: var(--surface-2); stroke: var(--border); stroke-width: 1.5; }
+      .s-box-accent{ fill: var(--surface-2); stroke: var(--accent); stroke-width: 1.5; }
+      .s-box-warn{ fill: var(--surface-2); stroke: var(--warn); stroke-width: 1.5; }
+      .s-box-danger{ fill: var(--surface-2); stroke: var(--danger); stroke-width: 1.5; }
+      .s-zone{ fill: none; stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 5 4; }
+      .s-t{ font-family: var(--mono); font-size: 12px; fill: var(--text); }
+      .s-t-sm{ font-family: var(--mono); font-size: 10.5px; fill: var(--muted); }
+      .s-t-xs{ font-family: var(--mono); font-size: 9.5px; fill: var(--faint); }
+      .s-t-accent{ font-family: var(--mono); font-size: 10.5px; fill: var(--accent); }
+      .s-t-warn{ font-family: var(--mono); font-size: 10.5px; fill: var(--warn); }
+      .s-t-danger{ font-family: var(--mono); font-size: 10.5px; fill: var(--danger); }
+      .s-label{ font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.1em; fill: var(--faint); }
+      .s-line{ stroke: var(--faint); stroke-width: 1.4; fill: none; }
+      .s-line-accent{ stroke: var(--accent); stroke-width: 1.6; fill: none; }
+      .s-line-dash{ stroke: var(--muted); stroke-width: 1.4; fill: none; stroke-dasharray: 4 3; }
+      .s-line-danger{ stroke: var(--danger); stroke-width: 1.6; fill: none; }
+      .s-lifeline{ stroke: var(--border); stroke-width: 1.4; stroke-dasharray: 3 4; }
+
+      table{
+        width: 100%;
+        border-collapse: collapse;
+        margin: 0 0 1.4rem;
+        font-size: 0.9rem;
+      }
+      th, td{
+        text-align: left;
+        padding: 0.6rem 0.7rem;
+        border-bottom: 1px solid var(--border);
+        vertical-align: top;
+      }
+      th{
+        font-family: var(--mono);
+        font-size: 0.76rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--faint);
+        font-weight: 600;
+      }
+      td code{ white-space: normal; }
+      .tbl-wrap{ overflow-x: auto; }
+
+      .callout{
+        border-left: 3px solid var(--accent);
+        background: var(--surface);
+        padding: 0.9rem 1.1rem;
+        border-radius: 0 8px 8px 0;
+        margin: 0 0 1.4rem;
+      }
+      .callout.warn{ border-left-color: var(--warn); }
+      .callout.danger{ border-left-color: var(--danger); }
+      .callout p:last-child{ margin-bottom: 0; }
+      .callout .tag{
+        display: block;
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent);
+        margin-bottom: 0.4rem;
+      }
+      .callout.warn .tag{ color: var(--warn); }
+      .callout.danger .tag{ color: var(--danger); }
+
+      .toc{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.1rem 1.3rem;
+        margin-bottom: 1rem;
+      }
+      .toc ol{ margin: 0; padding-left: 1.2rem; }
+      .toc li{ margin-bottom: 0.25rem; font-size: 0.92rem; }
+      .toc a{ text-decoration: none; }
+      .toc a:hover{ text-decoration: underline; }
+
+      footer{
+        margin-top: 4rem;
+        padding-top: 1.4rem;
+        border-top: 1px solid var(--border);
+        color: var(--faint);
+        font-size: 0.84rem;
+        font-family: var(--mono);
+      }
+      @media (max-width: 640px){
+        .shell{ padding: 2.2rem 1.1rem 3.5rem; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div class="eyebrow">Plan de implementación</div>
+        <h1>Agentes locales, opcionalmente en Docker</h1>
+        <p class="lede">
+          Dejar todo donde está — hub y broker en <code>127.0.0.1</code>, sin nube, sin túnel — y
+          añadir <strong>una elección por workflow</strong>: que su agente corra directamente en el
+          host como hoy, o dentro de un contenedor Docker en la misma máquina. Mismo hub, mismos
+          pasos, misma sesión encadenada; lo único que cambia es la frontera del proceso.
+        </p>
+      </header>
+
+      <div class="toc">
+        <ol>
+          <li><a href="#today">Dónde estamos hoy</a></li>
+          <li><a href="#proposal">Qué se propone</a></li>
+          <li><a href="#tradeoffs">Pros y contras</a></li>
+          <li><a href="#seam">Por dónde engancha</a></li>
+          <li><a href="#blockers">Qué hay que acertar</a></li>
+          <li><a href="#work">Trabajo a realizar</a></li>
+          <li><a href="#criterion">Criterio de éxito</a></li>
+          <li><a href="#security">Modelo de seguridad</a></li>
+          <li><a href="#order">Orden de ejecución</a></li>
+          <li><a href="#open">Preguntas abiertas</a></li>
+        </ol>
+      </div>
+
+      <!-- ────────────────────────────── 1 ────────────────────────────── -->
+      <h2 id="today"><span class="num">1</span>Dónde estamos hoy</h2>
+
+      <p>
+        <code>npm start</code> levanta dos procesos en loopback: el broker de awb en
+        <code>127.0.0.1:8890</code> y el hub en <code>127.0.0.1:8893</code>. Crear un workflow crea su
+        propio hook dedicado (<code>createAwbHook</code>, <code>hub/awb.ts:188</code>) con su propio
+        workdir de sandbox, y todos los pasos de ese workflow reanudan una única sesión del harness.
+      </p>
+      <p>
+        Cuando se despacha un paso, el broker lanza el agente <strong>como tu usuario, sobre tu
+        filesystem real</strong>: <code>runClaude</code> construye
+        <code>claude --resume &lt;id&gt; -p &lt;prompt&gt;</code> y se lo pasa a
+        <code>runHidden</code>, que lo envuelve en un <code>flock</code> sobre el workdir
+        (<code>adapters/spawn-runner/shared.ts:122-129</code>). El "workdir de sandbox" es una
+        convención de nombres, no una frontera: un hook con <code>bypassPermissions</code>
+        (<code>hub/awb.ts:162</code>) puede hacer cualquier cosa que puedas hacer tú.
+      </p>
+
+      <!-- ────────────────────────────── 2 ────────────────────────────── -->
+      <h2 id="proposal"><span class="num">2</span>Qué se propone</h2>
+
+      <p>
+        Añadir una elección de <strong>sandbox</strong> por workflow, tomada una sola vez al crearlo y
+        escrita en el hook de ese workflow:
+      </p>
+      <ul>
+        <li><strong><code>host</code></strong> (por defecto) — exactamente lo que pasa hoy. No cambia nada.</li>
+        <li><strong><code>docker</code></strong> — la misma invocación de <code>claude</code> corre dentro de un contenedor, con el repo y el estado del harness montados desde el host.</li>
+      </ul>
+
+      <p>
+        Y lo importante: <strong>el broker se queda en el host</strong>. No se mete dentro del
+        contenedor; hace <code>docker run</code> por cada job. Esa única decisión es lo que mantiene
+        este plan pequeño — el hub, los callbacks, el registro de hooks, el camino del abort y el
+        watchdog de progreso siguen funcionando sin enterarse de que Docker existe.
+      </p>
+
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 880 330" role="img" aria-label="Dos caminos de ejecución desde el mismo broker. En modo host se lanza claude directamente. En modo docker se lanza docker run, que arranca claude dentro de un contenedor con el repo y el home de claude montados desde el host. Los callbacks vuelven del broker al hub por loopback en ambos casos.">
+            <defs>
+              <marker id="p1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#5ed6a4"/>
+              </marker>
+              <marker id="p1m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#8ea1a6"/>
+              </marker>
+            </defs>
+
+            <rect class="s-zone" x="8" y="30" width="864" height="290" rx="10"/>
+            <text class="s-label" x="18" y="22">UNA SOLA MÁQUINA — TODO SIGUE EN 127.0.0.1</text>
+
+            <rect class="s-box-accent" x="28" y="112" width="150" height="86" rx="8"/>
+            <text class="s-t" x="44" y="140">hub :8893</text>
+            <text class="s-t-xs" x="44" y="160">workflows · pasos</text>
+            <text class="s-t-xs" x="44" y="178">watchdog</text>
+
+            <rect class="s-box" x="238" y="112" width="166" height="86" rx="8"/>
+            <text class="s-t" x="254" y="140">broker awb :8890</text>
+            <text class="s-t-xs" x="254" y="160">hooks.json (host)</text>
+            <text class="s-t-xs" x="254" y="178">flock sobre el workdir</text>
+
+            <path class="s-line-accent" d="M 178 142 L 232 142" marker-end="url(#p1)"/>
+            <text class="s-t-accent" x="182" y="134">POST hook</text>
+            <path class="s-line-dash" d="M 238 176 L 184 176" marker-end="url(#p1m)"/>
+            <text class="s-t-xs" x="168" y="212">callbacks siguen en loopback — sin cambios</text>
+
+            <!-- rama host -->
+            <rect class="s-box" x="500" y="52" width="340" height="82" rx="8"/>
+            <text class="s-t" x="518" y="78">sandbox: "host"  ·  hoy</text>
+            <text class="s-t-sm" x="518" y="100">claude --resume &lt;id&gt; -p …</text>
+            <text class="s-t-xs" x="518" y="120">tu usuario · tu filesystem · sin frontera</text>
+            <path class="s-line-accent" d="M 404 138 L 494 96" marker-end="url(#p1)"/>
+
+            <!-- rama docker -->
+            <rect class="s-box-accent" x="500" y="168" width="340" height="126" rx="8"/>
+            <text class="s-t" x="518" y="194">sandbox: "docker"  ·  nuevo</text>
+            <text class="s-t-sm" x="518" y="216">docker run --rm  …montajes…  imagen  claude …</text>
+            <line class="s-line" x1="518" y1="230" x2="822" y2="230" stroke-dasharray="3 3"/>
+            <text class="s-t-xs" x="518" y="248">bind: &lt;workdir&gt; → misma ruta absoluta</text>
+            <text class="s-t-xs" x="518" y="264">bind: home de claude → dir del host que lee el hub</text>
+            <text class="s-t-accent" x="518" y="282">sin acceso al hub del host — solo salida</text>
+            <path class="s-line-accent" d="M 404 172 L 494 216" marker-end="url(#p1)"/>
+          </svg>
+        </div>
+        <figcaption>Fig. 1 — Un broker, dos caminos de spawn. El contenedor nunca habla con el hub; lo hace el broker, desde el host, como siempre.</figcaption>
+      </figure>
+
+      <div class="callout">
+        <span class="tag">Por qué el contenedor no necesita red hacia el hub</span>
+        <p>
+          En este diseño el contenedor solo ejecuta <code>claude</code>. El broker captura su stdout en
+          el host y postea el resultado al hub él mismo. Así que el contenedor necesita
+          <strong>salida a internet</strong> (para llegar a la API del modelo) y <strong>nada
+          más</strong>: ni puerto, ni <code>--network host</code>, ni
+          <code>host.docker.internal</code>. Esto además deja satisfecha la comprobación de loopback
+          que el broker hace sobre el <code>callbackUrl</code>
+          (<code>broker/dispatch.ts:27-43</code>) sin tener que tocarla.
+        </p>
+      </div>
+
+      <!-- ────────────────────────────── 3 ────────────────────────────── -->
+      <h2 id="tradeoffs"><span class="num">3</span>Pros y contras</h2>
+
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Lo que ganas</th><th>Lo que cuesta</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><strong>Una frontera real alrededor de un agente permisivo.</strong> <code>bypassPermissions</code> deja de significar "cualquier cosa que puedas hacer tú" y pasa a significar "cualquier cosa dentro de este contenedor y sus montajes". Este es el motivo de todo.</td>
+              <td><strong>Los montajes son el nuevo radio de explosión.</strong> Un contenedor solo contiene tanto como lo permitan sus bind mounts; monta tu home y no has ganado nada.</td>
+            </tr>
+            <tr>
+              <td><strong>Toolchain reproducible por agente.</strong> Fijar node, python o lo que el repo necesite en una imagen, en vez de lo que haya en el host.</td>
+              <td><strong>Una imagen que construir y mantener.</strong> Más el pull inicial, y un arranque de paso más lento.</td>
+            </tr>
+            <tr>
+              <td><strong>Opcional y reversible.</strong> El valor por defecto sigue siendo <code>host</code>; los workflows existentes no se tocan, y la elección es por workflow.</td>
+              <td><strong>Dos caminos de código que mantener vivos.</strong> Cada cambio futuro en el spawn hay que pensarlo dos veces.</td>
+            </tr>
+            <tr>
+              <td><strong>El watchdog, el abort, la terminal y el panel de tokens siguen funcionando</strong> — si se respetan las reglas de rutas de §5.</td>
+              <td><strong>Y se rompen en silencio si no.</strong> Una ruta mal mapeada no da error; simplemente deja ciego al hub. Ver §5.1.</td>
+            </tr>
+            <tr>
+              <td><strong>Un peldaño intermedio.</strong> Esto es la fase D del plan cloud, hecha antes y aislada, donde sale barato equivocarse.</td>
+              <td><strong>Las credenciales cruzan la frontera.</strong> El montaje más simple mete tus credenciales de Claude Code dentro del contenedor. Ver §5.4.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <span class="tag">Relación con el plan cloud</span>
+        <p>
+          Este plan es deliberadamente un subconjunto estricto de
+          <code>docs/cloud-nodes-plan.html</code>: sin agentes registrados, sin
+          <code>publicBaseUrl</code>, sin heartbeat, sin API keys. Construye la parte de contenedores
+          por su cuenta, en una máquina donde puedes depurarla — y si más adelante haces la división
+          cloud, la fase D ya está hecha y probada.
+        </p>
+      </div>
+
+      <!-- ────────────────────────────── 4 ────────────────────────────── -->
+      <h2 id="seam"><span class="num">4</span>Por dónde engancha</h2>
+
+      <p>
+        El adaptador de spawn ya separa <em>qué ejecutar</em> de <em>cómo ejecutarlo</em>.
+        <code>runClaude</code> (<code>adapters/spawn-runner/claude.ts:26-56</code>) calcula un argv y le
+        pasa tres cosas a <code>runHidden</code>: el <strong>binario</strong>, los
+        <strong>args</strong> y el <strong>cwd</strong>. El modo Docker es reescribir los dos primeros,
+        dejando el tercero intacto:
+      </p>
+
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 880 260" role="img" aria-label="La reescritura del argv: hoy runHidden recibe el binario claude con los argumentos de claude. En modo docker recibe el binario docker con run, montajes, imagen, y luego los mismos argumentos de claude sin tocar. El cwd y el flock del host son idénticos en ambos casos.">
+            <defs>
+              <marker id="p2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#5ed6a4"/>
+              </marker>
+            </defs>
+
+            <text class="s-label" x="16" y="24">HOY</text>
+            <rect class="s-box" x="16" y="34" width="838" height="58" rx="8"/>
+            <text class="s-t-sm" x="34" y="58">binario:</text>
+            <text class="s-t" x="120" y="58">claude</text>
+            <text class="s-t-sm" x="34" y="80">args:</text>
+            <text class="s-t-xs" x="120" y="80">--resume &lt;id&gt;  -p &lt;prompt&gt;  --output-format json  --permission-mode acceptEdits</text>
+
+            <text class="s-label" x="16" y="128">MODO DOCKER — mismos args, con prefijo</text>
+            <rect class="s-box-accent" x="16" y="138" width="838" height="76" rx="8"/>
+            <text class="s-t-sm" x="34" y="162">binario:</text>
+            <text class="s-t" x="120" y="162">docker</text>
+            <text class="s-t-sm" x="34" y="184">args:</text>
+            <text class="s-t-accent" x="120" y="184">run --rm  -v &lt;workdir&gt;:&lt;workdir&gt;  -v &lt;homeClaude&gt;:…  -w &lt;workdir&gt;  &lt;imagen&gt;  claude</text>
+            <text class="s-t-xs" x="120" y="202">↳ …y luego los mismos args de claude, intactos</text>
+
+            <rect class="s-box" x="16" y="228" width="408" height="26" rx="5"/>
+            <text class="s-t-xs" x="34" y="245">cwd: igual → el flock del host sigue serializando el workdir</text>
+            <rect class="s-box" x="446" y="228" width="408" height="26" rx="5"/>
+            <text class="s-t-xs" x="464" y="245">pid de onSpawn: igual → el abort sigue matando el grupo</text>
+          </svg>
+        </div>
+        <figcaption>Fig. 2 — El modo Docker es un prefijo en el argv. Todo lo que <code>runHidden</code> hace alrededor es idéntico.</figcaption>
+      </figure>
+
+      <p>Como la reescritura ocurre por debajo del hub, esto sigue funcionando sin ningún cambio:</p>
+      <ul>
+        <li>
+          <strong>El <code>flock</code> del workdir</strong> (<code>shared.ts:122-129</code>) sigue
+          corriendo en el host contra el mismo lockfile — así que un workflow <code>host</code> y uno
+          <code>docker</code> apuntando al mismo repo siguen serializándose entre ellos.
+        </li>
+        <li>
+          <strong>El abort</strong> — <code>registerRun</code> registra el líder del grupo de procesos
+          en el host (<code>broker/dispatch.ts:153-155</code>). Con <code>docker run</code> en primer
+          plano, un SIGTERM a ese grupo para también el contenedor.
+        </li>
+        <li>
+          <strong>Registro de hooks, callbacks, el hub</strong> — el hook sigue siendo local, así que
+          <code>inspectLocalHook</code>, <code>hookRuntime</code> y las URLs de callback quedan
+          intactos.
+        </li>
+      </ul>
+
+      <div class="callout">
+        <span class="tag">Por qué <code>docker run --rm</code> y no <code>docker exec</code></span>
+        <p>
+          Un contenedor de larga vida con <code>docker exec</code> parece más elegante pero aquí es
+          peor: matar al cliente de <code>exec</code> no mata de forma fiable el proceso de dentro del
+          contenedor, lo cual rompe el abort; y añade un ciclo de vida de contenedor que gestionar. Con
+          <code>--rm</code> el contenedor es desechable <strong>porque ningún estado vive dentro de
+          él</strong> — el repo y las sesiones del harness son bind mounts del host. Por eso este plan
+          tampoco hereda la restricción del plan cloud de que los contenedores no puedan ser efímeros.
+        </p>
+      </div>
+
+      <!-- ────────────────────────────── 5 ────────────────────────────── -->
+      <h2 id="blockers"><span class="num">5</span>Qué hay que acertar</h2>
+
+      <h3>5.1 &nbsp;La ruta del workdir debe ser idéntica dentro y fuera</h3>
+      <p>
+        Esta es la que romperá cosas en silencio. El hub localiza los transcripts de una ejecución
+        slugificando <strong>la cadena de la ruta del workdir</strong>:
+      </p>
+<pre><code>// hub/transcript.ts:29-32
+export function claudeProjectDir(workdir: string): string {
+  const slug = workdir.replace(/[^a-zA-Z0-9-]/g, "-");
+  return path.join(os.homedir(), ".claude", "projects", slug);
+}</code></pre>
+      <p>
+        Monta el repo en otra ruta dentro del contenedor (<code>/workspace</code>, por ejemplo) y
+        Claude Code escribirá sus transcripts bajo un <em>slug distinto</em>. No falla nada. El hub
+        simplemente no encuentra artefactos — y entonces <code>probeStepProgress</code> devuelve null,
+        <code>last_progress_at</code> no avanza nunca, y <strong>todos los pasos se declaran
+        <code>stalled</code> a los 10 minutos</strong> (<code>hub/progress.ts:246</code>), exactamente
+        el modo de fallo que el plan cloud necesita resolver con un heartbeat. Aquí se evita gratis.
+      </p>
+
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 880 250" role="img" aria-label="Si el contenedor monta el repo en la misma ruta absoluta, el slug del transcript coincide y el hub ve el progreso. Si lo monta en otra ruta, el slug difiere, el hub no encuentra nada y da el paso por caducado a los diez minutos.">
+            <defs>
+              <marker id="p3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#5ed6a4"/>
+              </marker>
+              <marker id="p3d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#e07b6b"/>
+              </marker>
+            </defs>
+
+            <text class="s-label" x="16" y="24">CORRECTO — MISMA RUTA ABSOLUTA</text>
+            <rect class="s-box" x="16" y="36" width="230" height="56" rx="8"/>
+            <text class="s-t-xs" x="32" y="58">-v /home/u/repo:/home/u/repo</text>
+            <text class="s-t-xs" x="32" y="76">-w /home/u/repo</text>
+
+            <rect class="s-box" x="300" y="36" width="250" height="56" rx="8"/>
+            <text class="s-t-xs" x="316" y="58">slug = -home-u-repo</text>
+            <text class="s-t-xs" x="316" y="76">~/.claude/projects/-home-u-repo</text>
+
+            <rect class="s-box-accent" x="604" y="36" width="250" height="56" rx="8"/>
+            <text class="s-t-accent" x="620" y="58">el hub lo ve → hay progreso</text>
+            <text class="s-t-xs" x="620" y="76">un paso de 40 min sobrevive</text>
+
+            <path class="s-line-accent" d="M 246 64 L 294 64" marker-end="url(#p3)"/>
+            <path class="s-line-accent" d="M 550 64 L 598 64" marker-end="url(#p3)"/>
+
+            <text class="s-label" x="16" y="146">INCORRECTO — RUTA REMAPEADA</text>
+            <rect class="s-box-danger" x="16" y="158" width="230" height="56" rx="8"/>
+            <text class="s-t-xs" x="32" y="180">-v /home/u/repo:/workspace</text>
+            <text class="s-t-xs" x="32" y="198">-w /workspace</text>
+
+            <rect class="s-box-danger" x="300" y="158" width="250" height="56" rx="8"/>
+            <text class="s-t-danger" x="316" y="180">slug = -workspace</text>
+            <text class="s-t-xs" x="316" y="198">el hub busca en -home-u-repo</text>
+
+            <rect class="s-box-danger" x="604" y="158" width="250" height="56" rx="8"/>
+            <text class="s-t-danger" x="620" y="180">no encuentra artefactos</text>
+            <text class="s-t-xs" x="620" y="198">stalled a los 10 min · sin error</text>
+
+            <path class="s-line-danger" d="M 246 186 L 294 186" marker-end="url(#p3d)"/>
+            <path class="s-line-danger" d="M 550 186 L 598 186" marker-end="url(#p3d)"/>
+          </svg>
+        </div>
+        <figcaption>Fig. 3 — Monta el repo en su propia ruta absoluta. Todo el watchdog depende de que esa cadena coincida.</figcaption>
+      </figure>
+
+      <h3>5.2 &nbsp;El home del harness debe caer donde el hub mira</h3>
+      <p>
+        El mismo problema, la otra mitad. <code>claudeProjectDir</code> resuelve la base desde
+        <code>os.homedir()</code> <strong>del proceso del hub</strong> — y, a diferencia de
+        <code>hub/notifier.ts:101</code>, <strong>no</strong> respeta
+        <code>CLAUDE_CONFIG_DIR</code>. Así que o bien:
+      </p>
+      <ul>
+        <li>
+          <strong>Lo más simple:</strong> montar el <code>~/.claude</code> del host dentro del
+          contenedor. Todo funciona sin tocar nada — pero el contenedor comparte tu estado personal de
+          Claude Code, incluidas las credenciales (§5.4), y sus sesiones se mezclan con las tuyas
+          interactivas.
+        </li>
+        <li>
+          <strong>Más limpio:</strong> dar a cada agente dockerizado su propio home de claude en el
+          host (<code>~/.target/agents/&lt;agente&gt;/claude</code>) y enseñar a
+          <code>claudeProjectDir</code> a aceptar un directorio base, como ya hace
+          <code>notifier.ts</code> para su propia búsqueda. Es un cambio pequeño y elimina el
+          acoplamiento para siempre.
+        </li>
+      </ul>
+      <p>
+        Recomiendo la segunda, pero solo después de que la primera haya demostrado que el resto de la
+        tubería funciona de punta a punta.
+      </p>
+
+      <h3>5.3 &nbsp;Propiedad de los ficheros</h3>
+      <p>
+        Un contenedor corriendo como root escribe ficheros de root dentro del repo montado, que luego
+        necesitan <code>sudo</code> para limpiarse desde el host — y el hub, corriendo como tú, puede
+        no ser capaz de leer partes del árbol de transcripts. Ejecuta el contenedor con el uid/gid del
+        host (<code>--user "$(id -u):$(id -g)"</code>) y haz que el home de la imagen sea escribible
+        para ese uid. Verifícalo en la fase 0; es la segunda forma más habitual de que esto falle en la
+        práctica.
+      </p>
+
+      <h3>5.4 &nbsp;Las credenciales cruzan la frontera</h3>
+      <p>
+        El agente de dentro del contenedor tiene que estar autenticado. Montar el <code>~/.claude</code>
+        del host se trae <code>.credentials.json</code> con él — cómodo, y socava parte de para lo que
+        está el contenedor, ya que un prompt hostil dentro del sandbox puede leerlas. Una API key
+        dedicada por agente, pasada por variable de entorno, mantiene el radio de explosión en algo que
+        puedes revocar por separado. Decídelo explícitamente en lugar de heredarlo del montaje.
+      </p>
+
+      <h3>5.5 &nbsp;free-code y el problema de las sesiones-como-rutas</h3>
+      <p>
+        En free-code el id de sesión <em>es</em> una ruta absoluta a un <code>.jsonl</code>
+        (<code>hub/awb.ts:141-143</code>, <code>hub/progress.ts:152-158</code>), que el hub almacena y
+        luego devuelve a <code>--session</code>. Si esa ruta solo es válida dentro del contenedor, el
+        resume se rompe igual que §5.1 rompe el watchdog. La regla de identidad de rutas lo cubre, pero
+        merece un test explícito. Limitar el primer corte a <code>runner: claude</code> y añadir
+        free-code después es una simplificación razonable.
+      </p>
+
+      <!-- ────────────────────────────── 6 ────────────────────────────── -->
+      <h2 id="work"><span class="num">6</span>Trabajo a realizar</h2>
+
+      <h3>Fase 0 — Demostrarlo a mano (sin código)</h3>
+      <p>
+        Antes de tocar ninguno de los dos repos, ejecuta a mano los dos comandos que generaría el
+        adaptador, contra un repo de pruebas:
+      </p>
+<pre><code>docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -v /home/u/scratch:/home/u/scratch \
+  -v /home/u/.claude:/home/u/.claude \
+  -w /home/u/scratch \
+  &lt;imagen&gt; claude -p "crea un fichero llamado hello.txt" --output-format json
+# → captura session_id del envoltorio JSON, y después:
+docker run --rm … &lt;imagen&gt; claude --resume &lt;session_id&gt; -p "ahora añádele una línea" …</code></pre>
+      <p>Comprueba, en este orden:</p>
+      <ol>
+        <li>que la segunda ejecución <strong>reanuda la misma conversación</strong>;</li>
+        <li>que <code>~/.claude/projects/-home-u-scratch/</code> existe <strong>en el host</strong> y que sus <code>.jsonl</code> se mueven mientras la ejecución está en vuelo;</li>
+        <li>que los ficheros creados en el repo son tuyos, no de root.</li>
+      </ol>
+      <div class="callout warn">
+        <span class="tag">Puerta</span>
+        <p>
+          Las tres tienen que pasar antes de escribir una línea de código. Cada una corresponde a una
+          sección de arriba (§5.1/5.2, §5.1, §5.3), y cada una es mucho más barata de diagnosticar en
+          un prompt de shell que a través de dos capas de dispatch.
+        </p>
+      </div>
+
+      <h3>Fase A — El sandbox docker en awb</h3>
+      <p>Dos cambios pequeños en <code>vendor/agent-webhook-bridge</code>:</p>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Fichero</th><th>Cambio</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>broker/config.ts:25</code></td>
+              <td>
+                <code>HookConfig</code> gana un bloque opcional de sandbox — por ejemplo
+                <code>sandbox?: { kind: "docker"; image: string; user?: string; env?: string[] }</code>.
+                Ausente significa el spawn en host de hoy, así que todos los hooks.json existentes
+                siguen siendo válidos.
+              </td>
+            </tr>
+            <tr>
+              <td><code>adapters/spawn-runner/</code></td>
+              <td>
+                Un helper <code>wrapForSandbox(binary, args, hook)</code> que devuelve el par reescrito
+                de la Fig. 2. <code>runClaude</code> y <code>runFreeCode</code> lo llaman justo antes de
+                su <code>runHidden</code> / <code>runVisible</code>. Los montajes se derivan de
+                <code>hook.workdir</code> — <strong>nunca</strong> del cuerpo del evento, o quien llame
+                al webhook elige qué se monta.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Deliberadamente <strong>no</strong> es un consumer nuevo (<code>spawn:docker</code>): el
+        consumer elige <em>qué CLI de agente</em> ejecutar, y esto elige <em>dónde</em> se ejecuta.
+        Mantenerlos ortogonales hace que ambos runners tengan Docker gratis y que
+        <code>broker/dispatch.ts:141</code> no se toque.
+      </p>
+
+      <h3>Fase B — La elección en target</h3>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Fichero</th><th>Cambio</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>hub/awb.ts</code></td>
+              <td>
+                <code>PUBLISHABLE_SANDBOXES = ["host","docker"]</code>;
+                <code>HookOptions.sandbox</code> e <code>image</code>; <code>createAwbHook</code>
+                escribe el bloque de sandbox. <code>HARNESS_RESUME_COMMANDS</code>
+                (<code>:140</code>) gana una variante docker para que el botón de terminal siga
+                ofreciendo un comando que funcione —
+                <code>docker run -it … &lt;imagen&gt; claude --resume &lt;id&gt;</code>.
+              </td>
+            </tr>
+            <tr>
+              <td><code>hub/workflow.ts:439</code></td>
+              <td><code>createWorkflow</code> acepta y reenvía <code>sandbox</code> / <code>image</code>, igual que ya hace con <code>runner</code> y <code>permissionMode</code>.</td>
+            </tr>
+            <tr>
+              <td><code>hub/server.ts:635</code></td>
+              <td><code>POST /api/workflows</code> valida <code>sandbox</code> contra la lista permitida — misma forma que la validación existente de <code>runner</code>.</td>
+            </tr>
+            <tr>
+              <td><code>hub/cli.ts</code></td>
+              <td><code>--sandbox &lt;host|docker&gt;</code> e <code>--image &lt;nombre&gt;</code> en <code>create</code>.</td>
+            </tr>
+            <tr>
+              <td><code>hub/ui</code></td>
+              <td>Un selector <strong>Sandbox</strong> en el modal de nuevo workflow, junto al de <em>Agent runtime</em> que ya existe, y un distintivo en la tarjeta del workflow para que se vea de un vistazo cuáles están contenidos.</td>
+            </tr>
+            <tr>
+              <td><code>hub/awb.ts:105</code></td>
+              <td><code>hookRuntime</code> debería exponer también el sandbox, para que la UI y el panel de session-info puedan mostrarlo.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Fase C — La imagen</h3>
+      <ul>
+        <li>Un <code>Dockerfile</code> con el CLI del agente más el toolchain que necesiten los repos objetivo.</li>
+        <li>Usuario no-root, con uid/gid sobreescribible en tiempo de ejecución (§5.3).</li>
+        <li>Documentada como reemplazable: la <code>image</code> es por workflow, así que un repo Python y uno Node pueden usar imágenes distintas.</li>
+      </ul>
+
+      <h3>Fase D — Desacoplar el directorio base de transcripts</h3>
+      <p>
+        La limpieza de §5.2: dar a <code>claudeProjectDir</code> una base configurable, dar a cada
+        agente dockerizado su propio home de claude, y dejar de compartir el tuyo personal. Va la última
+        a propósito — es una mejora, no un prerrequisito, y es mucho más fácil de razonar una vez que se
+        sabe que la tubería funciona.
+      </p>
+
+      <!-- ────────────────────────────── 7 ────────────────────────────── -->
+      <h2 id="criterion"><span class="num">7</span>Criterio de éxito</h2>
+      <p>Dos workflows en la misma máquina, a la vez:</p>
+      <ol>
+        <li>El workflow <strong>H</strong> con <code>sandbox: host</code> se comporta exactamente como hoy — esta es la comprobación de regresión que más importa.</li>
+        <li>El workflow <strong>D</strong> con <code>sandbox: docker</code> ejecuta tres pasos encadenados en <strong>una</strong> sesión, a través de tres <code>docker run --rm</code> separados.</li>
+        <li>La barra de progreso y el indicador de inactividad de D se mueven mientras un paso corre — demostrando que el hub ve dentro de los transcripts del contenedor (§5.1, §5.2).</li>
+        <li>Un paso de 15 minutos en D <strong>no</strong> caduca.</li>
+        <li>Abortar un paso en ejecución de D para de verdad el contenedor, y el paso se puede relanzar con ▶.</li>
+        <li>Los ficheros que D crea en el repo son de tu usuario.</li>
+        <li>H y D apuntando al mismo repo se serializan — uno corre, el otro muestra <code>queued</code>.</li>
+        <li>El "abrir terminal" de D ofrece un comando que reanuda de verdad la conversación.</li>
+      </ol>
+
+      <!-- ────────────────────────────── 8 ────────────────────────────── -->
+      <h2 id="security"><span class="num">8</span>Modelo de seguridad</h2>
+      <p>
+        Este plan no expone nada a la red — el modelo de amenazas es el mismo que hoy. Lo que cambia es
+        la <strong>contención del propio agente</strong>, que importa porque el prompt que un agente
+        ejecuta no siempre es algo que hayas escrito tú con cuidado.
+      </p>
+      <ul>
+        <li>
+          <strong>El contenedor vale lo que valgan sus montajes.</strong> El único montaje obligatorio
+          es el workdir. Cada montaje adicional es un agujero que has elegido.
+        </li>
+        <li>
+          <strong>Los montajes salen del hook, nunca del cuerpo del evento.</strong> El hook lo escribe
+          el hub; el cuerpo es lo que haya posteado quien llame. Derivar un montaje del payload
+          convertiría el webhook en acceso arbitrario al filesystem del host.
+        </li>
+        <li>
+          <strong><code>bypassPermissions</code> pasa a ser defendible.</strong> Hoy no tiene límite;
+          en un contenedor lo limitan los montajes. Ese es el motivo para construir esto.
+        </li>
+        <li>
+          <strong>El socket de Docker: no montarlo jamás.</strong>
+          <code>-v /var/run/docker.sock</code> dentro de un contenedor de agente equivale a darle root
+          en el host.
+        </li>
+        <li><strong>Credenciales</strong> — ver §5.4; la opción cómoda es la más débil.</li>
+      </ul>
+
+      <!-- ────────────────────────────── 9 ────────────────────────────── -->
+      <h2 id="order"><span class="num">9</span>Orden de ejecución</h2>
+
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 880 140" role="img" aria-label="Orden de fases: la fase cero lo demuestra a mano y es una puerta, luego el wrapper de sandbox en awb, luego la elección en target, luego la imagen, y por último la limpieza del directorio base de transcripts.">
+            <defs>
+              <marker id="p4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#5ed6a4"/>
+              </marker>
+            </defs>
+
+            <rect class="s-box-warn" x="14" y="36" width="150" height="56" rx="8"/>
+            <text class="s-t-warn" x="30" y="60">0 · a mano</text>
+            <text class="s-t-xs" x="30" y="78">resume · rutas · uid</text>
+            <text class="s-t-warn" x="30" y="118">PUERTA — sin código hasta pasarla</text>
+
+            <rect class="s-box-accent" x="216" y="36" width="150" height="56" rx="8"/>
+            <text class="s-t" x="232" y="60">A · awb</text>
+            <text class="s-t-xs" x="232" y="78">wrapper de argv</text>
+
+            <rect class="s-box-accent" x="418" y="36" width="150" height="56" rx="8"/>
+            <text class="s-t" x="434" y="60">B · target</text>
+            <text class="s-t-xs" x="434" y="78">el selector</text>
+
+            <rect class="s-box" x="620" y="36" width="110" height="56" rx="8"/>
+            <text class="s-t" x="636" y="60">C · imagen</text>
+            <text class="s-t-xs" x="636" y="78">Dockerfile</text>
+
+            <rect class="s-box" x="778" y="36" width="90" height="56" rx="8"/>
+            <text class="s-t" x="794" y="60">D · limpieza</text>
+            <text class="s-t-xs" x="794" y="78">§5.2</text>
+
+            <path class="s-line-accent" d="M 164 64 L 210 64" marker-end="url(#p4)"/>
+            <path class="s-line-accent" d="M 366 64 L 412 64" marker-end="url(#p4)"/>
+            <path class="s-line-accent" d="M 568 64 L 614 64" marker-end="url(#p4)"/>
+            <path class="s-line-accent" d="M 730 64 L 772 64" marker-end="url(#p4)"/>
+          </svg>
+        </div>
+        <figcaption>Fig. 4 — A y C pueden ir en paralelo una vez la fase 0 haya fijado la forma de la imagen.</figcaption>
+      </figure>
+
+      <ol>
+        <li><strong>Fase 0</strong> — demostrar a mano el resume, la identidad de rutas y la propiedad de ficheros.</li>
+        <li><strong>Fase A</strong> — el wrapper de sandbox en awb (la única lógica de verdad).</li>
+        <li><strong>Fase B</strong> — la elección por workflow en target, de punta a punta hasta la UI.</li>
+        <li><strong>Fase C</strong> — una imagen mantenida (puede empezar como algo desechable durante la 0).</li>
+        <li><strong>Fase D</strong> — desacoplar el directorio base de transcripts.</li>
+      </ol>
+
+      <!-- ────────────────────────────── 10 ────────────────────────────── -->
+      <h2 id="open"><span class="num">10</span>Preguntas abiertas</h2>
+      <ul>
+        <li>
+          <strong>¿Una imagen para todo, o una por workflow?</strong> Por workflow es más flexible y no
+          cuesta nada estructuralmente — la <code>image</code> es un campo más del hook. Recomiendo
+          permitirlo desde el principio, con una por defecto.
+        </li>
+        <li>
+          <strong>¿Debería <code>bypassPermissions</code> dejar de exigir <code>acceptBypassRisk</code>
+          cuando el sandbox es <code>docker</code>?</strong> Se puede argumentar que sí, y sería un
+          incentivo real para usar contenedores. Requiere decidir que el contenedor cuenta como
+          contención de confianza.
+        </li>
+        <li>
+          <strong>Límites de recursos</strong> — <code>--memory</code>, <code>--cpus</code>,
+          <code>--pids-limit</code>. Baratos de añadir, y la defensa principal contra un agente
+          desbocado. Mejor en la fase A que retrofiteados después.
+        </li>
+        <li>
+          <strong>¿El workdir sigue siendo un sandbox, o pasa a ser un repo real?</strong> Los
+          contenedores hacen mucho más defendible apuntar un agente a un checkout de verdad. Eso es
+          discutiblemente la motivación entera, y debería ser una decisión explícita y no una deriva.
+        </li>
+        <li>
+          <strong>¿free-code en el primer corte, o solo claude?</strong> Ver §5.5.
+        </li>
+      </ul>
+
+      <footer>
+        The Target Project — plan de implementación · agentes locales, opcionalmente en Docker · fases 0–D
+      </footer>
+    </div>
+  </body>
+</html>

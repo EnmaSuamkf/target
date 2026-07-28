@@ -90,11 +90,24 @@ export function inspectLocalHook(hookUrl: string): LocalHookInfo {
 	return { local: true, found: true, name, hasWorkdir: typeof hook.workdir === "string" && hook.workdir !== "" };
 }
 
+/** The docker half of a hook's `sandbox` block, as awb's broker/config.ts writes it. */
+export interface HookSandbox {
+	kind: "docker";
+	image: string;
+}
+
 export interface HookRuntime {
 	/** Harness the hook spawns, from its `consumers` list (`spawn:claude` → "claude"). */
 	harness: string | null;
 	/** Directory the harness runs in — where its sessions can be resumed from. */
 	workdir: string | null;
+	/**
+	 * The hook's containment: null when its agent runs straight on the host
+	 * (every hook written before the sandbox choice existed, and every
+	 * `sandbox: "host"` one since). Orthogonal to `harness` — the harness says
+	 * WHICH CLI runs, this says WHERE.
+	 */
+	sandbox: HookSandbox | null;
 }
 
 /**
@@ -104,7 +117,7 @@ export interface HookRuntime {
  */
 export function hookRuntime(hookUrl: string): HookRuntime {
 	const info = inspectLocalHook(hookUrl);
-	if (!info.local || !info.found || !info.name) return { harness: null, workdir: null };
+	if (!info.local || !info.found || !info.name) return { harness: null, workdir: null, sandbox: null };
 	const hook = loadAwbConfig().hooks[info.name];
 	const consumers = Array.isArray(hook?.consumers) ? (hook.consumers as unknown[]) : [];
 	let harness: string | null = null;
@@ -115,7 +128,12 @@ export function hookRuntime(hookUrl: string): HookRuntime {
 		}
 	}
 	const workdir = typeof hook?.workdir === "string" && hook.workdir !== "" ? hook.workdir : null;
-	return { harness, workdir };
+	const block = hook?.sandbox as { kind?: unknown; image?: unknown } | undefined;
+	const sandbox =
+		block?.kind === "docker" && typeof block.image === "string" && block.image !== ""
+			? { kind: "docker" as const, image: block.image }
+			: null;
+	return { harness, workdir, sandbox };
 }
 
 /**
@@ -143,13 +161,76 @@ const HARNESS_RESUME_COMMANDS: Record<string, (sessionId: string) => string> = {
 };
 
 /**
+ * Resource caps and mount list mirroring awb's
+ * `adapters/spawn-runner/sandbox.ts`, the same way `AWB_DEFAULTS` above
+ * mirrors awb's config defaults. The hub can't import from the broker's tree
+ * (they're separate installs), and this only has to agree with it well enough
+ * that the terminal the operator opens lands in the SAME container shape the
+ * steps ran in — above all the identical `-v`/`-w` paths, without which the
+ * resumed session simply isn't there.
+ */
+const SANDBOX_LIMITS = { memory: "4g", cpus: "2", pidsLimit: 512 } as const;
+
+function existingPaths(paths: string[]): string[] {
+	return paths.filter((p) => {
+		try {
+			return fs.existsSync(p);
+		} catch {
+			return false;
+		}
+	});
+}
+
+/**
+ * `docker run …` up to and including the image, for an interactive resume in
+ * a real terminal (hence `-it`, which the broker's own headless runs don't
+ * use). Every path is mounted at its own absolute path — that identity is the
+ * whole reason the session the steps built is findable from in here.
+ */
+function dockerResumePrefix(sandbox: HookSandbox, workdir: string): string {
+	const mounts = [
+		workdir,
+		...existingPaths([path.join(os.homedir(), ".claude"), path.join(os.homedir(), ".claude.json"), path.join(awbDir(), "sessions")]),
+	];
+	const parts = [
+		"docker run --rm -it",
+		`--user ${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`,
+		`--memory ${SANDBOX_LIMITS.memory}`,
+		`--cpus ${SANDBOX_LIMITS.cpus}`,
+		`--pids-limit ${SANDBOX_LIMITS.pidsLimit}`,
+		...mounts.map((m) => `-v ${shellQuote(`${m}:${m}`)}`),
+		`-e ${shellQuote(`HOME=${os.homedir()}`)}`,
+		`-w ${shellQuote(workdir)}`,
+		shellQuote(sandbox.image),
+	];
+	return parts.join(" ");
+}
+
+/**
  * The command to resume `sessionId` under `harness`, or null when either is
  * unknown — callers must hide the offer rather than show a command that would
  * fail (or resume the wrong conversation) if pasted or run.
+ *
+ * A workflow whose steps ran in a container gets the containerised form of
+ * the same command: running the bare `claude --resume <id>` on the host would
+ * appear to work while reaching a different install with a different
+ * toolchain, so the sandbox is carried through instead. That needs the
+ * workdir (it's the mount and the `-w`), so a docker hook with no resolvable
+ * workdir answers null rather than a command that would start the wrong
+ * conversation.
  */
-export function harnessResumeCommand(harness: string | null, sessionId: string | null): string | null {
+export function harnessResumeCommand(
+	harness: string | null,
+	sessionId: string | null,
+	sandbox: HookSandbox | null = null,
+	workdir: string | null = null,
+): string | null {
 	if (!harness || !sessionId) return null;
-	return HARNESS_RESUME_COMMANDS[harness]?.(sessionId) ?? null;
+	const command = HARNESS_RESUME_COMMANDS[harness]?.(sessionId);
+	if (!command) return null;
+	if (!sandbox) return command;
+	if (!workdir) return null;
+	return `${dockerResumePrefix(sandbox, workdir)} ${command}`;
 }
 
 /**
@@ -173,12 +254,39 @@ export type PublishablePermissionMode = (typeof PUBLISHABLE_PERMISSION_MODES)[nu
 export const PUBLISHABLE_RUNNERS = ["claude", "free-code"] as const;
 export type PublishableRunner = (typeof PUBLISHABLE_RUNNERS)[number];
 
+/**
+ * Where a workflow's agent runs. Deliberately orthogonal to the runner: the
+ * runner picks WHICH CLI a step spawns, the sandbox picks WHERE it spawns, so
+ * both runners get containment from the same awb code path.
+ *
+ * `host` is the default and is exactly today's behaviour — the CLI runs as
+ * the operator, on the operator's filesystem, which is why
+ * `bypassPermissions` currently means "anything you can do". `docker` runs
+ * the same invocation inside `docker run --rm`, with the workflow's workdir
+ * and the harness's own state bind-mounted at their real paths (the broker
+ * stays on the host; see awb's adapters/spawn-runner/sandbox.ts).
+ */
+export const PUBLISHABLE_SANDBOXES = ["host", "docker"] as const;
+export type PublishableSandbox = (typeof PUBLISHABLE_SANDBOXES)[number];
+
+/**
+ * Image used when a workflow asks for `sandbox: "docker"` without naming one.
+ * The image is a per-hook field on purpose — a Python repo and a Node repo
+ * want different toolchains — this is only the fallback, built from the
+ * `Dockerfile` at the root of this repo.
+ */
+export const DEFAULT_SANDBOX_IMAGE = "target-agent:latest";
+
 export interface HookOptions {
 	/** Custom shared secret; autogenerated when omitted. */
 	secret?: string;
 	permissionMode?: PublishablePermissionMode;
 	/** Which CLI the hook spawns. Defaults to `"claude"`. */
 	runner?: PublishableRunner;
+	/** Where that CLI runs. Defaults to `"host"`, which writes no sandbox block at all. */
+	sandbox?: PublishableSandbox;
+	/** Image for `sandbox: "docker"`; defaults to `DEFAULT_SANDBOX_IMAGE`. Ignored on the host. */
+	image?: string;
 }
 
 /**
@@ -204,6 +312,10 @@ export function createAwbHook(
 		promptTemplate,
 		workdir,
 		...(options.permissionMode ? { permissionMode: options.permissionMode } : {}),
+		// No block at all for the host default: an unsandboxed hook stays
+		// byte-for-byte the hook the hub has always written, so nothing about
+		// the existing spawn path is even re-read.
+		...(options.sandbox === "docker" ? { sandbox: { kind: "docker", image: options.image || DEFAULT_SANDBOX_IMAGE } } : {}),
 	};
 	const file = awbConfigFile();
 	fs.mkdirSync(path.dirname(file), { recursive: true });

@@ -74,7 +74,7 @@ in its `Ready.` block (it always lives in `~/.target/config.json`) — the UI
 asks for it and the CLI uses it automatically.
 
 ```bash
-node hub/cli.ts create "release-notes" [--workdir <dir>] [--permission-mode acceptEdits] [--runner free-code]
+node hub/cli.ts create "release-notes" [--workdir <dir>] [--permission-mode acceptEdits] [--runner free-code] [--sandbox docker] [--image <name>]
 node hub/cli.ts set-context <workflowId> "<text>"   # set (or clear with "") the conversation context, on an existing workflow
 node hub/cli.ts add-step <workflowId> "Read the CHANGELOG and put together a summary"
 node hub/cli.ts add-step <workflowId> "Publish the summary to docs/release-notes.md"
@@ -253,6 +253,49 @@ What changes and what doesn't:
 
 The runner is fixed at workflow creation (it's the hook's spawn consumer);
 to switch runtimes, create a new workflow.
+
+### Containing the agent (`--sandbox`)
+
+The runner picks *which* CLI runs a step; the sandbox picks *where* it runs.
+By default (`--sandbox host`) it runs directly on this machine, as you — so
+the workflow's workdir is a naming convention, not a boundary, and
+`bypassPermissions` really does mean "anything you can do". Create the
+workflow with `--sandbox docker` to run every step inside a container
+instead:
+
+```bash
+docker build -t target-agent:latest .            # once; see ./Dockerfile
+node hub/cli.ts create "release-notes" --sandbox docker --permission-mode acceptEdits
+```
+
+- **The broker stays on the host.** It shells out to `docker run --rm` per
+  step and posts the callback itself, so the container needs no port, no
+  `--network host` and no route to the hub — only outbound internet for the
+  model API. Everything around the spawn (the workdir `flock`, the abort
+  path, the progress watchdog, the callbacks) is unchanged.
+- **Paths are identical inside and out.** The workdir is bind-mounted at its
+  own absolute path and is also the container's `-w`, and `~/.claude`,
+  `~/.claude.json` and `~/.agent-webhook-bridge/sessions` come along at
+  theirs. That identity is load-bearing: the hub finds a run's transcripts by
+  slugifying the workdir string, so a remapped path wouldn't error, it would
+  just make every step look stalled after ten minutes.
+- **Files stay yours.** The container runs as the broker's `uid:gid`, so
+  anything the agent writes into the workdir is owned by you, not root.
+  Runs are also capped (`--memory 4g --cpus 2 --pids-limit 512`).
+- **The image is per workflow.** `--image <name>` (or the *Container image*
+  box in the UI) overrides the default `target-agent:latest`, so a Python
+  repo and a Node repo can use different toolchains. The `Dockerfile` at the
+  root of this repo is only the default.
+- **Mounts are the blast radius.** They're derived from the hook the hub
+  wrote, never from a webhook payload. Every extra mount is a hole you chose
+  — and the docker socket must never be one of them.
+- **"Open conversation" follows.** For a docker workflow the terminal button
+  offers `docker run --rm -it … <image> claude --resume <id>`, entering the
+  same container shape the steps ran in, because that's where the session is.
+
+Like the runner, the sandbox is fixed at creation (it's a block in the hook);
+workflows created before this existed carry no block at all and keep spawning
+on the host exactly as they did.
 
 ## External requirement
 

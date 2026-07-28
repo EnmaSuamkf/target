@@ -433,12 +433,21 @@ export function writeStatusMd(workflowId: string): void {
  * workdir, so its harness session is isolated per workflow (mirrors
  * agentmesh's "dedicated sandbox" security default). `runner` picks which
  * CLI the hook spawns — Claude Code (default) or free-code; both chain the
- * workflow's steps on one shared session. Steps are added afterwards, one at
- * a time, from the Workflow section's "+ step" button.
+ * workflow's steps on one shared session. `sandbox` picks where that CLI
+ * runs — on the host (default, unchanged) or in a container built from
+ * `image` — which is the only thing that makes the workdir a real boundary
+ * rather than a naming convention. Steps are added afterwards, one at a time,
+ * from the Workflow section's "+ step" button.
  */
 export function createWorkflow(
 	name: string,
-	options: { workdir?: string; permissionMode?: HookOptions["permissionMode"]; runner?: HookOptions["runner"] } = {},
+	options: {
+		workdir?: string;
+		permissionMode?: HookOptions["permissionMode"];
+		runner?: HookOptions["runner"];
+		sandbox?: HookOptions["sandbox"];
+		image?: HookOptions["image"];
+	} = {},
 ): Workflow {
 	const trimmed = name.trim();
 	if (!trimmed) throw new WorkflowError("name is required");
@@ -451,6 +460,8 @@ export function createWorkflow(
 	const hook = createAwbHook(agentName, workdir, promptTemplate, {
 		permissionMode: options.permissionMode,
 		runner: options.runner,
+		sandbox: options.sandbox,
+		image: options.image,
 	});
 	const mdPath = path.join(targetDir(), `${slug}-${shortId}.md`);
 	const workflow = insertWorkflow({
