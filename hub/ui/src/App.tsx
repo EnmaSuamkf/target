@@ -5,6 +5,8 @@ import type {
 	CreateWorkflowInput,
 	NotificationSettings,
 	NotificationSettingsInput,
+	OverridableStepStatus,
+	OverridableWorkflowStatus,
 	SessionInfo,
 	Step,
 	StepConfigInput,
@@ -251,6 +253,33 @@ export function App(): React.JSX.Element {
 		}
 	};
 
+	/**
+	 * Forces the workflow's status by hand. Confirmed, because it overrules what
+	 * the engine recorded and the hub will then stop re-deriving that status
+	 * until the workflow runs again — but it is not destructive (nothing is lost,
+	 * and setting it again or re-running restores the derived value), so it isn't
+	 * styled as a danger.
+	 */
+	const handleSetWorkflowStatus = async (status: OverridableWorkflowStatus): Promise<void> => {
+		const workflow = selectedWorkflow;
+		if (!workflow) return;
+		const confirmed = await confirm({
+			title: `Mark "${workflow.name}" as ${status}?`,
+			description:
+				"Records the status by hand — nothing is run. It stays as you set it until the workflow is started, stopped or restarted, and it's marked as set manually.",
+			confirmLabel: `Mark ${status}`,
+		});
+		if (!confirmed) return;
+		await act(
+			"Could not set the workflow status",
+			async () => {
+				await api.setWorkflowStatus(workflow.id, status);
+				toast.success(`Workflow marked ${status}.`);
+			},
+			refreshCurrent,
+		);
+	};
+
 	// Returns whether the save actually reached the server, so the context
 	// panel only clears its "unsaved edits" state on a real success.
 	const handleSaveContext = async (context: string): Promise<boolean> => {
@@ -324,6 +353,34 @@ export function App(): React.JSX.Element {
 			async () => {
 				await api.continueStep(selectedId, stepId);
 				toast.success("Step approved — the workflow continues.");
+			},
+			refreshCurrent,
+		);
+	};
+
+	/**
+	 * Forces one step's status by hand. Same confirmation rationale as the
+	 * workflow's, plus the one consequence worth spelling out: the workflow's own
+	 * badge follows from its steps, so correcting the last failed step of a run
+	 * also clears the workflow's `failed`.
+	 */
+	const handleSetStepStatus = async (stepId: string, status: OverridableStepStatus): Promise<void> => {
+		if (!selectedId) return;
+		const step = steps.find((s) => s.id === stepId);
+		const confirmed = await confirm({
+			title: `Mark step ${step ? step.orderIndex + 1 : ""} as ${status}?`.replace("  ", " "),
+			description:
+				status === "pending"
+					? "Puts the step back in the queue. It isn't run now — it runs on the next Start, if it's selected."
+					: "Records the status by hand — the step is not re-run. The workflow's own status follows from its steps, so this can clear its failed badge too.",
+			confirmLabel: `Mark ${status}`,
+		});
+		if (!confirmed) return;
+		await act(
+			"Could not set the step status",
+			async () => {
+				await api.setStepStatus(selectedId, stepId, status);
+				toast.success(`Step marked ${status}.`);
 			},
 			refreshCurrent,
 		);
@@ -437,6 +494,7 @@ export function App(): React.JSX.Element {
 								onStart={handleStart}
 								onStop={handleStop}
 								onDelete={() => void handleDelete()}
+								onSetStatus={(status) => void handleSetWorkflowStatus(status)}
 								onSaveContext={handleSaveContext}
 								onOpenTerminal={handleOpenTerminal}
 								onAddStep={handleAddStep}
@@ -445,6 +503,7 @@ export function App(): React.JSX.Element {
 								onRunStep={(id) => void handleRunStep(id)}
 								onAbortStep={(id) => void handleAbortStep(id)}
 								onContinueStep={(id) => void handleContinueStep(id)}
+								onSetStepStatus={(id, status) => void handleSetStepStatus(id, status)}
 								onAddStepsFromTemplate={handleAddStepsFromTemplate}
 							/>
 						) : (

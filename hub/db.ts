@@ -34,6 +34,28 @@ export type StepStatus = "pending" | "queued" | "running" | "waiting" | "done" |
  */
 export type StepPhase = "exec" | "judge";
 
+/**
+ * Statuses a HUMAN may force a step into (see `overrideStepStatus`).
+ *
+ * Deliberately only the settled ones. `running`/`queued` are owned by the
+ * engine — they mean "a job is in flight", and asserting them without a
+ * dispatch would leave a step no callback will ever settle — and `waiting` is
+ * produced by the manual-review gate, which has its own Continue. What an
+ * operator actually needs is to say "this DID work" (`done`), "this did not"
+ * (`failed`) or "put it back in the queue" (`pending`).
+ */
+export const OVERRIDABLE_STEP_STATUSES = ["pending", "done", "failed"] as const;
+export type OverridableStepStatus = (typeof OVERRIDABLE_STEP_STATUSES)[number];
+
+/**
+ * Statuses a HUMAN may force a workflow into (see `setWorkflowStatus`'s
+ * `manual` option). `running` is the engine's own — it means "a dispatch is
+ * happening", which a status write can't make true — and `waiting` belongs to
+ * the manual-review gate.
+ */
+export const OVERRIDABLE_WORKFLOW_STATUSES = ["draft", "paused", "completed", "failed"] as const;
+export type OverridableWorkflowStatus = (typeof OVERRIDABLE_WORKFLOW_STATUSES)[number];
+
 export interface Workflow {
 	id: string;
 	name: string;
@@ -61,6 +83,17 @@ export interface Workflow {
 	 * restart (a fresh conversation) and by editing the context.
 	 */
 	contextInjected: boolean;
+	/**
+	 * Whether the CURRENT status was forced by a human rather than derived from
+	 * the steps. It's what makes an override stick: `reconcileStatus` (which runs
+	 * on every read) refuses to re-derive a status a person asserted, so a
+	 * workflow corrected to `completed` doesn't flip back to `failed` two seconds
+	 * later. Cleared automatically by every engine status write — see
+	 * `setWorkflowStatus`.
+	 */
+	statusManual: boolean;
+	/** When that override was made; null when the status is the engine's own. */
+	statusManualAt: string | null;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -130,6 +163,16 @@ export interface Step {
 	 * "select nothing" means nothing runs, not "run everything".
 	 */
 	selected: boolean;
+	/**
+	 * Whether the CURRENT status was forced by a human (`overrideStepStatus`)
+	 * rather than reported by a run. Purely a marker — the status itself is a
+	 * normal one, so progress %, the .md file and the sequential engine all read
+	 * it exactly as they would a status the engine wrote. Cleared the moment the
+	 * step runs again (any dispatch/reset re-authors the status).
+	 */
+	statusManual: boolean;
+	/** When that override was made; null when the status came from a run. */
+	statusManualAt: string | null;
 }
 
 /**
@@ -178,6 +221,8 @@ function open(): DatabaseSync {
 			conversation_context TEXT,
 			context_injected INTEGER NOT NULL DEFAULT 0,
 			completion_notified INTEGER NOT NULL DEFAULT 0,
+			status_manual INTEGER NOT NULL DEFAULT 0,
+			status_manual_at TEXT,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
@@ -205,7 +250,9 @@ function open(): DatabaseSync {
 			selected INTEGER NOT NULL DEFAULT 1,
 			last_progress_at TEXT,
 			last_progress_kind TEXT,
-			last_progress_token TEXT
+			last_progress_token TEXT,
+			status_manual INTEGER NOT NULL DEFAULT 0,
+			status_manual_at TEXT
 		);
 		CREATE INDEX IF NOT EXISTS idx_steps_workflow ON steps(workflow_id, order_index);
 		CREATE TABLE IF NOT EXISTS templates (
@@ -246,6 +293,8 @@ function open(): DatabaseSync {
 	addColumn("last_progress_at", "last_progress_at TEXT");
 	addColumn("last_progress_kind", "last_progress_kind TEXT");
 	addColumn("last_progress_token", "last_progress_token TEXT");
+	addColumn("status_manual", "status_manual INTEGER NOT NULL DEFAULT 0");
+	addColumn("status_manual_at", "status_manual_at TEXT");
 	// Same upgrade safety for the `workflows` table: `conversation_context` and
 	// `context_injected` were added after launch, so an older DB won't have them.
 	const existingWorkflowColumns = new Set(
@@ -258,6 +307,8 @@ function open(): DatabaseSync {
 	addWorkflowColumn("context_injected", "context_injected INTEGER NOT NULL DEFAULT 0");
 	addWorkflowColumn("status_before_review", "status_before_review TEXT");
 	addWorkflowColumn("completion_notified", "completion_notified INTEGER NOT NULL DEFAULT 0");
+	addWorkflowColumn("status_manual", "status_manual INTEGER NOT NULL DEFAULT 0");
+	addWorkflowColumn("status_manual_at", "status_manual_at TEXT");
 	return db;
 }
 
@@ -285,6 +336,8 @@ function rowToWorkflow(row: Record<string, unknown>): Workflow {
 		mdPath: String(row.md_path),
 		conversationContext: row.conversation_context == null ? null : String(row.conversation_context),
 		contextInjected: Number(row.context_injected ?? 0) === 1,
+		statusManual: Number(row.status_manual ?? 0) === 1,
+		statusManualAt: row.status_manual_at == null ? null : String(row.status_manual_at),
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
 	};
@@ -312,6 +365,8 @@ export function insertWorkflow(input: {
 		mdPath: input.mdPath,
 		conversationContext,
 		contextInjected: false,
+		statusManual: false,
+		statusManualAt: null,
 		createdAt: now,
 		updatedAt: now,
 	};
@@ -349,7 +404,20 @@ export function listWorkflows(): Workflow[] {
 	return (rows as Record<string, unknown>[]).map(rowToWorkflow);
 }
 
-export function setWorkflowStatus(id: string, status: WorkflowStatus): void {
+/**
+ * Writes a workflow's status.
+ *
+ * `manual` is the whole of the human-override feature at this level: it records
+ * that THIS status was asserted by a person, which `reconcileStatus`
+ * (workflow.ts) reads as "don't re-derive me from the steps". Every other
+ * caller in the codebase omits it and therefore CLEARS the marker — that's
+ * deliberate, and it's what bounds the override in time: the moment the engine
+ * legitimately authors a status again (start/pause/resume/restart, a step
+ * callback, a heal), the workflow goes back to being engine-owned. An override
+ * survives reads and restarts; it does not survive a re-run.
+ */
+export function setWorkflowStatus(id: string, status: WorkflowStatus, options: { manual?: boolean } = {}): void {
+	const manual = options.manual === true;
 	// Any status that ISN'T `completed` re-arms the "workflow finished" notice
 	// (see `claimWorkflowCompletionNotice`). This is what makes a restart — or an
 	// "+ step" that pushes a terminal workflow back to `draft` — notify again on
@@ -357,13 +425,15 @@ export function setWorkflowStatus(id: string, status: WorkflowStatus): void {
 	// already announced is over, and whatever finishes later is a new one.
 	// Writing `completed` itself deliberately leaves the marker alone, so a
 	// status re-write on an already-completed workflow can't re-arm it.
+	const now = new Date().toISOString();
 	open()
 		.prepare(
 			`UPDATE workflows SET status = ?, updated_at = ?,
-			 completion_notified = CASE WHEN ? = 'completed' THEN completion_notified ELSE 0 END
+			 completion_notified = CASE WHEN ? = 'completed' THEN completion_notified ELSE 0 END,
+			 status_manual = ?, status_manual_at = ?
 			 WHERE id = ?`,
 		)
-		.run(status, new Date().toISOString(), status, id);
+		.run(status, now, status, manual ? 1 : 0, manual ? now : null, id);
 }
 
 /**
@@ -482,6 +552,8 @@ function rowToStep(row: Record<string, unknown>): Step {
 		lastProgressToken: row.last_progress_token == null ? null : String(row.last_progress_token),
 		phase: (row.phase as StepPhase) ?? "exec",
 		selected: Number(row.selected ?? 1) === 1,
+		statusManual: Number(row.status_manual ?? 0) === 1,
+		statusManualAt: row.status_manual_at == null ? null : String(row.status_manual_at),
 	};
 }
 
@@ -530,6 +602,8 @@ export function insertStep(
 		lastProgressToken: null,
 		phase: "exec",
 		selected: true,
+		statusManual: false,
+		statusManualAt: null,
 	};
 	database
 		.prepare(
@@ -643,7 +717,8 @@ export function markStepRunning(id: string, manual = false): void {
 	open()
 		.prepare(
 			`UPDATE steps SET status = 'running', started_at = ?, is_manual_run = ?, phase = 'exec',
-			 last_progress_at = ?, last_progress_kind = NULL, last_progress_token = NULL
+			 last_progress_at = ?, last_progress_kind = NULL, last_progress_token = NULL,
+			 status_manual = 0, status_manual_at = NULL
 			 WHERE id = ? AND status = 'pending'`,
 		)
 		.run(now, manual ? 1 : 0, now, id);
@@ -688,7 +763,8 @@ export function markStepQueued(id: string, manual = false): void {
 	open()
 		.prepare(
 			`UPDATE steps SET status = 'queued', queued_at = ?, started_at = NULL, is_manual_run = ?, phase = 'exec',
-			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL
+			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL,
+			 status_manual = 0, status_manual_at = NULL
 			 WHERE id = ? AND status = 'pending'`,
 		)
 		.run(new Date().toISOString(), manual ? 1 : 0, id);
@@ -796,7 +872,8 @@ export function beginRetry(id: string): void {
 		.prepare(
 			`UPDATE steps SET status = 'pending', phase = 'exec', retry_count = retry_count + 1,
 			 result = NULL, error = NULL, session_id = NULL, started_at = NULL, finished_at = NULL,
-			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL
+			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL,
+			 status_manual = 0, status_manual_at = NULL
 			 WHERE id = ?`,
 		)
 		.run(id);
@@ -840,7 +917,8 @@ export function startManualRun(stepId: string): boolean {
 		.prepare(
 			`UPDATE steps SET status = 'queued', result = NULL, error = NULL, session_id = NULL,
 			 queued_at = ?, started_at = NULL, finished_at = NULL, is_manual_run = 1, phase = 'exec', retry_count = 0,
-			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL
+			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL,
+			 status_manual = 0, status_manual_at = NULL
 			 WHERE id = ? AND status NOT IN ('running', 'queued', 'waiting')`,
 		)
 		.run(now, stepId).changes;
@@ -867,6 +945,47 @@ export function failRunningStep(stepId: string, error: string): boolean {
 				 WHERE id = ? AND status IN ('running', 'queued')`,
 			)
 			.run(error, new Date().toISOString(), stepId).changes > 0
+	);
+}
+
+/**
+ * Forces a step's status by hand, and records that a human did it.
+ *
+ * This is the correction path for the case the engine can't see: the agent
+ * really did the work, but the run was cut short (out of tokens) or its result
+ * callback never landed, so the step — and with it the whole workflow — reads
+ * `failed`. Nothing about the run is invented: the stored result/session/
+ * retry-count are all left exactly as they are, so the transcript still tells
+ * the true story. Only the verdict changes, and it's stamped as a human's.
+ *
+ * The `finished_at` bookkeeping follows the status so the derived views stay
+ * honest: settling a step stamps a finish time (keeping any earlier one — the
+ * run really did end then), while putting it back to `pending` clears the
+ * finish time, because a step that is going to run again has not finished. A
+ * step forced to `done` also drops its `error`: keeping a red error body under a
+ * green badge is the contradiction this feature exists to remove. A `failed`
+ * override with no error of its own gets one that says who set it, so the UI is
+ * never blank about why.
+ *
+ * Deliberately NOT guarded on the current status — unlike every other setter
+ * here, an override is the operator overruling the engine, and the caller
+ * (`overrideStepStatus` in workflow.ts) is what enforces the one state it must
+ * not touch: a step with a job actually in flight. Returns whether a row changed.
+ */
+export function overrideStepStatus(id: string, status: OverridableStepStatus): boolean {
+	const now = new Date().toISOString();
+	return (
+		open()
+			.prepare(
+				`UPDATE steps SET status = ?,
+				 finished_at = CASE WHEN ? = 'pending' THEN NULL ELSE COALESCE(finished_at, ?) END,
+				 error = CASE WHEN ? = 'done' THEN NULL
+				              WHEN ? = 'pending' THEN NULL
+				              ELSE COALESCE(error, 'Marked failed manually.') END,
+				 status_manual = 1, status_manual_at = ?
+				 WHERE id = ?`,
+			)
+			.run(status, status, now, status, status, now, id).changes > 0
 	);
 }
 
@@ -974,7 +1093,8 @@ export function resetSteps(workflowId: string): void {
 		.prepare(
 			`UPDATE steps SET status = 'pending', result = NULL, error = NULL, session_id = NULL,
 			 started_at = NULL, finished_at = NULL, is_manual_run = 0, phase = 'exec', retry_count = 0,
-			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL
+			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL,
+			 status_manual = 0, status_manual_at = NULL
 			 WHERE workflow_id = ? AND selected = 1`,
 		)
 		.run(workflowId);

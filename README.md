@@ -83,7 +83,9 @@ node hub/cli.ts pause <workflowId>
 node hub/cli.ts resume <workflowId>
 node hub/cli.ts restart <workflowId>   # resets every step and starts from scratch
 node hub/cli.ts list
-node hub/cli.ts show <workflowId>
+node hub/cli.ts show <workflowId>                    # also prints each step's id
+node hub/cli.ts set-status <workflowId> completed    # set a status by hand (see below)
+node hub/cli.ts set-step-status <workflowId> <stepId> done
 ```
 
 Or from the UI at `http://127.0.0.1:8893`: create a workflow, add steps with
@@ -123,6 +125,10 @@ Notes on behaviour worth knowing:
   no-op.
 - **One Start button.** It maps to the action that fits the status — `start`
   when draft, `resume` when paused, `restart` when completed or failed.
+- **Set status…** A picker beside the run controls, and one per step, that sets
+  a status by hand when the engine got it wrong. It runs nothing; see
+  "Correcting a status by hand" below. Statuses set this way carry a pencil on
+  their badge.
 - **Live updates.** The hub has no streaming endpoint, so the UI polls every 2s.
   Polling pauses while the tab is hidden and resumes on focus.
 - **Deep links.** The selected workflow is in the URL hash (`#/w/<id>`), so a
@@ -153,6 +159,29 @@ are all finished but whose badge is stale (e.g. stuck `running` at 100%
 because its remaining pending steps were deleted) is reconciled to
 `completed`/`failed`/`draft` on the next `GET`. Workflows that still have
 pending or running steps are never touched by this heal.
+
+### Correcting a status by hand
+
+Sometimes the engine's verdict is simply wrong: the agent did the work, but the
+run ran out of tokens, or its result callback never arrived, so the step is
+`failed` — and the whole workflow reads `failed` with it. The **Set status…**
+picker (on the workflow header, and on each step) sets the status yourself, and
+so do `target set-status` / `target set-step-status` and
+`POST /api/workflows/:id/status` / `POST /api/workflows/:id/steps/:stepId/status`.
+
+Only settled statuses can be set — `done`/`failed`/`pending` for a step,
+`completed`/`failed`/`paused`/`draft` for a workflow. `running`, `queued` and
+`waiting` belong to the engine and the manual-review gate, and a step (or
+workflow) with a job actually in flight is refused: abort it first.
+
+An override **records a verdict, it never runs anything** — a step corrected to
+`done` is not re-run and does not advance the workflow. The workflow's badge
+still follows from its steps, so fixing the last failed step clears the
+workflow's `failed` on its own; and a workflow status you set by hand is left
+alone by the read-path heal until the engine writes one itself (Start, Stop,
+Resume, Start over, or the next step callback). Statuses set this way are marked
+with a pencil on the badge, and called out in the `.md` status file. Full
+semantics: [`docs/status-override.md`](docs/status-override.md).
 
 ### Stuck steps
 

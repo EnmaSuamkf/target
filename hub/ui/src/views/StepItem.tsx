@@ -1,5 +1,6 @@
 import { useState } from "react";
-import type { Step, StepConfigInput } from "../api/types.ts";
+import type { OverridableStepStatus, Step, StepConfigInput } from "../api/types.ts";
+import { OVERRIDABLE_STEP_STATUSES } from "../api/types.ts";
 import { Badge } from "../components/Badge.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { Switch } from "../components/Switch.tsx";
@@ -21,6 +22,8 @@ import styles from "./StepItem.module.css";
  * - The retry interval only applies with more than one retry, so the field is
  *   disabled and forced to 0 below that.
  * - A step running its judge phase reads "judging", not "running".
+ * - The status picker can't touch a step with a job in flight (the server
+ *   refuses it) — Abort is the action for that, and it's right there.
  *
  * The result body is collapsed by default and expandable, replacing the old
  * hard truncation at 240 characters that made longer output unreadable.
@@ -34,6 +37,7 @@ export function StepItem({
 	onRun,
 	onAbort,
 	onContinue,
+	onSetStatus,
 	busy,
 }: {
 	step: Step;
@@ -44,6 +48,8 @@ export function StepItem({
 	onRun: (id: string) => void;
 	onAbort: (id: string) => void;
 	onContinue: (id: string) => void;
+	/** Forces the step's status by hand; never runs the step. */
+	onSetStatus: (id: string, status: OverridableStepStatus) => void;
 	busy: boolean;
 }): React.JSX.Element {
 	const [editing, setEditing] = useState(false);
@@ -51,6 +57,10 @@ export function StepItem({
 
 	const running = step.status === "running";
 	const waiting = step.status === "waiting";
+	// A step with a job in flight is the one state the override refuses: its
+	// callback is still coming, so a status written now would be overwritten (or
+	// would strand a live agent). Abort first — the button next to it does that.
+	const inFlight = running || step.status === "queued";
 	const editable = !running && !waiting;
 	const removable = step.status === "pending";
 	const statusLabel = running && step.phase === "judge" ? "judging" : step.status;
@@ -95,7 +105,7 @@ export function StepItem({
 				</label>
 				<span className={styles.index}>{step.orderIndex + 1}</span>
 				<p className={styles.description}>{step.description}</p>
-				<Badge status={step.status} label={statusLabel} />
+				<Badge status={step.status} label={statusLabel} manual={step.statusManual} manualAt={step.statusManualAt} />
 			</div>
 
 			{(step.acceptanceCriteria || elapsed || step.manualRun || step.manualReview || activity) && (
@@ -213,6 +223,36 @@ export function StepItem({
 				>
 					Remove
 				</button>
+
+				{/* Correcting the status is a picker rather than a button per status:
+				    it's three options, it's rare, and one native <select> is a single
+				    thumb-sized target on a phone where three more buttons would not be.
+				    It never holds a value — picking one fires the action and the control
+				    snaps back to its prompt, because the step's real status is the badge
+				    above, not this. */}
+				<select
+					className={`select ${styles.statusSelect}`}
+					value=""
+					disabled={inFlight || busy}
+					aria-label={`Set the status of step ${step.orderIndex + 1} by hand`}
+					title={
+						inFlight
+							? "This step still has a job in flight — abort it first."
+							: "Say what really happened: mark this step done, failed or pending by hand. Nothing is run."
+					}
+					onChange={(ev) => {
+						const next = ev.target.value as OverridableStepStatus | "";
+						ev.target.value = "";
+						if (next) onSetStatus(step.id, next);
+					}}
+				>
+					<option value="">Set status…</option>
+					{OVERRIDABLE_STEP_STATUSES.filter((s) => s !== step.status).map((s) => (
+						<option key={s} value={s}>
+							Mark {s}
+						</option>
+					))}
+				</select>
 			</div>
 		</li>
 	);

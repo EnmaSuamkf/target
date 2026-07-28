@@ -157,7 +157,9 @@ export function WorkflowList({
 										docker
 									</span>
 								)}
-								<Badge status={workflow.status} />
+								{/* Marked here too: a status somebody set by hand should be
+							    recognisable from the list, not only after opening it. */}
+							<Badge status={workflow.status} manual={workflow.statusManual} manualAt={workflow.statusManualAt} />
 							</span>
 
 							<ProgressBar progress={workflow.progress} running={workflow.status === "running"} />

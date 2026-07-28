@@ -17,6 +17,8 @@
  *   POST   /api/workflows/:id/steps/:stepId/run         → run one step now, outside the sequential order (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/abort        → abort a step stuck running, so it can be re-run (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/continue      → release a step waiting for its manual review (admin token)
+ *   POST   /api/workflows/:id/steps/:stepId/status        → force a step's status by hand (admin token)
+ *   POST   /api/workflows/:id/status                    → force the workflow's status by hand (admin token)
  *   POST   /api/workflows/:id/start                    → begin/continue sequential dispatch (admin token)
  *   POST   /api/workflows/:id/pause                    → stop dispatching further steps (admin token)
  *   POST   /api/workflows/:id/resume                   → undo pause (admin token)
@@ -60,9 +62,13 @@ import {
 	listTemplates,
 	listWorkflows,
 	normalizeNotificationChannels,
+	OVERRIDABLE_STEP_STATUSES,
+	OVERRIDABLE_WORKFLOW_STATUSES,
 	saveNotificationSettings,
 	stepProgress,
 	updateTemplate,
+	type OverridableStepStatus,
+	type OverridableWorkflowStatus,
 	type Step,
 	type Template,
 	type Workflow,
@@ -78,6 +84,8 @@ import {
 	createWorkflow,
 	editStep,
 	expireStale,
+	forceStepStatus,
+	forceWorkflowStatus,
 	onStepResult,
 	pauseWorkflow,
 	removeStep,
@@ -195,6 +203,11 @@ function publicWorkflow(workflow: Workflow): Record<string, unknown> {
 		progress: stepProgress(workflow.id),
 		conversationContext: workflow.conversationContext,
 		contextInjected: workflow.contextInjected,
+		// Whether this status was forced by a human rather than derived from the
+		// steps — the UI marks it, and it's why the badge doesn't move on the next
+		// poll (see `reconcileStatus`).
+		statusManual: workflow.statusManual,
+		statusManualAt: workflow.statusManualAt,
 		createdAt: workflow.createdAt,
 		updatedAt: workflow.updatedAt,
 	};
@@ -222,6 +235,10 @@ function publicStep(step: Step, cfg: HubConfig): Record<string, unknown> {
 		retryCount: step.retryCount,
 		phase: step.phase,
 		selected: step.selected,
+		// Set by the manual status override, so the UI can mark a status a person
+		// asserted rather than one a run reported.
+		statusManual: step.statusManual,
+		statusManualAt: step.statusManualAt,
 		// Progress watchdog (see progress.ts): when the agent was last seen doing
 		// something and what the derived activity state is. `activity` is null for
 		// anything that isn't `running` — there's nothing to watch.
@@ -1035,6 +1052,65 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
 			}
 		})();
+		return;
+	}
+
+	// --- /api/workflows/:id/steps/:stepId/status (force a step's status by hand) ---
+	//
+	// The correction path for a step the engine got wrong: the agent did the work
+	// but the run was cut short or its callback never landed, so the step reads
+	// `failed`. Body: {"status": "done" | "failed" | "pending"}. Never dispatches
+	// anything — see the manual-override block in workflow.ts for the full
+	// semantics. Synchronous: it's a DB write plus the .md rewrite.
+
+	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "status" && !parts[6] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		const stepId = parts[4];
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const status = String(body.status ?? "") as OverridableStepStatus;
+			if (!OVERRIDABLE_STEP_STATUSES.includes(status)) {
+				sendJson(res, 400, { error: `status must be one of: ${OVERRIDABLE_STEP_STATUSES.join(", ")}` });
+				return;
+			}
+			try {
+				const step = forceStepStatus(workflowId, stepId, status, log);
+				sendJson(res, 200, { step: publicStep(step, cfg) });
+			} catch (err) {
+				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		});
+		return;
+	}
+
+	// --- /api/workflows/:id/status (force the workflow's status by hand) ---
+	//
+	// Same idea one level up, for the workflow badge itself. Body:
+	// {"status": "completed" | "failed" | "paused" | "draft"}. The status is
+	// pinned against re-derivation until the engine next writes one of its own.
+	// Declared before the {start,pause,resume,restart} block only for symmetry
+	// with the step route above; the paths don't overlap.
+
+	if (workflowId && parts[3] === "status" && !parts[4] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const status = String(body.status ?? "") as OverridableWorkflowStatus;
+			if (!OVERRIDABLE_WORKFLOW_STATUSES.includes(status)) {
+				sendJson(res, 400, { error: `status must be one of: ${OVERRIDABLE_WORKFLOW_STATUSES.join(", ")}` });
+				return;
+			}
+			try {
+				const workflow = forceWorkflowStatus(workflowId, status, log);
+				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
+			} catch (err) {
+				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		});
 		return;
 	}
 

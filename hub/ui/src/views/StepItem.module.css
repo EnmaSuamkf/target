@@ -190,6 +190,17 @@
 	padding-left: calc(15px + var(--space-3));
 }
 
+/* The manual status picker sits in the action row, so it's sized to match the
+   small buttons beside it rather than the full-width form selects. */
+.statusSelect {
+	width: auto;
+	min-width: 8.5rem;
+	height: auto;
+	padding-top: 0.25rem;
+	padding-bottom: 0.25rem;
+	font-size: var(--text-xs);
+}
+
 /* --- editor --- */
 
 .editor {
@@ -329,6 +340,16 @@
 	   pair — which is fine as two half-width buttons. */
 	.step > .actions > :global(.btn--primary) {
 		grid-column: 1 / -1;
+	}
+
+	/* The picker takes the full width of the grid and a thumb-sized height: a
+	   native select is the one control here that opens a system sheet, so a
+	   mis-tap costs more than on a button. */
+	.statusSelect {
+		grid-column: 1 / -1;
+		width: 100%;
+		min-height: var(--tap-target);
+		font-size: var(--text-sm);
 	}
 
 	.resultToggle {

@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import type { SessionInfo, Step, StepConfigInput, Template, Workflow } from "../api/types.ts";
-import { startActionFor } from "../api/types.ts";
+import type {
+	OverridableStepStatus,
+	OverridableWorkflowStatus,
+	SessionInfo,
+	Step,
+	StepConfigInput,
+	Template,
+	Workflow,
+} from "../api/types.ts";
+import { OVERRIDABLE_WORKFLOW_STATUSES, startActionFor } from "../api/types.ts";
 import { Badge } from "../components/Badge.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
@@ -27,6 +35,11 @@ import styles from "./WorkflowDetail.module.css";
  * - **A `waiting` workflow has no Start at all.** It's held at a step's
  *   manual-review gate, and only that step's Continue button releases it (the
  *   server refuses a Start on it), so the button says so instead of failing.
+ * - **The status picker overrules all of that.** It doesn't run anything: it
+ *   records what really happened when the engine's verdict is wrong (a run that
+ *   ran out of tokens, a callback that never landed). The hub then leaves that
+ *   status alone until the workflow is run again, and the badge is marked as
+ *   set by hand.
  *
  * `onBack` is passed only when this pane is the whole screen (a phone, where
  * the workflow list is not next to it) — it's what turns "the detail half of a
@@ -42,6 +55,7 @@ export function WorkflowDetail({
 	onStart,
 	onStop,
 	onDelete,
+	onSetStatus,
 	onSaveContext,
 	onOpenTerminal,
 	onAddStep,
@@ -50,6 +64,7 @@ export function WorkflowDetail({
 	onRunStep,
 	onAbortStep,
 	onContinueStep,
+	onSetStepStatus,
 	onAddStepsFromTemplate,
 }: {
 	workflow: Workflow;
@@ -62,6 +77,8 @@ export function WorkflowDetail({
 	onStart: (stepIds: string[]) => void;
 	onStop: () => void;
 	onDelete: () => void;
+	/** Forces the workflow's status by hand; never runs anything. */
+	onSetStatus: (status: OverridableWorkflowStatus) => void;
 	/** Resolves true only when the server really stored the context. */
 	onSaveContext: (context: string) => Promise<boolean>;
 	onOpenTerminal: () => void;
@@ -71,6 +88,8 @@ export function WorkflowDetail({
 	onRunStep: (id: string) => void;
 	onAbortStep: (id: string) => void;
 	onContinueStep: (id: string) => void;
+	/** Forces one step's status by hand; never runs the step. */
+	onSetStepStatus: (id: string, status: OverridableStepStatus) => void;
 	onAddStepsFromTemplate: (templateId: string) => Promise<void>;
 }): React.JSX.Element {
 	// Which steps the next run should dispatch. Seeded from the server's
@@ -96,6 +115,9 @@ export function WorkflowDetail({
 
 	const startAction = startActionFor(workflow.status);
 	const running = workflow.status === "running";
+	// The server refuses a workflow override while a step still has a callback
+	// coming — that callback would write a status over it seconds later.
+	const stepInFlight = steps.some((s) => s.status === "running" || s.status === "queued");
 	const selectedCount = selection.size;
 	const allSelected = steps.length > 0 && selectedCount === steps.length;
 
@@ -141,7 +163,7 @@ export function WorkflowDetail({
 
 				<div className={styles.titleRow}>
 					<h2 className={styles.title}>{workflow.name}</h2>
-					<Badge status={workflow.status} />
+					<Badge status={workflow.status} manual={workflow.statusManual} manualAt={workflow.statusManualAt} />
 				</div>
 
 				<dl className={styles.facts}>
@@ -204,6 +226,34 @@ export function WorkflowDetail({
 						Stop
 					</button>
 
+					{/* Says what really happened when the engine's verdict is wrong.
+					    Deliberately NOT a run control: it dispatches nothing, and it's a
+					    picker rather than four buttons so the run controls stay the
+					    obvious thing to press — and so it's one target on a phone. */}
+					<select
+						className={`select ${styles.statusSelect}`}
+						value=""
+						disabled={busy || stepInFlight}
+						aria-label="Set this workflow's status by hand"
+						title={
+							stepInFlight
+								? "A step is still in flight — stop or abort it first."
+								: "Correct the status by hand when a step really succeeded but was recorded as failed. Nothing is run."
+						}
+						onChange={(ev) => {
+							const next = ev.target.value as OverridableWorkflowStatus | "";
+							ev.target.value = "";
+							if (next) onSetStatus(next);
+						}}
+					>
+						<option value="">Set status…</option>
+						{OVERRIDABLE_WORKFLOW_STATUSES.filter((s) => s !== workflow.status).map((s) => (
+							<option key={s} value={s}>
+								Mark {s}
+							</option>
+						))}
+					</select>
+
 					<div className={styles.controlsSpacer} />
 
 					<button type="button" className={`btn btn--danger ${styles.delete}`} onClick={onDelete} disabled={busy}>
@@ -249,6 +299,7 @@ export function WorkflowDetail({
 									onRun={onRunStep}
 									onAbort={onAbortStep}
 									onContinue={onContinueStep}
+									onSetStatus={onSetStepStatus}
 									busy={busy}
 								/>
 							))}

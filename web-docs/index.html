@@ -286,6 +286,7 @@
           <a href="#steps">Steps &amp; statuses</a>
           <a href="#judge">Judge &amp; retries</a>
           <a href="#review">Human review &amp; waiting</a>
+          <a href="#override">Fixing a status by hand</a>
           <a href="#templates">Templates</a>
           <a href="#conversation">The conversation</a>
           <a href="#settings">Settings &amp; notifications</a>
@@ -416,7 +417,7 @@
           <li><strong>judging</strong> &mdash; the step had acceptance criteria, finished its work, and is now self-evaluating the result.</li>
           <li><strong>waiting</strong> &mdash; the step was flagged for a human review and has finished its work; the workflow pauses until you press <strong>Continue</strong>. (See <a href="#review">Human review &amp; waiting</a>.)</li>
           <li><strong>done</strong> &mdash; finished and accepted.</li>
-          <li><strong>failed</strong> &mdash; the step (and therefore the workflow) ended in error.</li>
+          <li><strong>failed</strong> &mdash; the step (and therefore the workflow) ended in error. If the work actually landed and only the reporting went wrong, you can say so &mdash; see <a href="#override">Fixing a status by hand</a>.</li>
         </ul>
         <div class="callout">
           <span class="tag">badge = bar</span>
@@ -483,6 +484,51 @@
         <div class="callout">
           <span class="tag">heads up</span>
           <p>If you&rsquo;ve turned on notifications, the hub can ping you on Slack the moment a step starts waiting &mdash; so you don&rsquo;t have to keep the UI open. The message names the workflow, the step and what to check. The notification is advisory: the hold is the feature; a failed delivery changes nothing.</p>
+        </div>
+      </section>
+
+      <section id="override">
+        <h2>Fixing a status by hand</h2>
+        <p>
+          Every status here is worked out for you: a step&rsquo;s comes from what its run
+          reported, and a workflow&rsquo;s comes from its steps. That is right almost always,
+          and wrong in one situation you will eventually hit &mdash; the agent
+          <em>did</em> the work, but the run never got to say so. It ran out of tokens
+          halfway through the answer, or the result callback was lost, or the judge turned
+          down a result that was perfectly fine. The step reads <code>failed</code>, the
+          whole workflow reads <code>failed</code> with it, and the red segment on the
+          progress bar is for work that is sitting finished on your disk.
+        </p>
+        <p>
+          <strong>Set status&hellip;</strong> is the answer. There&rsquo;s one picker beside
+          the run controls for the workflow, and one in every step&rsquo;s row of actions.
+          Pick what really happened, confirm, done.
+        </p>
+        <div class="pills">
+          <span class="pill" data-s="done">step: done</span>
+          <span class="pill" data-s="failed">step: failed</span>
+          <span class="pill" data-s="pending">step: pending</span>
+        </div>
+        <p>
+          Workflows take <code>completed</code>, <code>failed</code>, <code>paused</code> or
+          <code>draft</code>. What you <em>can&rsquo;t</em> set is anything that means
+          &ldquo;a job is in flight&rdquo; &mdash; <code>running</code> and
+          <code>queued</code> aren&rsquo;t opinions, and <code>waiting</code> belongs to the
+          human-review gate and its <strong>Continue</strong> button. For the same reason, a
+          step that still has a run in the air is refused: <strong>Abort</strong> it first,
+          then set its status.
+        </p>
+        <p>What it does and doesn&rsquo;t do, in plain words:</p>
+        <ul>
+          <li><strong>It records, it never runs.</strong> Marking a failed step <code>done</code> does not re-run it and does not push the workflow forward. Marking one <code>pending</code> doesn&rsquo;t start it either &mdash; it just goes back in the queue for the next Start.</li>
+          <li><strong>Nothing is rewritten.</strong> The result, the session and the timings stay exactly as the run left them, so the conversation still tells the true story. Only the verdict changes &mdash; plus the error message, which is dropped when you mark a step <code>done</code>, because a red error under a green badge is the very thing you came here to fix.</li>
+          <li><strong>The workflow follows its steps.</strong> Fix the last failed step and the workflow&rsquo;s own <code>failed</code> badge clears itself, and the progress bar goes to 100%. You usually don&rsquo;t need to touch the workflow picker at all.</li>
+          <li><strong>A workflow status you set sticks.</strong> The hub normally re-derives it on every refresh; once you&rsquo;ve set it yourself it&rsquo;s left alone &mdash; until you Start, Stop, Resume or Start over, at which point the steps are telling the truth again and the hub takes it back.</li>
+          <li><strong>It&rsquo;s always visible.</strong> A status you set carries a small pencil on its badge (hover it for when), in the list and in the detail, and the workflow&rsquo;s <code>.md</code> status file says <em>set manually</em> next to it.</li>
+        </ul>
+        <div class="callout">
+          <span class="tag">on your phone too</span>
+          <p>Both pickers are native selects, so on a phone they open the system chooser and sit on their own full-width row &mdash; the same UI, just laid out for a thumb. Everything here works from the CLI as well: <code>target set-status &lt;id&gt; completed</code> and <code>target set-step-status &lt;id&gt; &lt;stepId&gt; done</code> (run <code>target show &lt;id&gt;</code> to get the step ids).</p>
         </div>
       </section>
 
@@ -765,7 +811,9 @@ npm run target:install</code></pre>
               <tr><td><code>target create-from-template &lt;templateId&gt; &lt;name&gt;</code></td><td>Same, seeded with a template&rsquo;s steps. Takes the same <code>--workdir</code> / <code>--permission-mode</code> / <code>--runner</code> / <code>--sandbox</code> / <code>--image</code> flags.</td></tr>
               <tr><td><code>target set-context &lt;id&gt; "&lt;text&gt;"</code></td><td>Sets (or clears, with <code>""</code>) the conversation context.</td></tr>
               <tr><td><code>target add-step &lt;id&gt; &lt;description&gt;</code></td><td>Appends a step.</td></tr>
-              <tr><td><code>target list</code> / <code>target show &lt;id&gt;</code></td><td>List workflows / show a workflow&rsquo;s steps.</td></tr>
+              <tr><td><code>target list</code> / <code>target show &lt;id&gt;</code></td><td>List workflows / show a workflow&rsquo;s steps (and their ids).</td></tr>
+              <tr><td><code>target set-status &lt;id&gt; &lt;status&gt;</code></td><td>Sets a workflow&rsquo;s status by hand: <code>completed</code>, <code>failed</code>, <code>paused</code> or <code>draft</code>. Runs nothing.</td></tr>
+              <tr><td><code>target set-step-status &lt;id&gt; &lt;stepId&gt; &lt;status&gt;</code></td><td>Sets one step&rsquo;s status by hand: <code>done</code>, <code>failed</code> or <code>pending</code>. Runs nothing.</td></tr>
               <tr><td><code>target run &lt;id&gt;</code></td><td>Start (or continue) sequential dispatch.</td></tr>
               <tr><td><code>target pause</code> / <code>resume</code> / <code>restart &lt;id&gt;</code></td><td>Stop dispatching / undo a pause / reset every step and start over.</td></tr>
             </tbody>
@@ -828,6 +876,8 @@ hub    →  next selected step dispatched              until none remain, then t
               <tr><td><code>POST /api/workflows/:id/steps/:stepId/run</code></td><td>Run one step now, out of order, on a fresh session.</td></tr>
               <tr><td><code>POST /api/workflows/:id/steps/:stepId/abort</code></td><td>Force-fail a stuck step, preserving its session, and kill the agent process on the broker.</td></tr>
               <tr><td><code>POST /api/workflows/:id/steps/:stepId/continue</code></td><td>Release a step&rsquo;s manual-review hold.</td></tr>
+              <tr><td><code>POST /api/workflows/:id/steps/:stepId/status</code></td><td>Set a step&rsquo;s status by hand. Body: <code>{status}</code> &mdash; <code>done</code>, <code>failed</code> or <code>pending</code>. Never dispatches; refused (<code>400</code>) while the step has a job in flight.</td></tr>
+              <tr><td><code>POST /api/workflows/:id/status</code></td><td>Set the workflow&rsquo;s status by hand. Body: <code>{status}</code> &mdash; <code>completed</code>, <code>failed</code>, <code>paused</code> or <code>draft</code>. Pinned against re-derivation until the engine writes a status itself.</td></tr>
               <tr><td><code>POST /api/workflows/:id/start | pause | resume | restart</code></td><td>Run control. Optional <code>{stepIds: [...]}</code> to restrict which steps run.</td></tr>
               <tr><td><code>GET/POST/PUT/DELETE /api/templates[/:id]</code></td><td>List, create, update and delete templates.</td></tr>
               <tr><td><code>GET/PUT /api/settings/notifications</code></td><td>Read and save the notification preferences.</td></tr>

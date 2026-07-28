@@ -16,6 +16,20 @@ export type WorkflowStatus = "draft" | "running" | "paused" | "waiting" | "compl
 export type StepStatus = "pending" | "queued" | "running" | "waiting" | "done" | "failed";
 
 /**
+ * The statuses a human may force by hand, mirroring the server's
+ * `OVERRIDABLE_*_STATUSES` (hub/db.ts). Only the settled ones: `running` and
+ * `queued` mean "a job is in flight", which no status write can make true, and
+ * `waiting` belongs to the manual-review gate and its Continue button. The
+ * server validates these again and answers 400, so these arrays only decide
+ * what the pickers offer.
+ */
+export const OVERRIDABLE_STEP_STATUSES = ["done", "failed", "pending"] as const;
+export type OverridableStepStatus = (typeof OVERRIDABLE_STEP_STATUSES)[number];
+
+export const OVERRIDABLE_WORKFLOW_STATUSES = ["completed", "failed", "paused", "draft"] as const;
+export type OverridableWorkflowStatus = (typeof OVERRIDABLE_WORKFLOW_STATUSES)[number];
+
+/**
  * Which job a `running` step is waiting on: its own execution (`exec`) or the
  * self-evaluation that follows (`judge`). Meaningless while not running — the
  * UI only uses it to show "judging" instead of "running".
@@ -67,6 +81,13 @@ export interface Workflow {
 	progress: Progress;
 	conversationContext: string | null;
 	contextInjected: boolean;
+	/**
+	 * True when this status was forced by a human instead of derived from the
+	 * steps. It's also why the badge stays put: the hub stops re-deriving a
+	 * status a person asserted until the engine runs again.
+	 */
+	statusManual: boolean;
+	statusManualAt: string | null;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -94,6 +115,9 @@ export interface Step {
 	retryCount: number;
 	phase: StepPhase;
 	selected: boolean;
+	/** True when this status was forced by a human rather than reported by a run. */
+	statusManual: boolean;
+	statusManualAt: string | null;
 	/** When the step's agent was last seen doing something (mtime of the freshest artifact its harness wrote). Null unless it has run. */
 	lastProgressAt: string | null;
 	/** Which artifact that signal came from. */

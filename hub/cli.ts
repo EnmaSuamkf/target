@@ -22,7 +22,11 @@ Commands:
   create-from-template <templateId> <workflowName> [--workdir <dir>] [--runner <claude|free-code>] [--sandbox <host|docker>] [--image <name>]
                                          Create a workflow seeded with a template's steps
   list                                  List workflows with progress
-  show <workflowId>                     Show a workflow's steps
+  show <workflowId>                     Show a workflow's steps (and their ids)
+  set-status <workflowId> <draft|paused|completed|failed>
+                                         Force a workflow's status by hand
+  set-step-status <workflowId> <stepId> <pending|done|failed>
+                                         Force one step's status by hand
   run <workflowId>                      Start (or continue) sequential dispatch
   pause <workflowId>                    Stop dispatching further steps
   resume <workflowId>                   Undo pause
@@ -44,6 +48,8 @@ interface WorkflowJson {
 	agentName: string;
 	lastSessionId: string | null;
 	mdPath: string;
+	/** True when the status was forced by a human rather than derived from the steps. */
+	statusManual?: boolean;
 	conversationContext: string | null;
 	contextInjected: boolean;
 	/** Where the workflow's agent runs: "host" (default) or "docker". */
@@ -58,6 +64,8 @@ interface StepJson {
 	description: string;
 	status: string;
 	error: string | null;
+	/** True when the status was forced by a human rather than reported by a run. */
+	statusManual?: boolean;
 }
 
 interface TemplateJson {
@@ -232,8 +240,53 @@ async function main(): Promise<void> {
 		}
 		console.log("");
 		for (const s of steps) {
-			console.log(`  ${s.orderIndex + 1}. [${s.status}] ${s.description}${s.error ? ` — ${s.error}` : ""}`);
+			// The id is printed because `set-step-status` needs it and this is the
+			// only command that shows it.
+			console.log(
+				`  ${s.orderIndex + 1}. [${s.status}${s.statusManual ? " (manual)" : ""}] ${s.description}${s.error ? ` — ${s.error}` : ""}\n     ${s.id}`,
+			);
 		}
+		return;
+	}
+
+	// Manual status override: say what really happened when the engine got it
+	// wrong (a run that ran out of tokens, a callback that never landed). Neither
+	// command runs anything — see the manual-override block in hub/workflow.ts.
+
+	if (cmd === "set-status") {
+		const [workflowId, status] = rest;
+		if (!workflowId || !status) {
+			console.error("Usage: target set-status <workflowId> <draft|paused|completed|failed>");
+			process.exitCode = 1;
+			return;
+		}
+		const res = await fetch(`${apiBase}/workflows/${workflowId}/status`, {
+			method: "POST",
+			headers: { "content-type": "application/json", ...authHeaders },
+			body: JSON.stringify({ status }),
+		});
+		if (!res.ok) await fail(res);
+		const { workflow } = (await res.json()) as { workflow: WorkflowJson };
+		console.log(`Workflow '${workflow.name}' is now ${workflow.status} (set manually).`);
+		return;
+	}
+
+	if (cmd === "set-step-status") {
+		const [workflowId, stepId, status] = rest;
+		if (!workflowId || !stepId || !status) {
+			console.error("Usage: target set-step-status <workflowId> <stepId> <pending|done|failed>");
+			console.error("  (`target show <workflowId>` lists the step ids)");
+			process.exitCode = 1;
+			return;
+		}
+		const res = await fetch(`${apiBase}/workflows/${workflowId}/steps/${stepId}/status`, {
+			method: "POST",
+			headers: { "content-type": "application/json", ...authHeaders },
+			body: JSON.stringify({ status }),
+		});
+		if (!res.ok) await fail(res);
+		const { step } = (await res.json()) as { step: StepJson };
+		console.log(`Step ${step.orderIndex + 1} is now ${step.status} (set manually).`);
 		return;
 	}
 
