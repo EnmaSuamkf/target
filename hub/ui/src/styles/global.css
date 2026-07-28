@@ -457,11 +457,19 @@ kbd,
 @media (max-width: 768px) {
 	/* Under 16px, iOS Safari zooms the page when a control takes focus and never
 	   zooms back out — the single most disorienting thing a form can do on a
-	   phone. The `:not()` chain is only there to out-specify the `.input` /
-	   `.searchInput` class rules that come later in the cascade. */
-	input:not([type="checkbox"]):not([type="radio"]),
-	textarea,
-	select {
+	   phone.
+	   The `:not()` chain is not cosmetic: it buys the specificity needed to
+	   out-weigh the single-class rules that size these controls (`.input`,
+	   `.textarea`, `.select` above, plus `.searchInput` / `.statusSelect` /
+	   VoiceDock's `.lang` in component modules). Specificity is computed per
+	   complex selector, never for the list as a whole, so the elements have to
+	   share one arm via `:is()` — spelling them as three bare type selectors
+	   would leave `textarea` and `select` at (0,0,1) and they would lose to
+	   their own class rules and keep zooming.
+	   `[contenteditable]` is here because the rich-text popup writes into a div,
+	   not a textarea, and iOS zooms into that just the same. */
+	:is(input, textarea, select):not([type="checkbox"]):not([type="radio"]),
+	[contenteditable]:not([contenteditable="false"]) {
 		font-size: 16px;
 	}
 
@@ -514,8 +522,25 @@ kbd,
 		padding-right: var(--space-8);
 	}
 
+	/* --- form rhythm on a phone ---
+	 *
+	 * The 16px anti-zoom floor above is not free: it lifted every control's text
+	 * above its own label (13px) and hint (13px), so a field read as one flat
+	 * grey run with a box in the middle of it. These three rules put the
+	 * hierarchy back — label over hint, both under the control — and give the
+	 * label/control/hint trio enough air to read as one group.
+	 */
+	.label {
+		font-size: var(--text-md);
+	}
+
 	.hint {
-		font-size: var(--text-sm);
+		font-size: var(--text-base);
+		line-height: 1.55;
+	}
+
+	.field {
+		gap: var(--space-3);
 	}
 }
 

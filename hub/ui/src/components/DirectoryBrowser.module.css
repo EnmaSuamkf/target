@@ -101,6 +101,13 @@
  * everything below it in the form is still reachable by scrolling the sheet.
  */
 @media (max-width: 768px) {
+	/* Compact, but not tighter than the form it drops into: at the desktop 12px
+	   the panel's own frame sat right on its 44px rows. */
+	.panel {
+		gap: var(--space-3);
+		padding: var(--space-4);
+	}
+
 	.toolbar {
 		flex-wrap: wrap;
 	}
