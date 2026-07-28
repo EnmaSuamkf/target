@@ -149,6 +149,14 @@ export function WorkflowList({
 						>
 							<span className={styles.cardHead}>
 								<span className={styles.cardName}>{workflow.name}</span>
+								{/* Only the contained ones are marked: `host` is the default and
+								    marking it everywhere would make the badge invisible on the
+								    workflows where it actually says something. */}
+								{workflow.sandbox === "docker" && (
+									<span className={styles.sandbox} title={`Steps run in a container (${workflow.image ?? "default image"})`}>
+										docker
+									</span>
+								)}
 								<Badge status={workflow.status} />
 							</span>
 

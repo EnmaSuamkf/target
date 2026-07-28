@@ -290,6 +290,7 @@
           <a href="#conversation">The conversation</a>
           <a href="#settings">Settings &amp; notifications</a>
           <a href="#rich-text">Rich text inputs</a>
+          <a href="#sandbox">Host or Docker</a>
           <a href="#safety">Safety</a>
           <a href="#install">Install &amp; run</a>
           <a href="#reference">Quick reference</a>
@@ -322,7 +323,7 @@
       <section id="story">
         <h2>The story in five moves</h2>
         <div class="story">
-          <div class="move"><p><strong>You create a workflow.</strong> Give it a name, pick a working folder, choose the agent runtime and its permissions. A dedicated agent and hook are created for it automatically.</p></div>
+          <div class="move"><p><strong>You create a workflow.</strong> Give it a name, pick a working folder, choose the agent runtime, where it runs (this machine or a Docker container) and its permissions. A dedicated agent and hook are created for it automatically.</p></div>
           <div class="move"><p><strong>You add steps.</strong> Each step is a plain-language task, with optional acceptance criteria, retries, a retry interval, and a &ldquo;needs a human&rdquo; toggle.</p></div>
           <div class="move"><p><strong>You press Start.</strong> The first step is sent to the agent. When it finishes, the next selected step is sent &mdash; always resuming the same conversation.</p></div>
           <div class="move"><p><strong>You watch and steer.</strong> A progress bar and a badge track the run. A step that needs review pauses the whole workflow and waits for your <em>Continue</em>.</p></div>
@@ -373,6 +374,8 @@
         <ul>
           <li><strong>Working directory</strong> &mdash; where the agent works. Leave it empty for a private sandbox under <code>~/.target/sandboxes/</code>, or point it at a real repo. The <code>&hellip;</code> button browses the server&rsquo;s folders.</li>
           <li><strong>Agent runtime</strong> &mdash; <code>Claude Code</code> (the default) or <code>free-code</code>. The engine, judges and retries behave the same either way; only the spawned CLI and the session-id shape differ. The runner is fixed for the workflow&rsquo;s life &mdash; to switch, make a new workflow.</li>
+          <li><strong>Sandbox</strong> &mdash; <em>where</em> that runtime runs. <code>This machine</code> is the default and is what The Target Project has always done: the CLI runs as you, on your real filesystem. <code>Docker container</code> runs the very same invocation inside <code>docker run --rm</code>, with only the working directory and the harness&rsquo;s own state mounted in. It sits right next to the runtime because the two answer different halves of the same question &mdash; and because the sandbox is what bounds the permission choice underneath it. See <a href="#sandbox">Host or Docker</a>.</li>
+          <li><strong>Container image</strong> &mdash; only appears when you pick <code>Docker container</code>. Leave it empty for <code>target-agent:latest</code>, the image built from the repo&rsquo;s <code>Dockerfile</code>, or name your own: the image is a per-workflow field, so a Python repo and a Node repo can use different toolchains.</li>
           <li><strong>Agent permissions</strong> &mdash; how much the agent may do. <code>Read-only</code> by default: it can answer but can&rsquo;t write files or run commands. <code>acceptEdits</code> lets it write files inside its sandbox. <code>bypassPermissions</code> removes every check &mdash; so it asks you to confirm the risk first.</li>
           <li><strong>Start from template</strong> &mdash; copy a saved step list into the new workflow (more on <a href="#templates">templates</a> below).</li>
         </ul>
@@ -541,6 +544,14 @@
           <code>free-code --session &lt;path&gt;</code>) so you can pick up the conversation
           by hand.
         </p>
+        <p>
+          If the workflow runs in a <a href="#sandbox">Docker sandbox</a>, the offered command
+          is the containerised one &mdash; <code>docker run --rm -it &hellip; &lt;image&gt; claude
+          --resume &lt;id&gt;</code>, with the same mounts and the same working directory the
+          steps ran under. Running the bare host command instead would look like it worked
+          while reaching a different install; the session lives in the container&rsquo;s view of
+          the world, so the terminal has to enter the same one.
+        </p>
       </section>
 
       <section id="settings">
@@ -583,6 +594,93 @@
         </p>
       </section>
 
+      <section id="sandbox">
+        <h2>Where the agent runs: this machine, or a container</h2>
+        <p class="lead">
+          <strong>Sandbox</strong> is the sibling of the agent runtime. The runtime decides
+          <em>which</em> CLI runs your steps; the sandbox decides <em>where</em> it runs. You
+          choose once, when you create the workflow, and like the runtime it is fixed for that
+          workflow&rsquo;s life.
+        </p>
+        <ul>
+          <li><strong><code>host</code></strong> &mdash; the default, and exactly today&rsquo;s behaviour: the CLI is spawned on this machine, as you, on your real filesystem. Here <code>bypassPermissions</code> means &ldquo;anything you can do&rdquo;.</li>
+          <li><strong><code>docker</code></strong> &mdash; the same invocation runs inside <code>docker run --rm</code>. Only the workflow&rsquo;s working directory and the harness&rsquo;s own state are mounted, so <code>bypassPermissions</code> shrinks to &ldquo;anything inside these mounts&rdquo;. That is the whole point of the feature.</li>
+        </ul>
+        <p>
+          Pick it from the <strong>Sandbox</strong> dropdown in the New-workflow dialog (a
+          <strong>Container image</strong> box appears underneath when you choose Docker), or
+          from the command line:
+        </p>
+        <pre><code>target create my-flow --workdir ~/repos/thing --sandbox docker
+target create my-flow --workdir ~/repos/thing --sandbox docker --image my-python-agent:1.2</code></pre>
+        <p>
+          A containerised workflow carries a small <strong>docker</strong> badge in the workflow
+          list, and its session panel shows the sandbox and the image next to the harness, so
+          you never have to guess where a run happened.
+        </p>
+
+        <h3>The broker never moves</h3>
+        <p>
+          The hub and the awb broker stay on this machine, on <code>127.0.0.1</code>, exactly as
+          before. The broker simply shells out to <code>docker run --rm</code> once per step,
+          captures the output on the host, and posts the callback itself. The container needs
+          outbound internet to reach the model API and nothing else &mdash; no published port,
+          no route back to the hub. That is why the workdir lock, the callbacks, <strong>Abort</strong>
+          and the idle watchdog behave identically whichever sandbox you picked, and why a
+          <code>host</code> workflow and a <code>docker</code> workflow pointed at the same repo
+          still serialize against each other.
+        </p>
+        <pre><code>docker run --rm --init \
+  --user 1000:1000 --memory 4g --cpus 2 --pids-limit 512 \
+  -v /home/you/repo:/home/you/repo \
+  -v /home/you/.claude:/home/you/.claude \
+  -v /home/you/.claude.json:/home/you/.claude.json \
+  -e HOME=/home/you \
+  -w /home/you/repo \
+  target-agent:latest \
+  claude --resume &lt;session&gt; -p "&lt;the step&gt;" &hellip;</code></pre>
+        <p>
+          The mounts are exactly three things: the working directory, the harness&rsquo;s home
+          state (<code>~/.claude</code> and <code>~/.claude.json</code>, plus awb&rsquo;s
+          <code>sessions/</code> directory for free-code, whose session ids <em>are</em>
+          absolute paths), and whatever extra paths the hook was configured with. Nothing is
+          derived from a step&rsquo;s text.
+        </p>
+
+        <div class="callout warn">
+          <span class="tag">same path inside and out</span>
+          <p>The working directory is mounted at its <strong>own absolute path</strong>, and the container works from that same path. This isn&rsquo;t cosmetic: the hub locates a step&rsquo;s transcripts by slugifying the working-directory string, so a container that remaps the repo to <code>/workspace</code> doesn&rsquo;t error &mdash; it writes its transcripts under a slug nobody is watching, no progress is ever seen, and every step is declared stalled after the 10-minute idle timeout. If you bring your own image, don&rsquo;t bake in a <code>WORKDIR</code> or a <code>HOME</code> that fights this.</p>
+        </div>
+        <div class="callout warn">
+          <span class="tag">credentials cross the boundary</span>
+          <p>The container shares your personal <code>~/.claude</code> &mdash; config, sessions and <code>.credentials.json</code> included &mdash; because that is also where the transcripts the hub reads have to land. This is a deliberate trade-off, not an oversight: the container bounds what the agent can touch on your <em>filesystem</em>, not what it can read of your Claude Code login. Giving each agent its own harness home is future work; it isn&rsquo;t what this does today.</p>
+        </div>
+
+        <h3>The image</h3>
+        <p>
+          The default is <code>target-agent:latest</code>, built from the <code>Dockerfile</code>
+          at the root of the repo &mdash; Node&nbsp;24, the <code>claude</code> CLI,
+          <code>git</code>, <code>ripgrep</code>, and a non-root user:
+        </p>
+        <pre><code>docker build -t target-agent:latest .
+
+# if your account isn't uid/gid 1000, build with matching ids:
+docker build -t target-agent:latest \
+  --build-arg AGENT_UID="$(id -u)" --build-arg AGENT_GID="$(id -g)" .</code></pre>
+        <p>
+          It is meant to be replaced. Because the image is a per-workflow field, one workflow can
+          run on a Python image and the next on a Node one. Whatever the image, the container is
+          run as <code>--user &lt;your uid&gt;:&lt;your gid&gt;</code>, so files the agent creates
+          in the repo come back owned by you rather than root, and the resource caps
+          (<code>--memory 4g</code>, <code>--cpus 2</code>, <code>--pids-limit 512</code>) stop a
+          runaway step from taking the machine down with it.
+        </p>
+        <div class="callout danger">
+          <span class="tag">never</span>
+          <p>Don&rsquo;t mount <code>/var/run/docker.sock</code> into an agent image. That socket is root on the host &mdash; handing it to a permissive agent gives back everything the container was for.</p>
+        </div>
+      </section>
+
       <section id="safety">
         <h2>Safety: timeouts, permissions and abort</h2>
         <h3>A step is timed out for going quiet, not for taking long</h3>
@@ -608,7 +706,9 @@
           By default an agent can answer but can&rsquo;t write files or run commands. Writing
           needs <code>acceptEdits</code> at creation, scoped to that agent&rsquo;s own sandbox.
           <code>bypassPermissions</code> removes every check and demands an explicit risk
-          confirmation.
+          confirmation. What that check-free agent can actually reach is then bounded by its
+          <a href="#sandbox">sandbox</a>: on the host, your whole machine; in a container, its
+          mounts.
         </p>
         <h3>Abort a stuck step</h3>
         <p>
@@ -627,7 +727,11 @@
 
       <section id="install">
         <h2>Install &amp; run</h2>
-        <p>It runs straight from the repo checkout (not on npm). Needs <strong>Node&nbsp;24+</strong>.</p>
+        <p>
+          It runs straight from the repo checkout (not on npm). Needs <strong>Node&nbsp;24+</strong>
+          &mdash; plus <strong>Docker</strong>, but only if you intend to create workflows with
+          <a href="#sandbox">the Docker sandbox</a>; host workflows need nothing extra.
+        </p>
         <pre><code>git clone &lt;this repo&gt; &amp;&amp; cd target
 npm run target:install</code></pre>
         <p>
@@ -657,7 +761,8 @@ npm run target:install</code></pre>
           <table>
             <thead><tr><th>Command</th><th>What it does</th></tr></thead>
             <tbody>
-              <tr><td><code>target create &lt;name&gt;</code></td><td>Creates a workflow (+ its agent/hook). Flags: <code>--workdir</code>, <code>--permission-mode</code>, <code>--runner claude|free-code</code>, <code>--yes-bypass-risk</code>.</td></tr>
+              <tr><td><code>target create &lt;name&gt;</code></td><td>Creates a workflow (+ its agent/hook). Flags: <code>--workdir</code>, <code>--permission-mode</code>, <code>--runner claude|free-code</code>, <code>--sandbox host|docker</code>, <code>--image &lt;name&gt;</code>, <code>--yes-bypass-risk</code>. Prints the sandbox it settled on.</td></tr>
+              <tr><td><code>target create-from-template &lt;templateId&gt; &lt;name&gt;</code></td><td>Same, seeded with a template&rsquo;s steps. Takes the same <code>--workdir</code> / <code>--permission-mode</code> / <code>--runner</code> / <code>--sandbox</code> / <code>--image</code> flags.</td></tr>
               <tr><td><code>target set-context &lt;id&gt; "&lt;text&gt;"</code></td><td>Sets (or clears, with <code>""</code>) the conversation context.</td></tr>
               <tr><td><code>target add-step &lt;id&gt; &lt;description&gt;</code></td><td>Appends a step.</td></tr>
               <tr><td><code>target list</code> / <code>target show &lt;id&gt;</code></td><td>List workflows / show a workflow&rsquo;s steps.</td></tr>
@@ -689,6 +794,7 @@ awb    →  <span class="hl">queued</span> (waiting on the workdir lock)      se
 awb    →  POST startedCallbackUrl {started:true}   the instant the lock is acquired
 hub    →  step <span class="hl">running</span> (idle clock starts here)
 awb    →  spawns <span class="hl">claude</span> or <span class="hl">free-code</span>             the step's description, with the subagent instruction appended
+          …on the host, or wrapped in <span class="hl">docker run --rm</span>   only if the workflow chose sandbox: docker; the broker itself never moves
 awb    →  POST callbackUrl {ok, result, session_id}  when the run finishes
 hub    →  step <span class="hl">done</span> · <span class="hl">judging</span> · or <span class="hl">waiting</span>     done if no criteria; judging if it has them; waiting if gated
 hub    →  next selected step dispatched              until none remain, then the workflow is <span class="hl">completed</span></div>
@@ -715,7 +821,7 @@ hub    →  next selected step dispatched              until none remain, then t
             <thead><tr><th>Endpoint</th><th>What it does</th></tr></thead>
             <tbody>
               <tr><td><code>GET /api/workflows</code></td><td>List workflows with progress % (expires stale steps first).</td></tr>
-              <tr><td><code>POST /api/workflows</code></td><td>Create a workflow (+ its hook). Body: <code>{name, workdir?, permissionMode?, runner?, acceptBypassRisk?, templateId?}</code>.</td></tr>
+              <tr><td><code>POST /api/workflows</code></td><td>Create a workflow (+ its hook). Body: <code>{name, workdir?, permissionMode?, runner?, sandbox?, image?, acceptBypassRisk?, templateId?}</code>. <code>sandbox</code> is <code>"host"</code> (default) or <code>"docker"</code> and is validated server-side; <code>image</code> only means anything alongside <code>"docker"</code>, and falls back to <code>target-agent:latest</code>.</td></tr>
               <tr><td><code>GET /api/workflows/:id</code></td><td>Workflow detail + its steps.</td></tr>
               <tr><td><code>PATCH /api/workflows/:id/context</code></td><td>Set or clear the conversation context.</td></tr>
               <tr><td><code>POST /api/workflows/:id/steps</code></td><td>Add a step. Body: <code>{description, acceptanceCriteria?, maxRetries?, retryIntervalSeconds?, manualReview?}</code>.</td></tr>

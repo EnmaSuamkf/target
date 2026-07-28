@@ -43,7 +43,9 @@ import {
 	PUBLISHABLE_PERMISSION_MODES,
 	type PublishablePermissionMode,
 	PUBLISHABLE_RUNNERS,
+	PUBLISHABLE_SANDBOXES,
 	type PublishableRunner,
+	type PublishableSandbox,
 } from "./awb.ts";
 import type { HubConfig } from "./config.ts";
 import {
@@ -185,6 +187,11 @@ function publicWorkflow(workflow: Workflow): Record<string, unknown> {
 		mdPath: workflow.mdPath,
 		workdir: runtime.workdir,
 		harness: runtime.harness,
+		// "host" rather than null when there's no sandbox block: the UI shows a
+		// containment badge, and "unknown" would read as a warning where the
+		// honest answer is "the default, on this machine".
+		sandbox: runtime.sandbox?.kind ?? "host",
+		image: runtime.sandbox?.image ?? null,
 		progress: stepProgress(workflow.id),
 		conversationContext: workflow.conversationContext,
 		contextInjected: workflow.contextInjected,
@@ -673,6 +680,21 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					}
 					runner = body.runner as PublishableRunner;
 				}
+				// Optional: where that CLI runs — on the host (default, unchanged) or
+				// in a container. Orthogonal to the runner, so it's validated the same
+				// way and against its own list.
+				let sandbox: PublishableSandbox | undefined;
+				if (typeof body.sandbox === "string" && body.sandbox !== "") {
+					if (!PUBLISHABLE_SANDBOXES.includes(body.sandbox as PublishableSandbox)) {
+						sendJson(res, 400, { error: `invalid sandbox (allowed: ${PUBLISHABLE_SANDBOXES.join(", ")})` });
+						return;
+					}
+					sandbox = body.sandbox as PublishableSandbox;
+				}
+				// The image is only meaningful for a docker sandbox; it's a hook field
+				// (a docker tag / name), never a path or a command, so it's taken as
+				// an opaque trimmed string.
+				const image = typeof body.image === "string" && body.image.trim() !== "" ? body.image.trim() : undefined;
 				// Optional: seed the new workflow with a template's steps (same order,
 				// same judge config), leaving the template itself untouched — a
 				// template's name/tags never carry over, only its steps.
@@ -685,7 +707,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					}
 				}
 				try {
-					const workflow = createWorkflow(name, { workdir, permissionMode, runner });
+					const workflow = createWorkflow(name, { workdir, permissionMode, runner, sandbox, image });
 					if (template) {
 						for (const step of template.steps) {
 							addStep(workflow.id, step.description, {
@@ -780,6 +802,8 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		sendJson(res, 200, {
 			sessionId,
 			harness: runtime.harness,
+			sandbox: runtime.sandbox?.kind ?? "host",
+			image: runtime.sandbox?.image ?? null,
 			usage: sessionId && runtime.workdir ? readTokenUsage(runtime.workdir, sessionId) : null,
 		});
 		return;
@@ -818,7 +842,10 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			sendJson(res, 400, { error: "unknown_workdir" });
 			return;
 		}
-		const resumeCommand = harnessResumeCommand(runtime.harness, sessionId);
+		// The sandbox is carried into the resume command: a workflow whose steps
+		// ran in a container has its session inside that container's view of the
+		// world, so the terminal has to enter the same one.
+		const resumeCommand = harnessResumeCommand(runtime.harness, sessionId, runtime.sandbox, runtime.workdir);
 		if (!resumeCommand) {
 			sendJson(res, 400, { error: "unknown_harness" });
 			return;

@@ -140,6 +140,12 @@ export function WorkflowDetail({
 						</dd>
 					</div>
 					<div className={styles.fact}>
+						<dt>Sandbox</dt>
+						<dd title={workflow.image ?? undefined}>
+							{workflow.sandbox === "docker" ? `docker · ${workflow.image ?? "default image"}` : "this machine"}
+						</dd>
+					</div>
+					<div className={styles.fact}>
 						<dt>Status file</dt>
 						<dd className="mono" title={workflow.mdPath}>
 							{prettyPath(workflow.mdPath)}

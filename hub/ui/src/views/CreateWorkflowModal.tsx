@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { CreateWorkflowInput, PermissionMode, Runner, Template } from "../api/types.ts";
+import type { CreateWorkflowInput, PermissionMode, Runner, Sandbox, Template } from "../api/types.ts";
 import { DirectoryBrowser } from "../components/DirectoryBrowser.tsx";
 import { Field } from "../components/Field.tsx";
 import { Modal } from "../components/Modal.tsx";
@@ -13,6 +13,12 @@ import styles from "./CreateWorkflowModal.module.css";
  * `bypassPermissions` additionally requires `acceptBypassRisk: true` — the
  * server rejects it otherwise — so it's gated behind an explicit checkbox with
  * the consequence spelled out instead of hidden in a `<select>` option.
+ *
+ * The sandbox sits right next to the runtime because the two answer different
+ * halves of the same question — which CLI runs the steps, and where it runs —
+ * and because the sandbox is what bounds the permission choice below it:
+ * `bypassPermissions` in a container means "anything inside these mounts",
+ * not "anything on this machine".
  *
  * Conversation context is deliberately absent: the API ignores it at creation
  * time, it's set from the workflow's detail pane afterwards.
@@ -28,6 +34,20 @@ const PERMISSION_OPTIONS: { value: "" | PermissionMode; label: string; descripti
 		value: "bypassPermissions",
 		label: "bypassPermissions",
 		description: "No restrictions at all — arbitrary command execution on this machine.",
+	},
+];
+
+const SANDBOX_OPTIONS: { value: Sandbox; label: string; description: string }[] = [
+	{
+		value: "host",
+		label: "This machine (default)",
+		description: "The agent runs directly on this machine, as you — its permissions are the only limit.",
+	},
+	{
+		value: "docker",
+		label: "Docker container",
+		description:
+			"Every step runs inside a container. Only the working directory and the harness's own state are mounted, so the agent can't reach the rest of your filesystem.",
 	},
 ];
 
@@ -54,6 +74,8 @@ export function CreateWorkflowModal({
 	const [name, setName] = useState("");
 	const [workdir, setWorkdir] = useState("");
 	const [runner, setRunner] = useState<Runner>("claude");
+	const [sandbox, setSandbox] = useState<Sandbox>("host");
+	const [image, setImage] = useState("");
 	const [permissionMode, setPermissionMode] = useState<"" | PermissionMode>("");
 	const [templateId, setTemplateId] = useState("");
 	const [acceptRisk, setAcceptRisk] = useState(false);
@@ -66,6 +88,8 @@ export function CreateWorkflowModal({
 		setName("");
 		setWorkdir("");
 		setRunner("claude");
+		setSandbox("host");
+		setImage("");
 		setPermissionMode("");
 		setTemplateId("");
 		setAcceptRisk(false);
@@ -83,6 +107,8 @@ export function CreateWorkflowModal({
 			const input: CreateWorkflowInput = { name: name.trim() };
 			if (workdir.trim()) input.workdir = workdir.trim();
 			if (runner !== "claude") input.runner = runner;
+			if (sandbox !== "host") input.sandbox = sandbox;
+			if (sandbox === "docker" && image.trim()) input.image = image.trim();
 			if (permissionMode) input.permissionMode = permissionMode;
 			if (templateId) input.templateId = templateId;
 			if (bypass) input.acceptBypassRisk = true;
@@ -185,6 +211,41 @@ export function CreateWorkflowModal({
 						</select>
 					)}
 				</Field>
+
+				<Field label="Sandbox" hint={SANDBOX_OPTIONS.find((o) => o.value === sandbox)?.description ?? ""}>
+					{(props) => (
+						<select
+							{...props}
+							className="select"
+							value={sandbox}
+							onChange={(ev) => setSandbox(ev.target.value as Sandbox)}
+						>
+							{SANDBOX_OPTIONS.map((option) => (
+								<option key={option.value} value={option.value}>
+									{option.label}
+								</option>
+							))}
+						</select>
+					)}
+				</Field>
+
+				{sandbox === "docker" && (
+					<Field
+						label="Container image"
+						hint="Optional — leave empty for the image built from this repo's Dockerfile. The image is per workflow, so a Python repo and a Node repo can use different ones."
+					>
+						{(props) => (
+							<input
+								{...props}
+								type="text"
+								className="input"
+								value={image}
+								placeholder="target-agent:latest"
+								onChange={(ev) => setImage(ev.target.value)}
+							/>
+						)}
+					</Field>
+				)}
 
 				<Field label="Agent permissions" {...(selectedOption ? { hint: selectedOption.description } : {})}>
 					{(props) => (

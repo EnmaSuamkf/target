@@ -13,13 +13,13 @@ function usage(): void {
 
 Commands:
   start                                 Run the hub (foreground)
-  create <name> [--workdir <dir>] [--runner <claude|free-code>]
+  create <name> [--workdir <dir>] [--runner <claude|free-code>] [--sandbox <host|docker>] [--image <name>]
                                          Create a workflow (creates its agent + awb hook too)
   set-context <workflowId> "<text>"   Set (or clear with "") a workflow's conversation context
   add-step <workflowId> <description...>
                                          Append a step to a workflow
   templates                             List available workflow templates
-  create-from-template <templateId> <workflowName> [--workdir <dir>] [--runner <claude|free-code>]
+  create-from-template <templateId> <workflowName> [--workdir <dir>] [--runner <claude|free-code>] [--sandbox <host|docker>] [--image <name>]
                                          Create a workflow seeded with a template's steps
   list                                  List workflows with progress
   show <workflowId>                     Show a workflow's steps
@@ -46,6 +46,10 @@ interface WorkflowJson {
 	mdPath: string;
 	conversationContext: string | null;
 	contextInjected: boolean;
+	/** Where the workflow's agent runs: "host" (default) or "docker". */
+	sandbox: string;
+	/** Image backing a "docker" sandbox; null on the host. */
+	image: string | null;
 }
 
 interface StepJson {
@@ -91,10 +95,15 @@ async function main(): Promise<void> {
 		const workdir = flagValue(rest, "--workdir");
 		const permissionMode = flagValue(rest, "--permission-mode");
 		const runner = flagValue(rest, "--runner");
+		const sandbox = flagValue(rest, "--sandbox");
+		const image = flagValue(rest, "--image");
 		if (!name) {
 			console.error(
-				"Usage: target create <name> [--workdir <dir>] [--permission-mode <mode>] [--runner <claude|free-code>] [--yes-bypass-risk]\n" +
-					"  modes: acceptEdits, auto, manual, dontAsk, plan, bypassPermissions (needs --yes-bypass-risk)",
+				"Usage: target create <name> [--workdir <dir>] [--permission-mode <mode>] [--runner <claude|free-code>]\n" +
+					"                        [--sandbox <host|docker>] [--image <name>] [--yes-bypass-risk]\n" +
+					"  modes: acceptEdits, auto, manual, dontAsk, plan, bypassPermissions (needs --yes-bypass-risk)\n" +
+					"  --sandbox docker runs every step inside a container (default host = directly on this machine);\n" +
+					"  --image names the image to use, defaulting to the one built from this repo's Dockerfile",
 			);
 			process.exitCode = 1;
 			return;
@@ -107,12 +116,15 @@ async function main(): Promise<void> {
 				...(workdir ? { workdir } : {}),
 				...(permissionMode ? { permissionMode } : {}),
 				...(runner ? { runner } : {}),
+				...(sandbox ? { sandbox } : {}),
+				...(image ? { image } : {}),
 				...(rest.includes("--yes-bypass-risk") ? { acceptBypassRisk: true } : {}),
 			}),
 		});
 		if (!res.ok) await fail(res);
 		const { workflow } = (await res.json()) as { workflow: WorkflowJson };
 		console.log(`Workflow '${workflow.name}' created (${workflow.id}), agent '${workflow.agentName}'.`);
+		console.log(`Sandbox: ${workflow.sandbox}${workflow.image ? ` (${workflow.image})` : ""}`);
 		console.log(`Status file: ${workflow.mdPath}`);
 		console.log(`Add steps with: target add-step ${workflow.id} <description...>`);
 		return;
@@ -157,9 +169,12 @@ async function main(): Promise<void> {
 		const workdir = flagValue(rest, "--workdir");
 		const permissionMode = flagValue(rest, "--permission-mode");
 		const runner = flagValue(rest, "--runner");
+		const sandbox = flagValue(rest, "--sandbox");
+		const image = flagValue(rest, "--image");
 		if (!templateId || !name) {
 			console.error(
-				"Usage: target create-from-template <templateId> <workflowName> [--workdir <dir>] [--permission-mode <mode>] [--runner <claude|free-code>]",
+				"Usage: target create-from-template <templateId> <workflowName> [--workdir <dir>] [--permission-mode <mode>]\n" +
+					"                                     [--runner <claude|free-code>] [--sandbox <host|docker>] [--image <name>]",
 			);
 			process.exitCode = 1;
 			return;
@@ -173,11 +188,14 @@ async function main(): Promise<void> {
 				...(workdir ? { workdir } : {}),
 				...(permissionMode ? { permissionMode } : {}),
 				...(runner ? { runner } : {}),
+				...(sandbox ? { sandbox } : {}),
+				...(image ? { image } : {}),
 			}),
 		});
 		if (!createRes.ok) await fail(createRes);
 		const { workflow } = (await createRes.json()) as { workflow: WorkflowJson };
 		console.log(`Workflow '${workflow.name}' created from template '${templateId}' (${workflow.id}), agent '${workflow.agentName}'.`);
+		console.log(`Sandbox: ${workflow.sandbox}${workflow.image ? ` (${workflow.image})` : ""}`);
 		console.log(`Status file: ${workflow.mdPath}`);
 		return;
 	}

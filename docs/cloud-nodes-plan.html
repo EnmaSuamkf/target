@@ -1,0 +1,1398 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>The Target Project — cloud hub + dockerized local nodes</title>
+    <meta name="description" content="Implementation plan: run the Target hub in the cloud and the agents in Docker containers on the operator's machine, reachable through a tunnel." />
+    <style>
+      :root{
+        --bg: #0e1416;
+        --surface: #141c1f;
+        --surface-2: #182124;
+        --border: #253034;
+        --text: #e6edee;
+        --muted: #8ea1a6;
+        --faint: #5d7378;
+        --accent: #5ed6a4;
+        --accent-dim: #2f6b54;
+        --warn: #e7b563;
+        --danger: #e07b6b;
+        --mono: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      *{ box-sizing: border-box; }
+      html{ scroll-behavior: smooth; }
+      body{
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
+        line-height: 1.65;
+      }
+      a{ color: var(--accent); }
+      a:focus-visible{ outline: 2px solid var(--accent); outline-offset: 2px; }
+      code, kbd{
+        font-family: var(--mono);
+        font-size: 0.88em;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        padding: 0.05em 0.4em;
+        border-radius: 4px;
+        white-space: nowrap;
+      }
+      pre{
+        font-family: var(--mono);
+        font-size: 0.82rem;
+        line-height: 1.6;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1rem 1.15rem;
+        overflow-x: auto;
+        margin: 0 0 1rem;
+      }
+      pre code{ background: none; border: none; padding: 0; white-space: pre; }
+
+      .shell{ max-width: 900px; margin: 0 auto; padding: 3.2rem 1.5rem 5rem; }
+
+      header.hero{ margin-bottom: 2.6rem; }
+      .eyebrow{
+        font-family: var(--mono);
+        font-size: 0.74rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--accent);
+        display: flex;
+        align-items: center;
+        gap: 0.6em;
+        margin-bottom: 0.6rem;
+      }
+      .eyebrow::before{
+        content: "";
+        width: 6px; height: 6px;
+        background: var(--accent);
+        border-radius: 50%;
+        box-shadow: 0 0 0 3px var(--accent-dim);
+      }
+      h1{
+        font-family: var(--mono);
+        font-size: clamp(1.6rem, 4vw, 2.2rem);
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        margin: 0 0 0.8rem;
+        line-height: 1.25;
+      }
+      .lede{ color: var(--muted); font-size: 1.02rem; margin: 0; max-width: 68ch; }
+
+      h2{
+        font-family: var(--mono);
+        font-size: 1.08rem;
+        font-weight: 600;
+        margin: 3.2rem 0 1rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 1px solid var(--border);
+        letter-spacing: -0.01em;
+      }
+      h2 .num{ color: var(--accent); margin-right: 0.55em; }
+      h3{
+        font-family: var(--mono);
+        font-size: 0.94rem;
+        font-weight: 600;
+        margin: 2rem 0 0.7rem;
+        color: var(--text);
+      }
+      p{ margin: 0 0 1rem; }
+      ul, ol{ margin: 0 0 1rem; padding-left: 1.3rem; }
+      li{ margin-bottom: 0.45rem; }
+      strong{ color: #f2f8f9; }
+
+      figure{ margin: 1.6rem 0 1.9rem; }
+      .diagram{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.4rem 1.2rem 1rem;
+        overflow-x: auto;
+      }
+      .diagram svg{ display: block; width: 100%; height: auto; min-width: 620px; }
+      figcaption{
+        color: var(--faint);
+        font-size: 0.82rem;
+        margin-top: 0.7rem;
+        font-family: var(--mono);
+      }
+
+      /* shared SVG vocabulary */
+      .s-box{ fill: var(--surface-2); stroke: var(--border); stroke-width: 1.5; }
+      .s-box-accent{ fill: var(--surface-2); stroke: var(--accent); stroke-width: 1.5; }
+      .s-box-warn{ fill: var(--surface-2); stroke: var(--warn); stroke-width: 1.5; }
+      .s-box-danger{ fill: var(--surface-2); stroke: var(--danger); stroke-width: 1.5; }
+      .s-zone{ fill: none; stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 5 4; }
+      .s-t{ font-family: var(--mono); font-size: 12px; fill: var(--text); }
+      .s-t-sm{ font-family: var(--mono); font-size: 10.5px; fill: var(--muted); }
+      .s-t-xs{ font-family: var(--mono); font-size: 9.5px; fill: var(--faint); }
+      .s-t-accent{ font-family: var(--mono); font-size: 10.5px; fill: var(--accent); }
+      .s-t-warn{ font-family: var(--mono); font-size: 10.5px; fill: var(--warn); }
+      .s-t-danger{ font-family: var(--mono); font-size: 10.5px; fill: var(--danger); }
+      .s-label{ font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.1em; fill: var(--faint); }
+      .s-line{ stroke: var(--faint); stroke-width: 1.4; fill: none; }
+      .s-line-accent{ stroke: var(--accent); stroke-width: 1.6; fill: none; }
+      .s-line-dash{ stroke: var(--muted); stroke-width: 1.4; fill: none; stroke-dasharray: 4 3; }
+      .s-line-danger{ stroke: var(--danger); stroke-width: 1.6; fill: none; }
+      .s-lifeline{ stroke: var(--border); stroke-width: 1.4; stroke-dasharray: 3 4; }
+
+      table{
+        width: 100%;
+        border-collapse: collapse;
+        margin: 0 0 1.4rem;
+        font-size: 0.9rem;
+      }
+      th, td{
+        text-align: left;
+        padding: 0.6rem 0.7rem;
+        border-bottom: 1px solid var(--border);
+        vertical-align: top;
+      }
+      th{
+        font-family: var(--mono);
+        font-size: 0.76rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--faint);
+        font-weight: 600;
+      }
+      td code{ white-space: normal; }
+      .tbl-wrap{ overflow-x: auto; }
+
+      .callout{
+        border-left: 3px solid var(--accent);
+        background: var(--surface);
+        padding: 0.9rem 1.1rem;
+        border-radius: 0 8px 8px 0;
+        margin: 0 0 1.4rem;
+      }
+      .callout.warn{ border-left-color: var(--warn); }
+      .callout.danger{ border-left-color: var(--danger); }
+      .callout p:last-child{ margin-bottom: 0; }
+      .callout .tag{
+        display: block;
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent);
+        margin-bottom: 0.4rem;
+      }
+      .callout.warn .tag{ color: var(--warn); }
+      .callout.danger .tag{ color: var(--danger); }
+
+      .toc{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.1rem 1.3rem;
+        margin-bottom: 1rem;
+      }
+      .toc ol{ margin: 0; padding-left: 1.2rem; }
+      .toc li{ margin-bottom: 0.25rem; font-size: 0.92rem; }
+      .toc a{ text-decoration: none; }
+      .toc a:hover{ text-decoration: underline; }
+
+      footer{
+        margin-top: 4rem;
+        padding-top: 1.4rem;
+        border-top: 1px solid var(--border);
+        color: var(--faint);
+        font-size: 0.84rem;
+        font-family: var(--mono);
+      }
+      @media (max-width: 640px){
+        .shell{ padding: 2.2rem 1.1rem 3.5rem; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div class="eyebrow">Implementation plan</div>
+        <h1>Cloud hub + dockerized local nodes</h1>
+        <p class="lede">
+          Today The Target Project runs entirely on one machine, on <code>127.0.0.1</code>. This plan
+          splits it in two: the hub (workflows, steps, judge, UI) moves <strong>to the cloud</strong>
+          on a public URL, and the agents move <strong>into Docker containers</strong> on the
+          operator's machine, reachable through a tunnel. You send work from anywhere; the work runs
+          on your own hardware, in a sandbox, and never touches the host.
+        </p>
+      </header>
+
+      <div class="toc">
+        <ol>
+          <li><a href="#today">Where we are today</a></li>
+          <li><a href="#proposal">What is proposed</a></li>
+          <li><a href="#tradeoffs">Pros, cons, and the cheaper alternative</a></li>
+          <li><a href="#reuse">What we reuse unchanged</a></li>
+          <li><a href="#blockers">What actually blocks this</a></li>
+          <li><a href="#work">Work to do</a></li>
+          <li><a href="#criterion">Success criterion</a></li>
+          <li><a href="#security">Security model</a></li>
+          <li><a href="#order">Execution order</a></li>
+          <li><a href="#open">Open questions</a></li>
+        </ol>
+      </div>
+
+      <!-- ────────────────────────────── 1 ────────────────────────────── -->
+      <h2 id="today"><span class="num">1</span>Where we are today</h2>
+
+      <p>
+        <code>npm start</code> brings up two processes on loopback and opens a browser: the
+        <strong>agent-webhook-bridge broker</strong> on <code>127.0.0.1:8890</code> and the
+        <strong>hub</strong> on <code>127.0.0.1:8893</code>. Everything else — the database, the
+        agent's sandbox, the harness transcripts — is a file under the operator's home directory.
+      </p>
+
+      <p>
+        Creating a workflow creates <strong>its own dedicated agent</strong>:
+        <code>createWorkflow</code> (<code>hub/workflow.ts:439</code>) calls
+        <code>createAwbHook</code>, which registers a hook by writing
+        <code>~/.agent-webhook-bridge/hooks.json</code> and gives it a private sandbox workdir at
+        <code>~/.target/sandboxes/&lt;agentName&gt;</code>. One workflow, one hook, one workdir, one
+        harness session that every step of that workflow resumes in turn.
+      </p>
+
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 880 360" role="img" aria-label="Today everything runs on one machine on loopback: the browser talks to the hub on port 8893, the hub posts to the awb broker on 8890, which spawns claude in a per-workflow sandbox workdir. The hub reads the harness transcripts directly off the local filesystem.">
+            <defs>
+              <marker id="t1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#5ed6a4"/>
+              </marker>
+              <marker id="t1m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#8ea1a6"/>
+              </marker>
+            </defs>
+
+            <rect class="s-zone" x="10" y="30" width="860" height="240" rx="10"/>
+            <text class="s-label" x="20" y="22">YOUR MACHINE — EVERYTHING ON 127.0.0.1</text>
+
+            <rect class="s-box" x="30" y="58" width="140" height="60" rx="8"/>
+            <text class="s-t" x="46" y="82">browser</text>
+            <text class="s-t-xs" x="46" y="102">localhost:8893</text>
+
+            <rect class="s-box-accent" x="222" y="46" width="188" height="152" rx="8"/>
+            <text class="s-t" x="240" y="70">hub :8893</text>
+            <text class="s-t-sm" x="240" y="92">workflows · steps</text>
+            <text class="s-t-sm" x="240" y="110">judge · retries</text>
+            <text class="s-t-sm" x="240" y="128">manual review</text>
+            <line class="s-line" x1="240" y1="142" x2="394" y2="142" stroke-dasharray="3 3"/>
+            <text class="s-t-xs" x="240" y="160">~/.target/target.db</text>
+            <text class="s-t-xs" x="240" y="176">config.json · &lt;slug&gt;.md</text>
+            <text class="s-t-xs" x="240" y="192">admin token</text>
+
+            <rect class="s-box" x="462" y="46" width="176" height="152" rx="8"/>
+            <text class="s-t" x="480" y="70">awb broker :8890</text>
+            <text class="s-t-sm" x="480" y="92">hooks.json</text>
+            <text class="s-t-xs" x="480" y="112">one hook per workflow</text>
+            <line class="s-line" x1="480" y1="126" x2="622" y2="126" stroke-dasharray="3 3"/>
+            <text class="s-t-xs" x="480" y="144">flock per workdir</text>
+            <text class="s-t-xs" x="480" y="160">logs/&lt;agent&gt;-&lt;epoch&gt;.log</text>
+            <text class="s-t-xs" x="480" y="176">spawn:claude | free-code</text>
+
+            <rect class="s-box" x="690" y="46" width="160" height="152" rx="8"/>
+            <text class="s-t" x="706" y="70">claude</text>
+            <text class="s-t-xs" x="706" y="92">--resume &lt;session&gt;</text>
+            <line class="s-line" x1="706" y1="106" x2="834" y2="106" stroke-dasharray="3 3"/>
+            <text class="s-t-xs" x="706" y="124">~/.target/sandboxes/</text>
+            <text class="s-t-xs" x="706" y="140">&lt;agentName&gt;</text>
+            <text class="s-t-xs" x="706" y="162">~/.claude/projects/</text>
+            <text class="s-t-xs" x="706" y="178">&lt;slug&gt;/*.jsonl</text>
+
+            <path class="s-line-accent" d="M 170 88 L 216 92" marker-end="url(#t1)"/>
+            <path class="s-line-accent" d="M 410 104 L 456 104" marker-end="url(#t1)"/>
+            <path class="s-line-accent" d="M 638 104 L 684 104" marker-end="url(#t1)"/>
+            <path class="s-line-dash" d="M 684 218 L 320 218 L 320 204" marker-end="url(#t1m)"/>
+            <text class="s-t-sm" x="452" y="212">callbacks · /started · /result</text>
+
+            <path class="s-line-dash" d="M 690 240 L 320 240" marker-end="url(#t1m)"/>
+            <text class="s-t-warn" x="360" y="256">the hub stats these files directly → the progress watchdog</text>
+
+            <!-- 1:1 strip -->
+            <text class="s-label" x="20" y="300">1 : 1 : 1</text>
+            <rect class="s-box" x="100" y="286" width="150" height="40" rx="6"/>
+            <text class="s-t-sm" x="116" y="311">workflow</text>
+            <rect class="s-box" x="310" y="286" width="150" height="40" rx="6"/>
+            <text class="s-t-sm" x="326" y="311">its own hook</text>
+            <rect class="s-box" x="520" y="286" width="176" height="40" rx="6"/>
+            <text class="s-t-sm" x="536" y="311">its own sandbox</text>
+            <rect class="s-box-accent" x="756" y="286" width="110" height="40" rx="6"/>
+            <text class="s-t-accent" x="772" y="311">one session</text>
+            <path class="s-line" d="M 250 306 L 304 306" marker-end="url(#t1m)"/>
+            <path class="s-line" d="M 460 306 L 514 306" marker-end="url(#t1m)"/>
+            <path class="s-line" d="M 696 306 L 750 306" marker-end="url(#t1m)"/>
+          </svg>
+        </div>
+        <figcaption>Fig. 1 — Today. Two loopback processes and a pile of local files. Nothing listens on the network.</figcaption>
+      </figure>
+
+      <h3>What today does well</h3>
+      <ul>
+        <li>
+          <strong>Zero configuration and zero exposure.</strong> Nothing listens off
+          <code>127.0.0.1</code>; the admin token is the only gate and it never leaves the machine.
+        </li>
+        <li>
+          <strong>The hub can see the agent working.</strong> Because the transcripts are local files,
+          <code>hub/progress.ts</code> can <code>stat</code> them and tell a hung step from a slow one
+          — that is what lets a legitimate 40-minute step survive.
+        </li>
+        <li>
+          <strong>Full local affordances.</strong> "Open terminal" reattaches to the exact session
+          (<code>hub/terminal.ts</code>), the filesystem picker browses real directories, and each
+          workflow gets its own isolated sandbox.
+        </li>
+      </ul>
+
+      <h3>What today cannot do</h3>
+      <ul>
+        <li><strong>Reach you anywhere else.</strong> Close the laptop and the UI ceases to exist. There is no way to queue work from a phone.</li>
+        <li><strong>Let anyone else send work.</strong> There is one admin token and it is all-or-nothing; there is no notion of another submitter.</li>
+        <li>
+          <strong>Bound what an agent can touch.</strong> The sandbox workdir is a convention, not a
+          boundary: the agent runs as your user, and a hook with <code>bypassPermissions</code>
+          (<code>hub/awb.ts:162</code>) can do anything you can.
+        </li>
+      </ul>
+
+      <!-- ────────────────────────────── 2 ────────────────────────────── -->
+      <h2 id="proposal"><span class="num">2</span>What is proposed</h2>
+
+      <p>
+        Cut the system along the line that already exists in the code — the hook URL — and put the two
+        halves in different places:
+      </p>
+      <ul>
+        <li>
+          <strong>The hub moves to the cloud.</strong> Public URL, persistent disk, always on. It keeps
+          workflows, steps, the judge, retries, the manual-review gate and the UI. It stops creating
+          hooks and instead <strong>references agents that already exist</strong> on a node.
+        </li>
+        <li>
+          <strong>The agents move into Docker containers</strong> on the operator's machine — one
+          long-lived container per agent, each with its own volumes and its own awb broker, exposed
+          through a tunnel. The container dials out; no inbound port is opened on the host.
+        </li>
+      </ul>
+
+      <p>
+        This is agentmesh's phase-2 vision (<code>agentmesh/index.html</code>,
+        <code>agentmesh/PLAN.md</code> §6) applied to workflows instead of loose jobs — with one
+        constraint the container design must respect: <strong>a workflow chains one harness session
+        across all its steps</strong>, so containers cannot be per-job and cannot be ephemeral.
+      </p>
+
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 880 430" role="img" aria-label="The proposed split: the cloud hub dispatches steps through a tunnel to Docker containers on the operator machine; the containers post callbacks back to the hub.">
+            <defs>
+              <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#5ed6a4"/>
+              </marker>
+              <marker id="a1m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#8ea1a6"/>
+              </marker>
+            </defs>
+
+            <rect class="s-zone" x="8" y="34" width="250" height="330" rx="10"/>
+            <text class="s-label" x="18" y="26">CLOUD</text>
+            <rect class="s-zone" x="470" y="34" width="402" height="330" rx="10"/>
+            <text class="s-label" x="480" y="26">OPERATOR MACHINE</text>
+
+            <rect class="s-box-accent" x="28" y="56" width="210" height="200" rx="8"/>
+            <text class="s-t" x="44" y="82">target hub</text>
+            <text class="s-t-sm" x="44" y="104">workflows · steps</text>
+            <text class="s-t-sm" x="44" y="122">judge · retries</text>
+            <text class="s-t-sm" x="44" y="140">manual review gate</text>
+            <text class="s-t-sm" x="44" y="158">agents registry</text>
+            <text class="s-t-sm" x="44" y="176">web UI</text>
+            <line class="s-line" x1="44" y1="192" x2="222" y2="192" stroke-dasharray="3 3"/>
+            <text class="s-t-xs" x="44" y="210">sqlite on a persistent disk</text>
+            <text class="s-t-xs" x="44" y="226">publicBaseUrl (https)</text>
+            <text class="s-t-accent" x="44" y="244">mode: "cloud"</text>
+
+            <rect class="s-box" x="28" y="278" width="210" height="66" rx="8"/>
+            <text class="s-t" x="44" y="304">browser / phone</text>
+            <text class="s-t-xs" x="44" y="324">API key · Bearer token</text>
+            <line class="s-line-dash" x1="133" y1="278" x2="133" y2="258" marker-end="url(#a1m)"/>
+
+            <rect class="s-box" x="298" y="120" width="124" height="72" rx="8"/>
+            <text class="s-t" x="318" y="148">tunnel</text>
+            <text class="s-t-xs" x="318" y="168">cloudflared</text>
+            <text class="s-t-xs" x="318" y="182">+ Access token</text>
+
+            <rect class="s-box-accent" x="492" y="56" width="360" height="98" rx="8"/>
+            <text class="s-t" x="510" y="80">container A</text>
+            <text class="s-t-sm" x="510" y="100">awb broker + claude</text>
+            <text class="s-t-xs" x="510" y="120">vol ~/.claude · vol ~/.agent-webhook-bridge</text>
+            <text class="s-t-xs" x="510" y="136">vol workdir · restart: unless-stopped</text>
+
+            <rect class="s-box" x="492" y="166" width="360" height="62" rx="8"/>
+            <text class="s-t" x="510" y="190">container B</text>
+            <text class="s-t-xs" x="510" y="210">own volumes · own hook · own session</text>
+
+            <rect class="s-box" x="492" y="240" width="360" height="62" rx="8"/>
+            <text class="s-t" x="510" y="264">container C</text>
+            <text class="s-t-xs" x="510" y="284">one container per agent</text>
+
+            <text class="s-t-xs" x="510" y="330">host filesystem and credentials stay outside</text>
+
+            <path class="s-line-accent" d="M 238 132 L 292 132" marker-end="url(#a1)"/>
+            <path class="s-line-accent" d="M 422 132 L 486 105" marker-end="url(#a1)"/>
+            <path class="s-line-accent" d="M 422 150 L 486 190" marker-end="url(#a1)"/>
+            <path class="s-line-accent" d="M 422 160 L 486 262" marker-end="url(#a1)"/>
+            <text class="s-t-accent" x="244" y="122">POST hookUrl</text>
+            <text class="s-t-xs" x="244" y="152">x-webhook-secret</text>
+            <text class="s-t-xs" x="244" y="166">sessionid header</text>
+
+            <path class="s-line-dash" d="M 486 386 L 140 386 L 140 262" marker-end="url(#a1m)"/>
+            <text class="s-t-sm" x="300" y="378">callbacks →  /started · /progress · /result</text>
+            <text class="s-t-xs" x="492" y="404">the node always dials out — no inbound port on the host</text>
+          </svg>
+        </div>
+        <figcaption>Fig. 2 — The proposal. Dispatch goes cloud → tunnel → container; every result comes back as an outbound callback.</figcaption>
+      </figure>
+
+      <!-- ────────────────────────────── 3 ────────────────────────────── -->
+      <h2 id="tradeoffs"><span class="num">3</span>Pros, cons, and the cheaper alternative</h2>
+
+      <p>
+        This is not a free upgrade. It buys reach and containment, and it pays for them in
+        observability and operational surface.
+      </p>
+
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>What you gain</th><th>What it costs</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><strong>Send work from anywhere.</strong> The hub is always up, so a workflow can be queued from a phone and picked up whenever the node is online.</td>
+              <td><strong>The hub goes blind.</strong> It can no longer stat the transcripts, so the progress watchdog stops working until the node reports in — see §5.3. Without that, every step dies at 10 minutes.</td>
+            </tr>
+            <tr>
+              <td><strong>A real sandbox.</strong> Today's "sandbox workdir" is a convention; a container is a boundary. This is what makes exposing an agent to the network defensible at all.</td>
+              <td><strong>Local affordances are lost.</strong> "Open terminal" and resume-in-place cannot work against a remote container. The UI already hides them (<code>hub/awb.ts:105,150</code>), so they degrade rather than break — but they are gone.</td>
+            </tr>
+            <tr>
+              <td><strong>More than one submitter.</strong> API keys, quotas and attribution become possible; today there is one all-or-nothing admin token.</td>
+              <td><strong>The broker is now on the internet.</strong> The shared secret becomes a real credential, and the cloud database holds it — compromise the hub and you can submit jobs to the node. See §8.</td>
+            </tr>
+            <tr>
+              <td><strong>Room to grow.</strong> N agents, later N machines, without changing the model — the registry already knows which node is behind each agent.</td>
+              <td><strong>A whole new operational surface.</strong> Tunnel, containers, volumes, image rebuilds, and a host with a persistent disk. Today it is <code>npm start</code>.</td>
+            </tr>
+            <tr>
+              <td><strong>Agent reuse.</strong> One configured agent can serve many workflows instead of accumulating one hook per workflow forever.</td>
+              <td><strong>Per-workflow isolation drops.</strong> N workflows on one agent share its workdir and container — see the phase A caveat in §6.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>The cheaper alternative, and why it is not this</h3>
+      <p>
+        There is a much smaller version of "use it from the web": leave the hub local and expose it
+        with a tunnel (<code>cloudflared tunnel --url http://127.0.0.1:8893</code>). agentmesh already
+        does exactly this and it works — API keys, rate limiting and remote detection are implemented
+        there (<code>agentmesh/hub/server.ts:60-92</code>, <code>agentmesh/hub/db.ts:252+</code>).
+      </p>
+
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 880 210" role="img" aria-label="Comparison of the two options: tunnelling the local hub keeps everything local and needs almost no code, but dies with the laptop and exposes the hub itself. The cloud split needs real work but survives the laptop being off and contains the agent.">
+            <defs>
+              <marker id="c1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#8ea1a6"/>
+              </marker>
+            </defs>
+
+            <text class="s-label" x="16" y="22">OPTION A — TUNNEL THE LOCAL HUB</text>
+            <rect class="s-zone" x="12" y="32" width="410" height="152" rx="10"/>
+            <rect class="s-box" x="36" y="52" width="120" height="44" rx="8"/>
+            <text class="s-t-sm" x="52" y="72">web</text>
+            <text class="s-t-xs" x="52" y="88">tunnel URL</text>
+            <rect class="s-box-warn" x="216" y="52" width="180" height="44" rx="8"/>
+            <text class="s-t-sm" x="232" y="72">hub + broker (local)</text>
+            <text class="s-t-xs" x="232" y="88">unchanged</text>
+            <path class="s-line" d="M 156 74 L 210 74" marker-end="url(#c1)"/>
+            <text class="s-t-accent" x="36" y="124">+ zero code · watchdog still works</text>
+            <text class="s-t-xs" x="36" y="142">+ terminal and resume keep working</text>
+            <text class="s-t-danger" x="36" y="164">− dies with the laptop · no real sandbox</text>
+
+            <text class="s-label" x="452" y="22">OPTION B — THIS PLAN</text>
+            <rect class="s-zone" x="448" y="32" width="420" height="152" rx="10"/>
+            <rect class="s-box-accent" x="472" y="52" width="150" height="44" rx="8"/>
+            <text class="s-t-sm" x="488" y="72">hub (cloud)</text>
+            <text class="s-t-xs" x="488" y="88">always up</text>
+            <rect class="s-box-accent" x="682" y="52" width="164" height="44" rx="8"/>
+            <text class="s-t-sm" x="698" y="72">containers (local)</text>
+            <text class="s-t-xs" x="698" y="88">sandboxed</text>
+            <path class="s-line" d="M 622 74 L 676 74" marker-end="url(#c1)"/>
+            <text class="s-t-accent" x="472" y="124">+ survives the laptop · real containment</text>
+            <text class="s-t-xs" x="472" y="142">+ multi-user, multi-node later</text>
+            <text class="s-t-danger" x="472" y="164">− 5 phases of work · watchdog needs rebuilding</text>
+          </svg>
+        </div>
+        <figcaption>Fig. 3 — Option A is a weekend. Option B is the architecture. Pick B only for the reasons B is better at.</figcaption>
+      </figure>
+
+      <div class="callout warn">
+        <span class="tag">Be honest about the choice</span>
+        <p>
+          If the goal is only <em>"queue work to my own machine from my phone"</em>, <strong>option A
+          does that with essentially no code</strong> and keeps the watchdog and the terminal working.
+          Option B is worth it when you need the hub to survive the laptop being off, want a real
+          sandbox around an agent with write or command permissions, or intend to let anyone else
+          submit. Everything below assumes those are the goals.
+        </p>
+      </div>
+
+      <!-- ────────────────────────────── 4 ────────────────────────────── -->
+      <h2 id="reuse"><span class="num">4</span>What we reuse unchanged</h2>
+
+      <ul>
+        <li>
+          <strong><code>dispatchStep</code> (<code>hub/runner.ts:169</code>)</strong> — it only does
+          <code>fetch(workflow.hookUrl)</code> with <code>x-webhook-secret</code> and an optional
+          <code>sessionid</code> header. Point <code>hookUrl</code> at a tunnel and it works as-is.
+          This is the seam the whole plan hangs off.
+        </li>
+        <li>
+          <strong>The hook protocol</strong> — <code>{jobId, input, callbackUrl, startedCallbackUrl}</code>
+          in, <code>{result, session_id}</code> back on the callback. Runtime-agnostic already.
+        </li>
+        <li>
+          <strong>The graceful-degradation paths for remote hooks</strong>:
+          <code>inspectLocalHook</code> returns <code>local: false</code> (<code>hub/awb.ts:75</code>),
+          <code>hookRuntime</code> returns all-null (<code>hub/awb.ts:105</code>),
+          <code>harnessResumeCommand</code> returns null (<code>hub/awb.ts:150</code>) → the UI already
+          hides the terminal and session-resume offers for remote agents. Nothing to do here.
+        </li>
+        <li>
+          <strong>The judge, retries, manual review gate, session chaining, status <code>.md</code></strong>
+          — all of it is transport-agnostic and stays put.
+        </li>
+      </ul>
+
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 880 300" role="img" aria-label="Sequence diagram of one step dispatch: hub posts to the broker, the broker acknowledges, fires started after acquiring the workdir lock, streams progress heartbeats, and finally posts the result with the session id.">
+            <defs>
+              <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#5ed6a4"/>
+              </marker>
+              <marker id="a2m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#8ea1a6"/>
+              </marker>
+            </defs>
+
+            <rect class="s-box-accent" x="20" y="14" width="150" height="34" rx="6"/>
+            <text class="s-t" x="38" y="36">hub (cloud)</text>
+            <line class="s-lifeline" x1="95" y1="48" x2="95" y2="286"/>
+
+            <rect class="s-box" x="360" y="14" width="180" height="34" rx="6"/>
+            <text class="s-t" x="378" y="36">awb broker</text>
+            <line class="s-lifeline" x1="450" y1="48" x2="450" y2="286"/>
+
+            <rect class="s-box" x="700" y="14" width="160" height="34" rx="6"/>
+            <text class="s-t" x="718" y="36">claude / free-code</text>
+            <line class="s-lifeline" x1="780" y1="48" x2="780" y2="286"/>
+
+            <path class="s-line-accent" d="M 95 76 L 444 76" marker-end="url(#a2)"/>
+            <text class="s-t-accent" x="108" y="70">POST /hook/&lt;agent&gt;  {jobId, input, callbackUrl}</text>
+
+            <path class="s-line-dash" d="M 450 100 L 101 100" marker-end="url(#a2m)"/>
+            <text class="s-t-sm" x="300" y="94">200 {ok:true}</text>
+            <text class="s-t-xs" x="108" y="116">step → queued (accepted, not started)</text>
+
+            <path class="s-line" d="M 450 140 L 774 140" marker-end="url(#a2m)"/>
+            <text class="s-t-sm" x="470" y="134">flock acquired → spawn --resume &lt;sessionId&gt;</text>
+
+            <path class="s-line-dash" d="M 450 168 L 101 168" marker-end="url(#a2m)"/>
+            <text class="s-t-sm" x="240" y="162">POST /api/steps/:id/started</text>
+            <text class="s-t-xs" x="108" y="184">step → running · idle clock starts here</text>
+
+            <path class="s-line-dash" d="M 450 214 L 101 214" marker-end="url(#a2m)"/>
+            <text class="s-t-warn" x="200" y="208">POST /api/steps/:id/progress  ×N  (new)</text>
+            <text class="s-t-xs" x="108" y="230">every ~30s while the transcript moves</text>
+
+            <path class="s-line-accent" d="M 450 262 L 101 262" marker-end="url(#a2)"/>
+            <text class="s-t-accent" x="180" y="256">POST /api/steps/:id/result  {result, session_id}</text>
+            <text class="s-t-xs" x="108" y="278">session_id stored on the workflow → reused by the next step</text>
+          </svg>
+        </div>
+        <figcaption>Fig. 4 — One step, end to end. Only the <code>/progress</code> message is new; everything else already exists.</figcaption>
+      </figure>
+
+      <h3>Both execution modes ride the same seam</h3>
+      <p>
+        A workflow can be executed two ways, and <strong>both keep working with a remote agent for
+        free</strong> — because both funnel into <code>dispatchStep</code>, which is the one thing
+        this plan re-points:
+      </p>
+      <ul>
+        <li>
+          <strong>Run the whole workflow</strong> — <code>startWorkflow</code>
+          (<code>hub/workflow.ts:772</code>). <code>setStepSelection</code> persists which steps were
+          ticked, and the sequential engine advances across callbacks, dispatching only those.
+        </li>
+        <li>
+          <strong>Run one step on demand</strong> — <code>runStep</code>
+          (<code>hub/workflow.ts:1221</code>), the ▶ button. It dispatches to the same agent and
+          resumes the same shared session, so an on-demand run continues the same conversation. It
+          stays outside the engine for ordering, and if the step has acceptance criteria its callback
+          still goes through the judge.
+        </li>
+      </ul>
+      <p>
+        Nothing in either path knows or cares where the hook lives. The manual-review gate
+        (<code>continueStep</code>) and <code>abortStep</code> sit on top of both and are equally
+        transport-agnostic — with one exception, see §5.4.
+      </p>
+
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 880 300" role="img" aria-label="Both execution modes, the sequential engine and the on-demand step run, converge on dispatchStep and then on the same remote hook and session.">
+            <defs>
+              <marker id="a8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#5ed6a4"/>
+              </marker>
+              <marker id="a8w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#e7b563"/>
+              </marker>
+            </defs>
+
+            <rect class="s-box" x="16" y="34" width="196" height="76" rx="8"/>
+            <text class="s-t" x="34" y="58">Start / Resume</text>
+            <text class="s-t-xs" x="34" y="78">startWorkflow(stepIds)</text>
+            <text class="s-t-xs" x="34" y="94">engine advances in order</text>
+
+            <rect class="s-box" x="16" y="146" width="196" height="76" rx="8"/>
+            <text class="s-t" x="34" y="170">▶ run one step</text>
+            <text class="s-t-xs" x="34" y="190">runStep(stepId)</text>
+            <text class="s-t-xs" x="34" y="206">outside the engine</text>
+
+            <rect class="s-box-accent" x="316" y="90" width="180" height="76" rx="8"/>
+            <text class="s-t" x="334" y="114">dispatchStep</text>
+            <text class="s-t-accent" x="334" y="134">the only seam</text>
+            <text class="s-t-xs" x="334" y="152">runner.ts:169</text>
+
+            <path class="s-line-accent" d="M 212 72 L 310 112" marker-end="url(#a8)"/>
+            <path class="s-line-accent" d="M 212 184 L 310 144" marker-end="url(#a8)"/>
+
+            <rect class="s-box-accent" x="600" y="90" width="176" height="76" rx="8"/>
+            <text class="s-t" x="618" y="114">workflow.hookUrl</text>
+            <text class="s-t-xs" x="618" y="134">local  ·or·  tunnel</text>
+            <text class="s-t-xs" x="618" y="152">same shared session</text>
+            <path class="s-line-accent" d="M 496 128 L 594 128" marker-end="url(#a8)"/>
+
+            <rect class="s-box-warn" x="316" y="216" width="460" height="62" rx="8"/>
+            <text class="s-t-warn" x="334" y="240">NEW with N workflows → 1 agent (phase A)</text>
+            <text class="s-t-xs" x="334" y="260">runStep only guards steps of ITS workflow — two workflows on one agent share the workdir</text>
+            <path class="s-line" d="M 406 166 L 406 210" marker-end="url(#a8w)" stroke="#e7b563"/>
+          </svg>
+        </div>
+        <figcaption>Fig. 5 — Two entry points, one seam. Re-point <code>dispatchStep</code> and both modes follow.</figcaption>
+      </figure>
+
+      <!-- ────────────────────────────── 5 ────────────────────────────── -->
+      <h2 id="blockers"><span class="num">5</span>What actually blocks this</h2>
+
+      <h3>5.1 &nbsp;Hook creation is local-only</h3>
+      <p>
+        <code>createWorkflow</code> (<code>hub/workflow.ts:451</code>) calls <code>createAwbHook</code>,
+        which registers the hook by <strong>writing <code>~/.agent-webhook-bridge/hooks.json</code></strong>
+        (<code>hub/awb.ts:188</code>). A cloud hub has no such file. The model has to flip from
+        <em>"each workflow creates its agent"</em> to <em>"each workflow picks a registered agent"</em>
+        — which is what <code>hub/awb.ts:8-10</code> already anticipated for phase 2.
+      </p>
+
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 880 290" role="img" aria-label="Today each workflow creates its own hook by writing hooks.json. In cloud mode, several workflows reference one registered agent whose hook lives on the node.">
+            <defs>
+              <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#5ed6a4"/>
+              </marker>
+              <marker id="a3d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#e07b6b"/>
+              </marker>
+            </defs>
+
+            <text class="s-label" x="20" y="20">TODAY — LOCAL</text>
+            <rect class="s-zone" x="12" y="30" width="400" height="240" rx="10"/>
+
+            <rect class="s-box" x="36" y="56" width="150" height="46" rx="8"/>
+            <text class="s-t" x="54" y="84">workflow A</text>
+            <rect class="s-box" x="36" y="128" width="150" height="46" rx="8"/>
+            <text class="s-t" x="54" y="156">workflow B</text>
+
+            <rect class="s-box" x="242" y="56" width="148" height="46" rx="8"/>
+            <text class="s-t-sm" x="258" y="78">hook a-1f3c</text>
+            <text class="s-t-xs" x="258" y="94">own workdir</text>
+            <rect class="s-box" x="242" y="128" width="148" height="46" rx="8"/>
+            <text class="s-t-sm" x="258" y="150">hook b-9d02</text>
+            <text class="s-t-xs" x="258" y="166">own workdir</text>
+
+            <path class="s-line-accent" d="M 186 79 L 236 79" marker-end="url(#a3)"/>
+            <path class="s-line-accent" d="M 186 151 L 236 151" marker-end="url(#a3)"/>
+            <text class="s-t-accent" x="192" y="70">creates</text>
+
+            <rect class="s-box-danger" x="120" y="206" width="270" height="44" rx="8"/>
+            <text class="s-t-danger" x="138" y="226">writes ~/.agent-webhook-bridge/hooks.json</text>
+            <text class="s-t-xs" x="138" y="242">local filesystem — impossible from the cloud</text>
+            <path class="s-line-danger" d="M 300 178 L 280 200" marker-end="url(#a3d)"/>
+
+            <text class="s-label" x="452" y="20">CLOUD MODE</text>
+            <rect class="s-zone" x="444" y="30" width="424" height="240" rx="10"/>
+
+            <rect class="s-box" x="466" y="56" width="150" height="46" rx="8"/>
+            <text class="s-t" x="484" y="84">workflow A</text>
+            <rect class="s-box" x="466" y="128" width="150" height="46" rx="8"/>
+            <text class="s-t" x="484" y="156">workflow B</text>
+            <text class="s-t-xs" x="466" y="196">agent_ref → "reviewer"</text>
+
+            <rect class="s-box-accent" x="672" y="86" width="176" height="70" rx="8"/>
+            <text class="s-t" x="690" y="110">registered agent</text>
+            <text class="s-t-sm" x="690" y="128">"reviewer"</text>
+            <text class="s-t-xs" x="690" y="145">hook_url + secret</text>
+
+            <path class="s-line-accent" d="M 616 82 L 666 108" marker-end="url(#a3)"/>
+            <path class="s-line-accent" d="M 616 152 L 666 132" marker-end="url(#a3)"/>
+            <text class="s-t-accent" x="612" y="196">N workflows → 1 agent</text>
+
+            <rect class="s-box" x="672" y="196" width="176" height="54" rx="8"/>
+            <text class="s-t-sm" x="690" y="218">hook lives on the node</text>
+            <text class="s-t-xs" x="690" y="236">created once, in the container</text>
+            <path class="s-line" d="M 760 160 L 760 190" marker-end="url(#a3)" stroke="#5ed6a4"/>
+          </svg>
+        </div>
+        <figcaption>Fig. 6 — The model change: the hub stops creating hooks and starts referencing agents that already exist on the node.</figcaption>
+      </figure>
+
+      <h3>5.2 &nbsp;Callbacks point at loopback</h3>
+      <p>
+        <code>hub/runner.ts:144,150</code> build both callback URLs from <code>cfg.host:cfg.port</code>
+        = <code>127.0.0.1:8893</code>. From inside a container that resolves to the container itself.
+        Nothing works until this is configurable.
+      </p>
+
+      <h3>5.3 &nbsp;The idle watchdog kills every remote step at 10 minutes</h3>
+      <p>
+        <code>hub/workflow.ts:120-124</code> documents the degradation honestly: a candidate with no
+        local artifacts <em>"finds no signal and times out on the idle clock exactly as the old wall
+        clock did — the watchdog degrades, never blocks"</em>. That is a sound trade-off
+        <strong>while remote hooks are the exception</strong>. In this architecture they are the rule,
+        and the trade-off inverts.
+      </p>
+
+      <div class="callout danger">
+        <span class="tag">Consequence</span>
+        <p>
+          <code>probeStepProgress</code> returns null for every remote hook →
+          <code>last_progress_at</code> never advances → <code>stepActivity</code> falls back to
+          <code>progressMs = startedAt</code> (<code>hub/progress.ts:246</code>) → <strong>every step
+          is declared <code>stalled</code> after <code>stepIdleTimeoutMs</code> (10 min)</strong>,
+          no matter how healthy it is.
+        </p>
+      </div>
+
+      <p>
+        Containers make this worse independently: the transcripts move inside the container's
+        filesystem, so even a local hub could not stat them.
+      </p>
+
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 880 270" role="img" aria-label="Timeline comparison. A local hook records progress signals and survives a 40 minute step. A remote hook without heartbeats is killed at 10 minutes. With heartbeats it survives.">
+            <defs>
+              <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#8ea1a6"/>
+              </marker>
+            </defs>
+
+            <text class="s-t-xs" x="150" y="248">0 min</text>
+            <text class="s-t-xs" x="380" y="248">10 min</text>
+            <text class="s-t-xs" x="610" y="248">25 min</text>
+            <text class="s-t-xs" x="800" y="248">40 min</text>
+            <line class="s-line" x1="150" y1="232" x2="850" y2="232" marker-end="url(#a4)"/>
+            <line class="s-line" x1="400" y1="40" x2="400" y2="232" stroke-dasharray="3 4" stroke="#e7b563"/>
+            <text class="s-t-warn" x="356" y="32">stepIdleTimeoutMs</text>
+
+            <text class="s-t-sm" x="16" y="72">local hook</text>
+            <text class="s-t-xs" x="16" y="88">(today)</text>
+            <rect class="s-box-accent" x="150" y="56" width="700" height="26" rx="5"/>
+            <g fill="#5ed6a4">
+              <circle cx="200" cy="69" r="3"/><circle cx="260" cy="69" r="3"/><circle cx="330" cy="69" r="3"/>
+              <circle cx="410" cy="69" r="3"/><circle cx="490" cy="69" r="3"/><circle cx="570" cy="69" r="3"/>
+              <circle cx="650" cy="69" r="3"/><circle cx="730" cy="69" r="3"/><circle cx="810" cy="69" r="3"/>
+            </g>
+            <text class="s-t-accent" x="600" y="50">transcript mtime keeps resetting the clock → survives</text>
+
+            <text class="s-t-sm" x="16" y="140">remote hook</text>
+            <text class="s-t-xs" x="16" y="156">(phase A only)</text>
+            <rect class="s-box-danger" x="150" y="124" width="250" height="26" rx="5"/>
+            <line class="s-line-danger" x1="400" y1="112" x2="400" y2="162"/>
+            <text class="s-t-danger" x="412" y="132">killed — "no progress for 10m"</text>
+            <text class="s-t-xs" x="412" y="150">no local files to stat → no signal ever recorded</text>
+
+            <text class="s-t-sm" x="16" y="200">remote hook</text>
+            <text class="s-t-xs" x="16" y="216">+ heartbeat</text>
+            <rect class="s-box-accent" x="150" y="184" width="700" height="26" rx="5"/>
+            <g fill="#e7b563">
+              <circle cx="210" cy="197" r="3"/><circle cx="285" cy="197" r="3"/><circle cx="360" cy="197" r="3"/>
+              <circle cx="435" cy="197" r="3"/><circle cx="510" cy="197" r="3"/><circle cx="585" cy="197" r="3"/>
+              <circle cx="660" cy="197" r="3"/><circle cx="735" cy="197" r="3"/><circle cx="810" cy="197" r="3"/>
+            </g>
+            <text class="s-t-warn" x="600" y="178">POST /progress every ~30s → survives</text>
+          </svg>
+        </div>
+        <figcaption>Fig. 7 — Why phase C is not optional: without heartbeats, phase A alone caps every step at 10 minutes.</figcaption>
+      </figure>
+
+      <h3>5.4 &nbsp;Abort silently stops killing the run</h3>
+      <p>
+        <code>abortAwbRun</code> (<code>hub/awb.ts:256</code>) opens with a local-only guard:
+      </p>
+<pre><code>const info = inspectLocalHook(hookUrl);
+if (!info.local || !info.found || !info.name) {
+  log(`abort: hook not local/found, skipping broker kill`, "warning");
+  return false;
+}</code></pre>
+      <p>
+        For a tunnelled hook <code>inspectLocalHook</code> returns <code>local: false</code>, so the
+        broker kill is skipped. The step still settles as <code>failed</code> in the DB — but the
+        agent keeps running in the container, holding the workdir <code>flock</code>. That is
+        <strong>exactly the bug the abort feature was written to fix</strong>
+        (<code>hub/workflow.ts:1261</code> documents it: <em>"the step showed failed but the orphaned
+        agent kept running for hours"</em>), silently reintroduced for every remote agent.
+      </p>
+      <p>
+        It also hits <code>retryTimedOutStep</code> (<code>hub/workflow.ts:775</code>), which calls
+        <code>abortAwbRun</code> first precisely so the retry does not queue behind the zombie. On a
+        remote agent the zombie survives and the retry queues behind it until it times out too.
+      </p>
+
+      <div class="callout">
+        <span class="tag">Fix — small</span>
+        <p>
+          The guard only exists to obtain <code>info.name</code>, and the name is already in the URL:
+          <code>abortAwbRun</code> builds the abort endpoint by rewriting the hook URL's path
+          (<code>abortUrl.pathname = /hook/&lt;name&gt;/abort</code>, <code>hub/awb.ts:262-263</code>).
+          Parse the name from the URL for remote hooks instead of looking it up in the local config,
+          and POST to the same origin — the shared secret already authenticates it. Keep the local
+          lookup only as the "hook exists?" warning it is on a local hub.
+        </p>
+      </div>
+
+      <!-- ────────────────────────────── 6 ────────────────────────────── -->
+      <h2 id="work"><span class="num">6</span>Work to do</h2>
+
+      <h3>Phase 0 — Session-persistence spike (do this first)</h3>
+      <p>
+        Before writing any hub code, prove the core assumption. Build a throwaway container with
+        awb + claude and a named volume on <code>~/.claude</code>, then:
+      </p>
+      <ol>
+        <li>Fire a job with no <code>sessionid</code> → capture <code>session_id</code> from the callback.</li>
+        <li><code>docker restart</code> the container.</li>
+        <li>Fire a second job with <code>sessionid: &lt;that id&gt;</code>.</li>
+      </ol>
+
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 880 250" role="img" aria-label="With a named volume the session survives a container restart and step two resumes. With an ephemeral container the session is lost and resume fails.">
+            <defs>
+              <marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#5ed6a4"/>
+              </marker>
+              <marker id="a5d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#e07b6b"/>
+              </marker>
+            </defs>
+
+            <text class="s-label" x="16" y="26">PASS — NAMED VOLUME</text>
+            <rect class="s-box" x="16" y="38" width="150" height="52" rx="8"/>
+            <text class="s-t-sm" x="32" y="60">step 1</text>
+            <text class="s-t-xs" x="32" y="78">fresh session</text>
+
+            <rect class="s-box-accent" x="236" y="38" width="180" height="52" rx="8"/>
+            <text class="s-t-sm" x="252" y="60">vol ~/.claude</text>
+            <text class="s-t-xs" x="252" y="78">session uuid persisted</text>
+
+            <rect class="s-box-warn" x="486" y="38" width="150" height="52" rx="8"/>
+            <text class="s-t-warn" x="502" y="60">docker restart</text>
+            <text class="s-t-xs" x="502" y="78">container replaced</text>
+
+            <rect class="s-box-accent" x="706" y="38" width="158" height="52" rx="8"/>
+            <text class="s-t-sm" x="722" y="60">step 2 --resume</text>
+            <text class="s-t-accent" x="722" y="78">same conversation</text>
+
+            <path class="s-line-accent" d="M 166 64 L 230 64" marker-end="url(#a5)"/>
+            <path class="s-line-accent" d="M 416 64 L 480 64" marker-end="url(#a5)"/>
+            <path class="s-line-accent" d="M 636 64 L 700 64" marker-end="url(#a5)"/>
+
+            <text class="s-label" x="16" y="146">FAIL — EPHEMERAL (--rm)</text>
+            <rect class="s-box" x="16" y="158" width="150" height="52" rx="8"/>
+            <text class="s-t-sm" x="32" y="180">step 1</text>
+            <text class="s-t-xs" x="32" y="198">fresh session</text>
+
+            <rect class="s-box-danger" x="236" y="158" width="180" height="52" rx="8"/>
+            <text class="s-t-danger" x="252" y="180">session inside container</text>
+            <text class="s-t-xs" x="252" y="198">no volume</text>
+
+            <rect class="s-box-danger" x="486" y="158" width="150" height="52" rx="8"/>
+            <text class="s-t-danger" x="502" y="180">container torn down</text>
+            <text class="s-t-xs" x="502" y="198">transcript gone</text>
+
+            <rect class="s-box-danger" x="706" y="158" width="158" height="52" rx="8"/>
+            <text class="s-t-danger" x="722" y="180">step 2 --resume</text>
+            <text class="s-t-xs" x="722" y="198">nothing to resume</text>
+
+            <path class="s-line-danger" d="M 166 184 L 230 184" marker-end="url(#a5d)"/>
+            <path class="s-line-danger" d="M 416 184 L 480 184" marker-end="url(#a5d)"/>
+            <path class="s-line-danger" d="M 636 184 L 700 184" marker-end="url(#a5d)"/>
+
+            <text class="s-t-xs" x="16" y="238">agentmesh's paper says containers are "torn down or recycled between jobs" — correct for one-shot jobs, fatal for chained workflow steps.</text>
+          </svg>
+        </div>
+        <figcaption>Fig. 8 — The assumption phase 0 exists to verify. If the bottom row is what happens, the design is wrong.</figcaption>
+      </figure>
+
+      <div class="callout warn">
+        <span class="tag">Pass condition</span>
+        <p>
+          The second run resumes the same conversation (<code>claude --resume &lt;id&gt; -p</code>,
+          <code>adapters/spawn-runner/claude.ts:37-38</code>). If this fails, the whole design is
+          wrong and everything below is wasted — target's value is the chained session, not the
+          dispatch.
+        </p>
+      </div>
+
+      <p>
+        Also settle here: authenticate the in-container CLI with a <strong>dedicated API key per
+        container</strong> (env var) rather than bind-mounting host credentials. Mounting the host's
+        credentials into a container that executes untrusted prompts reopens much of the blast radius
+        the container exists to close.
+      </p>
+
+      <h3>Phase A — Registered agents</h3>
+      <p>New table (<code>hub/db.ts</code>, alongside the existing block at&nbsp;:169):</p>
+<pre><code>CREATE TABLE IF NOT EXISTS agents (
+  name         TEXT PRIMARY KEY,
+  hook_url     TEXT NOT NULL,
+  secret       TEXT NOT NULL,
+  description  TEXT NOT NULL DEFAULT '',
+  runner       TEXT NOT NULL DEFAULT 'claude',
+  enabled      INTEGER NOT NULL DEFAULT 1,
+  created_at   TEXT NOT NULL,
+  last_seen_at TEXT
+);</code></pre>
+
+      <p>
+        <code>workflows</code> gains one nullable column, via the existing
+        <code>addWorkflowColumn</code> migration helper (<code>hub/db.ts:255</code>):
+        <code>agent_ref TEXT</code> — null means a legacy local workflow that owns its hook.
+      </p>
+
+      <div class="callout danger">
+        <span class="tag">Schema trap</span>
+        <p>
+          <strong>Do not reuse <code>agent_name</code> for this.</strong> It is <code>UNIQUE</code>
+          (<code>hub/db.ts:172</code>), so two workflows sharing one registered agent would collide on
+          insert — and sqlite cannot drop a constraint without rebuilding the table. Keep
+          <code>agent_name</code> synthetic (<code>&lt;slug&gt;-&lt;shortid&gt;</code>) as today; it
+          stays the key for the status <code>.md</code> path and the log lines. <code>agent_ref</code>
+          carries the real binding.
+        </p>
+      </div>
+
+      <p>
+        <strong><code>hook_url</code> / <code>secret</code> stay denormalized on the workflow row.</strong>
+        They are copied from the agent at creation time, so <code>dispatchStep</code> needs
+        <strong>zero changes</strong>.
+      </p>
+
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>File</th><th>Change</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>hub/workflow.ts:439</code></td>
+              <td><code>createWorkflow</code> takes <code>agentRef</code>. When set: look the agent up, skip <code>createAwbHook</code> entirely, copy its <code>hookUrl</code>/<code>secret</code>, store <code>agent_ref</code>. When unset: today's behaviour, untouched.</td>
+            </tr>
+            <tr>
+              <td><code>hub/workflow.ts:519</code></td>
+              <td><code>removeWorkflow</code> must <strong>not</strong> call <code>deleteAwbHook</code> for a workflow with an <code>agent_ref</code> — the hook belongs to the node. (It is best-effort and would return <code>false</code>, but the intent must be explicit.)</td>
+            </tr>
+            <tr>
+              <td><code>hub/server.ts:635</code></td>
+              <td><code>POST /api/workflows</code> accepts <code>agentRef</code>. In cloud mode it is required, and <code>workdir</code> / <code>permissionMode</code> / <code>runner</code> are rejected — those are node-side properties now.</td>
+            </tr>
+            <tr>
+              <td><code>hub/server.ts</code></td>
+              <td>New routes: <code>GET /api/agents</code> (public shape, never the secret — mirror <code>publicAgent</code> in <code>agentmesh/hub/server.ts:111</code>), <code>POST /api/agents</code> (admin), <code>DELETE /api/agents/:name</code> (admin), <code>POST /api/agents/:name/ping</code> → updates <code>last_seen_at</code>.</td>
+            </tr>
+            <tr>
+              <td><code>hub/config.ts</code></td>
+              <td><code>mode: "local" | "cloud"</code> (default <code>"local"</code>). Cloud mode makes every hook-writing path unreachable.</td>
+            </tr>
+            <tr>
+              <td><code>hub/cli.ts</code></td>
+              <td><code>add-agent</code> / <code>list-agents</code> / <code>rm-agent</code>, and <code>--agent</code> on <code>create</code>.</td>
+            </tr>
+            <tr>
+              <td><code>hub/ui</code></td>
+              <td>Agent selector in the New-workflow modal; an Agents view to register and remove nodes.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout warn">
+        <span class="tag">Consequence for the two execution modes</span>
+        <p>
+          Today a hook is 1:1 with a workflow, so <code>createWorkflow</code> gives each one its own
+          sandbox workdir (<code>targetDir()/sandboxes/&lt;agentName&gt;</code>,
+          <code>hub/workflow.ts:449</code>). Phase A makes it <strong>N:1</strong> — several workflows
+          on one registered agent — and that <strong>drops the per-workflow sandbox isolation</strong>:
+          they now share one workdir inside one container.
+        </p>
+        <p>
+          Sessions stay separate (each workflow keeps its own <code>lastSessionId</code>), so the
+          conversations do not bleed. But the guard in <code>runStep</code>
+          (<code>hub/workflow.ts:1226</code>) only blocks steps <em>of the same workflow</em> — its
+          comment, <em>"they'd otherwise fight over the same hook/session"</em>, becomes half true.
+          Two workflows on one agent can dispatch concurrently and will contend on the container's
+          workdir <code>flock</code>: one runs, the other sits <code>queued</code> until it wins the
+          lock, bounded by <code>queuedTimeoutMs</code> (6h). That is correct behaviour, but it is new
+          — with 1:1 hooks it could never happen.
+        </p>
+        <p>
+          <strong>Decide explicitly:</strong> either bind one workflow per agent at a time (a
+          <code>busy</code> flag on the agent row, rejecting a second binding), or accept the queueing
+          and document that workflows sharing an agent share its files. Do not leave it implicit.
+        </p>
+      </div>
+
+      <h3>Phase B — Public callbacks</h3>
+      <p>
+        <code>hub/config.ts</code>: add <code>publicBaseUrl: string | null</code>.
+        <code>hub/runner.ts:144,150</code>: replace the two hardcoded strings with a shared
+        <code>baseUrl(cfg)</code> = <code>cfg.publicBaseUrl ?? http://${cfg.host}:${cfg.port}</code>.
+      </p>
+      <p>
+        Guards: in cloud mode, refuse to boot without a <code>publicBaseUrl</code>, and require
+        <code>https</code>. The callback token still travels in the query string
+        (<code>?token=&lt;callbackToken&gt;</code>) — acceptable over TLS, but it means access logs on
+        any intermediary see it. Note it, revisit if a proxy is added. <code>host</code> also has to
+        become bindable (<code>0.0.0.0</code> or behind the platform's proxy); today it is hardcoded to
+        <code>127.0.0.1</code> in the defaults (<code>hub/config.ts:53</code>).
+      </p>
+
+      <div class="callout danger">
+        <span class="tag">The broker rejects it too</span>
+        <p>
+          Changing the hub is not enough. The broker validates the callback URLs it is handed and
+          <strong>drops any that are not loopback</strong>:
+          <code>if (url.protocol !== "http:" || !LOOPBACK_HOSTS.has(url.hostname))</code>
+          (<code>broker/dispatch.ts:38</code>, with
+          <code>LOOPBACK_HOSTS = {127.0.0.1, localhost, [::1]}</code> at&nbsp;:25). An
+          <code>https://</code> callback pointing at the cloud hub fails <em>both</em> conditions, so
+          the node would run the step and then silently discard the result — the hub would see the
+          step queued forever until <code>queuedTimeoutMs</code>.
+        </p>
+        <p>
+          This guard exists so a webhook caller cannot use the broker as a request proxy against
+          arbitrary URLs, which is a real protection worth keeping. Replace it with an allowlist the
+          <em>operator</em> configures (a <code>callbackOrigins</code> list in the broker's config,
+          defaulting to loopback only), not with a blanket removal — the origin must stay something
+          the node's owner chose, never something the request body chose.
+        </p>
+      </div>
+
+      <h3>Phase C — Progress heartbeat</h3>
+      <p>
+        <strong>Hub side.</strong> New route
+        <code>POST /api/steps/:id/progress?token=&lt;callbackToken&gt;</code>, authenticated exactly
+        like <code>/started</code> and <code>/result</code> (<code>hub/server.ts:379,394</code>). Body:
+        <code>{ at?: ISO, kind: "transcript"|"session-file"|"run-log", token: string }</code>. It
+        reuses <code>recordStepProgress</code> and <strong>the same two guards</strong> as
+        <code>recordFreshSignal</code> (<code>hub/workflow.ts:88-95</code>): an unchanged fingerprint
+        is not progress, and a signal older than the stored one is ignored. Those guards are what keep
+        the idle clock honest; a heartbeat that ignored them would just disable the watchdog.
+      </p>
+      <p>
+        <strong>Watchdog side.</strong> A workflow bound to a remote agent must not be judged by the
+        idle clock until at least one heartbeat has arrived. In <code>expireStale</code>
+        (<code>hub/workflow.ts:134</code>), a candidate with <code>reason === "idle"</code>, an
+        <code>agent_ref</code>, and <code>last_progress_at IS NULL</code> is skipped; only
+        <code>stepHardTimeoutMs</code> applies to it. Once heartbeats flow, the normal idle logic
+        resumes unchanged.
+      </p>
+      <p>
+        <strong>Node side.</strong> A small reporter loop in the container stats the same paths
+        <code>hub/progress.ts</code> does (<code>claudeTranscripts</code>,
+        <code>freeCodeSessions</code>, <code>runLogs</code>) and POSTs the fingerprint when it changes,
+        every ~30s. It knows the step id because awb already receives <code>jobId</code>.
+      </p>
+
+      <h3>Phase D — The node image</h3>
+      <p><code>Dockerfile</code> + <code>docker-compose.yml</code> for one agent:</p>
+      <ul>
+        <li>Node 24 base, <code>claude</code> (and/or <code>free-code</code>) installed, awb checked out, awb broker as the entrypoint.</li>
+        <li>
+          <strong>Named volumes</strong> — this is the part that matters:
+          <code>~/.claude</code> (Claude Code sessions — <strong>without this, step 2 of every workflow
+          cannot resume</strong>), <code>~/.agent-webhook-bridge</code> (hooks.json, run logs, free-code
+          sessions), and the workdir.
+        </li>
+        <li><code>restart: unless-stopped</code>. Never <code>--rm</code>.</li>
+        <li>Hook created once at container init (<code>awb add</code>), with the lowest permission mode that agent actually needs.</li>
+        <li>A <code>cloudflared</code> sidecar per container, or one tunnel plus a reverse proxy routing <code>/&lt;agent&gt;/*</code> to each container. Prefer the proxy once there is more than one agent.</li>
+      </ul>
+
+      <div class="callout warn">
+        <span class="tag">flock changes meaning</span>
+        <p>
+          <code>runHidden</code> serializes runs per workdir with <code>flock</code>
+          (<code>vendor/agent-webhook-bridge/adapters/spawn-runner/shared.ts:122-129</code>). Across
+          separate containers there is nothing to serialize and nothing to protect — the isolation is
+          the container. <strong>But if you bind-mount the same host repo into two containers, you lose
+          that serialization and <code>flock</code> will not save you.</strong> Mount a given repo into
+          exactly one container.
+        </p>
+      </div>
+
+      <p>
+        The <code>started</code> callback still fires after the lock is acquired, so the
+        queued&nbsp;→&nbsp;running transition and <code>queuedTimeoutMs</code> keep working untouched.
+      </p>
+
+      <h3>Phase E — Remote auth</h3>
+      <p>Port agentmesh's phase-2 layer, which already exists and works:</p>
+
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>From</th><th>To</th><th>What</th></tr></thead>
+          <tbody>
+            <tr><td><code>agentmesh/hub/db.ts:252+</code></td><td><code>hub/db.ts</code></td><td><code>api_keys</code> table, sha256-hashed keys, expiry, max uses</td></tr>
+            <tr><td><code>agentmesh/hub/server.ts:87</code></td><td><code>hub/server.ts</code></td><td><code>isRemoteRequest</code> via <code>cf-connecting-ip</code> / <code>x-forwarded-for</code></td></tr>
+            <tr><td><code>agentmesh/hub/server.ts:60-77</code></td><td><code>hub/server.ts</code></td><td>per-key sliding-window rate limit</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>
+        Then add what target needs and agentmesh does not, because target has ~15 mutating routes
+        behind a single all-or-nothing <code>isAdmin</code> (<code>hub/server.ts:172</code>) where
+        agentmesh has essentially one. <strong>Deny for remote callers even with a valid admin
+        token:</strong>
+      </p>
+      <ul>
+        <li><code>POST /workflows/:id/open-terminal</code> (<code>hub/server.ts:801</code>) — spawns a terminal on the operator's machine.</li>
+        <li><code>GET /api/fs/dirs</code> (<code>hub/server.ts:568</code>) — filesystem browser.</li>
+        <li>Every <code>DELETE</code>.</li>
+      </ul>
+
+      <p>
+        And <strong>allow</strong>, explicitly — this is the set that makes "send me a workflow"
+        actually usable, and it must cover <em>both</em> execution modes or remote callers can start a
+        whole workflow but not drive it step by step:
+      </p>
+
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Route</th><th>Why a remote caller needs it</th></tr></thead>
+          <tbody>
+            <tr><td><code>POST /api/workflows</code></td><td>create the workflow (with <code>agentRef</code>)</td></tr>
+            <tr><td><code>POST /workflows/:id/steps</code><br/><code>…/steps/from-template</code></td><td>add the steps</td></tr>
+            <tr><td><code>POST /workflows/:id/start|pause|resume|restart</code></td><td><strong>mode 1</strong> — run the whole workflow, with the ticked selection</td></tr>
+            <tr><td><code>POST /workflows/:id/steps/:stepId/run</code></td><td><strong>mode 2</strong> — the ▶ on-demand single step</td></tr>
+            <tr><td><code>POST /workflows/:id/steps/:stepId/continue</code></td><td>release the manual-review gate from the web — the whole point of having it</td></tr>
+            <tr><td><code>POST /workflows/:id/steps/:stepId/abort</code></td><td>unstick a hung step without a shell on the host (needs §5.4 fixed, or it only settles the DB row)</td></tr>
+            <tr><td><code>PATCH /workflows/:id/steps/:stepId</code></td><td>edit a pending step before re-running it</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>
+        And decide whether <code>GET</code>s become key-gated: they currently expose workdir paths,
+        transcripts and session ids to anyone holding the URL. agentmesh's README admits the same gap
+        for its own reads.
+      </p>
+
+      <!-- ────────────────────────────── 7 ────────────────────────────── -->
+      <h2 id="criterion"><span class="num">7</span>Success criterion</h2>
+      <p>
+        A workflow created from the cloud UI, with three steps, bound to a dockerized agent through a
+        tunnel, that:
+      </p>
+      <ol>
+        <li>chains <strong>one</strong> session across all three steps;</li>
+        <li>runs steps 1–2 through the sequential engine (<strong>mode 1</strong>), then step 3 via the ▶ button (<strong>mode 2</strong>), still on the same conversation;</li>
+        <li>survives <code>docker restart</code> between step 2 and step 3 and still resumes;</li>
+        <li>runs a 40-minute step without being timed out (heartbeats arriving);</li>
+        <li>stops at a <code>manualReview</code> step until approved from the cloud UI;</li>
+        <li>lets an aborted step actually die in the container, then be re-run with ▶;</li>
+        <li>shows the terminal and session-resume offers hidden, not broken.</li>
+      </ol>
+      <p>When that passes end to end, this is done.</p>
+
+      <!-- ────────────────────────────── 8 ────────────────────────────── -->
+      <h2 id="security"><span class="num">8</span>Security model</h2>
+      <p>The risk <strong>inverts</strong> compared to tunnelling a local hub.</p>
+
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 880 210" role="img" aria-label="Comparison of the exposed surface. Tunnelling a local hub exposes the hub. In this architecture the exposed surface is the operator broker, and the cloud database holds the hook secrets.">
+            <defs>
+              <marker id="a6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#e07b6b"/>
+              </marker>
+            </defs>
+
+            <text class="s-label" x="16" y="22">TUNNELLED LOCAL HUB</text>
+            <rect class="s-zone" x="12" y="32" width="410" height="150" rx="10"/>
+            <rect class="s-box-danger" x="40" y="58" width="150" height="46" rx="8"/>
+            <text class="s-t-sm" x="56" y="80">hub (exposed)</text>
+            <text class="s-t-xs" x="56" y="96">admin token = all</text>
+            <rect class="s-box" x="250" y="58" width="146" height="46" rx="8"/>
+            <text class="s-t-sm" x="266" y="80">broker (private)</text>
+            <text class="s-t-xs" x="266" y="96">loopback only</text>
+            <path class="s-line-danger" d="M 190 81 L 244 81" marker-end="url(#a6)"/>
+            <text class="s-t-xs" x="40" y="140">one leaked token → terminal, filesystem, deletes</text>
+            <text class="s-t-xs" x="40" y="160">blast radius: the whole host</text>
+
+            <text class="s-label" x="452" y="22">CLOUD HUB + CONTAINERS</text>
+            <rect class="s-zone" x="448" y="32" width="420" height="150" rx="10"/>
+            <rect class="s-box-warn" x="476" y="58" width="150" height="46" rx="8"/>
+            <text class="s-t-sm" x="492" y="80">hub (cloud)</text>
+            <text class="s-t-warn" x="492" y="96">holds hook secrets</text>
+            <rect class="s-box-danger" x="686" y="58" width="160" height="46" rx="8"/>
+            <text class="s-t-sm" x="702" y="80">broker (exposed)</text>
+            <text class="s-t-accent" x="702" y="96">inside a container</text>
+            <path class="s-line-danger" d="M 626 81 L 680 81" marker-end="url(#a6)"/>
+            <text class="s-t-xs" x="476" y="140">compromise the hub → arbitrary jobs on the node</text>
+            <text class="s-t-xs" x="476" y="160">blast radius: one container — that is the whole point</text>
+          </svg>
+        </div>
+        <figcaption>Fig. 9 — The container is the control, not the secret. Phase D is what makes the exposure tolerable.</figcaption>
+      </figure>
+
+      <ul>
+        <li>
+          <strong>The exposed surface is now the operator's broker.</strong> A hook with
+          <code>bypassPermissions</code> (<code>hub/awb.ts:162</code>) reachable from the internet is
+          remote code execution — which is precisely why phase D is not optional.
+        </li>
+        <li>
+          <strong>The cloud box holds the keys to the machine.</strong> <code>hook_url</code> +
+          <code>secret</code> sit in the cloud sqlite. Compromise the hub and you can submit arbitrary
+          jobs to the node. Mitigate with: least-privilege permission mode per agent, Cloudflare Access
+          with a service token in front of the tunnel (so the shared secret is not the only gate), and
+          the manual review gate as a human checkpoint before anything touches a real repo.
+        </li>
+        <li>
+          <strong>Prompt payloads are untrusted input.</strong> That is the container's whole purpose —
+          same stance as <code>agentmesh/index.html:339</code>.
+        </li>
+        <li>Persistent disk required for sqlite (Fly volume / VPS / Render disk). Not serverless.</li>
+      </ul>
+
+      <!-- ────────────────────────────── 9 ────────────────────────────── -->
+      <h2 id="order"><span class="num">9</span>Execution order</h2>
+
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 880 150" role="img" aria-label="Phase order: phase zero is a gate, then registered agents, public callbacks, heartbeat, node image, and remote auth.">
+            <defs>
+              <marker id="a7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#5ed6a4"/>
+              </marker>
+            </defs>
+
+            <rect class="s-box-warn" x="14" y="40" width="128" height="56" rx="8"/>
+            <text class="s-t-warn" x="30" y="64">0 · spike</text>
+            <text class="s-t-xs" x="30" y="82">sessions survive?</text>
+            <text class="s-t-warn" x="30" y="122">GATE — nothing</text>
+            <text class="s-t-warn" x="30" y="136">starts until it passes</text>
+
+            <rect class="s-box-accent" x="176" y="40" width="122" height="56" rx="8"/>
+            <text class="s-t" x="192" y="64">A · agents</text>
+            <text class="s-t-xs" x="192" y="82">largest diff</text>
+
+            <rect class="s-box" x="332" y="40" width="122" height="56" rx="8"/>
+            <text class="s-t" x="348" y="64">B · callbacks</text>
+            <text class="s-t-xs" x="348" y="82">small, unblocks A</text>
+
+            <rect class="s-box-accent" x="488" y="40" width="122" height="56" rx="8"/>
+            <text class="s-t" x="504" y="64">C · heartbeat</text>
+            <text class="s-t-xs" x="504" y="82">or 10-min cap</text>
+
+            <rect class="s-box" x="644" y="40" width="104" height="56" rx="8"/>
+            <text class="s-t" x="660" y="64">D · image</text>
+            <text class="s-t-xs" x="660" y="82">compose</text>
+
+            <rect class="s-box" x="782" y="40" width="86" height="56" rx="8"/>
+            <text class="s-t" x="798" y="64">E · auth</text>
+            <text class="s-t-xs" x="798" y="82">keys</text>
+
+            <path class="s-line-accent" d="M 142 68 L 170 68" marker-end="url(#a7)"/>
+            <path class="s-line-accent" d="M 298 68 L 326 68" marker-end="url(#a7)"/>
+            <path class="s-line-accent" d="M 454 68 L 482 68" marker-end="url(#a7)"/>
+            <path class="s-line-accent" d="M 610 68 L 638 68" marker-end="url(#a7)"/>
+            <path class="s-line-accent" d="M 748 68 L 776 68" marker-end="url(#a7)"/>
+            <text class="s-t-xs" x="644" y="122">E lands before anyone else gets a URL</text>
+          </svg>
+        </div>
+        <figcaption>Fig. 10 — Phase 0 is a gate, not a warm-up.</figcaption>
+      </figure>
+
+      <ol>
+        <li><strong>Phase 0</strong> — session-persistence spike. Nothing else starts until it passes.</li>
+        <li><strong>Phase A</strong> — registered agents (the model change; largest diff).</li>
+        <li><strong>Phase B</strong> — <code>publicBaseUrl</code> (small, but A is untestable end-to-end without it).</li>
+        <li><strong>Phase C</strong> — heartbeat (without it every step dies at 10 minutes).</li>
+        <li><strong>Phase D</strong> — the real node image + compose + tunnel.</li>
+        <li><strong>Phase E</strong> — API keys and the remote deny-list, before anyone else gets a URL.</li>
+      </ol>
+
+      <!-- ────────────────────────────── 10 ────────────────────────────── -->
+      <h2 id="open"><span class="num">10</span>Open questions</h2>
+      <ul>
+        <li>
+          <strong>Is option A enough?</strong> The single biggest decision in this document. If the
+          real need is "queue work to my own machine from my phone", §3 says do that instead.
+        </li>
+        <li>
+          <strong>Multi-user?</strong> "So people can send me workflows" implies more than one
+          submitter. That turns phase E from optional to mandatory and raises quota and attribution
+          questions (agentmesh tracks <code>submittedBy</code> on a job —
+          <code>agentmesh/hub/db.ts:44</code>).
+        </li>
+        <li><strong>One tunnel per container, or a proxy?</strong> Simpler vs. fewer moving parts at N&nbsp;&gt;&nbsp;2 agents.</li>
+        <li>
+          <strong>Do containers get real repos bind-mounted, or only sandboxes?</strong> Real repos are
+          the useful case and the dangerous one; see the <code>flock</code> caveat in phase D.
+        </li>
+        <li>
+          <strong>Does local mode stay?</strong> Recommended yes: <code>mode: "local"</code> keeps
+          today's zero-config single-machine flow working, and it is what the tests exercise.
+        </li>
+      </ul>
+
+      <footer>
+        The Target Project — implementation plan · today → proposal → trade-offs → phases 0–E
+      </footer>
+    </div>
+  </body>
+</html>

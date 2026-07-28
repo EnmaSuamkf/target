@@ -40,7 +40,9 @@ export function SessionPanel({
 					disabled={!canOpen || opening}
 					title={
 						canOpen
-							? "Opens a terminal on this machine, cd'd into the workflow's workdir, resuming this session."
+							? info?.sandbox === "docker"
+								? "Opens a terminal on this machine running `docker run -it …` in the same container image the steps used, resuming this session."
+								: "Opens a terminal on this machine, cd'd into the workflow's workdir, resuming this session."
 							: "No session yet — run a step first."
 					}
 				>
@@ -56,6 +58,10 @@ export function SessionPanel({
 						<div className={styles.fact}>
 							<dt>Harness</dt>
 							<dd>{info.harness ?? "unknown"}</dd>
+						</div>
+						<div className={styles.fact}>
+							<dt>Sandbox</dt>
+							<dd title={info.image ?? undefined}>{info.sandbox === "docker" ? `docker · ${info.image ?? "default image"}` : "this machine"}</dd>
 						</div>
 						<div className={styles.fact}>
 							<dt>Session</dt>

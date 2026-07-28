@@ -34,6 +34,15 @@ export type PermissionMode = (typeof PERMISSION_MODES)[number];
 export const RUNNERS = ["claude", "free-code"] as const;
 export type Runner = (typeof RUNNERS)[number];
 
+/**
+ * Where a workflow's agent runs (server-validated). Orthogonal to the runner:
+ * `host` is the historical behaviour — the CLI runs as you, on your
+ * filesystem — while `docker` runs the same invocation in a container whose
+ * only mounts are the workflow's workdir and the harness's own state.
+ */
+export const SANDBOXES = ["host", "docker"] as const;
+export type Sandbox = (typeof SANDBOXES)[number];
+
 export interface Progress {
 	done: number;
 	total: number;
@@ -51,6 +60,10 @@ export interface Workflow {
 	/** Resolved from the awb hook, so it can be absent if the hook is gone. */
 	workdir: string | null;
 	harness: string | null;
+	/** "host" for an uncontained agent (the default), "docker" when its steps run in a container. */
+	sandbox: Sandbox;
+	/** Image backing a docker sandbox; null on the host. */
+	image: string | null;
 	progress: Progress;
 	conversationContext: string | null;
 	contextInjected: boolean;
@@ -164,6 +177,8 @@ export interface TokenUsage {
 export interface SessionInfo {
 	sessionId: string | null;
 	harness: string | null;
+	sandbox: Sandbox;
+	image: string | null;
 	usage: TokenUsage | null;
 }
 
@@ -186,6 +201,10 @@ export interface CreateWorkflowInput {
 	permissionMode?: PermissionMode;
 	/** Which CLI the workflow's hook spawns; the server defaults to "claude". */
 	runner?: Runner;
+	/** Where that CLI runs; the server defaults to "host" (and writes no sandbox block at all). */
+	sandbox?: Sandbox;
+	/** Image for a docker sandbox; the server falls back to its own default image. */
+	image?: string;
 	templateId?: string;
 	/** Required confirmation when permissionMode is "bypassPermissions". */
 	acceptBypassRisk?: boolean;
