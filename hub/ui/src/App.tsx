@@ -19,6 +19,7 @@ import { useToast } from "./components/Toast.tsx";
 import { VoiceDock } from "./components/VoiceDock.tsx";
 import { useAdminToken } from "./hooks/useAdminToken.ts";
 import { useDictation } from "./hooks/useDictation.ts";
+import { useIsMobile } from "./hooks/useIsMobile.ts";
 import { usePolling } from "./hooks/usePolling.ts";
 import { CreateWorkflowModal } from "./views/CreateWorkflowModal.tsx";
 import { SettingsView } from "./views/SettingsView.tsx";
@@ -40,6 +41,12 @@ import styles from "./App.module.css";
  * The selected workflow is mirrored in the URL hash (`#/w/<id>`), so a reload
  * or a copied link lands back on the same workflow — the old UI always reset to
  * "nothing selected".
+ *
+ * Layout: the workflows view is a master/detail pair. On a wide screen both
+ * panes are on screen at once; on a phone there isn't room for two columns, so
+ * the same selection state drives *which* of them is shown — the list until a
+ * workflow is picked, then the detail with a back affordance. No routes and no
+ * second component tree, just one branch on `useIsMobile()`.
  */
 
 const POLL_INTERVAL_MS = 2000;
@@ -63,6 +70,7 @@ export function App(): React.JSX.Element {
 
 	const toast = useToast();
 	const dictation = useDictation();
+	const isMobile = useIsMobile();
 	const { hasToken, saveToken } = useAdminToken();
 	const { confirm, dialog } = useConfirm();
 
@@ -406,12 +414,17 @@ export function App(): React.JSX.Element {
 
 				{view === "workflows" ? (
 					<div className={styles.workflowLayout}>
-						<WorkflowList
-							workflows={workflows}
-							selectedId={selectedId}
-							onSelect={setSelectedId}
-							onCreate={() => setCreateOpen(true)}
-						/>
+						{/* On a phone the list steps aside while a workflow is open — two
+						    stacked panes would mean scrolling past the whole list to reach
+						    the steps of the thing you just tapped. */}
+						{(!isMobile || !selectedWorkflow) && (
+							<WorkflowList
+								workflows={workflows}
+								selectedId={selectedId}
+								onSelect={setSelectedId}
+								onCreate={() => setCreateOpen(true)}
+							/>
+						)}
 
 						{selectedWorkflow ? (
 							<WorkflowDetail
@@ -420,6 +433,7 @@ export function App(): React.JSX.Element {
 								sessionInfo={sessionInfo}
 								templates={templates}
 								busy={busy}
+								{...(isMobile ? { onBack: () => setSelectedId(null) } : {})}
 								onStart={handleStart}
 								onStop={handleStop}
 								onDelete={() => void handleDelete()}
@@ -434,21 +448,25 @@ export function App(): React.JSX.Element {
 								onAddStepsFromTemplate={handleAddStepsFromTemplate}
 							/>
 						) : (
-							<section className={styles.placeholder}>
-								<EmptyState
-									title={loaded && workflows.length === 0 ? "Nothing here yet" : "No workflow selected"}
-									description={
-										loaded && workflows.length === 0
-											? "Create a workflow to define its steps and run them in order."
-											: "Pick a workflow from the list to see its steps and controls."
-									}
-									action={
-										<button type="button" className="btn btn--primary btn--sm" onClick={() => setCreateOpen(true)}>
-											New workflow
-										</button>
-									}
-								/>
-							</section>
+							// The "pick something" placeholder is a two-pane idea: with only
+							// the list on screen there is nothing to explain.
+							!isMobile && (
+								<section className={styles.placeholder}>
+									<EmptyState
+										title={loaded && workflows.length === 0 ? "Nothing here yet" : "No workflow selected"}
+										description={
+											loaded && workflows.length === 0
+												? "Create a workflow to define its steps and run them in order."
+												: "Pick a workflow from the list to see its steps and controls."
+										}
+										action={
+											<button type="button" className="btn btn--primary btn--sm" onClick={() => setCreateOpen(true)}>
+												New workflow
+											</button>
+										}
+									/>
+								</section>
+							)
 						)}
 					</div>
 				) : view === "templates" ? (

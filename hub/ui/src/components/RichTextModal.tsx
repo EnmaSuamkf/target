@@ -144,7 +144,7 @@ export function RichTextModal({
 					<button
 						key={item.label}
 						type="button"
-						className={styles.tool}
+						className={`${styles.tool} tap-target`}
 						title={item.title}
 						aria-label={item.label}
 						// Prevent the button press from stealing the selection the

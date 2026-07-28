@@ -4,6 +4,7 @@ import { EmptyState } from "../components/EmptyState.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { Field } from "../components/Field.tsx";
 import { Switch } from "../components/Switch.tsx";
+import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { relativeTime } from "../lib/format.ts";
 import styles from "./TemplatesView.module.css";
 
@@ -16,6 +17,10 @@ import styles from "./TemplatesView.module.css";
  *
  * Search filters locally on name and tags (the API also accepts `?q=`, but
  * filtering in the browser is instant and the list is small by nature).
+ *
+ * Layout mirrors the workflows view: side-by-side list and form on a wide
+ * screen, and on a phone the same state (`creating` / `editingId`) decides
+ * which of the two is the screen you're on, with a back link out of the form.
  */
 export function TemplatesView({
 	templates,
@@ -34,6 +39,7 @@ export function TemplatesView({
 	const [tagFilter, setTagFilter] = useState("");
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const [creating, setCreating] = useState(false);
+	const isMobile = useIsMobile();
 
 	const allTags = useMemo(() => {
 		const tags = new Set<string>();
@@ -59,9 +65,15 @@ export function TemplatesView({
 	}, [templates, editingId]);
 
 	const showForm = creating || editing !== null;
+	const closeForm = (): void => {
+		setCreating(false);
+		setEditingId(null);
+	};
 
 	return (
 		<div className={styles.layout}>
+			{/* One pane at a time on a phone — see the layout note above. */}
+			{(!isMobile || !showForm) && (
 			<aside className={styles.listPanel} aria-label="Templates">
 				<div className={styles.head}>
 					<div className={styles.headRow}>
@@ -167,17 +179,18 @@ export function TemplatesView({
 					)}
 				</div>
 			</aside>
+			)}
 
-			<section className={styles.formPanel}>
-				{showForm ? (
+			{/* With only the list on screen there is nothing for a "pick one"
+			    placeholder to sit next to, so the pane isn't rendered at all. */}
+			{showForm ? (
+				<section className={styles.formPanel}>
 					<TemplateForm
 						key={editing?.id ?? "new"}
 						template={editing}
 						busy={busy}
-						onCancel={() => {
-							setCreating(false);
-							setEditingId(null);
-						}}
+						{...(isMobile ? { onBack: closeForm } : {})}
+						onCancel={closeForm}
 						onDelete={editing ? () => onDelete(editing.id) : undefined}
 						onSubmit={async (input) => {
 							if (editing) await onUpdate(editing.id, input);
@@ -185,18 +198,22 @@ export function TemplatesView({
 							setCreating(false);
 						}}
 					/>
-				) : (
-					<EmptyState
-						title="No template selected"
-						description="Pick a template to edit it, or create a new one."
-						action={
-							<button type="button" className="btn btn--primary btn--sm" onClick={() => setCreating(true)}>
-								New template
-							</button>
-						}
-					/>
-				)}
-			</section>
+				</section>
+			) : (
+				!isMobile && (
+					<section className={styles.formPanel}>
+						<EmptyState
+							title="No template selected"
+							description="Pick a template to edit it, or create a new one."
+							action={
+								<button type="button" className="btn btn--primary btn--sm" onClick={() => setCreating(true)}>
+									New template
+								</button>
+							}
+						/>
+					</section>
+				)
+			)}
 		</div>
 	);
 }
@@ -207,12 +224,15 @@ function TemplateForm({
 	busy,
 	onSubmit,
 	onCancel,
+	onBack,
 	onDelete,
 }: {
 	template: Template | null;
 	busy: boolean;
 	onSubmit: (input: TemplateInput) => Promise<void>;
 	onCancel: () => void;
+	/** Only supplied when the list isn't on screen beside this form. */
+	onBack?: () => void;
 	onDelete?: (() => void) | undefined;
 }): React.JSX.Element {
 	const [name, setName] = useState(template?.name ?? "");
@@ -259,6 +279,15 @@ function TemplateForm({
 
 	return (
 		<form className={styles.form} onSubmit={submit}>
+			{onBack && (
+				<button type="button" className={styles.back} onClick={onBack}>
+					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+						<path d="M15 18l-6-6 6-6" />
+					</svg>
+					Templates
+				</button>
+			)}
+
 			<div className={styles.formHead}>
 				<h2 className={styles.heading}>{template ? "Edit template" : "New template"}</h2>
 				{onDelete && (

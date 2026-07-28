@@ -200,3 +200,82 @@
 .dot {
 	color: var(--text-subtle);
 }
+
+/* --- phone ---
+ *
+ * Keep in sync with MOBILE_QUERY in hooks/useIsMobile.ts.
+ */
+@media (max-width: 768px) {
+	/* The panel is the page, not a sidebar: it scrolls with the document. */
+	.panel {
+		overflow: visible;
+	}
+
+	.list {
+		overflow: visible;
+		padding: var(--space-3);
+		gap: var(--space-3);
+	}
+
+	.searchInput {
+		min-height: var(--tap-target);
+		padding-left: 2.5rem;
+	}
+
+	.searchIcon {
+		left: var(--space-4);
+	}
+
+	/* One scrollable row rather than three wrapped ones — the filters must not
+	   push the workflows themselves below the fold. */
+	.filters {
+		flex-wrap: nowrap;
+		overflow-x: auto;
+		gap: var(--space-2);
+		padding-bottom: var(--space-1);
+		scrollbar-width: none;
+		-webkit-overflow-scrolling: touch;
+	}
+
+	.filters::-webkit-scrollbar {
+		display: none;
+	}
+
+	.filter {
+		flex: none;
+		min-height: var(--tap-target);
+		padding: 0 var(--space-4);
+		font-size: var(--text-sm);
+	}
+
+	/* The card is the primary target on this screen and it's what a thumb aims
+	   at, so it gets room and a visible press state (there is no hover). */
+	.card {
+		gap: var(--space-3);
+		padding: var(--space-4);
+	}
+
+	.card:active {
+		background: var(--surface-sunken);
+	}
+
+	/* Touch leaves the last-tapped element in its hover state until something
+	   else is tapped, which reads as a phantom selection. */
+	.card:hover {
+		border-color: var(--border);
+		box-shadow: none;
+	}
+
+	.filter:hover {
+		background: var(--surface-sunken);
+		color: var(--text-muted);
+	}
+
+	.cardName {
+		font-size: var(--text-md);
+	}
+
+	.cardMeta {
+		font-size: var(--text-sm);
+	}
+}

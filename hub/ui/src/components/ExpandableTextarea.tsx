@@ -44,7 +44,7 @@ export function ExpandableTextarea({
 			{editable && (
 				<button
 					type="button"
-					className={styles.expand}
+					className={`${styles.expand} tap-target`}
 					title="Expand — edit in a larger window with formatting"
 					aria-label={`Expand: ${expandTitle}`}
 					aria-haspopup="dialog"

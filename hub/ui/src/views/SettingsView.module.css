@@ -79,8 +79,29 @@
 	border-top: 1px solid var(--border);
 }
 
-@media (max-width: 560px) {
+@media (max-width: 768px) {
 	.panel {
 		padding: var(--space-4);
+		gap: var(--space-4);
+	}
+
+	/* The label wraps to two or three lines at this width, so the switch stops
+	   being centred against a tall block of text and sits level with its first
+	   line — where the thing it belongs to is. */
+	.toggleRow {
+		align-items: flex-start;
+		gap: var(--space-3);
+	}
+
+	.channel {
+		padding: var(--space-3);
+	}
+
+	.actions {
+		flex-wrap: wrap;
+	}
+
+	.actions :global(.btn) {
+		width: 100%;
 	}
 }

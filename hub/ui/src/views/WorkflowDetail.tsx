@@ -27,6 +27,10 @@ import styles from "./WorkflowDetail.module.css";
  * - **A `waiting` workflow has no Start at all.** It's held at a step's
  *   manual-review gate, and only that step's Continue button releases it (the
  *   server refuses a Start on it), so the button says so instead of failing.
+ *
+ * `onBack` is passed only when this pane is the whole screen (a phone, where
+ * the workflow list is not next to it) — it's what turns "the detail half of a
+ * split view" into "a screen you can leave".
  */
 export function WorkflowDetail({
 	workflow,
@@ -34,6 +38,7 @@ export function WorkflowDetail({
 	sessionInfo,
 	templates,
 	busy,
+	onBack,
 	onStart,
 	onStop,
 	onDelete,
@@ -52,6 +57,8 @@ export function WorkflowDetail({
 	sessionInfo: SessionInfo | null;
 	templates: Template[];
 	busy: boolean;
+	/** Only supplied when the list isn't on screen beside this pane. */
+	onBack?: () => void;
 	onStart: (stepIds: string[]) => void;
 	onStop: () => void;
 	onDelete: () => void;
@@ -123,6 +130,15 @@ export function WorkflowDetail({
 	return (
 		<section className={styles.detail} aria-label={`Workflow ${workflow.name}`}>
 			<header className={styles.header}>
+				{onBack && (
+					<button type="button" className={styles.back} onClick={onBack}>
+						<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+							<path d="M15 18l-6-6 6-6" />
+						</svg>
+						Workflows
+					</button>
+				)}
+
 				<div className={styles.titleRow}>
 					<h2 className={styles.title}>{workflow.name}</h2>
 					<Badge status={workflow.status} />
@@ -190,7 +206,7 @@ export function WorkflowDetail({
 
 					<div className={styles.controlsSpacer} />
 
-					<button type="button" className="btn btn--danger" onClick={onDelete} disabled={busy}>
+					<button type="button" className={`btn btn--danger ${styles.delete}`} onClick={onDelete} disabled={busy}>
 						Delete
 					</button>
 				</div>

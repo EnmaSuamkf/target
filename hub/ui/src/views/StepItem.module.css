@@ -37,11 +37,18 @@
 	gap: var(--space-3);
 }
 
-.check {
+.checkWrap {
 	flex: none;
+	display: grid;
+	place-items: center;
+	margin-top: 0.25rem;
+	cursor: pointer;
+}
+
+.check {
 	width: 15px;
 	height: 15px;
-	margin: 0.25rem 0 0;
+	margin: 0;
 	accent-color: var(--accent-600);
 	cursor: pointer;
 }
@@ -233,5 +240,112 @@
 @media (max-width: 560px) {
 	.editorGrid {
 		grid-template-columns: 1fr;
+	}
+}
+
+/* --- phone ---
+ *
+ * Keep in sync with MOBILE_QUERY in hooks/useIsMobile.ts.
+ */
+@media (max-width: 768px) {
+	.step {
+		padding: var(--space-4);
+		gap: var(--space-3);
+	}
+
+	.step:hover {
+		border-color: var(--border);
+	}
+
+	/* Row one is the controls (select, number, status); the description gets the
+	   full width underneath it. Squeezing all four onto one line leaves the text
+	   about twenty characters wide on a phone. */
+	.head {
+		flex-wrap: wrap;
+		align-items: center;
+		gap: var(--space-2) var(--space-3);
+	}
+
+	.description {
+		order: 1;
+		flex: 1 1 100%;
+		font-size: var(--text-base);
+	}
+
+	/* Grows the hit area around the 15px box to the 44px minimum, without
+	   drawing a checkbox that size. */
+	.checkWrap {
+		min-width: var(--tap-target);
+		min-height: var(--tap-target);
+		margin: calc(var(--space-2) * -1) calc(var(--space-3) * -1) calc(var(--space-2) * -1) calc(var(--space-2) * -1);
+	}
+
+	.check {
+		width: 20px;
+		height: 20px;
+	}
+
+	.index {
+		min-width: 1.75rem;
+		height: 1.75rem;
+		font-size: var(--text-sm);
+	}
+
+	/* The description no longer sits in a column beside the checkbox, so the
+	   detail blocks stop being indented to line up with it and use the width. */
+	.meta,
+	.actions {
+		padding-left: 0;
+	}
+
+	.criteria,
+	.error,
+	.result {
+		margin-left: 0;
+	}
+
+	.meta,
+	.metaItem {
+		font-size: var(--text-sm);
+	}
+
+	.criteria,
+	.error,
+	.resultBody {
+		font-size: var(--text-sm);
+	}
+
+	/* Four to five actions per step: as a wrapped flex row they end up ragged
+	   and adjacent enough to mis-tap. Two even columns are predictable, and
+	   Continue — the one that releases a manual-review gate — takes the full
+	   width when it's there. */
+	.actions {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: var(--space-2);
+	}
+
+	/* `.step >` so this only hits the read-mode row, not the editor's Save/Cancel
+	   pair — which is fine as two half-width buttons. */
+	.step > .actions > :global(.btn--primary) {
+		grid-column: 1 / -1;
+	}
+
+	.resultToggle {
+		min-height: var(--tap-target);
+		font-size: var(--text-sm);
+	}
+
+	.resultBody {
+		max-height: 7rem;
+	}
+
+	.resultExpanded {
+		max-height: none;
+	}
+
+	.gateRow {
+		align-items: flex-start;
+		gap: var(--space-3);
 	}
 }

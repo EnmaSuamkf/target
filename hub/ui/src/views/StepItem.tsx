@@ -79,14 +79,20 @@ export function StepItem({
 	return (
 		<li className={`${styles.step} ${running ? styles.stepRunning : ""} ${waiting ? styles.stepWaiting : ""}`}>
 			<div className={styles.head}>
-				<input
-					type="checkbox"
-					className={styles.check}
-					checked={selected}
-					onChange={(ev) => onToggleSelected(step.id, ev.target.checked)}
-					aria-label={`Include step ${step.orderIndex + 1} in the next run`}
+				{/* The checkbox is wrapped so its tappable area can be grown to a
+				    thumb's size on a phone without drawing a giant checkbox. */}
+				<label
+					className={styles.checkWrap}
 					title="Check to run only the selected steps on Start. Leave all unchecked to run nothing."
-				/>
+				>
+					<input
+						type="checkbox"
+						className={styles.check}
+						checked={selected}
+						onChange={(ev) => onToggleSelected(step.id, ev.target.checked)}
+						aria-label={`Include step ${step.orderIndex + 1} in the next run`}
+					/>
+				</label>
 				<span className={styles.index}>{step.orderIndex + 1}</span>
 				<p className={styles.description}>{step.description}</p>
 				<Badge status={step.status} label={statusLabel} />

@@ -116,6 +116,37 @@
 	--header-height: 3.5rem;
 	--sidebar-width: 21rem;
 	--content-max: 78rem;
+
+	/* --- touch / small screens ---
+	   The app is one responsive UI; these are the few measurements the phone
+	   layout needs that the desktop one doesn't. The breakpoint itself is
+	   `max-width: 768px` everywhere (media queries can't read a custom property),
+	   mirrored in JS by `MOBILE_QUERY` in hooks/useIsMobile.ts. */
+
+	/* Apple's HIG minimum, which Android's 48dp guidance also clears in practice.
+	   Every control that can be tapped is at least this tall and wide. */
+	--tap-target: 44px;
+
+	/* The bottom tab bar's own height, excluding the home-indicator inset that
+	   is added on top of it. Anything anchored to the bottom of the viewport
+	   clears both. */
+	--bottom-nav-height: 3.5rem;
+
+	/* How tall a bottom sheet is allowed to grow (components/Modal.module.css).
+	   Deliberately short of the viewport: the strip of backdrop left above the
+	   sheet is what marks it as a layer over the page, and it's also the only
+	   place the dictation dock can park while a sheet is open. Both sides measure
+	   from this one number, so the dock can't end up overhanging the sheet.
+	   `dvh` rather than `vh` so a phone's retracting URL bar doesn't clip the
+	   sheet's footer. */
+	--sheet-max-height: 85dvh;
+
+	/* `env()` resolves to 0px wherever there is no notch, so these are safe to
+	   use unconditionally. Named so the intent reads at the call site. */
+	--safe-top: env(safe-area-inset-top, 0px);
+	--safe-bottom: env(safe-area-inset-bottom, 0px);
+	--safe-left: env(safe-area-inset-left, 0px);
+	--safe-right: env(safe-area-inset-right, 0px);
 }
 
 /* Respect a user's reduced-motion preference — the UI polls every 2s and

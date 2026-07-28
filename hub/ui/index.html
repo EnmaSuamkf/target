@@ -2,7 +2,14 @@
 <html lang="en">
 	<head>
 		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<!-- `viewport-fit=cover` lets the layout paint under a notch/home indicator;
+		     every fixed surface then pays the `env(safe-area-inset-*)` back itself.
+		     Zoom is deliberately not disabled — pinching out is an accessibility
+		     affordance, and the 16px form controls already stop iOS from zooming
+		     on focus. -->
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+		<meta name="theme-color" content="#ffffff" />
+		<meta name="mobile-web-app-capable" content="yes" />
 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 		<meta
 			name="description"

@@ -106,3 +106,32 @@
 	font-size: var(--text-xs);
 	color: var(--text-muted);
 }
+
+/* --- phone ---
+ *
+ * Keep in sync with MOBILE_QUERY in hooks/useIsMobile.ts.
+ */
+@media (max-width: 768px) {
+	/* The block's title and its action stop competing for one line: a session id
+	   plus an "Open conversation" button doesn't fit across a phone. */
+	.blockHead {
+		flex-wrap: wrap;
+	}
+
+	.blockActions :global(.btn) {
+		flex: 1;
+	}
+
+	/* A 5rem label column leaves nothing for a session id; label above value. */
+	.fact {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 2px;
+	}
+
+	.fact dt,
+	.fact dd,
+	.usageHead,
+	.usageTotals {
+		font-size: var(--text-sm);
+	}
+}
