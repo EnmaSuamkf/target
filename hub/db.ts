@@ -565,13 +565,33 @@ export function insertStep(
 		manualReview?: boolean;
 		maxRetries?: number;
 		retryIntervalSeconds?: number;
+		/**
+		 * Where the new step lands. Omitted (the usual case) appends it after the
+		 * last one; a number threads it in directly AFTER that order index instead,
+		 * pushing every later step down a slot. The caller resolves which step that
+		 * index belongs to — db.ts stays a storage layer and only does the
+		 * arithmetic.
+		 */
+		afterOrderIndex?: number | null;
 	} = {},
 ): Step {
 	const database = open();
-	const maxRow = database
-		.prepare("SELECT COALESCE(MAX(order_index), -1) AS maxIdx FROM steps WHERE workflow_id = ?")
-		.get(workflowId) as Record<string, unknown>;
-	const orderIndex = Number(maxRow.maxIdx) + 1;
+	let orderIndex: number;
+	if (options.afterOrderIndex == null) {
+		const maxRow = database
+			.prepare("SELECT COALESCE(MAX(order_index), -1) AS maxIdx FROM steps WHERE workflow_id = ?")
+			.get(workflowId) as Record<string, unknown>;
+		orderIndex = Number(maxRow.maxIdx) + 1;
+	} else {
+		orderIndex = options.afterOrderIndex + 1;
+		// Free the slot by moving everything from it downwards one place. Done
+		// before the INSERT so the new row never collides with an existing index;
+		// a crash between the two would only leave a gap, which nothing reads —
+		// `order_index` is an ordering, not an identity (steps are keyed by id).
+		database
+			.prepare("UPDATE steps SET order_index = order_index + 1 WHERE workflow_id = ? AND order_index >= ?")
+			.run(workflowId, orderIndex);
+	}
 	const acceptanceCriteria = options.acceptanceCriteria?.trim() || null;
 	// The gate is opt-in: a step nobody configured never holds the workflow.
 	const manualReview = options.manualReview === true;
@@ -943,6 +963,29 @@ export function failRunningStep(stepId: string, error: string): boolean {
 			.prepare(
 				`UPDATE steps SET status = 'failed', error = ?, finished_at = ?
 				 WHERE id = ? AND status IN ('running', 'queued')`,
+			)
+			.run(error, new Date().toISOString(), stepId).changes > 0
+	);
+}
+
+/**
+ * The other half of Abort, for a step held at its manual-review gate: the human
+ * read the result and it's wrong, so instead of releasing the step it's recorded
+ * `failed` with the given error. Nothing was in flight — the run finished, which
+ * is why the step is holding at all — so unlike `failRunningStep` there's no
+ * callback to fence off; the point here is purely that the operator's verdict is
+ * written down. `result`, `session_id` and `phase` are preserved for the same
+ * reason as there: the rejected work is still worth reading and the conversation
+ * it established is still worth talking to. Only acts on a `waiting` step (a
+ * stale button click on a step the operator already continued must change
+ * nothing); returns whether a row was changed.
+ */
+export function rejectWaitingStep(stepId: string, error: string): boolean {
+	return (
+		open()
+			.prepare(
+				`UPDATE steps SET status = 'failed', error = ?, finished_at = ?
+				 WHERE id = ? AND status = 'waiting'`,
 			)
 			.run(error, new Date().toISOString(), stepId).changes > 0
 	);

@@ -6,6 +6,12 @@
  * path), a later successful ▶ re-run reconciles it back out of `failed`, and
  * any late awb callback for the aborted step is ignored.
  *
+ * Abort's other meaning — refusing the result of a step held at its
+ * manual-review gate, which stops the workflow instead of unsticking anything —
+ * lives with the rest of the gate, in manual-review.test.ts. Everything here is
+ * about the stuck-dispatch case, including the guard that still refuses every
+ * other status.
+ *
  * Same throwaway-TARGET_HOME + fake-awb-hook convention as context.test.ts:
  * the fake hook swallows the dispatch POST (answers `{ok:true}`, records it,
  * never calls back a result) so dispatched steps stay `running` — exactly the

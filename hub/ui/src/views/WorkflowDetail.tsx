@@ -33,8 +33,9 @@ import styles from "./WorkflowDetail.module.css";
  *   ids and the engine runs exactly those. An empty selection runs nothing, so
  *   the button is disabled and says why rather than silently no-op'ing.
  * - **A `waiting` workflow has no Start at all.** It's held at a step's
- *   manual-review gate, and only that step's Continue button releases it (the
- *   server refuses a Start on it), so the button says so instead of failing.
+ *   manual-review gate, and the only ways out are on that step: Continue to
+ *   approve it and carry on, or Abort to refuse it and stop (the server refuses
+ *   a Start on it), so the button says so instead of failing.
  * - **The status picker overrules all of that.** It doesn't run anything: it
  *   records what really happened when the engine's verdict is wrong (a run that
  *   ran out of tokens, a callback that never landed). The hub then leaves that
@@ -64,6 +65,8 @@ export function WorkflowDetail({
 	onRunStep,
 	onAbortStep,
 	onContinueStep,
+	onOpenStepConversation,
+	onAddStepAfter,
 	onSetStepStatus,
 	onAddStepsFromTemplate,
 }: {
@@ -88,6 +91,10 @@ export function WorkflowDetail({
 	onRunStep: (id: string) => void;
 	onAbortStep: (id: string) => void;
 	onContinueStep: (id: string) => void;
+	/** Opens a terminal on one step's own session (the held step's "Open conversation"). */
+	onOpenStepConversation: (id: string) => void;
+	/** Inserts a step right after the given one, so it runs next. */
+	onAddStepAfter: (afterStepId: string, input: StepConfigInput) => Promise<boolean>;
 	/** Forces one step's status by hand; never runs the step. */
 	onSetStepStatus: (id: string, status: OverridableStepStatus) => void;
 	onAddStepsFromTemplate: (templateId: string) => Promise<void>;
@@ -211,7 +218,7 @@ export function WorkflowDetail({
 						title={
 							!startAction
 								? workflow.status === "waiting"
-									? "A step is waiting for your review — press Continue on it to carry on."
+									? "A step is waiting for your review — Continue it to carry on, or Abort it to stop here."
 									: "Already running."
 								: selectedCount === 0
 									? "Select at least one step to run."
@@ -299,6 +306,8 @@ export function WorkflowDetail({
 									onRun={onRunStep}
 									onAbort={onAbortStep}
 									onContinue={onContinueStep}
+									onOpenConversation={onOpenStepConversation}
+									onAddStepAfter={onAddStepAfter}
 									onSetStatus={onSetStepStatus}
 									busy={busy}
 								/>

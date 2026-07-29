@@ -707,3 +707,178 @@ test("a template's manualReview flag is carried onto the steps it seeds, both wa
 	const appendedByOrder = [...appended.steps].sort((a, b) => a.orderIndex - b.orderIndex);
 	assert.deepEqual(appendedByOrder.map((s) => s.manualReview), [false, true]);
 });
+
+/**
+ * The rest of what a step held at its manual-review gate offers, over HTTP.
+ * Continue (above) was the only answer it had; these are the other three —
+ * Abort, Open conversation and Add step — proven here as wiring, status codes
+ * and the admin gate. Their engine behaviour is manual-review.test.ts's.
+ */
+
+test("POST .../abort on a waiting step refuses the result and stops the workflow", async () => {
+	const { workflowId, step } = await createWorkflowWithStep("abort a held step", {
+		description: "ship it",
+		manualReview: true,
+	});
+	holdStep(workflowId, step.id);
+
+	const res = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/${step.id}/abort`, {
+		method: "POST",
+		headers: adminHeaders(),
+	});
+	assert.equal(res.status, 200);
+	const body = (await res.json()) as { workflow: { status: string } };
+	assert.equal(body.workflow.status, "failed");
+	assert.equal(getStep(step.id)?.status, "failed");
+	assert.equal(getStep(step.id)?.error, "aborted");
+	// The result the operator rejected is still there to read.
+	assert.equal(getStep(step.id)?.result, "the work");
+});
+
+test("POST .../abort on a waiting step requires an admin token", async () => {
+	const { workflowId, step } = await createWorkflowWithStep("abort a held step unauthenticated", {
+		description: "ship it",
+		manualReview: true,
+	});
+	holdStep(workflowId, step.id);
+
+	const res = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/${step.id}/abort`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+	});
+	assert.equal(res.status, 401);
+	assert.equal(getStep(step.id)?.status, "waiting");
+});
+
+test("POST .../steps/:stepId/open-terminal resumes THAT step's session, not the workflow's newest", async (t) => {
+	const { workflowId, step } = await createWorkflowWithStep("step conversation", {
+		description: "ship it",
+		manualReview: true,
+	});
+	markStepRunning(step.id);
+	assert.ok(markStepWaiting(step.id, { result: "the work", sessionId: "sess-this-step" }));
+	setWorkflowStatus(workflowId, "waiting");
+	// A newer session on the workflow: the workflow-level route would resume this
+	// one, which is exactly the confusion the per-step route exists to avoid.
+	setWorkflowSessionId(workflowId, "sess-newer");
+
+	const detail = (await (await fetch(`${baseUrl}/api/workflows/${workflowId}`)).json()) as {
+		workflow: { workdir: string };
+	};
+
+	const calls: { bin: string; args: string[] }[] = [];
+	const originalSpawn = terminalImpl.spawn;
+	t.after(() => {
+		terminalImpl.spawn = originalSpawn;
+	});
+	terminalImpl.spawn = ((bin: string, args: string[]) => {
+		calls.push({ bin, args });
+		return fakeSpawnChild();
+	}) as unknown as typeof terminalImpl.spawn;
+
+	const res = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/${step.id}/open-terminal`, {
+		method: "POST",
+		headers: adminHeaders(),
+	});
+	assert.equal(res.status, 200);
+	const body = (await res.json()) as { ok: boolean; sessionId: string; workdir: string };
+	assert.equal(body.ok, true);
+	assert.equal(body.sessionId, "sess-this-step");
+	assert.equal(body.workdir, detail.workflow.workdir);
+
+	assert.equal(calls.length, 1);
+	const shellCmd = calls[0].args.at(-1) ?? "";
+	assert.match(shellCmd, /^cd '.*' && claude --resume 'sess-this-step'; exec bash$/);
+});
+
+test("POST .../steps/:stepId/open-terminal requires an admin token", async () => {
+	const { workflowId, step } = await createWorkflowWithStep("step conversation auth", { description: "ship it" });
+	const res = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/${step.id}/open-terminal`, {
+		method: "POST",
+	});
+	assert.equal(res.status, 401);
+});
+
+test("POST .../steps/:stepId/open-terminal on a step that never reported a session returns no_session_yet", async () => {
+	const { workflowId, step } = await createWorkflowWithStep("step conversation no session", {
+		description: "ship it",
+	});
+	// Even with a session on the workflow: this step doesn't have one, and the
+	// point of the route is that it answers for the step.
+	setWorkflowSessionId(workflowId, "sess-elsewhere");
+
+	const res = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/${step.id}/open-terminal`, {
+		method: "POST",
+		headers: adminHeaders(),
+	});
+	assert.equal(res.status, 400);
+	assert.equal(((await res.json()) as { error: string }).error, "no_session_yet");
+});
+
+test("POST .../steps/:stepId/open-terminal on an unknown step, or one of another workflow, returns unknown_step", async () => {
+	const { workflowId } = await createWorkflowWithStep("step conversation unknown", { description: "ship it" });
+	const other = await createWorkflowWithStep("step conversation other", { description: "elsewhere" });
+
+	const unknown = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/no-such-step/open-terminal`, {
+		method: "POST",
+		headers: adminHeaders(),
+	});
+	assert.equal(unknown.status, 404);
+	assert.equal(((await unknown.json()) as { error: string }).error, "unknown_step");
+
+	const foreign = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/${other.step.id}/open-terminal`, {
+		method: "POST",
+		headers: adminHeaders(),
+	});
+	assert.equal(foreign.status, 404);
+	assert.equal(((await foreign.json()) as { error: string }).error, "unknown_step");
+});
+
+test("POST /api/workflows/:id/steps with afterStepId inserts the step right after that one", async () => {
+	const { workflowId, step } = await createWorkflowWithStep("insert after", { description: "first" });
+	for (const description of ["second", "third"]) {
+		await fetch(`${baseUrl}/api/workflows/${workflowId}/steps`, {
+			method: "POST",
+			headers: adminHeaders(),
+			body: JSON.stringify({ description }),
+		});
+	}
+
+	const res = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ description: "the correction", afterStepId: step.id, manualReview: true }),
+	});
+	assert.equal(res.status, 200);
+	const inserted = (await res.json()) as StepBody;
+	assert.equal(inserted.step.manualReview, true);
+
+	const detail = (await (await fetch(`${baseUrl}/api/workflows/${workflowId}`)).json()) as {
+		steps: { description: string; orderIndex: number }[];
+	};
+	const byOrder = [...detail.steps].sort((a, b) => a.orderIndex - b.orderIndex);
+	assert.deepEqual(
+		byOrder.map((s) => s.description),
+		["first", "the correction", "second", "third"],
+	);
+	assert.deepEqual(
+		byOrder.map((s) => s.orderIndex),
+		[0, 1, 2, 3],
+	);
+});
+
+test("POST /api/workflows/:id/steps with an afterStepId from another workflow returns 400 and adds nothing", async () => {
+	const { workflowId } = await createWorkflowWithStep("insert after foreign", { description: "first" });
+	const other = await createWorkflowWithStep("insert after foreign source", { description: "elsewhere" });
+
+	const res = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ description: "nope", afterStepId: other.step.id }),
+	});
+	assert.equal(res.status, 400);
+	assert.equal(((await res.json()) as { error: string }).error, "unknown step");
+
+	const detail = (await (await fetch(`${baseUrl}/api/workflows/${workflowId}`)).json()) as { steps: unknown[] };
+	assert.equal(detail.steps.length, 1);
+});

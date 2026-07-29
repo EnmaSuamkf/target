@@ -331,16 +331,60 @@ export function App(): React.JSX.Element {
 		await act("Could not run the step", () => api.runStep(selectedId, stepId), refreshCurrent);
 	};
 
+	/**
+	 * One button, two meanings — which is why the confirmation is written from
+	 * the step's status rather than being one fixed sentence. On a stuck step
+	 * Abort unsticks it; on a step held at its manual-review gate it's the "no"
+	 * to Continue's "yes", and what it stops is the whole workflow, so that had
+	 * better be what the dialog says before it happens.
+	 */
 	const handleAbortStep = async (stepId: string): Promise<void> => {
 		if (!selectedId) return;
+		const step = steps.find((s) => s.id === stepId);
+		const held = step?.status === "waiting";
 		const confirmed = await confirm({
-			title: "Abort this step?",
-			description: "Force-fails a step whose run never called back, so it can be re-run. Its session is preserved.",
-			confirmLabel: "Abort step",
+			title: held ? "Abort this step and stop the workflow?" : "Abort this step?",
+			description: held
+				? "Refuses this step's result: it's recorded failed and the workflow stops here — no further step runs. Its result and session are kept, so you can still read it and talk to the agent, and a ▶ re-run later clears the failure."
+				: "Force-fails a step whose run never called back, so it can be re-run. Its session is preserved.",
+			confirmLabel: held ? "Abort and stop" : "Abort step",
 			danger: true,
 		});
 		if (!confirmed) return;
-		await act("Could not abort the step", () => api.abortStep(selectedId, stepId), refreshCurrent);
+		await act(
+			held ? "Could not abort the workflow" : "Could not abort the step",
+			async () => {
+				await api.abortStep(selectedId, stepId);
+				if (held) toast.success("Step rejected — the workflow stopped.");
+			},
+			refreshCurrent,
+		);
+	};
+
+	// Same action as the header's "Open conversation", pointed at one step's own
+	// session instead of the workflow's most recent one — from a held step, the
+	// conversation worth resuming is the one that produced the result being
+	// reviewed.
+	const handleOpenStepConversation = async (stepId: string): Promise<void> => {
+		if (!selectedId) return;
+		await act("Could not open the conversation", async () => {
+			await api.openStepTerminal(selectedId, stepId);
+			toast.success("Terminal opened.");
+		});
+	};
+
+	// Returns whether the step really landed, so the dialog stays open (holding
+	// what was typed) when the server refuses it.
+	const handleAddStepAfter = async (afterStepId: string, input: StepConfigInput): Promise<boolean> => {
+		if (!selectedId) return false;
+		return await act(
+			"Could not add the step",
+			async () => {
+				await api.addStep(selectedId, input, afterStepId);
+				toast.success("Step added — it runs next.");
+			},
+			refreshCurrent,
+		);
 	};
 
 	// Releasing a manual-review gate is not destructive (it approves work that
@@ -503,6 +547,8 @@ export function App(): React.JSX.Element {
 								onRunStep={(id) => void handleRunStep(id)}
 								onAbortStep={(id) => void handleAbortStep(id)}
 								onContinueStep={(id) => void handleContinueStep(id)}
+								onOpenStepConversation={(id) => void handleOpenStepConversation(id)}
+								onAddStepAfter={handleAddStepAfter}
 								onSetStepStatus={(id, status) => void handleSetStepStatus(id, status)}
 								onAddStepsFromTemplate={handleAddStepsFromTemplate}
 							/>

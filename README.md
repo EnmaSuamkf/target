@@ -129,6 +129,9 @@ Notes on behaviour worth knowing:
   a status by hand when the engine got it wrong. It runs nothing; see
   "Correcting a status by hand" below. Statuses set this way carry a pencil on
   their badge.
+- **A held step's four actions.** A step `waiting` for a manual review offers
+  Continue, Abort, Open conversation and Add step — approve, refuse, ask, or
+  insert a correction that runs next. See "A step waiting for your review".
 - **Live updates.** The hub has no streaming endpoint, so the UI polls every 2s.
   Polling pauses while the tab is hidden and resumes on focus.
 - **Deep links.** The selected workflow is in the URL hash (`#/w/<id>`), so a
@@ -182,6 +185,30 @@ alone by the read-path heal until the engine writes one itself (Start, Stop,
 Resume, Start over, or the next step callback). Statuses set this way are marked
 with a pencil on the badge, and called out in the `.md` status file. Full
 semantics: [`docs/status-override.md`](docs/status-override.md).
+
+### A step waiting for your review
+
+A step flagged **Manual review** stops the workflow when its work is accepted:
+it goes `waiting`, the workflow goes `waiting` with it, and nothing else runs
+until you say so. Saying so used to mean one thing — Continue — which made a
+result you did *not* approve of a dead end. The held step now carries the whole
+decision, on its own action row:
+
+- **Continue** approves it: the step goes `done` and the run carries on with the
+  next step (`POST /api/workflows/:id/steps/:stepId/continue`).
+- **Abort** refuses it: the step is recorded `failed` and the workflow stops
+  there — no further step is dispatched. Its result and session are kept, so you
+  can still read what was rejected, and a later ▶ re-run clears the failure the
+  usual way (`POST /api/workflows/:id/steps/:stepId/abort`, the same route that
+  unsticks a hung dispatch; the hub reads it from the step's status).
+- **Open conversation** opens a terminal resuming *that step's* session, so you
+  can ask the agent what it did before deciding. Deliberately not the workflow's
+  newest session, which is what the header's button resumes and may by then be a
+  different step's (`POST /api/workflows/:id/steps/:stepId/open-terminal`).
+- **Add step** opens a dialog that inserts a new step **directly after** the held
+  one, pushing the rest down — so the correction is what Continue dispatches
+  next, instead of running last (`POST /api/workflows/:id/steps` with
+  `afterStepId`).
 
 ### Stuck steps
 

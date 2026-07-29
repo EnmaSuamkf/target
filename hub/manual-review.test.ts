@@ -9,9 +9,12 @@
  *
  *  - the gate hooks into BOTH accept paths (no-judge exec, and an `ok` verdict),
  *    and into neither failure path (a reject still retries/fails as before);
- *  - the hold is inert to everything except Continue — ▶ run, Edit, Start and
- *    the timeout watchdog must all leave a `waiting` step alone, so a step can
- *    sit there for as long as the human takes;
+ *  - the hold is inert to everything the operator did NOT aim at it — ▶ run,
+ *    Edit, Start and the timeout watchdog must all leave a `waiting` step alone,
+ *    so a step can sit there for as long as the human takes;
+ *  - the three deliberate answers to a hold all work: Continue approves it,
+ *    Abort refuses it and stops the workflow, and a step added after the held one
+ *    is what Continue then dispatches;
  *  - the notification is advisory: a delivery that fails must not change the
  *    state the engine just wrote.
  *
@@ -82,11 +85,22 @@ const {
 	saveNotificationSettings,
 	setWorkflowStatus,
 	startManualRun,
+	takeStatusBeforeReview,
 } = await import("./db.ts");
 const { loadConfig } = await import("./config.ts");
 const { _impl: notifierImpl } = await import("./notifier.ts");
-const { continueStep, editStep, onStepResult, expireStale, restartWorkflow, runStep, startWorkflow, writeStatusMd } =
-	await import("./workflow.ts");
+const {
+	abortStep,
+	addStep,
+	continueStep,
+	editStep,
+	onStepResult,
+	expireStale,
+	restartWorkflow,
+	runStep,
+	startWorkflow,
+	writeStatusMd,
+} = await import("./workflow.ts");
 
 const cfg = loadConfig();
 const silent = () => {};
@@ -339,6 +353,152 @@ test("continueStep refuses an unknown workflow, an unknown step, and a step of a
 	// The hold survived every one of them.
 	assert.equal(getStep(steps[0].id)?.status, "waiting");
 	assert.equal(getWorkflow(workflow.id)?.status, "waiting");
+});
+
+// --- Abort: the answer that isn't yes -----------------------------------
+//
+// Continue used to be the only thing a held step offered, which made the gate a
+// question with one permitted answer: an operator looking at a result that's
+// plainly wrong could only approve it (or restart the whole step and hope).
+// Abort is the "no": the step is recorded `failed` and the workflow stops there.
+// It goes through the same `abortStep` as a stuck dispatch, because it's the
+// same button on the same step — what differs is that nothing is in flight, so
+// there's no broker process to kill and no re-run implied.
+
+test("aborting a held step refuses the result and stops the workflow", async (t) => {
+	const url = await hook(t);
+	const { workflow, steps } = makeWorkflow(url, [{ manualReview: true }, {}]);
+
+	await startWorkflow(workflow.id, cfg, silent, [steps[0].id, steps[1].id]);
+	await onStepResult(steps[0].id, { ok: true, result: "not what I asked for", sessionId: "sess-held" }, cfg, silent);
+	assert.equal(getStep(steps[0].id)?.status, "waiting");
+
+	const stopped = await abortStep(workflow.id, steps[0].id, silent);
+
+	assert.equal(stopped.status, "failed");
+	const held = getStep(steps[0].id);
+	assert.equal(held?.status, "failed");
+	assert.equal(held?.error, "aborted");
+	assert.ok(held?.finishedAt, "finished_at set");
+	// The rejected work and the conversation that produced it are both kept —
+	// that's what makes "read it again" and "Open conversation" still possible
+	// after the refusal.
+	assert.equal(held?.result, "not what I asked for");
+	assert.equal(held?.sessionId, "sess-held");
+	// And the run really stopped: the step behind the gate was never dispatched.
+	assert.equal(getStep(steps[1].id)?.status, "pending");
+});
+
+test("a held step aborted cannot then be continued — the hold is gone, not deferred", async (t) => {
+	const url = await hook(t);
+	const { workflow, steps } = makeWorkflow(url, [{ manualReview: true }, {}]);
+
+	await startWorkflow(workflow.id, cfg, silent, [steps[0].id, steps[1].id]);
+	await onStepResult(steps[0].id, { ok: true, result: "the work" }, cfg, silent);
+	await abortStep(workflow.id, steps[0].id, silent);
+
+	// The 2s poll is behind the click, so a stale Continue is a real event: it
+	// must change nothing rather than resurrect the aborted step.
+	await assert.rejects(
+		() => continueStep(workflow.id, steps[0].id, cfg, silent),
+		/only a step waiting for its manual review can be continued/,
+	);
+	assert.equal(getStep(steps[0].id)?.status, "failed");
+	assert.equal(getStep(steps[1].id)?.status, "pending");
+});
+
+test("▶ aborting a gated ▶ run's hold stops too, and consumes the stashed status", async (t) => {
+	const url = await hook(t);
+	const { workflow, steps } = makeWorkflow(url, [{ manualReview: true }, {}]);
+	setWorkflowStatus(workflow.id, "paused");
+
+	await runStep(workflow.id, steps[0].id, cfg, silent);
+	await onStepResult(steps[0].id, { ok: true, result: "wrong" }, cfg, silent);
+	assert.equal(getWorkflow(workflow.id)?.status, "waiting");
+
+	await abortStep(workflow.id, steps[0].id, silent);
+
+	// A ▶ run never drove the workflow, but a failed step still fails it — same
+	// as aborting a stuck ▶ run does.
+	assert.equal(getWorkflow(workflow.id)?.status, "failed");
+	// The `paused` the hold interrupted was stashed for the Continue that never
+	// came; the abort consumes it, so it can't be handed back by a later hold.
+	assert.equal(takeStatusBeforeReview(workflow.id), null);
+});
+
+test("abort still refuses every status that isn't running, queued or waiting", async (t) => {
+	const url = await hook(t);
+	const { workflow, steps } = makeWorkflow(url, [{}, {}]);
+
+	await assert.rejects(() => abortStep(workflow.id, steps[0].id, silent), /only a running step can be aborted/);
+	assert.equal(getStep(steps[0].id)?.status, "pending");
+});
+
+// --- Add step: inserting the fix in front of the queue -------------------
+//
+// The other thing a held step needs: the result is wrong because something has
+// to happen FIRST, and appending that something at the end of the list would run
+// it last — after everything it was supposed to precede. So a step can be added
+// directly after another one, and the rest move down.
+
+test("addStep with afterStepId threads the new step in behind it and pushes the rest down", async (t) => {
+	const url = await hook(t);
+	const { workflow, steps } = makeWorkflow(url, [{}, {}, {}]);
+
+	const inserted = addStep(workflow.id, "fix the thing first", { afterStepId: steps[0].id });
+
+	assert.equal(inserted.orderIndex, 1);
+	assert.deepEqual(
+		listSteps(workflow.id).map((s) => s.description),
+		["step 1", "fix the thing first", "step 2", "step 3"],
+	);
+	// Contiguous, so the numbers the UI prints (orderIndex + 1) stay 1..4.
+	assert.deepEqual(
+		listSteps(workflow.id).map((s) => s.orderIndex),
+		[0, 1, 2, 3],
+	);
+	// A plain add is unchanged: still appended at the end.
+	addStep(workflow.id, "and this one last");
+	assert.equal(listSteps(workflow.id).at(-1)?.description, "and this one last");
+});
+
+test("addStep refuses an afterStepId that isn't a step of this workflow", async (t) => {
+	const url = await hook(t);
+	const { workflow, steps } = makeWorkflow(url, [{}, {}]);
+	const other = makeWorkflow(url, [{}]);
+
+	assert.throws(() => addStep(workflow.id, "nope", { afterStepId: "no-such-step" }), /unknown step/);
+	assert.throws(() => addStep(workflow.id, "nope", { afterStepId: other.steps[0].id }), /unknown step/);
+	// Neither workflow was renumbered by the refusal.
+	assert.deepEqual(
+		listSteps(workflow.id).map((s) => s.orderIndex),
+		[0, 1],
+	);
+	assert.equal(listSteps(workflow.id).length, 2);
+	assert.equal(listSteps(other.workflow.id).length, 1);
+	assert.equal(steps.length, 2);
+});
+
+test("a step added after the held one is what Continue dispatches next", async (t) => {
+	const url = await hook(t);
+	const { workflow, steps } = makeWorkflow(url, [{ manualReview: true }, {}]);
+
+	await startWorkflow(workflow.id, cfg, silent, [steps[0].id, steps[1].id]);
+	await onStepResult(steps[0].id, { ok: true, result: "almost right" }, cfg, silent);
+	assert.equal(getStep(steps[0].id)?.status, "waiting");
+
+	// The correction, written while the gate holds. The workflow is `waiting`,
+	// not terminal, so adding a step must NOT reset it to draft here.
+	const fix = addStep(workflow.id, "correct the thing before carrying on", { afterStepId: steps[0].id });
+	assert.equal(getWorkflow(workflow.id)?.status, "waiting");
+	assert.equal(getStep(steps[0].id)?.status, "waiting");
+
+	await continueStep(workflow.id, steps[0].id, cfg, silent);
+
+	// The new step ran next — not the one that used to follow. New steps are
+	// selected by default, which is what puts it in the run's path.
+	assert.equal(getStep(fix.id)?.status, "queued");
+	assert.equal(getStep(steps[1].id)?.status, "pending");
 });
 
 // --- everything else must leave a held step alone -----------------------
