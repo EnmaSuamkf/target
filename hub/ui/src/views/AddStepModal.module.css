@@ -1,0 +1,46 @@
+.form {
+	display: grid;
+	gap: var(--space-4);
+}
+
+/* The manual-review toggle: explanation on the left, switch on the right, same
+   shape as the one in the step editor and the add-step form so the gate always
+   looks the same wherever it's set. */
+.gateRow {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-4);
+}
+
+.gateText {
+	display: grid;
+	gap: var(--space-1);
+	min-width: 0;
+}
+
+/* Retries and their interval are one decision in two numbers, so they sit on
+   one line rather than stacking as two more full-width fields. */
+.grid {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: var(--space-3);
+}
+
+@media (max-width: 768px) {
+	/* Same reasoning as CreateWorkflowModal.module.css: every field here carries
+	   a hint, and at the desktop gap the hint of one and the label of the next
+	   read as a single paragraph. */
+	.form {
+		gap: var(--space-8);
+	}
+
+	.gateRow {
+		align-items: flex-start;
+		gap: var(--space-3);
+	}
+
+	.grid {
+		grid-template-columns: 1fr;
+	}
+}

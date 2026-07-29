@@ -36,6 +36,7 @@ import {
 	OVERRIDABLE_STEP_STATUSES,
 	OVERRIDABLE_WORKFLOW_STATUSES,
 	recordStepProgress,
+	rejectWaitingStep,
 	releaseWaitingStep,
 	resetSteps,
 	setContextInjected,
@@ -630,6 +631,17 @@ export function removeWorkflow(workflowId: string): void {
 	deleteWorkflow(workflowId);
 }
 
+/**
+ * Appends a step to the workflow — or, with `afterStepId`, threads one in
+ * directly after an existing step instead.
+ *
+ * The insert-after path exists for the step sitting at its manual-review gate:
+ * the human looked at the result, it needs a correction first, and the fix has
+ * to run BEFORE whatever came next. Adding it at the end and reordering by hand
+ * isn't something the UI can do, so the position is chosen here. The new step is
+ * `pending` and selected by default, so the Continue that releases the gate
+ * dispatches it as the next step of the run — which is the whole point.
+ */
 export function addStep(
 	workflowId: string,
 	description: string,
@@ -638,13 +650,30 @@ export function addStep(
 		manualReview?: boolean;
 		maxRetries?: number;
 		retryIntervalSeconds?: number;
+		/** Insert directly after this step instead of appending at the end. */
+		afterStepId?: string | null;
 	} = {},
 ): Step {
 	const trimmed = description.trim();
 	if (!trimmed) throw new WorkflowError("description is required");
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
-	const step = insertStep(workflowId, trimmed, options);
+	// The anchor is resolved (and checked to belong to THIS workflow) here rather
+	// than in db.ts, which doesn't validate ownership — otherwise a step id from
+	// another workflow would silently renumber this one's steps.
+	let afterOrderIndex: number | null = null;
+	if (options.afterStepId) {
+		const anchor = getStep(options.afterStepId);
+		if (!anchor || anchor.workflowId !== workflowId) throw new WorkflowError("unknown step");
+		afterOrderIndex = anchor.orderIndex;
+	}
+	const step = insertStep(workflowId, trimmed, {
+		acceptanceCriteria: options.acceptanceCriteria ?? null,
+		manualReview: options.manualReview === true,
+		maxRetries: options.maxRetries ?? 0,
+		retryIntervalSeconds: options.retryIntervalSeconds ?? 0,
+		afterOrderIndex,
+	});
 	// A workflow that had already reached a terminal state gets a fresh
 	// pending step here — back to draft so the badge/progress stay honest and
 	// "Start" dispatches just the new step, instead of leaving it stuck
@@ -1371,12 +1400,38 @@ export async function runStep(workflowId: string, stepId: string, cfg: HubConfig
  * or a run that already finished just log a warning — the DB settling must not
  * be blocked by the kill, since the operator wants the step failed now either
  * way. Async because the kill is a network call.
+ *
+ * A step held at its manual-review gate is the second thing this answers for,
+ * and it's a different job under the same word: nothing is stuck there, the run
+ * finished and its result is sitting in front of a human who has decided it's
+ * wrong. Abort on a `waiting` step therefore means "no, and stop" — see the
+ * branch below. Every other status still throws.
  */
 export async function abortStep(workflowId: string, stepId: string, log?: Logger): Promise<Workflow> {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
+	// Rejecting a manual review, rather than unsticking a hung dispatch. The gate
+	// was the only thing holding the run, so refusing it ends the run: the step is
+	// recorded `failed` (with the result and session preserved, so the operator
+	// can still read what was rejected and talk to the agent about it) and the
+	// workflow fails with it — the same shape a failed step always gives the
+	// workflow, and one a later ▶ re-run reconciles back out of `failed`.
+	// Nothing is killed on the broker because nothing is running; the hold's
+	// stashed status is consumed so it can't leak into a later hold.
+	if (step.status === "waiting") {
+		if (!rejectWaitingStep(stepId, "aborted")) {
+			throw new WorkflowError("this step is no longer waiting for its manual review");
+		}
+		takeStatusBeforeReview(workflowId);
+		setWorkflowStatus(workflowId, "failed");
+		writeStatusMd(workflowId);
+		log?.(`step ${stepId} rejected at its manual review — workflow ${workflowId} stopped`, "warning");
+		const stopped = getWorkflow(workflowId);
+		if (!stopped) throw new WorkflowError("workflow disappeared");
+		return stopped;
+	}
 	if (step.status !== "running" && step.status !== "queued") throw new WorkflowError("only a running step can be aborted");
 	if (!failRunningStep(stepId, "aborted")) throw new WorkflowError("only a running step can be aborted");
 	setWorkflowStatus(workflowId, "failed");

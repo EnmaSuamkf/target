@@ -10,12 +10,13 @@
  *   POST   /api/workflows/:id/open-terminal              → spawn a local terminal resuming the current/last session (admin token)
  *   DELETE /api/workflows/:id                          → remove: deletes its awb hook + .md file + DB rows (admin token)
  *   PATCH  /api/workflows/:id/context                  → set the conversation context preamble (admin token)
- *   POST   /api/workflows/:id/steps                    → add a step (admin token)
+ *   POST   /api/workflows/:id/steps                    → add a step (admin token); optional afterStepId inserts it right after that step
  *   POST   /api/workflows/:id/steps/from-template       → append a template's steps (admin token)
  *   PATCH  /api/workflows/:id/steps/:stepId             → edit a step's description (admin token)
  *   DELETE /api/workflows/:id/steps/:stepId             → remove a pending step (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/run         → run one step now, outside the sequential order (admin token)
- *   POST   /api/workflows/:id/steps/:stepId/abort        → abort a step stuck running, so it can be re-run (admin token)
+ *   POST   /api/workflows/:id/steps/:stepId/abort        → abort a step stuck running, or reject one waiting for its review (admin token)
+ *   POST   /api/workflows/:id/steps/:stepId/open-terminal  → spawn a local terminal resuming THIS step's session (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/continue      → release a step waiting for its manual review (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/status        → force a step's status by hand (admin token)
  *   POST   /api/workflows/:id/status                    → force the workflow's status by hand (admin token)
@@ -888,8 +889,13 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
 			const description = typeof body.description === "string" ? body.description : "";
+			// `afterStepId` inserts the new step directly after that one instead of
+			// appending it at the end — the "add a step after the one I'm reviewing"
+			// path, so the fix runs next rather than last. Omitted = append, which is
+			// what every other caller does.
+			const afterStepId = typeof body.afterStepId === "string" && body.afterStepId !== "" ? body.afterStepId : null;
 			try {
-				const step = addStep(workflowId, description, readStepConfig(body));
+				const step = addStep(workflowId, description, { ...readStepConfig(body), afterStepId });
 				sendJson(res, 200, { step: publicStep(step, cfg) });
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
@@ -1029,13 +1035,19 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		return;
 	}
 
-	// --- /api/workflows/:id/steps/:stepId/abort (abort a step stuck running/queued) ---
+	// --- /api/workflows/:id/steps/:stepId/abort (abort a stuck step, or reject a held one) ---
 	//
 	// For a step whose dispatch never called back (a hung exec or judge) or
 	// that's still queued on the workdir lock, this force-fails it so the
 	// operator can re-run it via ▶ without restarting the whole workflow.
 	// Preserves the step's session id, and kills the spawned process on the
 	// broker (so an orphaned agent stops holding the workdir `flock`).
+	//
+	// On a step `waiting` at its manual-review gate the same route means the
+	// other half of that decision: Continue approves the result, Abort refuses it
+	// and stops the workflow (see `abortStep`). One route because it's one button
+	// on the step, and because which of the two applies is a fact about the
+	// step's status, not something the caller should have to know.
 	// Admin-gated (mutating). Async because the broker kill is a network call.
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "abort" && !parts[6] && req.method === "POST") {
@@ -1050,6 +1062,61 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		})();
+		return;
+	}
+
+	// --- /api/workflows/:id/steps/:stepId/open-terminal (talk to THIS step's agent) ---
+	//
+	// The workflow-level "Open conversation" resumes whichever session ran most
+	// recently. That's the right answer from the header, and the wrong one from a
+	// step held at its manual-review gate: the operator is looking at one step's
+	// result and wants to talk to the agent about THAT — and by the time they
+	// press it, another step may well have produced a newer session. So this
+	// resolves the session from the step itself and is otherwise identical to the
+	// workflow route (same runtime, same sandbox, same resume command). A step
+	// that never reported a session (never run, or still on its first dispatch —
+	// awb only reports one in the completion callback) answers `no_session_yet`.
+	// Admin-gated: it launches a real process on the operator's desktop.
+
+	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "open-terminal" && !parts[6] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		const workflow = getWorkflow(workflowId);
+		if (!workflow) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		const step = getStep(parts[4]);
+		if (!step || step.workflowId !== workflowId) {
+			sendJson(res, 404, { error: "unknown_step" });
+			return;
+		}
+		if (!step.sessionId) {
+			sendJson(res, 400, { error: "no_session_yet" });
+			return;
+		}
+		const runtime = hookRuntime(workflow.hookUrl);
+		if (!runtime.workdir) {
+			sendJson(res, 400, { error: "unknown_workdir" });
+			return;
+		}
+		const resumeCommand = harnessResumeCommand(runtime.harness, step.sessionId, runtime.sandbox, runtime.workdir);
+		if (!resumeCommand) {
+			sendJson(res, 400, { error: "unknown_harness" });
+			return;
+		}
+		const workdir = runtime.workdir;
+		const sessionId = step.sessionId;
+		(async () => {
+			try {
+				await openResumeTerminal(workdir, resumeCommand);
+				sendJson(res, 200, { ok: true, sessionId, workdir });
+			} catch (err) {
+				sendJson(res, 500, { error: String((err as Error).message ?? err) });
 			}
 		})();
 		return;

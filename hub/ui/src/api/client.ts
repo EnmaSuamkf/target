@@ -182,11 +182,17 @@ export function openTerminal(id: string): Promise<unknown> {
 
 // --- steps ---
 
-export async function addStep(workflowId: string, input: StepConfigInput): Promise<Step> {
+/**
+ * Appends a step, or — with `afterStepId` — threads one in directly after that
+ * step, pushing the rest down. The second form is how a step is added from the
+ * one held at its manual-review gate: the new step lands next in the run, so the
+ * Continue that releases the gate dispatches it before whatever followed.
+ */
+export async function addStep(workflowId: string, input: StepConfigInput, afterStepId?: string): Promise<Step> {
 	const data = await request<{ step: Step }>(`/api/workflows/${workflowId}/steps`, {
 		method: "POST",
 		admin: true,
-		body: json(input),
+		body: json(afterStepId ? { ...input, afterStepId } : input),
 	});
 	return data.step;
 }
@@ -246,7 +252,25 @@ export async function setStepStatus(
 	return data.step;
 }
 
-/** Force-fails a step whose dispatch never called back, preserving its session. */
+/**
+ * Opens a terminal resuming THIS step's own session, rather than the workflow's
+ * most recent one — what "talk to the agent about this step" means when the step
+ * is held for review and a newer session may already exist. Answers 400
+ * `no_session_yet` for a step that never reported one.
+ */
+export function openStepTerminal(workflowId: string, stepId: string): Promise<unknown> {
+	return request<unknown>(`/api/workflows/${workflowId}/steps/${stepId}/open-terminal`, {
+		method: "POST",
+		admin: true,
+	});
+}
+
+/**
+ * Force-fails a step whose dispatch never called back, preserving its session —
+ * and, on a step held at its manual-review gate, refuses the result instead:
+ * the step fails and the workflow stops with it. Same route either way; the
+ * server decides from the step's status.
+ */
 export async function abortStep(workflowId: string, stepId: string): Promise<Workflow> {
 	const data = await request<{ workflow: Workflow }>(`/api/workflows/${workflowId}/steps/${stepId}/abort`, {
 		method: "POST",

@@ -5,6 +5,7 @@ import { Badge } from "../components/Badge.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { Switch } from "../components/Switch.tsx";
 import { activityLabel, duration } from "../lib/format.ts";
+import { AddStepModal } from "./AddStepModal.tsx";
 import styles from "./StepItem.module.css";
 
 /**
@@ -15,15 +16,28 @@ import styles from "./StepItem.module.css";
  *
  * - A `running` step can't be edited, and only a `pending` one can be removed.
  * - A `waiting` step (held at its manual-review gate) can't be edited or ▶ re-run
- *   either — the server refuses both — so `Continue` is the only action offered
- *   on it, and it's the only status that offers one.
- * - `Abort` is only meaningful while running (it force-fails a dispatch that
- *   never called back, keeping the session so the step can be re-run).
+ *   either — the server refuses both.
  * - The retry interval only applies with more than one retry, so the field is
  *   disabled and forced to 0 below that.
  * - A step running its judge phase reads "judging", not "running".
  * - The status picker can't touch a step with a job in flight (the server
  *   refuses it) — Abort is the action for that, and it's right there.
+ *
+ * A `waiting` step gets its own set of four actions, because "Continue" alone
+ * was a dead end: the operator being asked to approve a result had no way to say
+ * anything except yes. So the hold offers the whole decision —
+ *
+ * - **Continue** approves it and the run carries on;
+ * - **Abort** refuses it and stops the workflow (the same route, which the
+ *   server reads differently for a held step than for a stuck one);
+ * - **Open conversation** resumes THIS step's session in a terminal, to ask the
+ *   agent what it did before deciding either way;
+ * - **Add step** inserts a correction directly after this one, so Continue then
+ *   runs that instead of whatever followed.
+ *
+ * The last two are the reason `waiting` is the only status showing them: they're
+ * answers to "what do I do about this result", and there is no result being
+ * asked about in any other state.
  *
  * The result body is collapsed by default and expandable, replacing the old
  * hard truncation at 240 characters that made longer output unreadable.
@@ -37,6 +51,8 @@ export function StepItem({
 	onRun,
 	onAbort,
 	onContinue,
+	onOpenConversation,
+	onAddStepAfter,
 	onSetStatus,
 	busy,
 }: {
@@ -48,12 +64,17 @@ export function StepItem({
 	onRun: (id: string) => void;
 	onAbort: (id: string) => void;
 	onContinue: (id: string) => void;
+	/** Opens a terminal on this step's own session, not the workflow's newest. */
+	onOpenConversation: (id: string) => void;
+	/** Adds a step immediately after this one, so it runs next. Resolves false when the server refused it, which keeps the dialog open on its typed-in text. */
+	onAddStepAfter: (id: string, input: StepConfigInput) => Promise<boolean>;
 	/** Forces the step's status by hand; never runs the step. */
 	onSetStatus: (id: string, status: OverridableStepStatus) => void;
 	busy: boolean;
 }): React.JSX.Element {
 	const [editing, setEditing] = useState(false);
 	const [expanded, setExpanded] = useState(false);
+	const [adding, setAdding] = useState(false);
 
 	const running = step.status === "running";
 	const waiting = step.status === "waiting";
@@ -61,6 +82,9 @@ export function StepItem({
 	// callback is still coming, so a status written now would be overwritten (or
 	// would strand a live agent). Abort first — the button next to it does that.
 	const inFlight = running || step.status === "queued";
+	// Abort covers two different situations: unsticking a dispatch that never
+	// called back, and refusing the result of a step held for review.
+	const abortable = inFlight || waiting;
 	const editable = !running && !waiting;
 	const removable = step.status === "pending";
 	const statusLabel = running && step.phase === "judge" ? "judging" : step.status;
@@ -179,19 +203,43 @@ export function StepItem({
 			)}
 
 			<div className={styles.actions}>
-				{/* Only offered while the gate is actually holding: the server refuses
-				    Continue on any other status, so a button that's always there would
-				    just be a 400 waiting to happen. */}
+				{/* The review decision, offered only while the gate is actually holding:
+				    the server refuses Continue on any other status, so buttons that were
+				    always there would just be 400s waiting to happen. */}
 				{waiting && (
-					<button
-						type="button"
-						className="btn btn--primary btn--sm"
-						onClick={() => onContinue(step.id)}
-						disabled={busy}
-						title="Approve this step's result: it's marked done and the workflow carries on with the next step."
-					>
-						Continue
-					</button>
+					<>
+						<button
+							type="button"
+							className="btn btn--primary btn--sm"
+							onClick={() => onContinue(step.id)}
+							disabled={busy}
+							title="Approve this step's result: it's marked done and the workflow carries on with the next step."
+						>
+							Continue
+						</button>
+						<button
+							type="button"
+							className="btn btn--sm"
+							onClick={() => onOpenConversation(step.id)}
+							disabled={!step.sessionId || busy}
+							title={
+								step.sessionId
+									? "Opens a terminal resuming this step's own conversation, so you can ask the agent about what it just did before you decide."
+									: "This step never reported a session, so there's no conversation to resume."
+							}
+						>
+							Open conversation
+						</button>
+						<button
+							type="button"
+							className="btn btn--sm"
+							onClick={() => setAdding(true)}
+							disabled={busy}
+							title="Insert a new step right after this one — it becomes the next thing the agent does when you press Continue."
+						>
+							Add step
+						</button>
+					</>
 				)}
 				<button
 					type="button"
@@ -206,8 +254,12 @@ export function StepItem({
 					type="button"
 					className="btn btn--sm btn--danger"
 					onClick={() => onAbort(step.id)}
-					disabled={!(step.status === "running" || step.status === "queued") || busy}
-					title="Force-fail this stuck step so it can be re-run, without restarting the whole workflow. Also kills the spawned agent process on the broker, freeing the workdir lock. Its session is preserved."
+					disabled={!abortable || busy}
+					title={
+						waiting
+							? "Refuse this step's result: it's recorded failed and the workflow stops here instead of carrying on. The result and the session are kept."
+							: "Force-fail this stuck step so it can be re-run, without restarting the whole workflow. Also kills the spawned agent process on the broker, freeing the workdir lock. Its session is preserved."
+					}
 				>
 					Abort
 				</button>
@@ -254,6 +306,21 @@ export function StepItem({
 					))}
 				</select>
 			</div>
+
+			{/* Rendered from the step it inserts after, so the dialog knows where the
+			    new step goes without the parent tracking which row opened it. Mounted
+			    only while the gate holds — that's the only place the button is, and a
+			    hold released from another tab should take its dialog with it. */}
+			{waiting && (
+				<AddStepModal
+					open={adding}
+					afterIndex={step.orderIndex + 1}
+					onClose={() => setAdding(false)}
+					onAdd={async (input) => {
+						if (await onAddStepAfter(step.id, input)) setAdding(false);
+					}}
+				/>
+			)}
 		</li>
 	);
 }
