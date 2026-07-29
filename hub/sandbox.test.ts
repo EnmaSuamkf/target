@@ -155,6 +155,68 @@ test("harnessResumeCommand for a docker workflow enters the same container, with
 	assert.ok(command.endsWith(" 'target-agent:latest' claude --resume 'sess-1'"), command);
 });
 
+// The regression behind `EACCES: permission denied, mkdir
+// '$HOME/.free-code/agent/themes/bundled'` on "Open conversation": the resume
+// prefix mounted `~/.claude` but not `~/.free-code`, so `$HOME` inside the
+// container was a directory docker had synthesised to hold the OTHER mounts —
+// root-owned — and free-code's `runMigrations()`, which mkdirs under `$HOME`
+// before it does anything else, could not start. Every harness state dir awb
+// mounts for the step run has to be mounted for the resume too.
+test("the docker resume mounts every harness state dir, ~/.free-code included", (t) => {
+	// os.homedir() reads $HOME on POSIX, so a scratch home makes this
+	// deterministic instead of dependent on what the box happens to have.
+	const realHome = process.env.HOME;
+	const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-test-home-"));
+	t.after(() => {
+		if (realHome === undefined) delete process.env.HOME;
+		else process.env.HOME = realHome;
+		fs.rmSync(fakeHome, { recursive: true, force: true });
+	});
+	process.env.HOME = fakeHome;
+	fs.mkdirSync(path.join(fakeHome, ".claude"));
+	fs.mkdirSync(path.join(fakeHome, ".free-code"));
+	fs.writeFileSync(path.join(fakeHome, ".claude.json"), "{}");
+	const sessionsDir = path.join(tmpHome, "sessions");
+	fs.mkdirSync(sessionsDir, { recursive: true });
+
+	const workdir = "/home/u/repos/demo";
+	const sessionFile = path.join(sessionsDir, "wf", "run.jsonl");
+	const command = harnessResumeCommand("free-code", sessionFile, { kind: "docker", image: "target-agent-freecode:latest" }, workdir);
+	assert.ok(command);
+	for (const entry of [".claude", ".claude.json", ".free-code"]) {
+		const p = path.join(fakeHome, entry);
+		assert.ok(command.includes(`-v '${p}:${p}'`), `${entry} must be mounted at its own path: ${command}`);
+	}
+	assert.ok(command.includes(`-v '${sessionsDir}:${sessionsDir}'`), command);
+	// $HOME itself is never mounted — that would hand the container the whole home.
+	assert.ok(!command.includes(`-v '${fakeHome}:${fakeHome}'`), command);
+	assert.ok(command.includes(`-e 'HOME=${fakeHome}'`), command);
+	// free-code resumes by absolute .jsonl path, which only resolves because the
+	// sessions dir above is mounted at its own path.
+	assert.ok(command.includes(` 'target-agent-freecode:latest' free-code --session '${sessionFile}'`), command);
+});
+
+test("harness state dirs that don't exist on the host are skipped, not mounted", (t) => {
+	// A bind mount of a missing source makes docker create a root-owned
+	// directory in its place — worse than not mounting it at all.
+	const realHome = process.env.HOME;
+	const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-test-emptyhome-"));
+	t.after(() => {
+		if (realHome === undefined) delete process.env.HOME;
+		else process.env.HOME = realHome;
+		fs.rmSync(emptyHome, { recursive: true, force: true });
+	});
+	process.env.HOME = emptyHome;
+
+	const workdir = "/home/u/repos/demo";
+	const command = harnessResumeCommand("free-code", "/s/x.jsonl", { kind: "docker", image: "img" }, workdir);
+	assert.ok(command);
+	assert.ok(!command.includes(path.join(emptyHome, ".free-code")), command);
+	assert.ok(!command.includes(path.join(emptyHome, ".claude")), command);
+	// The workdir is still mounted and is still the working directory.
+	assert.ok(command.includes(`-v '${workdir}:${workdir}'`), command);
+});
+
 test("harnessResumeCommand refuses a docker workflow with no resolvable workdir", () => {
 	// Without the workdir there's no mount and no -w, so any command we could
 	// offer would open a DIFFERENT conversation. Better to offer none.

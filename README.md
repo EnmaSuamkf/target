@@ -353,10 +353,16 @@ built still fails — with docker's `Unable to find image … locally` rather th
   path, the progress watchdog, the callbacks) is unchanged.
 - **Paths are identical inside and out.** The workdir is bind-mounted at its
   own absolute path and is also the container's `-w`, and `~/.claude`,
-  `~/.claude.json` and `~/.agent-webhook-bridge/sessions` come along at
-  theirs. That identity is load-bearing: the hub finds a run's transcripts by
-  slugifying the workdir string, so a remapped path wouldn't error, it would
-  just make every step look stalled after ten minutes.
+  `~/.claude.json`, `~/.free-code` and `~/.agent-webhook-bridge/sessions` come
+  along at theirs. That identity is load-bearing: the hub finds a run's
+  transcripts by slugifying the workdir string, so a remapped path wouldn't
+  error, it would just make every step look stalled after ten minutes. `$HOME`
+  itself is never mounted, so each harness's state directory has to be named:
+  free-code runs migrations that `mkdir` under `~/.free-code` before it does
+  anything else, and without that mount it exits with `EACCES … mkdir
+  '$HOME/.free-code/agent/themes/bundled'` instead of starting. **"Open
+  conversation" uses the same mount list**, so a resumed session lands in the
+  same container shape the steps ran in.
 - **Files stay yours.** The container runs as the broker's `uid:gid`, so
   anything the agent writes into the workdir is owned by you, not root.
   Runs are also capped (`--memory 4g --cpus 2 --pids-limit 512`).
