@@ -182,16 +182,52 @@ function existingPaths(paths: string[]): string[] {
 }
 
 /**
+ * Host paths holding a harness's own state, mirroring awb's
+ * `harnessStateMounts()` in `adapters/spawn-runner/sandbox.ts`. Each is mounted
+ * at its own absolute path, so the session the steps built is the same session
+ * this terminal reopens:
+ *
+ *  - `~/.claude` — Claude Code's config, credentials and `projects/<slug>/`
+ *    transcripts.
+ *  - `~/.claude.json` — Claude Code's top-level config file.
+ *  - `~/.free-code` — free-code's config, credentials, models and profiles.
+ *    Not optional: `runMigrations()` runs on every start and `mkdir`s
+ *    `agent/themes/bundled` under `$HOME` before anything else, so without this
+ *    mount "Open conversation" on a free-code docker workflow dies with
+ *    `EACCES … mkdir '$HOME/.free-code/agent/themes/bundled'` instead of
+ *    opening. `$HOME` itself is deliberately never mounted (that would hand the
+ *    container the operator's whole home), and the `$HOME` docker synthesises
+ *    to hold these mounts is root-owned, so every directory the harness writes
+ *    to has to be named here.
+ *  - `<awbDir>/sessions` — free-code resumes by absolute `.jsonl` path, so that
+ *    path has to resolve inside the container too. Only the sessions
+ *    subdirectory: the awb dir itself holds `hooks.json`, i.e. every hook's
+ *    shared secret.
+ *
+ * Not conditioned on the workflow's harness, for the same reason awb doesn't
+ * condition it: one symmetric list beats a half-measure per runner.
+ *
+ * Paths missing on the host are skipped — bind-mounting a missing source makes
+ * docker create a root-owned directory in its place, which is worse than not
+ * mounting it.
+ */
+function harnessStateMounts(): string[] {
+	return existingPaths([
+		path.join(os.homedir(), ".claude"),
+		path.join(os.homedir(), ".claude.json"),
+		path.join(os.homedir(), ".free-code"),
+		path.join(awbDir(), "sessions"),
+	]);
+}
+
+/**
  * `docker run …` up to and including the image, for an interactive resume in
  * a real terminal (hence `-it`, which the broker's own headless runs don't
  * use). Every path is mounted at its own absolute path — that identity is the
  * whole reason the session the steps built is findable from in here.
  */
 function dockerResumePrefix(sandbox: HookSandbox, workdir: string): string {
-	const mounts = [
-		workdir,
-		...existingPaths([path.join(os.homedir(), ".claude"), path.join(os.homedir(), ".claude.json"), path.join(awbDir(), "sessions")]),
-	];
+	const mounts = [workdir, ...harnessStateMounts()];
 	const parts = [
 		"docker run --rm -it",
 		`--user ${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`,
