@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
-import type { CreateWorkflowInput, PermissionMode, Runner, Sandbox, Template } from "../api/types.ts";
+import { listRunners } from "../api/client.ts";
+import type {
+	CreateWorkflowInput,
+	PermissionMode,
+	Runner,
+	RunnerAvailability,
+	Sandbox,
+	Template,
+} from "../api/types.ts";
 import { DirectoryBrowser } from "../components/DirectoryBrowser.tsx";
 import { Field } from "../components/Field.tsx";
 import { Modal } from "../components/Modal.tsx";
@@ -92,23 +100,79 @@ export function CreateWorkflowModal({
 	const [acceptRisk, setAcceptRisk] = useState(false);
 	const [saving, setSaving] = useState(false);
 	const [browsing, setBrowsing] = useState(false);
+	const [runners, setRunners] = useState<RunnerAvailability[]>([]);
+	const [loadingRunners, setLoadingRunners] = useState(true);
+	// True when the GET /api/runners probe threw (hub down / network blip).
+	// Distinct from "probe returned no installed runners": a failed probe must
+	// NOT silently degrade to offering both, so it surfaces an explicit error
+	// and disables submission until the operator retries.
+	const [probeFailed, setProbeFailed] = useState(false);
 
-	// Fresh form on every open.
+	// Fresh form on every open. Also fetch which agent CLIs are installed on
+	// the host so the runtime selector below only offers ones the operator can
+	// actually run, and default-selects the first installed runner. A failed
+	// probe (hub unreachable) is surfaced as an explicit error and disables
+	// submission — it never silently degrades to offering both runners, since
+	// an uninstalled agent must not be selectable.
 	useEffect(() => {
 		if (!open) return;
 		setName("");
 		setWorkdir("");
-		setRunner("claude");
 		setSandbox("host");
 		setImage("");
 		setPermissionMode("");
 		setTemplateId("");
 		setAcceptRisk(false);
 		setBrowsing(false);
+		setLoadingRunners(true);
+		setProbeFailed(false);
+		let cancelled = false;
+		void (async () => {
+			let avail: RunnerAvailability[] = [];
+			let failed = false;
+			try {
+				avail = await listRunners();
+			} catch {
+				// Hub down / network blip — record it so the selector shows an
+				// explicit error instead of degrading to offering both runners.
+				failed = true;
+			}
+			if (cancelled) return;
+			setRunners(avail);
+			setProbeFailed(failed);
+			setLoadingRunners(false);
+			setRunner(avail.find((r) => r.installed)?.id ?? "claude");
+		})();
+		return () => {
+			cancelled = true;
+		};
 	}, [open]);
 
 	const bypass = permissionMode === "bypassPermissions";
-	const canSubmit = name.trim() !== "" && (!bypass || acceptRisk) && !saving;
+	// Only installed runners are selectable: `RUNNER_OPTIONS` is used to look up
+	// each installed runner's label/description, never as the source of the
+	// option list, so an uninstalled CLI is never offered — not even as a
+	// disabled "(not installed)" entry.
+	const installedOptions = runners
+		.filter((r) => r.installed)
+		.map((r) => RUNNER_OPTIONS.find((o) => o.value === r.id))
+		.filter((o): o is { value: Runner; label: string; description: string } => o !== undefined);
+	const probeDone = !loadingRunners && !probeFailed;
+	const noInstalled = probeDone && installedOptions.length === 0;
+	const runnerDisabled = loadingRunners || probeFailed || noInstalled;
+	const runnerError = probeFailed
+		? "Couldn't reach the hub to verify installed agent CLIs. Please retry."
+		: noInstalled
+			? "No agent CLI is installed on this machine. Install `claude` or `free-code` to create a workflow."
+			: undefined;
+	const runnerHint = loadingRunners
+		? "Checking which agent CLIs are installed on this machine…"
+		: installedOptions.find((o) => o.value === runner)?.description ?? "";
+	// The probe has to have succeeded with at least one installed runner before
+	// a workflow can be created — otherwise the form would POST a runner the
+	// host can't spawn (or, on a failed probe, one it couldn't even verify).
+	const canSubmit =
+		probeDone && installedOptions.length > 0 && name.trim() !== "" && (!bypass || acceptRisk) && !saving;
 
 	const submit = async (ev: React.FormEvent): Promise<void> => {
 		ev.preventDefault();
@@ -205,20 +269,36 @@ export function CreateWorkflowModal({
 
 				<Field
 					label="Agent runtime"
-					hint={RUNNER_OPTIONS.find((o) => o.value === runner)?.description ?? ""}
+					hint={runnerHint}
+					{...(runnerError ? { error: runnerError } : {})}
 				>
 					{(props) => (
 						<select
 							{...props}
 							className="select"
-							value={runner}
+							value={runnerDisabled ? "" : runner}
+							disabled={runnerDisabled}
 							onChange={(ev) => setRunner(ev.target.value as Runner)}
 						>
-							{RUNNER_OPTIONS.map((option) => (
-								<option key={option.value} value={option.value}>
-									{option.label}
+							{loadingRunners ? (
+								<option value="" disabled>
+									Loading installed agents…
 								</option>
-							))}
+							) : probeFailed ? (
+								<option value="" disabled>
+									Hub unreachable
+								</option>
+							) : noInstalled ? (
+								<option value="" disabled>
+									No agent CLI installed
+								</option>
+							) : (
+								installedOptions.map((option) => (
+									<option key={option.value} value={option.value}>
+										{option.label}
+									</option>
+								))
+							)}
 						</select>
 					)}
 				</Field>

@@ -48,6 +48,12 @@ export type PermissionMode = (typeof PERMISSION_MODES)[number];
 export const RUNNERS = ["claude", "free-code"] as const;
 export type Runner = (typeof RUNNERS)[number];
 
+/** Whether each runner's CLI is installed on the host (from `GET /api/runners`). */
+export interface RunnerAvailability {
+	id: Runner;
+	installed: boolean;
+}
+
 /**
  * Where a workflow's agent runs (server-validated). Orthogonal to the runner:
  * `host` is the historical behaviour — the CLI runs as you, on your

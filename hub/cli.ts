@@ -5,6 +5,7 @@
  * from ~/.target/config.json (same trust boundary as reading that file
  * directly) so there's no token to type locally.
  */
+import * as cp from "node:child_process";
 import { loadConfig } from "./config.ts";
 import { startHub } from "./daemon.ts";
 
@@ -13,13 +14,13 @@ function usage(): void {
 
 Commands:
   start                                 Run the hub (foreground)
-  create <name> [--workdir <dir>] [--runner <claude|free-code>] [--sandbox <host|docker>] [--image <name>]
+  create <name> [--workdir <dir>] [--runner <claude|free-code>] [--sandbox <host|docker>] [--image <name>] [--force]
                                          Create a workflow (creates its agent + awb hook too)
   set-context <workflowId> "<text>"   Set (or clear with "") a workflow's conversation context
   add-step <workflowId> <description...>
                                          Append a step to a workflow
   templates                             List available workflow templates
-  create-from-template <templateId> <workflowName> [--workdir <dir>] [--runner <claude|free-code>] [--sandbox <host|docker>] [--image <name>]
+  create-from-template <templateId> <workflowName> [--workdir <dir>] [--runner <claude|free-code>] [--sandbox <host|docker>] [--image <name>] [--force]
                                          Create a workflow seeded with a template's steps
   list                                  List workflows with progress
   show <workflowId>                     Show a workflow's steps (and their ids)
@@ -38,6 +39,62 @@ function flagValue(args: string[], flag: string): string | undefined {
 	const i = args.indexOf(flag);
 	if (i === -1 || i === args.length - 1) return undefined;
 	return args[i + 1];
+}
+
+/**
+ * Whether `runner`'s CLI is installed on the host, for the create commands'
+ * fast-fail before the POST. Prefers the hub's GET /api/runners (the same
+ * authoritative probe the server's host install-check uses); if the hub can't
+ * be reached, falls back to a local `<runner> --version` probe. Always answers
+ * a boolean so callers never special-case "unknown".
+ */
+async function runnerInstalledOnHost(runner: string, apiBase: string): Promise<boolean> {
+	try {
+		const res = await fetch(`${apiBase}/runners`);
+		if (res.ok) {
+			const { runners } = (await res.json()) as { runners: { id: string; installed: boolean }[] };
+			const found = runners.find((r) => r.id === runner);
+			if (found) return found.installed;
+		}
+	} catch {
+		// Hub unreachable — fall back to a local probe below.
+	}
+	const result = cp.spawnSync(runner, ["--version"], { stdio: ["ignore", "pipe", "pipe"], timeout: 5000 });
+	return result.status === 0;
+}
+
+/**
+ * Pre-flight check for `target create` / `create-from-template`: verifies the
+ * chosen runner's CLI is installed on the host before POSTing, mirroring the
+ * server's host install-check so the operator fails fast here instead of after
+ * the first step's spawn. A docker sandbox ships its own binary in the image,
+ * so a host-missing runner only warns there; on the host it's refused unless
+ * `force` downgrades it to a warning (the hub still has the final say and will
+ * 400 a host runner it can't find). Returns whether creation should proceed.
+ */
+async function ensureRunnerInstalled(
+	runner: string,
+	sandbox: string | undefined,
+	apiBase: string,
+	force: boolean,
+): Promise<boolean> {
+	if (sandbox === "docker") {
+		if (!(await runnerInstalledOnHost(runner, apiBase))) {
+			console.error(
+				`note: runner '${runner}' is not installed on this host, but --sandbox docker ships its own binary; proceeding.`,
+			);
+		}
+		return true;
+	}
+	if (await runnerInstalledOnHost(runner, apiBase)) return true;
+	if (force) {
+		console.error(`warning: runner '${runner}' is not installed on this host; --force given, proceeding anyway.`);
+		return true;
+	}
+	console.error(
+		`runner '${runner}' is not installed on this host. Install it, use --sandbox docker with an image that ships it, or pass --force to proceed anyway.`,
+	);
+	return false;
 }
 
 interface WorkflowJson {
@@ -105,14 +162,24 @@ async function main(): Promise<void> {
 		const runner = flagValue(rest, "--runner");
 		const sandbox = flagValue(rest, "--sandbox");
 		const image = flagValue(rest, "--image");
+		const force = rest.includes("--force");
 		if (!name) {
 			console.error(
 				"Usage: target create <name> [--workdir <dir>] [--permission-mode <mode>] [--runner <claude|free-code>]\n" +
-					"                        [--sandbox <host|docker>] [--image <name>] [--yes-bypass-risk]\n" +
+					"                        [--sandbox <host|docker>] [--image <name>] [--yes-bypass-risk] [--force]\n" +
 					"  modes: acceptEdits, auto, manual, dontAsk, plan, bypassPermissions (needs --yes-bypass-risk)\n" +
 					"  --sandbox docker runs every step inside a container (default host = directly on this machine);\n" +
 					"  --image names the image to use, defaulting to the one built from this repo's Dockerfile",
 			);
+			process.exitCode = 1;
+			return;
+		}
+		// Verify the agent CLI is installed on the host before POSTing, mirroring
+		// the server's host install-check so the operator fails fast here instead
+		// of after the first step's spawn. See `ensureRunnerInstalled` for the
+		// docker/--force leeway.
+		const effectiveRunner = runner ?? "claude";
+		if (!(await ensureRunnerInstalled(effectiveRunner, sandbox, apiBase, force))) {
 			process.exitCode = 1;
 			return;
 		}
@@ -179,11 +246,18 @@ async function main(): Promise<void> {
 		const runner = flagValue(rest, "--runner");
 		const sandbox = flagValue(rest, "--sandbox");
 		const image = flagValue(rest, "--image");
+		const force = rest.includes("--force");
 		if (!templateId || !name) {
 			console.error(
 				"Usage: target create-from-template <templateId> <workflowName> [--workdir <dir>] [--permission-mode <mode>]\n" +
-					"                                     [--runner <claude|free-code>] [--sandbox <host|docker>] [--image <name>]",
+					"                                     [--runner <claude|free-code>] [--sandbox <host|docker>] [--image <name>] [--force]",
 			);
+			process.exitCode = 1;
+			return;
+		}
+		// Same host install-check as `target create` — see there for the rationale.
+		const effectiveRunner = runner ?? "claude";
+		if (!(await ensureRunnerInstalled(effectiveRunner, sandbox, apiBase, force))) {
 			process.exitCode = 1;
 			return;
 		}

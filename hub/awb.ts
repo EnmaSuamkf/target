@@ -13,6 +13,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as cp from "node:child_process";
 
 interface AwbConfig {
 	host: string;
@@ -289,6 +290,39 @@ export type PublishablePermissionMode = (typeof PUBLISHABLE_PERMISSION_MODES)[nu
  */
 export const PUBLISHABLE_RUNNERS = ["claude", "free-code"] as const;
 export type PublishableRunner = (typeof PUBLISHABLE_RUNNERS)[number];
+
+/**
+ * Which runners are actually installed on the broker's host. The hub writes
+ * `spawn:<runner>` into a hook and the broker — which runs on this same
+ * machine in phase 1 — later execs that binary; a runner not on PATH is
+ * doomed to fail at the first step's spawn with an opaque "run failed" (the
+ * real `spawn <binary> ENOENT` stays buried in the broker log). This probe is
+ * what lets the create form show only the agents the operator can actually
+ * run, instead of offering both unconditionally.
+ *
+ * Probed with `<binary> --version`, which both CLIs ship and which exits 0
+ * with no side effects; `spawnSync` keeps it local and synchronous so the
+ * route handler can call it inline. A missing binary surfaces as an `ENOENT`
+ * error with `status === null`, and a hung one is killed after the timeout
+ * (also `status === null`) — both read as "not installed", the safe default
+ * for something that can't answer `--version`.
+ */
+// Indirection so tests can force a runner to read as uninstalled without
+// uninstalling a real CLI — both are installed on the dev/CI box, so the
+// host install-check in POST /api/workflows (which calls `availableRunners`)
+// can only be exercised against an uninstalled runner by swapping this. Same
+// seam shape terminal.ts uses for its spawn.
+export const _impl = { spawnSync: cp.spawnSync };
+
+export function availableRunners(): { id: PublishableRunner; installed: boolean }[] {
+	return PUBLISHABLE_RUNNERS.map((id) => {
+		const result = _impl.spawnSync(id, ["--version"], {
+			stdio: ["ignore", "pipe", "pipe"],
+			timeout: 5000,
+		});
+		return { id, installed: result.status === 0 };
+	});
+}
 
 /**
  * Where a workflow's agent runs. Deliberately orthogonal to the runner: the
