@@ -149,6 +149,35 @@ export function shellQuote(value: string): string {
 }
 
 /**
+ * Extension flags for a free-code resume, mirroring `subagentExtensionArgs`
+ * in awb's free-code adapter (`adapters/spawn-runner/free-code.ts`) — the
+ * steps run with these, so the terminal that reopens their conversation has
+ * to carry them too.
+ *
+ * `--no-extensions` is the flag that makes "Open conversation" actually open
+ * the conversation. free-code's bundled profile-manager extension opens a
+ * blocking `Select session profile` picker on every startup that has a UI, so
+ * without this the terminal lands on a prompt — and to an operator whose TUI
+ * hasn't painted yet, on an apparently empty window. It is also what stops
+ * free-code from discovering (and executing) a `.free-code/agent/extensions/`
+ * planted in the workdir, which on a resume is a directory the agent itself
+ * has been writing to.
+ *
+ * The subagent widget is loaded back by absolute path through the documented
+ * escape hatch ("explicit -e paths still work"), so a conversation that used
+ * `subagent_create` reopens with those tools still registered. `~/.free-code`
+ * is mounted at its own path, so the path resolves inside the container as
+ * well as on the host. Omitted when the file isn't there, exactly as the
+ * adapter does: a missing `-e` path is only a startup diagnostic.
+ */
+function freeCodeExtensionArgs(): string {
+	const widget = path.join(os.homedir(), ".free-code", "agent", "extensions", "subagent-widget.ts");
+	const parts = ["--no-extensions"];
+	if (existingPaths([widget]).length > 0) parts.push(`-e ${shellQuote(widget)}`);
+	return parts.join(" ");
+}
+
+/**
  * Shell command that reopens a harness session in a terminal, keyed by the
  * harness name `hookRuntime` reports. awb ships the `spawn:claude` and
  * `spawn:free-code` adapters (broker/dispatch.ts); their resume mechanics
@@ -158,7 +187,14 @@ export function shellQuote(value: string): string {
  */
 const HARNESS_RESUME_COMMANDS: Record<string, (sessionId: string) => string> = {
 	claude: (sessionId) => `claude --resume ${shellQuote(sessionId)}`,
-	"free-code": (sessionId) => `free-code --session ${shellQuote(sessionId)}`,
+	// `--no-rag-server` skips the auto-start of the local Python RAG server
+	// (free-code-rag on :8085). In the docker resume image that server is not
+	// installed, so without this flag free-code blocks up to 90s waiting for
+	// it ("RAG: server did not become ready … within 90s") and the reopened
+	// conversation only paints after that delay — i.e. an apparently empty
+	// terminal. The RAG server is not used by these workflow sessions, so
+	// disabling it loses nothing and makes the conversation appear at once.
+	"free-code": (sessionId) => `free-code --session ${shellQuote(sessionId)} ${freeCodeExtensionArgs()} --no-rag-server`,
 };
 
 /**
