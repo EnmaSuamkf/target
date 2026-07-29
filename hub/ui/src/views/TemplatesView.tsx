@@ -427,6 +427,17 @@ function TemplateForm({
 									label={`Step ${index + 1} manual review`}
 								/>
 							</div>
+
+							{/* Carried onto every step this template creates too: whether the
+							    step is delegated to a subagent (the default) or run inline. */}
+							<div className={styles.stepRowToggle}>
+								<span className="hint">Use subagent — off runs this step inline in the conversation</span>
+								<Switch
+									checked={step.useSubagent !== false}
+									onChange={(next) => updateStep(index, { useSubagent: next })}
+									label={`Step ${index + 1} use subagent`}
+								/>
+							</div>
 						</div>
 					))}
 				</div>
@@ -437,7 +448,14 @@ function TemplateForm({
 					onClick={() =>
 						setSteps((current) => [
 							...current,
-							{ description: "", acceptanceCriteria: null, manualReview: false, maxRetries: 0, retryIntervalSeconds: 0 },
+							{
+								description: "",
+								acceptanceCriteria: null,
+								manualReview: false,
+								useSubagent: true,
+								maxRetries: 0,
+								retryIntervalSeconds: 0,
+							},
 						])
 					}
 				>

@@ -232,6 +232,9 @@ function publicStep(step: Step, cfg: HubConfig): Record<string, unknown> {
 		finishedAt: step.finishedAt,
 		manualRun: step.manualRun,
 		manualReview: step.manualReview,
+		// Whether this step's work is delegated to a subagent (default) or run
+		// inline on the shared session.
+		useSubagent: step.useSubagent,
 		acceptanceCriteria: step.acceptanceCriteria,
 		maxRetries: step.maxRetries,
 		retryIntervalSeconds: step.retryIntervalSeconds,
@@ -262,16 +265,18 @@ function publicTemplate(template: Template): Record<string, unknown> {
 	};
 }
 
-/** Reads the optional verification config (acceptance criteria + manual-review gate + retry budget + retry wait) from a step create/edit body. */
+/** Reads the optional run config (acceptance criteria + manual-review gate + subagent toggle + retry budget + retry wait) from a step create/edit body. */
 function readStepConfig(body: Record<string, unknown>): {
 	acceptanceCriteria?: string | null;
 	manualReview?: boolean;
+	useSubagent?: boolean;
 	maxRetries?: number;
 	retryIntervalSeconds?: number;
 } {
 	const config: {
 		acceptanceCriteria?: string | null;
 		manualReview?: boolean;
+		useSubagent?: boolean;
 		maxRetries?: number;
 		retryIntervalSeconds?: number;
 	} = {};
@@ -281,6 +286,10 @@ function readStepConfig(body: Record<string, unknown>): {
 	// Only when the client actually sent the field — an edit that omits it must
 	// leave the gate as it was, never silently clear it (see `editStep`).
 	if ("manualReview" in body) config.manualReview = body.manualReview === true;
+	// Same "only when actually sent" rule, mirrored: absent leaves the stored
+	// toggle alone, and since the toggle defaults to ON only an explicit `false`
+	// makes a step run inline.
+	if ("useSubagent" in body) config.useSubagent = body.useSubagent !== false;
 	if (body.maxRetries != null && Number.isFinite(Number(body.maxRetries))) {
 		config.maxRetries = Math.max(0, Math.floor(Number(body.maxRetries)));
 	}
@@ -762,6 +771,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 							addStep(workflow.id, step.description, {
 								acceptanceCriteria: step.acceptanceCriteria,
 								manualReview: step.manualReview,
+								useSubagent: step.useSubagent,
 								maxRetries: step.maxRetries,
 								retryIntervalSeconds: step.retryIntervalSeconds,
 							});
@@ -966,6 +976,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					addStep(workflowId, step.description, {
 						acceptanceCriteria: step.acceptanceCriteria,
 						manualReview: step.manualReview,
+						useSubagent: step.useSubagent,
 						maxRetries: step.maxRetries,
 						retryIntervalSeconds: step.retryIntervalSeconds,
 					});

@@ -134,6 +134,17 @@ export interface Step {
 	 * (the ▶ button vs. the engine); this is about who ends it.
 	 */
 	manualReview: boolean;
+	/**
+	 * Whether this step's work is delegated to a subagent (the Task tool) instead
+	 * of being solved inline on the shared session. On by default — that's the
+	 * behaviour every workflow had before this flag existed, and it's what keeps
+	 * the reused session light (see runner.ts). Turned off, the step carries the
+	 * opposite instruction: solve it directly in this thread, spawn nothing.
+	 *
+	 * Defaults to true wherever it's absent (old DB rows, old templates, an API
+	 * body that never heard of it), so nothing silently changes runtime behaviour.
+	 */
+	useSubagent: boolean;
 	/** How many times the judge may reject this step and re-run it before the workflow is failed. 0 = no retries (one shot, then fail if rejected). */
 	maxRetries: number;
 	/** Seconds to wait before each re-run after a judge reject. 0 = retry immediately. */
@@ -187,6 +198,8 @@ export interface TemplateStep {
 	acceptanceCriteria: string | null;
 	/** Seeds `Step.manualReview` — a template that encodes "a human signs this step off" would be useless if the flag were dropped on use. */
 	manualReview: boolean;
+	/** Seeds `Step.useSubagent`; absent (a template saved before the toggle existed) reads as true, the historical behaviour. */
+	useSubagent: boolean;
 	maxRetries: number;
 	retryIntervalSeconds: number;
 }
@@ -242,6 +255,7 @@ function open(): DatabaseSync {
 			finished_at TEXT,
 			is_manual_run INTEGER NOT NULL DEFAULT 0,
 			manual_review INTEGER NOT NULL DEFAULT 0,
+			use_subagent INTEGER NOT NULL DEFAULT 1,
 			acceptance_criteria TEXT,
 			max_retries INTEGER NOT NULL DEFAULT 0,
 			retry_interval_seconds INTEGER NOT NULL DEFAULT 0,
@@ -283,6 +297,9 @@ function open(): DatabaseSync {
 	};
 	addColumn("is_manual_run", "is_manual_run INTEGER NOT NULL DEFAULT 0");
 	addColumn("manual_review", "manual_review INTEGER NOT NULL DEFAULT 0");
+	// DEFAULT 1: every step written before the toggle existed ran through a
+	// subagent, so that's what an upgraded row has to keep saying.
+	addColumn("use_subagent", "use_subagent INTEGER NOT NULL DEFAULT 1");
 	addColumn("acceptance_criteria", "acceptance_criteria TEXT");
 	addColumn("max_retries", "max_retries INTEGER NOT NULL DEFAULT 0");
 	addColumn("retry_interval_seconds", "retry_interval_seconds INTEGER NOT NULL DEFAULT 0");
@@ -543,6 +560,8 @@ function rowToStep(row: Record<string, unknown>): Step {
 		finishedAt: row.finished_at == null ? null : String(row.finished_at),
 		manualRun: Number(row.is_manual_run ?? 0) === 1,
 		manualReview: Number(row.manual_review ?? 0) === 1,
+		// Absent column / NULL (a row migrated from before the toggle) reads as on.
+		useSubagent: Number(row.use_subagent ?? 1) === 1,
 		acceptanceCriteria: row.acceptance_criteria == null ? null : String(row.acceptance_criteria),
 		maxRetries: Number(row.max_retries ?? 0),
 		retryIntervalSeconds: Number(row.retry_interval_seconds ?? 0),
@@ -563,6 +582,8 @@ export function insertStep(
 	options: {
 		acceptanceCriteria?: string | null;
 		manualReview?: boolean;
+		/** Delegate the step to a subagent. Omitted = true (the historical behaviour). */
+		useSubagent?: boolean;
 		maxRetries?: number;
 		retryIntervalSeconds?: number;
 		/**
@@ -595,6 +616,8 @@ export function insertStep(
 	const acceptanceCriteria = options.acceptanceCriteria?.trim() || null;
 	// The gate is opt-in: a step nobody configured never holds the workflow.
 	const manualReview = options.manualReview === true;
+	// The subagent is opt-OUT: only an explicit `false` runs the step inline.
+	const useSubagent = options.useSubagent !== false;
 	const maxRetries = Math.max(0, Math.floor(options.maxRetries ?? 0));
 	const retryIntervalSeconds = Math.max(0, Math.floor(options.retryIntervalSeconds ?? 0));
 	const step: Step = {
@@ -613,6 +636,7 @@ export function insertStep(
 		finishedAt: null,
 		manualRun: false,
 		manualReview,
+		useSubagent,
 		acceptanceCriteria,
 		maxRetries,
 		retryIntervalSeconds,
@@ -627,8 +651,8 @@ export function insertStep(
 	};
 	database
 		.prepare(
-			`INSERT INTO steps (id, workflow_id, order_index, description, status, callback_token, created_at, acceptance_criteria, manual_review, max_retries, retry_interval_seconds)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO steps (id, workflow_id, order_index, description, status, callback_token, created_at, acceptance_criteria, manual_review, use_subagent, max_retries, retry_interval_seconds)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			step.id,
@@ -640,6 +664,7 @@ export function insertStep(
 			step.createdAt,
 			step.acceptanceCriteria,
 			step.manualReview ? 1 : 0,
+			step.useSubagent ? 1 : 0,
 			step.maxRetries,
 			step.retryIntervalSeconds,
 		);
@@ -697,23 +722,25 @@ export function updateStepDescription(id: string, description: string): void {
 	open().prepare("UPDATE steps SET description = ? WHERE id = ?").run(description, id);
 }
 
-/** Updates a step's verification config (acceptance criteria + manual-review gate + retry budget + retry wait). Editing a step is the only place these change after creation. */
+/** Updates a step's run config (acceptance criteria + manual-review gate + subagent toggle + retry budget + retry wait). Editing a step is the only place these change after creation. */
 export function updateStepConfig(
 	id: string,
 	config: {
 		acceptanceCriteria: string | null;
 		manualReview: boolean;
+		useSubagent: boolean;
 		maxRetries: number;
 		retryIntervalSeconds: number;
 	},
 ): void {
 	open()
 		.prepare(
-			"UPDATE steps SET acceptance_criteria = ?, manual_review = ?, max_retries = ?, retry_interval_seconds = ? WHERE id = ?",
+			"UPDATE steps SET acceptance_criteria = ?, manual_review = ?, use_subagent = ?, max_retries = ?, retry_interval_seconds = ? WHERE id = ?",
 		)
 		.run(
 			config.acceptanceCriteria?.trim() || null,
 			config.manualReview ? 1 : 0,
+			config.useSubagent ? 1 : 0,
 			Math.max(0, Math.floor(config.maxRetries)),
 			Math.max(0, Math.floor(config.retryIntervalSeconds)),
 			id,
@@ -1191,9 +1218,12 @@ function normalizeTemplateSteps(steps: unknown): TemplateStep[] {
 			// Opt-in, exactly like `insertStep`: a template stored before this field
 			// existed (or one that simply doesn't want the gate) reads as false.
 			const manualReview = obj.manualReview === true;
+			// Opt-out, exactly like `insertStep`: a template stored before this field
+			// existed keeps delegating to a subagent, which is what it used to do.
+			const useSubagent = obj.useSubagent !== false;
 			const maxRetries = Math.max(0, Math.floor(Number(obj.maxRetries ?? 0)) || 0);
 			const retryIntervalSeconds = Math.max(0, Math.floor(Number(obj.retryIntervalSeconds ?? 0)) || 0);
-			return { description, acceptanceCriteria, manualReview, maxRetries, retryIntervalSeconds };
+			return { description, acceptanceCriteria, manualReview, useSubagent, maxRetries, retryIntervalSeconds };
 		})
 		.filter((s) => s.description !== "");
 }

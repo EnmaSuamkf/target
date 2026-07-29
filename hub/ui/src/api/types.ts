@@ -115,6 +115,8 @@ export interface Step {
 	manualRun: boolean;
 	/** The per-step gate: when on, the step holds at `waiting` once its work is accepted, until a human presses Continue. */
 	manualReview: boolean;
+	/** On (the default): the step's work is delegated to a subagent. Off: it runs inline in the shared conversation. */
+	useSubagent: boolean;
 	acceptanceCriteria: string | null;
 	maxRetries: number;
 	retryIntervalSeconds: number;
@@ -155,6 +157,8 @@ export interface TemplateStep {
 	acceptanceCriteria: string | null;
 	/** Seeds the same flag on the real steps this template creates. */
 	manualReview: boolean;
+	/** Seeds the subagent toggle on the real steps this template creates. */
+	useSubagent: boolean;
 	maxRetries: number;
 	retryIntervalSeconds: number;
 }
@@ -246,6 +250,8 @@ export interface StepConfigInput {
 	acceptanceCriteria?: string;
 	/** Omitting it leaves the stored gate untouched; the forms always send it, so a toggle-off really turns it off. */
 	manualReview?: boolean;
+	/** Same rule for the subagent toggle: omitted leaves it as stored, and the forms always send it (default true). */
+	useSubagent?: boolean;
 	maxRetries?: number;
 	retryIntervalSeconds?: number;
 }

@@ -7,7 +7,8 @@ every item below.
 1. **Inject before all**
    The context text appears in the agent's input **only on the first
    dispatched step** of a fresh run (no prior session). It is prefixed before
-   the step's task description and the subagent suffix.
+   the step's task description and the step's subagent/inline suffix (whichever
+   its **Use subagent** toggle selects).
 
 2. **No re-injection**
    Subsequent steps (which resume the session) do **not** carry the preamble

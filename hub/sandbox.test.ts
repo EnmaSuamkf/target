@@ -196,6 +196,46 @@ test("the docker resume mounts every harness state dir, ~/.free-code included", 
 	assert.ok(command.includes(` 'target-agent-freecode:latest' free-code --session '${sessionFile}'`), command);
 });
 
+test("a free-code resume runs with --no-extensions, so it opens the conversation and not the profile picker", (t) => {
+	// free-code's bundled profile-manager extension opens a blocking
+	// "Select session profile" picker on every startup with a UI. The steps run
+	// with --no-extensions and never see it; a terminal that omitted the flag
+	// would stop on that prompt instead of reopening the conversation.
+	const realHome = process.env.HOME;
+	const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-test-fchome-"));
+	t.after(() => {
+		if (realHome === undefined) delete process.env.HOME;
+		else process.env.HOME = realHome;
+		fs.rmSync(fakeHome, { recursive: true, force: true });
+	});
+	process.env.HOME = fakeHome;
+
+	// Host resume: the flags are not a sandbox concern, so they are there either way.
+	assert.equal(
+		harnessResumeCommand("free-code", "/s/x.jsonl"),
+		"free-code --session '/s/x.jsonl' --no-extensions --no-rag-server",
+	);
+	// claude has no such picker and must keep the command it has always had.
+	assert.equal(harnessResumeCommand("claude", "sess-1"), "claude --resume 'sess-1'");
+
+	// The subagent widget is loaded back by absolute path once it exists, so a
+	// conversation that used subagent_create reopens with those tools.
+	const extDir = path.join(fakeHome, ".free-code", "agent", "extensions");
+	fs.mkdirSync(extDir, { recursive: true });
+	const widget = path.join(extDir, "subagent-widget.ts");
+	fs.writeFileSync(widget, "");
+	assert.equal(
+		harnessResumeCommand("free-code", "/s/x.jsonl"),
+		`free-code --session '/s/x.jsonl' --no-extensions -e '${widget}' --no-rag-server`,
+	);
+
+	// Inside the container the same absolute path resolves, because ~/.free-code
+	// is mounted at its own path.
+	const docker = harnessResumeCommand("free-code", "/s/x.jsonl", { kind: "docker", image: "img" }, "/home/u/repos/demo");
+	assert.ok(docker);
+	assert.ok(docker.endsWith(`free-code --session '/s/x.jsonl' --no-extensions -e '${widget}' --no-rag-server`), docker);
+});
+
 test("harness state dirs that don't exist on the host are skipped, not mounted", (t) => {
 	// A bind mount of a missing source makes docker create a root-owned
 	// directory in its place — worse than not mounting it at all.

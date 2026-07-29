@@ -132,7 +132,7 @@ export function StepItem({
 				<Badge status={step.status} label={statusLabel} manual={step.statusManual} manualAt={step.statusManualAt} />
 			</div>
 
-			{(step.acceptanceCriteria || elapsed || step.manualRun || step.manualReview || activity) && (
+			{(step.acceptanceCriteria || elapsed || step.manualRun || step.manualReview || step.useSubagent === false || activity) && (
 				<div className={styles.meta}>
 					{step.acceptanceCriteria && (
 						<span className={styles.metaItem} title={step.acceptanceCriteria}>
@@ -156,6 +156,16 @@ export function StepItem({
 								<circle cx="12" cy="12" r="3" />
 							</svg>
 							manual review
+						</span>
+					)}
+					{/* Only the non-default choice is worth a badge: delegating is what
+					    every step does unless someone turned it off here. */}
+					{step.useSubagent === false && (
+						<span className={styles.metaItem} title="This step runs inline in the conversation instead of being delegated to a subagent.">
+							<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+								<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+							</svg>
+							inline
 						</span>
 					)}
 					{step.manualRun && <span className={styles.metaItem}>manual run</span>}
@@ -338,6 +348,8 @@ function StepEditor({
 	const [description, setDescription] = useState(step.description);
 	const [criteria, setCriteria] = useState(step.acceptanceCriteria ?? "");
 	const [manualReview, setManualReview] = useState(step.manualReview);
+	// The stored value, defaulting to on for a step from before the toggle.
+	const [useSubagent, setUseSubagent] = useState(step.useSubagent !== false);
 	const [maxRetries, setMaxRetries] = useState(String(step.maxRetries ?? 0));
 	const [interval, setInterval] = useState(String(step.retryIntervalSeconds ?? 0));
 	const [saving, setSaving] = useState(false);
@@ -357,6 +369,8 @@ function StepEditor({
 				// Always sent: the server only touches the stored gate when the field
 				// is present, so an omitted false could never turn it back off.
 				manualReview,
+				// Always sent too, for the same reason.
+				useSubagent,
 				maxRetries: Math.max(0, parseInt(maxRetries, 10) || 0),
 				retryIntervalSeconds: intervalEnabled ? Math.max(0, parseInt(interval, 10) || 0) : 0,
 			});
@@ -411,6 +425,23 @@ function StepEditor({
 					onChange={setManualReview}
 					label="Manual review"
 					describedBy={`review-hint-${step.id}`}
+					disabled={saving}
+				/>
+			</div>
+
+			<div className={styles.gateRow}>
+				<div className={styles.gateText}>
+					<span className="label">Use subagent</span>
+					<p className="hint" id={`subagent-hint-${step.id}`}>
+						On: the agent delegates this step to a subagent (the Task tool), so the shared session only keeps its
+						summary. Off: it solves the step itself, inline in the conversation.
+					</p>
+				</div>
+				<Switch
+					checked={useSubagent}
+					onChange={setUseSubagent}
+					label="Use subagent"
+					describedBy={`subagent-hint-${step.id}`}
 					disabled={saving}
 				/>
 			</div>

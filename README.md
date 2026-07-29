@@ -32,7 +32,7 @@ the session-id shape differ (a claude uuid vs. a free-code `.jsonl` path).
 | Job = loose task, optional session | Step = task of a workflow, always chained to the previous session |
 | Parallel jobs, no order | Strictly sequential steps (the next one doesn't fire until the previous one finishes) |
 | — | Progress in % (done/total), pause/resume, edit a step + restart the workflow |
-| — | Every job carries an appended instruction to resolve itself with a subagent (Task tool), because the main thread is reused for the whole workflow |
+| — | Every job carries an appended instruction about *where* it runs: by default resolve itself with a subagent (Task tool), because the main thread is reused for the whole workflow — or, with the step's **Use subagent** toggle off, solve it inline in the conversation |
 | — | Status `.md` in `~/.target/<name-slug>-<id>.md`, rewritten on every change |
 
 ## Install

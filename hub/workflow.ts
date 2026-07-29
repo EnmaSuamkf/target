@@ -498,6 +498,12 @@ export function writeStatusMd(workflowId: string): void {
 			lines.push(`   - Acceptance criterion: ${step.acceptanceCriteria}`);
 			lines.push(`   - Retries: ${step.retryCount}/${step.maxRetries}`);
 		}
+		// Only the non-default choice is worth a line: every step used to run
+		// through a subagent, so "inline" is the thing that explains why this
+		// step's work shows up in the conversation itself.
+		if (!step.useSubagent) {
+			lines.push("   - Subagent: off — this step runs inline in the conversation");
+		}
 		// The gate is worth stating in the file too: it explains, without the UI,
 		// why a workflow is sitting at `waiting` instead of moving on.
 		if (step.manualReview) {
@@ -648,6 +654,8 @@ export function addStep(
 	options: {
 		acceptanceCriteria?: string | null;
 		manualReview?: boolean;
+		/** Delegate this step to a subagent. Omitted = true, the default behaviour (see runner.ts). */
+		useSubagent?: boolean;
 		maxRetries?: number;
 		retryIntervalSeconds?: number;
 		/** Insert directly after this step instead of appending at the end. */
@@ -670,6 +678,7 @@ export function addStep(
 	const step = insertStep(workflowId, trimmed, {
 		acceptanceCriteria: options.acceptanceCriteria ?? null,
 		manualReview: options.manualReview === true,
+		useSubagent: options.useSubagent !== false,
 		maxRetries: options.maxRetries ?? 0,
 		retryIntervalSeconds: options.retryIntervalSeconds ?? 0,
 		afterOrderIndex,
@@ -690,6 +699,7 @@ export function editStep(
 	options: {
 		acceptanceCriteria?: string | null;
 		manualReview?: boolean;
+		useSubagent?: boolean;
 		maxRetries?: number;
 		retryIntervalSeconds?: number;
 	} = {},
@@ -710,12 +720,14 @@ export function editStep(
 	if (
 		options.acceptanceCriteria !== undefined ||
 		options.manualReview !== undefined ||
+		options.useSubagent !== undefined ||
 		options.maxRetries !== undefined ||
 		options.retryIntervalSeconds !== undefined
 	) {
 		updateStepConfig(stepId, {
 			acceptanceCriteria: options.acceptanceCriteria ?? step.acceptanceCriteria,
 			manualReview: options.manualReview ?? step.manualReview,
+			useSubagent: options.useSubagent ?? step.useSubagent,
 			maxRetries: options.maxRetries ?? step.maxRetries,
 			retryIntervalSeconds: options.retryIntervalSeconds ?? step.retryIntervalSeconds,
 		});
