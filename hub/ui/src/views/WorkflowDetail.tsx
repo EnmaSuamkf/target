@@ -348,6 +348,8 @@ function AddStepForm({
 	const [description, setDescription] = useState("");
 	const [criteria, setCriteria] = useState("");
 	const [manualReview, setManualReview] = useState(false);
+	// Default ON — the behaviour every step had before this toggle existed.
+	const [useSubagent, setUseSubagent] = useState(true);
 	const [maxRetries, setMaxRetries] = useState("0");
 	const [interval, setInterval] = useState("0");
 	const [templateId, setTemplateId] = useState("");
@@ -359,6 +361,7 @@ function AddStepForm({
 		setDescription("");
 		setCriteria("");
 		setManualReview(false);
+		setUseSubagent(true);
 		setMaxRetries("0");
 		setInterval("0");
 	};
@@ -373,6 +376,7 @@ function AddStepForm({
 				description: trimmed,
 				acceptanceCriteria: criteria.trim(),
 				manualReview,
+				useSubagent,
 				maxRetries: Math.max(0, parseInt(maxRetries, 10) || 0),
 				retryIntervalSeconds: intervalEnabled ? Math.max(0, parseInt(interval, 10) || 0) : 0,
 			});
@@ -452,6 +456,23 @@ function AddStepForm({
 						onChange={setManualReview}
 						label="Manual review"
 						describedBy="new-step-review-hint"
+						disabled={saving}
+					/>
+				</div>
+
+				<div className={styles.gateRow}>
+					<div className={styles.gateText}>
+						<span className="label">Use subagent</span>
+						<p className="hint" id="new-step-subagent-hint">
+							On: the agent delegates this step to a subagent (the Task tool), so the shared session only keeps its
+							summary. Off: it solves the step itself, inline in the conversation.
+						</p>
+					</div>
+					<Switch
+						checked={useSubagent}
+						onChange={setUseSubagent}
+						label="Use subagent"
+						describedBy="new-step-subagent-hint"
 						disabled={saving}
 					/>
 				</div>

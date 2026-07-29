@@ -10,10 +10,18 @@
  * resumes the same Claude session (`workflow.lastSessionId`) — that's what
  * makes the whole workflow read as one continuous conversation instead of N
  * unrelated runs. Because that session is reused turn after turn, the input
- * always appends an explicit instruction to do the step's work through a
+ * appends by default an explicit instruction to do the step's work through a
  * subagent (the Task tool) rather than inline: that keeps each step's own
  * working context out of the resumed session, which only accumulates the
  * subagent's final summaries.
+ *
+ * That's a per-step choice (`step.useSubagent`, on by default). A step with the
+ * toggle OFF gets the opposite instruction instead — solve it here, in this
+ * thread, spawn nothing — because leaving the input bare would make the
+ * behaviour depend on the agent's mood: the session's earlier turns are full of
+ * "delegate this" instructions, and an unqualified step would very likely be
+ * delegated by imitation. Exactly one of the two instructions is always
+ * appended, so a step never has to be guessed about.
  */
 import type { HubConfig } from "./config.ts";
 import type { Step, Workflow } from "./db.ts";
@@ -23,8 +31,24 @@ export type Logger = (message: string, type?: "info" | "warning" | "error") => v
 
 const DISPATCH_TIMEOUT_MS = 10_000;
 
-const SUBAGENT_SUFFIX =
+export const SUBAGENT_SUFFIX =
 	"\n\nImportant: run this step by delegating the work to a subagent (the Task tool) instead of solving it yourself directly in this thread — this same session is reused sequentially for every step of the workflow, and delegating keeps the main thread lightweight.";
+
+/**
+ * The counter-instruction for a step whose subagent toggle is OFF. It has to be
+ * explicit for the reason given in the module header: earlier turns of this very
+ * session told the agent to delegate, so silence would read as "same as before".
+ * It also says why (the operator wants this step's work visible in the
+ * conversation), so the agent doesn't treat it as an arbitrary restriction and
+ * "helpfully" delegate anyway.
+ */
+export const INLINE_SUFFIX =
+	"\n\nImportant: run this step yourself, directly in this thread — do NOT delegate it to a subagent (do not use the Task tool for it). This step was explicitly configured to run inline, so its work belongs in this conversation.";
+
+/** The instruction appended to a step's exec input, per its subagent toggle. */
+export function subagentInstruction(useSubagent: boolean): string {
+	return useSubagent ? SUBAGENT_SUFFIX : INLINE_SUFFIX;
+}
 
 /**
  * Builds the input for a re-run of a step the judge rejected: the same task
@@ -79,20 +103,24 @@ function contextPreamble(context: string | null | undefined): string {
  * Deliberately omits SUBAGENT_SUFFIX — the verdict must come straight back on
  * this thread, not from a subagent whose summary we'd then have to parse.
  *
- * The prompt insists on ACTUAL verification: the step's work was done by a
- * subagent, so this thread only holds that subagent's summary, not the real
- * artifacts. Judging from memory is exactly how a clearly-unmet criterion used
- * to slip through as "ok". So it must re-inspect the real state (read the
- * files, run the commands) with its tools before ruling, and default to a
- * rejection whenever it cannot confirm the criterion holds.
+ * The prompt insists on ACTUAL verification: judging from memory is exactly how
+ * a clearly-unmet criterion used to slip through as "ok". So it must re-inspect
+ * the real state (read the files, run the commands) with its tools before
+ * ruling, and default to a rejection whenever it cannot confirm the criterion
+ * holds. `useSubagent` only changes WHY memory is untrustworthy: a delegated
+ * step left nothing here but the subagent's summary, while an inline step's own
+ * narration is still just narration, not the artifacts.
  */
-export function judgeInput(criteria: string): string {
+export function judgeInput(criteria: string, useSubagent = true): string {
+	const distrust = useSubagent
+		? "do NOT trust your memory or the subagent's summary. The step's work was done by a subagent, so its real output may not be in this thread."
+		: "do NOT trust your memory or what you said while doing the step. What this thread holds is your narration, not the real output.";
 	return [
 		"Evaluate whether the result of the previous step of this workflow meets the following acceptance criterion:",
 		"",
 		`"${criteria.trim()}"`,
 		"",
-		"Important: do NOT trust your memory or the subagent's summary. The step's work was done by a subagent, so its real output may not be in this thread. Verify the criterion by inspecting the actual artifacts with your tools — read the files, run the commands, check the real state — BEFORE deciding.",
+		`Important: ${distrust} Verify the criterion by inspecting the actual artifacts with your tools — read the files, run the commands, check the real state — BEFORE deciding.`,
 		"",
 		'Once you have verified, end your reply with a JSON object on its own final line, and nothing after it, in exactly this shape: {"ok": true|false, "reason": "<brief explanation>"}',
 		'"ok" is true ONLY if you confirmed the result meets the criterion. If it does not meet it, or you could not verify it, set "ok": false and in "reason" explain concretely what is missing or what to fix. When in doubt, "ok": false.',
@@ -161,8 +189,8 @@ export async function dispatchStep(
 			: "";
 	const input =
 		mode === "judge"
-			? judgeInput(step.acceptanceCriteria ?? "")
-			: `${preamble}${step.description}${criteriaNote(step.acceptanceCriteria)}${SUBAGENT_SUFFIX}${
+			? judgeInput(step.acceptanceCriteria ?? "", step.useSubagent)
+			: `${preamble}${step.description}${criteriaNote(step.acceptanceCriteria)}${subagentInstruction(step.useSubagent)}${
 					options.retryReason ? retryNote(options.retryReason) : ""
 				}${options.timedOut ? TIMEOUT_NOTE : ""}`;
 	try {

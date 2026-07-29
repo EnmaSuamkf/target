@@ -35,6 +35,8 @@ export function AddStepModal({
 	const [description, setDescription] = useState("");
 	const [criteria, setCriteria] = useState("");
 	const [manualReview, setManualReview] = useState(false);
+	// Default ON — every step ran through a subagent before this toggle existed.
+	const [useSubagent, setUseSubagent] = useState(true);
 	const [maxRetries, setMaxRetries] = useState("0");
 	const [interval, setInterval] = useState("0");
 	const [saving, setSaving] = useState(false);
@@ -46,6 +48,7 @@ export function AddStepModal({
 		setDescription("");
 		setCriteria("");
 		setManualReview(false);
+		setUseSubagent(true);
 		setMaxRetries("0");
 		setInterval("0");
 	}, [open]);
@@ -65,6 +68,7 @@ export function AddStepModal({
 				// Always sent, like the other two step forms: the server only touches
 				// the stored gate when the field is present.
 				manualReview,
+				useSubagent,
 				maxRetries: Math.max(0, parseInt(maxRetries, 10) || 0),
 				retryIntervalSeconds: intervalEnabled ? Math.max(0, parseInt(interval, 10) || 0) : 0,
 			});
@@ -133,6 +137,23 @@ export function AddStepModal({
 						onChange={setManualReview}
 						label="Manual review"
 						describedBy="add-step-after-review-hint"
+						disabled={saving}
+					/>
+				</div>
+
+				<div className={styles.gateRow}>
+					<div className={styles.gateText}>
+						<span className="label">Use subagent</span>
+						<p className="hint" id="add-step-after-subagent-hint">
+							On: the agent delegates this step to a subagent (the Task tool), keeping the shared session light. Off:
+							it does the work itself, inline in the conversation.
+						</p>
+					</div>
+					<Switch
+						checked={useSubagent}
+						onChange={setUseSubagent}
+						label="Use subagent"
+						describedBy="add-step-after-subagent-hint"
 						disabled={saving}
 					/>
 				</div>
