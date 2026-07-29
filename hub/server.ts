@@ -4,6 +4,7 @@
  * Routes:
  *   GET    /health                                   → liveness
  *   GET    /api/workflows                             → list (with progress %)
+ *   GET    /api/runners                               → which agent CLIs (claude/free-code) are installed on this host, for the create form
  *   POST   /api/workflows                             → create (admin token) — makes the awb hook too; optional templateId seeds its steps
  *   GET    /api/workflows/:id                          → detail + steps
  *   GET    /api/workflows/:id/session-info                → harness + session id + token usage of the current/last session
@@ -41,6 +42,7 @@ import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	availableRunners,
 	harnessResumeCommand,
 	hookRuntime,
 	PUBLISHABLE_PERMISSION_MODES,
@@ -644,6 +646,16 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		return;
 	}
 
+	// Which runners are installed on this host, so the create form can show
+	// only the agents the operator can actually run. Read-only and ungated
+	// (no admin token): it reports nothing the browser doesn't already know
+	// about the machine it's running on, and the form needs it before any
+	// admin action is even possible.
+	if (parts[1] === "runners" && !parts[2] && req.method === "GET") {
+		sendJson(res, 200, { runners: availableRunners() });
+		return;
+	}
+
 	if (parts[1] !== "workflows") {
 		sendJson(res, 404, { error: "not_found" });
 		return;
@@ -708,6 +720,25 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						return;
 					}
 					sandbox = body.sandbox as PublishableSandbox;
+				}
+				// Host sandbox: the runner's CLI has to actually be installed on THIS
+				// machine, because the broker — which runs here in phase 1 — later
+				// execs that binary directly; a runner not on PATH is doomed to fail at
+				// the first step's spawn with an opaque "run failed" (the real
+				// `spawn <binary> ENOENT` stays buried in the broker log). Skipped for
+				// `sandbox: "docker"`: the image ships its own binary, so probing the
+				// host PATH would wrongly block a valid container workflow. The
+				// effective runner is the one the hook will spawn — `runner` when set,
+				// claude otherwise (the default the form would have selected).
+				const effectiveRunner: PublishableRunner = runner ?? "claude";
+				if ((sandbox ?? "host") !== "docker") {
+					const installed = availableRunners().find((r) => r.id === effectiveRunner)?.installed ?? false;
+					if (!installed) {
+						sendJson(res, 400, {
+							error: `runner '${effectiveRunner}' is not installed on this host (install it or use sandbox: docker with an image that ships it)`,
+						});
+						return;
+					}
 				}
 				// The image is only meaningful for a docker sandbox; it's a hook field
 				// (a docker tag / name), never a path or a command, so it's taken as

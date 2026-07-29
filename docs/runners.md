@@ -21,11 +21,11 @@ that assumed Claude's session/transcript conventions.
 |---|---|
 | `hub/awb.ts` | `PUBLISHABLE_RUNNERS` (`claude`, `free-code`); `HookOptions.runner`; `createAwbHook` writes `spawn:<runner>`; `HARNESS_RESUME_COMMANDS` gains `free-code --session <path>` |
 | `hub/workflow.ts` | `createWorkflow` accepts and forwards `runner` |
-| `hub/server.ts` | `POST /api/workflows` validates an optional `runner` body field against `PUBLISHABLE_RUNNERS` |
-| `hub/cli.ts` | `target create` / `create-from-template` accept `--runner <claude\|free-code>` |
+| `hub/server.ts` | `POST /api/workflows` validates an optional `runner` body field against `PUBLISHABLE_RUNNERS`, and for a host sandbox rejects a runner whose CLI isn't installed on this machine (via `availableRunners()`); `GET /api/runners` exposes that probe to the create form |
+| `hub/cli.ts` | `target create` / `create-from-template` accept `--runner <claude\|free-code>` and verify that CLI is installed on the host before POSTing (host only; `--force` warns-and-proceeds, docker isn't blocked) |
 | `hub/transcript.ts` | `readTokenUsage` detects a free-code session (an absolute `.jsonl` path), reads the transcript directly, and normalises free-code's usage shape (`input`/`output`/`cacheRead`/`cacheWrite`) alongside Claude's (`input_tokens`/…) |
 | `hub/tokens.ts` | the CLI accepts a free-code `.jsonl` path as its argument |
-| `hub/ui` | `Runner` type + `runner` on `CreateWorkflowInput`; an **Agent runtime** selector in the New-workflow modal |
+| `hub/ui` | `Runner` type + `runner` on `CreateWorkflowInput`; an **Agent runtime** selector in the New-workflow modal that offers ONLY the agents `GET /api/runners` reports as installed — with an explicit error when the hub is unreachable or none are installed, never a silent fallback to both |
 | `hub/runner-harness.test.ts` | Tests: consumers written, harness surfaced, resume commands, runner validation, free-code usage reading, session-info and open-terminal on a free-code workflow |
 
 ## What deliberately did NOT change
@@ -45,8 +45,12 @@ that assumed Claude's session/transcript conventions.
 
 - **Session ids** are `.jsonl` paths, shown as-is in the Conversation panel
   and the progress `.md`.
-- **"Open conversation"** spawns `free-code --session <path>` instead of
-  `claude --resume <uuid>`.
+- **"Open conversation"** spawns `free-code --session <path> --no-extensions
+  -e <subagent-widget> --no-rag-server` instead of `claude --resume <uuid>`.
+  `--no-extensions` reopens with only the subagent widget (the steps ran that
+  way); `--no-rag-server` skips the local Python RAG server auto-start, which
+  isn't installed in the docker image and otherwise blocks ~90s before the
+  conversation paints (an apparently empty terminal).
 - **Permissions**: awb maps the hook's `permissionMode` to free-code's
   `--tools` flag (unset → read-only; `acceptEdits` → +write/edit, no bash;
   `bypassPermissions`/`auto`/`dontAsk` → full incl. bash; `manual`/`plan` →
@@ -56,9 +60,15 @@ that assumed Claude's session/transcript conventions.
   transcripts to fold in.
 - **The runner is fixed at creation** — it's baked into the hook's
   `consumers` — so switching runtime means creating a new workflow.
+- **Only installed agents are offered.** The create form probes each runner
+  with `<cli> --version` (`GET /api/runners`) and offers just the ones that
+  answer; an uninstalled CLI is never selectable, not even as a disabled
+  "(not installed)" entry. A host workflow whose runner isn't installed is
+  rejected at creation (server and CLI both), while a docker workflow is not —
+  the image ships its own binary.
 
 ## Status
 
-Implemented and covered by `hub/runner-harness.test.ts` plus the existing
-suites. `npm test` and `npm run typecheck` pass. Documented in `README.md`
-and `web-docs/index.html`.
+Implemented and covered by `hub/runner-harness.test.ts` and
+`hub/runner-install.test.ts` plus the existing suites. `npm run typecheck`
+passes. Documented in `README.md` and `web-docs/index.html`.

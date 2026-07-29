@@ -19,6 +19,7 @@ import type {
 	NotificationSettingsInput,
 	OverridableStepStatus,
 	OverridableWorkflowStatus,
+	RunnerAvailability,
 	SessionInfo,
 	Step,
 	StepConfigInput,
@@ -108,6 +109,12 @@ const json = (value: unknown): string => JSON.stringify(value);
 export async function listWorkflows(): Promise<Workflow[]> {
 	const data = await request<{ workflows: Workflow[] }>("/api/workflows");
 	return data.workflows;
+}
+
+/** Which agent CLIs are installed on the host, so the create form can show only those. */
+export async function listRunners(): Promise<RunnerAvailability[]> {
+	const data = await request<{ runners: RunnerAvailability[] }>("/api/runners");
+	return data.runners;
 }
 
 export function getWorkflow(id: string): Promise<{ workflow: Workflow; steps: Step[] }> {

@@ -53,6 +53,19 @@ test.after(() => {
 	server.close();
 });
 
+test("GET /api/runners reports which agent CLIs are installed on this host", async () => {
+	// Read-only and ungated (no admin token): the create form needs it before
+	// any admin action is possible. The exact installed booleans depend on the
+	// machine, so only the shape is pinned: both known runners, each carrying
+	// a boolean.
+	const res = await fetch(`${baseUrl}/api/runners`);
+	assert.equal(res.status, 200);
+	const body = (await res.json()) as { runners: { id: string; installed: boolean }[] };
+	const ids = body.runners.map((r) => r.id).sort();
+	assert.deepEqual(ids, ["claude", "free-code"]);
+	for (const r of body.runners) assert.equal(typeof r.installed, "boolean");
+});
+
 function adminHeaders() {
 	return { "content-type": "application/json", authorization: `Bearer ${cfg.adminToken}` };
 }
