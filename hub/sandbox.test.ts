@@ -32,7 +32,8 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-test-sandbox-"));
 process.env.TARGET_HOME = tmpHome;
 process.env.AWB_HOME = tmpHome;
 
-const { createAwbHook, DEFAULT_SANDBOX_IMAGE, harnessResumeCommand, hookRuntime, PUBLISHABLE_SANDBOXES } = await import("./awb.ts");
+const { createAwbHook, DEFAULT_SANDBOX_IMAGE, DEFAULT_SANDBOX_IMAGES, defaultSandboxImage, harnessResumeCommand, hookRuntime, PUBLISHABLE_SANDBOXES } =
+	await import("./awb.ts");
 const { loadConfig } = await import("./config.ts");
 const { createServer } = await import("./server.ts");
 const { setWorkflowSessionId } = await import("./db.ts");
@@ -75,6 +76,29 @@ test("createAwbHook with sandbox docker writes the block, defaulting the image",
 	const { hookUrl } = createAwbHook("docker-hook", path.join(tmpHome, "wd-docker"), "{{payload}}", { sandbox: "docker" });
 	assert.deepEqual(hooksJson()["docker-hook"].sandbox, { kind: "docker", image: DEFAULT_SANDBOX_IMAGE });
 	assert.deepEqual(hookRuntime(hookUrl).sandbox, { kind: "docker", image: DEFAULT_SANDBOX_IMAGE });
+});
+
+// The regression that produced `exit 127` in the field: the broker passes the
+// runner's binary as the CONTAINER COMMAND (`docker run … <image> free-code
+// …`), and the default image built from ./Dockerfile only ships `claude`. A
+// free-code workflow that didn't type an image name therefore launched an
+// image with nothing to exec, and died before an agent existed. The default
+// has to follow the runner.
+test("the default docker image follows the runner — free-code gets the image that has the free-code binary", () => {
+	const { hookUrl } = createAwbHook("docker-freecode-default", path.join(tmpHome, "wd-fc-default"), "{{payload}}", {
+		sandbox: "docker",
+		runner: "free-code",
+	});
+	const image = DEFAULT_SANDBOX_IMAGES["free-code"];
+	assert.notEqual(image, DEFAULT_SANDBOX_IMAGES.claude, "free-code must not fall back to the claude-only image");
+	assert.deepEqual(hooksJson()["docker-freecode-default"].sandbox, { kind: "docker", image });
+	assert.deepEqual(hookRuntime(hookUrl).sandbox, { kind: "docker", image });
+});
+
+test("defaultSandboxImage maps every publishable runner to a distinct image, claude when unspecified", () => {
+	assert.equal(defaultSandboxImage(), DEFAULT_SANDBOX_IMAGES.claude);
+	assert.equal(defaultSandboxImage("claude"), "target-agent:latest");
+	assert.equal(defaultSandboxImage("free-code"), "target-agent-freecode:latest");
 });
 
 test("createAwbHook honours a per-workflow image, and leaves the runner alone", () => {
@@ -148,6 +172,36 @@ test("POST /api/workflows with sandbox docker creates a contained workflow and w
 	assert.equal(workflow.sandbox, "docker");
 	assert.equal(workflow.image, "target-agent:latest");
 	assert.deepEqual(hooksJson()[workflow.agentName].sandbox, { kind: "docker", image: "target-agent:latest" });
+});
+
+test("POST /api/workflows with runner free-code + sandbox docker and NO image picks the free-code image", async () => {
+	// The exact shape the UI sends when you choose "free-code" + "Docker
+	// container" and leave the image box empty — the path that used to produce
+	// a hook pointing at the claude-only image, i.e. `exit 127` on every step.
+	const res = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ name: "free-code docker workflow", runner: "free-code", sandbox: "docker" }),
+	});
+	assert.equal(res.status, 200);
+	const { workflow } = (await res.json()) as { workflow: { agentName: string; sandbox: string; image: string | null } };
+	assert.equal(workflow.sandbox, "docker");
+	assert.equal(workflow.image, "target-agent-freecode:latest");
+	const hook = hooksJson()[workflow.agentName];
+	assert.deepEqual(hook.consumers, ["spawn:free-code"]);
+	assert.deepEqual(hook.sandbox, { kind: "docker", image: "target-agent-freecode:latest" });
+});
+
+test("an explicit image still wins over the runner default", async () => {
+	const res = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ name: "free-code custom image", runner: "free-code", sandbox: "docker", image: "my-freecode:dev" }),
+	});
+	assert.equal(res.status, 200);
+	const { workflow } = (await res.json()) as { workflow: { agentName: string; image: string | null } };
+	assert.equal(workflow.image, "my-freecode:dev");
+	assert.deepEqual(hooksJson()[workflow.agentName].sandbox, { kind: "docker", image: "my-freecode:dev" });
 });
 
 test("POST /api/workflows without a sandbox stays on the host (unchanged default)", async () => {

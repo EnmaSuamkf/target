@@ -324,16 +324,27 @@ docker build -t target-agent:latest .            # once; see ./Dockerfile
 node hub/cli.ts create "release-notes" --sandbox docker --permission-mode acceptEdits
 ```
 
-The default image only ships `claude`. A workflow whose runner is `free-code`
-invokes `free-code` as the container command, so it needs an image that has
-it — otherwise the step dies with `exit 127` before an agent exists. Build the
-derived image and point the workflow at it:
+The image built from `./Dockerfile` only ships `claude`. A workflow whose
+runner is `free-code` invokes `free-code` as the container command, so it needs
+an image that has it — otherwise the step dies with `exit 127` before an agent
+exists. **The default image follows the runner**, so a free-code docker
+workflow defaults to `target-agent-freecode:latest`; you only have to build it
+once:
 
 ```bash
 docker build -t target-agent-freecode:latest -f Dockerfile.free-code .
-node hub/cli.ts create "release-notes" --runner free-code --sandbox docker \
-  --image target-agent-freecode:latest
+node hub/cli.ts create "release-notes" --runner free-code --sandbox docker
 ```
+
+| runner | default image | built from |
+| --- | --- | --- |
+| `claude` | `target-agent:latest` | `Dockerfile` |
+| `free-code` | `target-agent-freecode:latest` | `Dockerfile.free-code` |
+
+`--image` still overrides either one. Note the default is only a *name*: the
+hub writes it into the hook, it doesn't build it for you, so an image you never
+built still fails — with docker's `Unable to find image … locally` rather than
+`exit 127`.
 
 - **The broker stays on the host.** It shells out to `docker run --rm` per
   step and posts the callback itself, so the container needs no port, no
@@ -350,9 +361,9 @@ node hub/cli.ts create "release-notes" --runner free-code --sandbox docker \
   anything the agent writes into the workdir is owned by you, not root.
   Runs are also capped (`--memory 4g --cpus 2 --pids-limit 512`).
 - **The image is per workflow.** `--image <name>` (or the *Container image*
-  box in the UI) overrides the default `target-agent:latest`, so a Python
-  repo and a Node repo can use different toolchains. The `Dockerfile` at the
-  root of this repo is only the default.
+  box in the UI) overrides the runner's default, so a Python repo and a Node
+  repo can use different toolchains. The Dockerfiles at the root of this repo
+  are only the defaults.
 - **Mounts are the blast radius.** They're derived from the hook the hub
   wrote, never from a webhook payload. Every extra mount is a hole you chose
   — and the docker socket must never be one of them.

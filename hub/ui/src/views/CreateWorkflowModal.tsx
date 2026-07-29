@@ -60,6 +60,17 @@ const RUNNER_OPTIONS: { value: Runner; label: string; description: string }[] = 
 	},
 ];
 
+/**
+ * Mirrors the server's `DEFAULT_SANDBOX_IMAGES` (hub/awb.ts) so the image box
+ * shows the image the workflow will actually get. It's per runner because the
+ * runner's binary is the container command — the claude image has no
+ * `free-code` in it.
+ */
+const DEFAULT_IMAGES: Record<Runner, string> = {
+	claude: "target-agent:latest",
+	"free-code": "target-agent-freecode:latest",
+};
+
 export function CreateWorkflowModal({
 	open,
 	templates,
@@ -232,7 +243,7 @@ export function CreateWorkflowModal({
 				{sandbox === "docker" && (
 					<Field
 						label="Container image"
-						hint="Optional — leave empty for the image built from this repo's Dockerfile. The image is per workflow, so a Python repo and a Node repo can use different ones."
+						hint={`Optional — leave empty for ${DEFAULT_IMAGES[runner]}, built from this repo's ${runner === "free-code" ? "Dockerfile.free-code" : "Dockerfile"}. It must ship the ${runner} binary, or steps die with exit 127. The image is per workflow, so a Python repo and a Node repo can use different ones.`}
 					>
 						{(props) => (
 							<input
@@ -240,7 +251,7 @@ export function CreateWorkflowModal({
 								type="text"
 								className="input"
 								value={image}
-								placeholder="target-agent:latest"
+								placeholder={DEFAULT_IMAGES[runner]}
 								onChange={(ev) => setImage(ev.target.value)}
 							/>
 						)}
