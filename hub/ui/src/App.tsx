@@ -9,6 +9,10 @@ import type {
 	OverridableStepStatus,
 	OverridableWorkflowStatus,
 	SessionInfo,
+	ShortcutAction,
+	ShortcutBinding,
+	ShortcutSettings,
+	ShortcutSettingsInput,
 	StagedStepImages,
 	Step,
 	StepConfigInput,
@@ -66,6 +70,7 @@ export function App(): React.JSX.Element {
 	const [workflows, setWorkflows] = useState<Workflow[]>([]);
 	const [templates, setTemplates] = useState<Template[]>([]);
 	const [settings, setSettings] = useState<NotificationSettings | null>(null);
+	const [shortcutSettings, setShortcutSettings] = useState<ShortcutSettings | null>(null);
 	const [selectedId, setSelectedId] = useState<string | null>(readHashSelection);
 	const [steps, setSteps] = useState<Step[]>([]);
 	const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
@@ -119,6 +124,10 @@ export function App(): React.JSX.Element {
 		setSettings(await api.getNotificationSettings());
 	}, []);
 
+	const refreshShortcutSettings = useCallback(async (): Promise<void> => {
+		setShortcutSettings(await api.getShortcutSettings());
+	}, []);
+
 	const refreshDetail = useCallback(async (id: string): Promise<void> => {
 		const [detail, session] = await Promise.all([
 			api.getWorkflow(id),
@@ -136,14 +145,14 @@ export function App(): React.JSX.Element {
 	useEffect(() => {
 		void (async () => {
 			try {
-				await Promise.all([refreshWorkflows(), refreshTemplates(), refreshSettings()]);
+				await Promise.all([refreshWorkflows(), refreshTemplates(), refreshSettings(), refreshShortcutSettings()]);
 			} catch (err) {
 				reportError(err, "Could not load data");
 			} finally {
 				setLoaded(true);
 			}
 		})();
-	}, [refreshWorkflows, refreshTemplates, refreshSettings, reportError]);
+	}, [refreshWorkflows, refreshTemplates, refreshSettings, refreshShortcutSettings, reportError]);
 
 	// Detail for the selected workflow, and clearing it when nothing is selected.
 	useEffect(() => {
@@ -185,10 +194,22 @@ export function App(): React.JSX.Element {
 
 	// Keyboard shortcuts: Alt+W focuses the first workflow, Alt+R starts
 	// dictation into the focused field, Alt+N opens the create-workflow modal.
+	// The key per action is configurable in Settings; until the bindings load,
+	// the hook gets the defaults (W/R/N) so the shortcuts work from first paint.
+	const shortcutBindings = useMemo<Record<ShortcutAction, ShortcutBinding>>(() => {
+		const stored = shortcutSettings?.bindings;
+		return {
+			focusWorkflow: { key: stored?.focusWorkflow.key ?? "w" },
+			toggleDictation: { key: stored?.toggleDictation.key ?? "r" },
+			createWorkflow: { key: stored?.createWorkflow.key ?? "n" },
+		};
+	}, [shortcutSettings]);
+
 	useKeyboardShortcuts({
 		view,
 		dictation,
 		onCreateWorkflow: () => setCreateOpen(true),
+		bindings: shortcutBindings,
 	});
 
 	/** Runs a mutating action, then refreshes and reports failures uniformly. */
@@ -570,6 +591,17 @@ export function App(): React.JSX.Element {
 		});
 	};
 
+	// Same shape as the notification handler: the PUT response is the stored
+	// values, folded straight back into state so the Settings form re-seeds from
+	// what the hub actually kept. Returns whether the save landed so the form's
+	// Save button can distinguish a real success from a rejection.
+	const handleSaveShortcutSettings = async (input: ShortcutSettingsInput): Promise<boolean> => {
+		return await act("Could not save the shortcuts", async () => {
+			setShortcutSettings(await api.saveShortcutSettings(input));
+			toast.success("Shortcuts saved.");
+		});
+	};
+
 	return (
 		<div className={styles.app}>
 			<Header view={view} onViewChange={setView} hasToken={hasToken} onSaveToken={saveToken} />
@@ -653,14 +685,16 @@ export function App(): React.JSX.Element {
 						onUpdate={handleUpdateTemplate}
 						onDelete={(id) => void handleDeleteTemplate(id)}
 					/>
-				) : settings ? (
-					// Keyed on the save stamp: a successful save re-seeds the form's
-					// local fields from what the hub actually stored.
+				) : settings && shortcutSettings ? (
+					// Keyed on both save stamps: a successful save in either section re-seeds
+					// that form's local fields from what the hub actually stored.
 					<SettingsView
-						key={settings.updatedAt ?? "unsaved"}
+						key={`${settings.updatedAt ?? "unsaved"}|${shortcutSettings.updatedAt ?? "unsaved"}`}
 						settings={settings}
+						shortcutSettings={shortcutSettings}
 						busy={busy}
 						onSave={handleSaveNotificationSettings}
+						onSaveShortcuts={handleSaveShortcutSettings}
 					/>
 				) : (
 					<section className={styles.placeholder}>
@@ -668,8 +702,8 @@ export function App(): React.JSX.Element {
 							title={loaded ? "Settings unavailable" : "Loading settings…"}
 							description={
 								loaded
-									? "The hub didn't return the notification preferences. Check that it's running and reload."
-									: "Reading the notification preferences from the hub."
+									? "The hub didn't return the preferences. Check that it's running and reload."
+									: "Reading the preferences from the hub."
 							}
 						/>
 					</section>
