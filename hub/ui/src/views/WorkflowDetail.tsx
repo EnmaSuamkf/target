@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
 	AttachmentField,
 	OverridableStepStatus,
@@ -115,11 +115,22 @@ export function WorkflowDetail({
 	const [selection, setSelection] = useState<Set<string>>(new Set());
 	const [opening, setOpening] = useState(false);
 
+	const sectionRef = useRef<HTMLElement>(null);
+
 	useEffect(() => {
 		setSelection(new Set(steps.filter((s) => s.selected).map((s) => s.id)));
 		// Re-seed only when the workflow changes, not on every poll — otherwise
 		// the operator's checkbox changes would be reverted every 2 seconds.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [workflow.id]);
+
+	// Move focus to the detail pane when a workflow is opened, so keyboard
+	// navigation and screen readers land on the workflow's controls instead of
+	// staying on the list item that was clicked. Runs only when the workflow
+	// changes — the id is stable across the 2s poll, so this never steals focus
+	// back while the operator is working in the open workflow.
+	useEffect(() => {
+		sectionRef.current?.focus();
 	}, [workflow.id]);
 
 	// Drop ids of steps that no longer exist so a stale selection can't be sent.
@@ -168,7 +179,7 @@ export function WorkflowDetail({
 	};
 
 	return (
-		<section className={styles.detail} aria-label={`Workflow ${workflow.name}`}>
+		<section ref={sectionRef} className={styles.detail} tabIndex={-1} data-workflow-detail aria-label={`Workflow ${workflow.name}`}>
 			<header className={styles.header}>
 				{onBack && (
 					<button type="button" className={styles.back} onClick={onBack}>

@@ -42,10 +42,16 @@
 	min-height: 0;
 }
 
-/* Both panes scroll internally so the run controls and the workflow list stay
-   put while the step list moves. */
+/* The list pane is capped to the viewport and scrolls internally, so it stays
+   put while the detail grows. The detail pane is left uncapped on purpose: its
+   context/steps/session section grows with its content and the page scrolls
+   instead of an inner region (see WorkflowDetail.module.css `.body`). */
 .workflowLayout > * {
 	max-height: calc(100vh - var(--header-height) - var(--space-12));
+}
+
+.workflowLayout > :global([data-workflow-detail]) {
+	max-height: none;
 }
 
 .placeholder {

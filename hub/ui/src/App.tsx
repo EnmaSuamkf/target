@@ -24,6 +24,7 @@ import { VoiceDock } from "./components/VoiceDock.tsx";
 import { useAdminToken } from "./hooks/useAdminToken.ts";
 import { useDictation } from "./hooks/useDictation.ts";
 import { useIsMobile } from "./hooks/useIsMobile.ts";
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts.ts";
 import { usePolling } from "./hooks/usePolling.ts";
 import { CreateWorkflowModal } from "./views/CreateWorkflowModal.tsx";
 import { SettingsView } from "./views/SettingsView.tsx";
@@ -181,6 +182,14 @@ export function App(): React.JSX.Element {
 		if (id) await refreshDetail(id);
 		// Templates change only through this UI, so they don't need the 2s poll.
 	}, POLL_INTERVAL_MS);
+
+	// Keyboard shortcuts: Alt+W focuses the first workflow, Alt+R starts
+	// dictation into the focused field, Alt+N opens the create-workflow modal.
+	useKeyboardShortcuts({
+		view,
+		dictation,
+		onCreateWorkflow: () => setCreateOpen(true),
+	});
 
 	/** Runs a mutating action, then refreshes and reports failures uniformly. */
 	const act = useCallback(
