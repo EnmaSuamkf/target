@@ -7,6 +7,10 @@
 	border-radius: var(--radius-md);
 	box-shadow: var(--shadow-xs);
 	overflow: hidden;
+	/* Leave room for the sticky app bar when focus scrolls this pane into view
+	   on opening a workflow, so the title (and the back button on a phone) isn't
+	   hidden underneath it. */
+	scroll-margin-top: calc(var(--header-height) + var(--space-4));
 }
 
 /* --- header --- */
@@ -117,15 +121,16 @@
 
 /* A single column: conversation context, then the steps, then the session.
    The panels used to sit in a 20rem sidebar, which squeezed the context
-   textarea and the session facts into a column too narrow to read them in. */
+   textarea and the session facts into a column too narrow to read them in.
+
+   This section grows with its content — no fixed height, no inner scroll. The
+   page scrolls instead, so a long step list or a tall context stays one
+   continuous read rather than a clipped box with its own scrollbar. */
 .body {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr);
 	gap: var(--space-5);
 	padding: var(--space-5);
-	overflow-y: auto;
-	flex: 1;
-	min-height: 0;
 	align-content: start;
 }
 
@@ -264,13 +269,6 @@
 	.header,
 	.body {
 		padding: var(--space-4);
-	}
-
-	/* The pane is the page here, so it stops being an inner scroller: one
-	   scrollbar per screen, and the run controls scroll away with the rest
-	   instead of being pinned above a second scroll region. */
-	.body {
-		overflow: visible;
 	}
 
 	.title {
