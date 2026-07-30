@@ -42,6 +42,16 @@ import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	AttachmentError,
+	getAttachment,
+	listFieldAttachments,
+	listStepAttachments,
+	listWorkflowAttachments,
+	MAX_ATTACHMENT_BYTES,
+	removeAttachment,
+	saveAttachment,
+} from "./attachments.ts";
+import {
 	availableRunners,
 	harnessResumeCommand,
 	hookRuntime,
@@ -70,6 +80,9 @@ import {
 	saveNotificationSettings,
 	stepProgress,
 	updateTemplate,
+	type Attachment,
+	type AttachmentField,
+	ATTACHMENT_FIELDS,
 	type OverridableStepStatus,
 	type OverridableWorkflowStatus,
 	type Step,
@@ -109,6 +122,15 @@ import { getStep } from "./db.ts";
  */
 const UI_DIR = path.join(import.meta.dirname, "ui", "dist");
 const UI_FILE = path.join(UI_DIR, "index.html");
+
+/**
+ * Body limit for the attachment upload route. The image arrives base64-encoded
+ * inside JSON, which inflates it by 4/3, so this is the real per-file ceiling
+ * (`MAX_ATTACHMENT_BYTES`) plus that overhead plus room for the surrounding
+ * fields. `attachments.ts` still enforces the true limit on the DECODED bytes —
+ * this only stops the server buffering an absurd request before it can.
+ */
+const MAX_ATTACHMENT_BODY_BYTES = Math.ceil((MAX_ATTACHMENT_BYTES * 4) / 3) + 64 * 1024;
 
 const CONTENT_TYPES: Record<string, string> = {
 	".html": "text/html; charset=utf-8",
@@ -187,6 +209,27 @@ function isAdmin(cfg: HubConfig, headers: http.IncomingHttpHeaders): boolean {
 	return provided.length > 0 && timingSafeEqualStr(provided, cfg.adminToken);
 }
 
+/**
+ * How an attachment reaches the browser. `path` is the absolute file on this
+ * machine — the same string composed into the agent's prompt, shown in the UI so
+ * an operator can see exactly what the agent was given — and `url` is where the
+ * thumbnail is fetched from.
+ */
+function publicAttachment(attachment: Attachment): Record<string, unknown> {
+	return {
+		id: attachment.id,
+		workflowId: attachment.workflowId,
+		stepId: attachment.stepId,
+		field: attachment.field,
+		filename: attachment.filename,
+		mime: attachment.mime,
+		size: attachment.size,
+		path: attachment.path,
+		url: `/api/attachments/${attachment.id}/content`,
+		createdAt: attachment.createdAt,
+	};
+}
+
 function publicWorkflow(workflow: Workflow): Record<string, unknown> {
 	const runtime = hookRuntime(workflow.hookUrl);
 	return {
@@ -206,6 +249,9 @@ function publicWorkflow(workflow: Workflow): Record<string, unknown> {
 		progress: stepProgress(workflow.id),
 		conversationContext: workflow.conversationContext,
 		contextInjected: workflow.contextInjected,
+		// Images pinned to the conversation-context field (field always "context";
+		// a step's own attachments ride on the step, see publicStep).
+		attachments: listFieldAttachments(workflow.id, null, "context").map(publicAttachment),
 		// Whether this status was forced by a human rather than derived from the
 		// steps — the UI marks it, and it's why the badge doesn't move on the next
 		// poll (see `reconcileStatus`).
@@ -236,6 +282,9 @@ function publicStep(step: Step, cfg: HubConfig): Record<string, unknown> {
 		// inline on the shared session.
 		useSubagent: step.useSubagent,
 		acceptanceCriteria: step.acceptanceCriteria,
+		// Images pinned to this step's two text inputs, in one list discriminated by
+		// `field` ("description" | "acceptance") — the UI filters it per textarea.
+		attachments: listStepAttachments(step.id).map(publicAttachment),
 		maxRetries: step.maxRetries,
 		retryIntervalSeconds: step.retryIntervalSeconds,
 		retryCount: step.retryCount,
@@ -454,6 +503,55 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			log(`step ${step.id} ${ok ? "done" : `failed (${error})`}`);
 			sendJson(res, 200, { ok: true });
 		});
+		return;
+	}
+
+	// --- /api/attachments/:id/content (serve an attached image) ---
+	//
+	// Deliberately NOT admin-gated, like every other read route here (GET
+	// /api/workflows/:id is open too): the UI shows these as <img> thumbnails, and
+	// an <img> tag cannot carry an Authorization header, so gating this would mean
+	// no thumbnails at all. Only the bytes of a file the operator themselves
+	// uploaded are served, and only by opaque uuid — never an arbitrary path.
+	if (parts[1] === "attachments" && parts[2] && parts[3] === "content" && !parts[4] && req.method === "GET") {
+		const attachment = getAttachment(parts[2]);
+		if (!attachment) {
+			sendJson(res, 404, { error: "unknown_attachment" });
+			return;
+		}
+		let stat: fs.Stats;
+		try {
+			stat = fs.statSync(attachment.path);
+		} catch {
+			// Row without a file: the upload half-failed or someone cleaned
+			// ~/.target by hand. Say so rather than serving an empty 200.
+			sendJson(res, 410, { error: "attachment_file_missing" });
+			return;
+		}
+		res.writeHead(200, {
+			"content-type": attachment.mime,
+			"content-length": stat.size,
+			// Immutable: an attachment's bytes never change — a new image is a new id.
+			"cache-control": "private, max-age=31536000, immutable",
+			"content-disposition": `inline; filename="${attachment.filename.replace(/"/g, "")}"`,
+		});
+		fs.createReadStream(attachment.path).pipe(res);
+		return;
+	}
+
+	// --- /api/attachments/:id (remove an attached image) ---
+
+	if (parts[1] === "attachments" && parts[2] && !parts[3] && req.method === "DELETE") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		if (!removeAttachment(parts[2])) {
+			sendJson(res, 404, { error: "unknown_attachment" });
+			return;
+		}
+		log(`attachment ${parts[2]} deleted`);
+		sendJson(res, 200, { ok: true });
 		return;
 	}
 
@@ -840,6 +938,106 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
 			}
 		});
+		return;
+	}
+
+	// --- /api/workflows/:id/attachments ---
+	//
+	// Pins an image to one of the three text inputs of this workflow: its
+	// conversation context (`field: "context"`, no stepId), or a step's task
+	// description / acceptance criteria (`field: "description" | "acceptance"`
+	// plus that step's `stepId`).
+	//
+	// Base64 in a JSON body rather than multipart: every other route here speaks
+	// JSON through `readJsonBody`, and multipart would mean a parser this server
+	// doesn't have. The cost is the 4/3 inflation, which is why this route gets its
+	// own body limit instead of `cfg.maxInputBytes` (64 KiB — smaller than any real
+	// screenshot). `data` accepts a bare base64 string or a full
+	// `data:image/png;base64,...` URL, since that's what the browser's FileReader
+	// hands back.
+	if (workflowId && parts[3] === "attachments" && !parts[4] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		const workflow = getWorkflow(workflowId);
+		if (!workflow) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		readJsonBody(req, res, MAX_ATTACHMENT_BODY_BYTES, (body) => {
+			const field = String(body.field ?? "");
+			if (!ATTACHMENT_FIELDS.includes(field as AttachmentField)) {
+				sendJson(res, 400, { error: `invalid field (allowed: ${ATTACHMENT_FIELDS.join(", ")})` });
+				return;
+			}
+			const stepId = typeof body.stepId === "string" && body.stepId !== "" ? body.stepId : null;
+			if (stepId !== null) {
+				// The step must exist AND belong to this workflow — otherwise an
+				// attachment could be hung off another workflow's step, where no prompt
+				// would ever read it.
+				const step = getStep(stepId);
+				if (!step || step.workflowId !== workflowId) {
+					sendJson(res, 404, { error: "unknown_step" });
+					return;
+				}
+			}
+			// Same freeze as editing the context text (see setConversationContext):
+			// once the preamble has been injected the agent is already running under
+			// it, so a newly attached image would never reach it. Refusing is honest;
+			// storing it would look like it worked.
+			if (field === "context" && workflow.contextInjected) {
+				sendJson(res, 400, { error: "context already injected" });
+				return;
+			}
+			const raw = typeof body.data === "string" ? body.data : "";
+			// Tolerate a full data URL, and take the mime from it when the caller
+			// didn't send one explicitly.
+			const dataUrl = /^data:([^;,]+);base64,(.*)$/s.exec(raw.trim());
+			const base64 = (dataUrl ? dataUrl[2] : raw).replace(/\s+/g, "");
+			const mime = typeof body.mime === "string" && body.mime !== "" ? body.mime : (dataUrl?.[1] ?? "");
+			if (base64 === "") {
+				sendJson(res, 400, { error: "data is required (base64 image bytes)" });
+				return;
+			}
+			let data: Buffer;
+			try {
+				data = Buffer.from(base64, "base64");
+			} catch {
+				sendJson(res, 400, { error: "data is not valid base64" });
+				return;
+			}
+			try {
+				const attachment = saveAttachment({
+					workflowId,
+					stepId,
+					field: field as AttachmentField,
+					filename: typeof body.filename === "string" ? body.filename : "image",
+					mime,
+					data,
+				});
+				log(
+					`attachment ${attachment.id} (${attachment.mime}, ${attachment.size}B) pinned to ${field}${
+						stepId ? ` of step ${stepId}` : ""
+					} of workflow ${workflowId} -> ${attachment.path}`,
+				);
+				sendJson(res, 200, { attachment: publicAttachment(attachment) });
+			} catch (err) {
+				sendJson(res, err instanceof AttachmentError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		});
+		return;
+	}
+
+	// --- /api/workflows/:id/attachments (list, for a client that wants them all at once) ---
+
+	if (workflowId && parts[3] === "attachments" && !parts[4] && req.method === "GET") {
+		const workflow = getWorkflow(workflowId);
+		if (!workflow) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		sendJson(res, 200, { attachments: listWorkflowAttachments(workflowId).map(publicAttachment) });
 		return;
 	}
 

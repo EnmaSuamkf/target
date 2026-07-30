@@ -13,6 +13,8 @@
  *   injected", "no_session_yet") instead of a bare status code.
  */
 import type {
+	Attachment,
+	AttachmentField,
 	CreateWorkflowInput,
 	DirListing,
 	NotificationSettings,
@@ -295,6 +297,61 @@ export function addStepsFromTemplate(
 		`/api/workflows/${workflowId}/steps/from-template`,
 		{ method: "POST", admin: true, body: json({ templateId }) },
 	);
+}
+
+// --- attachments (images pinned to a text input) ---
+
+/**
+ * Reads a `File` as the bare base64 the upload route wants.
+ *
+ * FileReader's `readAsDataURL` is the only way to get base64 out of a File
+ * without hand-rolling a Uint8Array→base64 loop, so the `data:...;base64,`
+ * prefix is stripped here rather than shipped (the server tolerates either, but
+ * sending the bare payload keeps the request smaller and the intent obvious).
+ */
+function fileToBase64(file: File): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const reader = new FileReader();
+		reader.onerror = () => reject(new ApiError(0, `could not read ${file.name}`));
+		reader.onload = () => {
+			const result = String(reader.result ?? "");
+			const comma = result.indexOf(",");
+			resolve(comma === -1 ? result : result.slice(comma + 1));
+		};
+		reader.readAsDataURL(file);
+	});
+}
+
+/**
+ * Pins one image to a text input of a workflow.
+ *
+ * `stepId` must be omitted for `field: "context"` and given for the two
+ * per-step fields — the server rejects the mismatch, since an attachment on the
+ * wrong owner is one no prompt would ever read.
+ */
+export async function uploadAttachment(
+	workflowId: string,
+	input: { field: AttachmentField; stepId?: string | null; file: File },
+): Promise<Attachment> {
+	const data = await fileToBase64(input.file);
+	const payload = await request<{ attachment: Attachment }>(`/api/workflows/${workflowId}/attachments`, {
+		method: "POST",
+		admin: true,
+		body: json({
+			field: input.field,
+			...(input.stepId ? { stepId: input.stepId } : {}),
+			filename: input.file.name || "image",
+			// A pasted screenshot's File has the right type but an empty name, so the
+			// mime has to come from the File rather than be guessed from the name.
+			mime: input.file.type,
+			data,
+		}),
+	});
+	return payload.attachment;
+}
+
+export function deleteAttachment(id: string): Promise<{ ok: true }> {
+	return request<{ ok: true }>(`/api/attachments/${id}`, { method: "DELETE", admin: true });
 }
 
 // --- filesystem (directory picker) ---

@@ -23,8 +23,9 @@
  * delegated by imitation. Exactly one of the two instructions is always
  * appended, so a step never has to be guessed about.
  */
+import { attachmentSection, listFieldAttachments } from "./attachments.ts";
 import type { HubConfig } from "./config.ts";
-import type { Step, Workflow } from "./db.ts";
+import type { Attachment, Step, Workflow } from "./db.ts";
 import { completeStep, markStepQueued } from "./db.ts";
 
 export type Logger = (message: string, type?: "info" | "warning" | "error") => void;
@@ -75,11 +76,23 @@ const TIMEOUT_NOTE =
  * from the start. Without this the criterion only surfaced in the judge phase —
  * the agent did the work never knowing what it would be graded against, so an
  * honest self-evaluation could only pass by luck.
+ *
+ * `images` are the files attached to the acceptance-criteria field; they're
+ * listed after the criterion so a criterion like "the panel must look like
+ * this" actually has the "this" attached to it. With no criterion text and no
+ * images this returns "" — an exec input with neither is byte-identical to what
+ * it was before attachments existed.
  */
-function criteriaNote(criteria: string | null | undefined): string {
+function criteriaNote(criteria: string | null | undefined, images: Attachment[] = []): string {
 	const trimmed = (criteria ?? "").trim();
-	if (!trimmed) return "";
-	return `\n\nThe result of this step MUST satisfy the following acceptance criterion, so aim explicitly to meet it: "${trimmed}".`;
+	const section = attachmentSection("attached to this step's acceptance criteria", images);
+	if (!trimmed) {
+		// Images pinned to the criteria field but no criterion written: still show
+		// them rather than silently dropping what the operator attached, and say
+		// what they are for so an unexplained image list isn't just noise.
+		return section ? `\n\nThe result of this step MUST satisfy the acceptance criteria given by the attached image(s).${section}` : "";
+	}
+	return `\n\nThe result of this step MUST satisfy the following acceptance criterion, so aim explicitly to meet it: "${trimmed}".${section}`;
 }
 
 /**
@@ -89,11 +102,20 @@ function criteriaNote(criteria: string | null | undefined): string {
  * once: later steps resume the session, which already carries it in history,
  * so `dispatchStep` only prepends it when starting fresh AND the workflow's
  * `context_injected` guard is still false. Returns "" when there's no context.
+ *
+ * `images` are the files attached to the conversation-context field. They ride
+ * the same once-only injection as the text: the preamble is what establishes the
+ * shared background, so that's the turn the agent should be told to look at
+ * them in. A context that is ONLY images (no text) still produces a preamble —
+ * attaching a spec screenshot and writing nothing is a legitimate way to use
+ * this, and returning "" there would throw the attachment away.
  */
-function contextPreamble(context: string | null | undefined): string {
+function contextPreamble(context: string | null | undefined, images: Attachment[] = []): string {
 	const trimmed = (context ?? "").trim();
-	if (!trimmed) return "";
-	return `Conversation context — this background applies to every step of this workflow:\n\n${trimmed}\n\n---\n\n`;
+	const section = attachmentSection("attached to this workflow's conversation context", images);
+	if (!trimmed && !section) return "";
+	const body = trimmed || "(No background text — the background for this workflow is in the attached image(s) below.)";
+	return `Conversation context — this background applies to every step of this workflow:\n\n${body}${section}\n\n---\n\n`;
 }
 
 /**
@@ -111,20 +133,69 @@ function contextPreamble(context: string | null | undefined): string {
  * step left nothing here but the subagent's summary, while an inline step's own
  * narration is still just narration, not the artifacts.
  */
-export function judgeInput(criteria: string, useSubagent = true): string {
+export function judgeInput(criteria: string, useSubagent = true, images: Attachment[] = []): string {
 	const distrust = useSubagent
 		? "do NOT trust your memory or the subagent's summary. The step's work was done by a subagent, so its real output may not be in this thread."
 		: "do NOT trust your memory or what you said while doing the step. What this thread holds is your narration, not the real output.";
+	// The images attached to the criteria are part of the criterion, so the judge
+	// needs them as much as the exec pass did — grading "matches this mockup"
+	// without the mockup in front of it is exactly the blind pass this prompt
+	// otherwise works hard to prevent.
+	const section = attachmentSection("attached to this step's acceptance criteria", images);
 	return [
 		"Evaluate whether the result of the previous step of this workflow meets the following acceptance criterion:",
 		"",
-		`"${criteria.trim()}"`,
+		`"${criteria.trim()}"${section}`,
 		"",
 		`Important: ${distrust} Verify the criterion by inspecting the actual artifacts with your tools — read the files, run the commands, check the real state — BEFORE deciding.`,
 		"",
 		'Once you have verified, end your reply with a JSON object on its own final line, and nothing after it, in exactly this shape: {"ok": true|false, "reason": "<brief explanation>"}',
 		'"ok" is true ONLY if you confirmed the result meets the criterion. If it does not meet it, or you could not verify it, set "ok": false and in "reason" explain concretely what is missing or what to fix. When in doubt, "ok": false.',
 	].join("\n");
+}
+
+/**
+ * Builds the exact string a dispatch would POST to the hook — the prompt the
+ * agent receives — without sending anything.
+ *
+ * Split out of `dispatchStep` for two reasons. It's the one place where all
+ * three attachment-bearing inputs (conversation context, task description,
+ * acceptance criteria) come together, so it's what has to be asserted on to know
+ * the images really reach the agent; and being side-effect free it doubles as a
+ * dry run — you can ask "what would this step say?" for a workflow you have no
+ * intention of running.
+ *
+ * `injectContext` is the caller's decision, not this function's: only
+ * `dispatchStep` knows whether this dispatch starts a fresh conversation and
+ * whether the workflow's once-only guard is still open.
+ */
+export function composeStepInput(
+	step: Step,
+	workflow: Workflow,
+	options: {
+		mode?: "exec" | "judge";
+		/** Prepend the conversation-context preamble (and its images). */
+		injectContext?: boolean;
+		retryReason?: string;
+		timedOut?: boolean;
+	} = {},
+): string {
+	const acceptanceImages = listFieldAttachments(workflow.id, step.id, "acceptance");
+	if ((options.mode ?? "exec") === "judge") {
+		return judgeInput(step.acceptanceCriteria ?? "", step.useSubagent, acceptanceImages);
+	}
+	const preamble = options.injectContext
+		? contextPreamble(workflow.conversationContext, listFieldAttachments(workflow.id, null, "context"))
+		: "";
+	// Straight after the description, so "do what this screenshot shows" reads as
+	// one instruction rather than a task and an unrelated file list.
+	const descriptionImages = attachmentSection(
+		"attached to this step's task description",
+		listFieldAttachments(workflow.id, step.id, "description"),
+	);
+	return `${preamble}${step.description}${descriptionImages}${criteriaNote(step.acceptanceCriteria, acceptanceImages)}${subagentInstruction(
+		step.useSubagent,
+	)}${options.retryReason ? retryNote(options.retryReason) : ""}${options.timedOut ? TIMEOUT_NOTE : ""}`;
 }
 
 /**
@@ -183,16 +254,12 @@ export async function dispatchStep(
 	// re-injecting would duplicate it. A failed first dispatch that produced no
 	// session leaves the guard false, so the next attempt re-injects cleanly.
 	const freshConversation = sessionToResume === null;
-	const preamble =
-		mode === "exec" && freshConversation && !workflow.contextInjected
-			? contextPreamble(workflow.conversationContext)
-			: "";
-	const input =
-		mode === "judge"
-			? judgeInput(step.acceptanceCriteria ?? "", step.useSubagent)
-			: `${preamble}${step.description}${criteriaNote(step.acceptanceCriteria)}${subagentInstruction(step.useSubagent)}${
-					options.retryReason ? retryNote(options.retryReason) : ""
-				}${options.timedOut ? TIMEOUT_NOTE : ""}`;
+	const input = composeStepInput(step, workflow, {
+		mode,
+		injectContext: mode === "exec" && freshConversation && !workflow.contextInjected,
+		retryReason: options.retryReason,
+		timedOut: options.timedOut,
+	});
 	try {
 		const res = await fetch(workflow.hookUrl, {
 			method: "POST",

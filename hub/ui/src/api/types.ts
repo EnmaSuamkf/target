@@ -70,6 +70,42 @@ export interface Progress {
 	failed: boolean;
 }
 
+/**
+ * Which of the three text inputs an image is pinned to: the workflow's
+ * conversation context, or a step's task description / acceptance criteria.
+ * Mirrors the hub's `AttachmentField`.
+ */
+export type AttachmentField = "context" | "description" | "acceptance";
+
+/** The image formats the hub accepts — used to filter the file picker and paste/drop. */
+export const ATTACHMENT_MIMES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+
+/** Per-file ceiling the hub enforces (5 MiB); checked client-side so the error is instant. */
+export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+
+/**
+ * An image attached to one of a workflow's text inputs, as `publicAttachment`
+ * serialises it.
+ */
+export interface Attachment {
+	id: string;
+	workflowId: string;
+	/** Null for a conversation-context attachment. */
+	stepId: string | null;
+	field: AttachmentField;
+	filename: string;
+	mime: string;
+	size: number;
+	/**
+	 * Absolute path of the file on the hub's machine — the very string composed
+	 * into the agent's prompt, shown in the UI so it's clear what the agent gets.
+	 */
+	path: string;
+	/** Where to fetch the bytes for a thumbnail (`/api/attachments/:id/content`). */
+	url: string;
+	createdAt: string;
+}
+
 export interface Workflow {
 	id: string;
 	name: string;
@@ -87,6 +123,8 @@ export interface Workflow {
 	progress: Progress;
 	conversationContext: string | null;
 	contextInjected: boolean;
+	/** Images pinned to the conversation context (every `field` is "context"). */
+	attachments: Attachment[];
 	/**
 	 * True when this status was forced by a human instead of derived from the
 	 * steps. It's also why the badge stays put: the hub stops re-deriving a
@@ -118,6 +156,8 @@ export interface Step {
 	/** On (the default): the step's work is delegated to a subagent. Off: it runs inline in the shared conversation. */
 	useSubagent: boolean;
 	acceptanceCriteria: string | null;
+	/** Images pinned to this step's two inputs; filter by `field` to split them. */
+	attachments: Attachment[];
 	maxRetries: number;
 	retryIntervalSeconds: number;
 	retryCount: number;
@@ -242,6 +282,18 @@ export interface CreateWorkflowInput {
 	templateId?: string;
 	/** Required confirmation when permissionMode is "bypassPermissions". */
 	acceptBypassRisk?: boolean;
+}
+
+/**
+ * Images picked in an add-step form, held until the step exists.
+ *
+ * A step's attachments hang off its id, and an add-step form has no step yet —
+ * so the files are staged here and uploaded straight after the create POST
+ * returns. Keyed by which of the step's two inputs they belong to.
+ */
+export interface StagedStepImages {
+	description: File[];
+	acceptance: File[];
 }
 
 /** The verification config shared by step create and step edit. */

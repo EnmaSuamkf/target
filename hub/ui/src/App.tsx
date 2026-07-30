@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "./api/client.ts";
 import { ApiError } from "./api/client.ts";
 import type {
+	AttachmentField,
 	CreateWorkflowInput,
 	NotificationSettings,
 	NotificationSettingsInput,
 	OverridableStepStatus,
 	OverridableWorkflowStatus,
 	SessionInfo,
+	StagedStepImages,
 	Step,
 	StepConfigInput,
 	Template,
@@ -302,11 +304,61 @@ export function App(): React.JSX.Element {
 		});
 	};
 
+	// --- image attachments ---
+	//
+	// Images pinned to one of the three text inputs (the workflow's conversation
+	// context, a step's task description, a step's acceptance criteria). They go
+	// through `act` + `refreshCurrent` like every other mutation, so the thumbnail
+	// strip is repainted from the server rather than from a guess — which matters
+	// here because the server is what assigns the absolute path the strip shows.
+
+	/** Uploads one field's staged files in order. Sequential on purpose: a failure names the file that failed. */
+	const uploadImages = async (
+		workflowId: string,
+		field: AttachmentField,
+		stepId: string | null,
+		files: File[],
+	): Promise<void> => {
+		for (const file of files) await api.uploadAttachment(workflowId, { field, stepId, file });
+	};
+
+	const handleAttachImages = async (
+		field: AttachmentField,
+		stepId: string | null,
+		files: File[],
+	): Promise<boolean> => {
+		if (!selectedId || files.length === 0) return false;
+		return await act(
+			"Could not attach the image",
+			async () => {
+				await uploadImages(selectedId, field, stepId, files);
+				toast.success(files.length === 1 ? "Image attached." : `${files.length} images attached.`);
+			},
+			refreshCurrent,
+		);
+	};
+
+	const handleRemoveAttachment = async (id: string): Promise<void> => {
+		await act("Could not remove the image", () => api.deleteAttachment(id), refreshCurrent);
+	};
+
 	// --- step actions ---
 
-	const handleAddStep = async (input: StepConfigInput): Promise<void> => {
+	const handleAddStep = async (input: StepConfigInput, staged?: StagedStepImages): Promise<void> => {
 		if (!selectedId) return;
-		await act("Could not add the step", () => api.addStep(selectedId, input), refreshCurrent);
+		await act(
+			"Could not add the step",
+			async () => {
+				// The step has to exist before its images can be pinned to it, so the
+				// staged files are uploaded with the id the create just returned.
+				const step = await api.addStep(selectedId, input);
+				if (staged) {
+					await uploadImages(selectedId, "description", step.id, staged.description);
+					await uploadImages(selectedId, "acceptance", step.id, staged.acceptance);
+				}
+			},
+			refreshCurrent,
+		);
 	};
 
 	const handleSaveStep = async (stepId: string, input: StepConfigInput): Promise<void> => {
@@ -375,12 +427,20 @@ export function App(): React.JSX.Element {
 
 	// Returns whether the step really landed, so the dialog stays open (holding
 	// what was typed) when the server refuses it.
-	const handleAddStepAfter = async (afterStepId: string, input: StepConfigInput): Promise<boolean> => {
+	const handleAddStepAfter = async (
+		afterStepId: string,
+		input: StepConfigInput,
+		staged?: StagedStepImages,
+	): Promise<boolean> => {
 		if (!selectedId) return false;
 		return await act(
 			"Could not add the step",
 			async () => {
-				await api.addStep(selectedId, input, afterStepId);
+				const step = await api.addStep(selectedId, input, afterStepId);
+				if (staged) {
+					await uploadImages(selectedId, "description", step.id, staged.description);
+					await uploadImages(selectedId, "acceptance", step.id, staged.acceptance);
+				}
 				toast.success("Step added — it runs next.");
 			},
 			refreshCurrent,
@@ -540,6 +600,8 @@ export function App(): React.JSX.Element {
 								onDelete={() => void handleDelete()}
 								onSetStatus={(status) => void handleSetWorkflowStatus(status)}
 								onSaveContext={handleSaveContext}
+								onAttachImages={handleAttachImages}
+								onRemoveAttachment={(id) => void handleRemoveAttachment(id)}
 								onOpenTerminal={handleOpenTerminal}
 								onAddStep={handleAddStep}
 								onSaveStep={handleSaveStep}
