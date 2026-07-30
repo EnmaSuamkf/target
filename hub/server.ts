@@ -34,6 +34,8 @@
  *   DELETE /api/templates/:id                            → remove a template (admin token)
  *   GET    /api/settings/notifications                     → notification preferences (master switch + per-channel config)
  *   PUT    /api/settings/notifications                     → replace the notification preferences (admin token)
+ *   GET    /api/settings/shortcuts                        → keyboard-shortcut bindings (key per action)
+ *   PUT    /api/settings/shortcuts                        → replace the shortcut bindings (admin token)
  *   GET    /                                           → ui/index.html
  */
 import * as crypto from "node:crypto";
@@ -67,6 +69,7 @@ import {
 	promoteQueuedToRunning,
 	deleteTemplate,
 	getNotificationSettings,
+	getShortcutSettings,
 	getWorkflow,
 	insertTemplate,
 	getTemplate,
@@ -75,9 +78,11 @@ import {
 	listTemplates,
 	listWorkflows,
 	normalizeNotificationChannels,
+	normalizeShortcutBindings,
 	OVERRIDABLE_STEP_STATUSES,
 	OVERRIDABLE_WORKFLOW_STATUSES,
 	saveNotificationSettings,
+	saveShortcutSettings,
 	stepProgress,
 	updateTemplate,
 	type Attachment,
@@ -85,6 +90,7 @@ import {
 	ATTACHMENT_FIELDS,
 	type OverridableStepStatus,
 	type OverridableWorkflowStatus,
+	type ShortcutAction,
 	type Step,
 	type Template,
 	type Workflow,
@@ -683,6 +689,58 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				}
 				const settings = saveNotificationSettings({ enabled, channels });
 				log(`notification settings updated (notifications ${enabled ? "enabled" : "disabled"})`);
+				sendJson(res, 200, { settings });
+			});
+			return;
+		}
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
+	// --- /api/settings/shortcuts ---
+	//
+	// The keyboard-shortcut bindings behind the UI's Settings view: one key per
+	// action (focus the first workflow, toggle dictation, open the create-workflow
+	// modal). The modifier is still Alt or Shift — only the letter is stored.
+	// Reading is open, like the notification preferences; the PUT replaces the
+	// whole binding set and is admin-gated like every other mutating route.
+	//
+	// Two actions on the same key is rejected rather than stored: whichever fired
+	// would be ambiguous, and the Settings form shows the clash inline first, but
+	// the route guards it too so a hand-rolled PUT can't land an ambiguous set.
+
+	if (parts[1] === "settings" && parts[2] === "shortcuts" && !parts[3]) {
+		if (req.method === "GET") {
+			sendJson(res, 200, { settings: getShortcutSettings() });
+			return;
+		}
+		if (req.method === "PUT" || req.method === "PATCH") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				// Omitting `bindings` keeps whatever is stored, so a client that only
+				// flips one key can't silently wipe the other two.
+				const bindings =
+					"bindings" in body
+						? normalizeShortcutBindings(body.bindings)
+						: getShortcutSettings().bindings;
+				const keys = new Set<string>();
+				for (const action of ["focusWorkflow", "toggleDictation", "createWorkflow"] as ShortcutAction[]) {
+					const key = bindings[action].key;
+					if (keys.has(key)) {
+						sendJson(res, 400, {
+							error: `two shortcuts share the key "${key}" — each action needs its own key`,
+						});
+						return;
+					}
+					keys.add(key);
+				}
+				const settings = saveShortcutSettings({ bindings });
+				log(`shortcut settings updated (${Object.entries(settings.bindings)
+					.map(([action, binding]) => `${action}=${binding.key}`)
+					.join(", ")})`);
 				sendJson(res, 200, { settings });
 			});
 			return;

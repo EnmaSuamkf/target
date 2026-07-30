@@ -23,6 +23,8 @@ import type {
 	OverridableWorkflowStatus,
 	RunnerAvailability,
 	SessionInfo,
+	ShortcutSettings,
+	ShortcutSettingsInput,
 	Step,
 	StepConfigInput,
 	Template,
@@ -416,6 +418,25 @@ export async function getNotificationSettings(): Promise<NotificationSettings> {
  */
 export async function saveNotificationSettings(input: NotificationSettingsInput): Promise<NotificationSettings> {
 	const data = await request<{ settings: NotificationSettings }>("/api/settings/notifications", {
+		method: "PUT",
+		admin: true,
+		body: json(input),
+	});
+	return data.settings;
+}
+
+/** Keyboard-shortcut bindings: one key per action. */
+export async function getShortcutSettings(): Promise<ShortcutSettings> {
+	const data = await request<{ settings: ShortcutSettings }>("/api/settings/shortcuts");
+	return data.settings;
+}
+
+/**
+ * Replaces the stored bindings. The server refuses a set where two actions
+ * share a key (400), so the Settings form checks for that clash inline first.
+ */
+export async function saveShortcutSettings(input: ShortcutSettingsInput): Promise<ShortcutSettings> {
+	const data = await request<{ settings: ShortcutSettings }>("/api/settings/shortcuts", {
 		method: "PUT",
 		admin: true,
 		body: json(input),

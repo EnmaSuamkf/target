@@ -1325,10 +1325,14 @@ export function deleteTemplate(id: string): boolean {
 // Hub-wide preferences, stored as one JSON blob per key in `settings` (same
 // "the whole shape is one column" approach as a template's step list — these
 // are read and written whole, never queried by field). Only the notification
-// preferences live here so far; a future setting adds a key, not a table.
+// preferences and the keyboard-shortcut bindings live here so far; a future
+// setting adds a key, not a table.
 
 /** The single `settings` row the notification preferences live in. */
 const NOTIFICATION_SETTINGS_KEY = "notifications";
+
+/** The single `settings` row the keyboard-shortcut bindings live in. */
+const SHORTCUT_SETTINGS_KEY = "shortcuts";
 
 /**
  * Per-channel delivery config, keyed by channel id.
@@ -1401,6 +1405,112 @@ export function saveNotificationSettings(input: { enabled: boolean; channels: No
 		.run(
 			NOTIFICATION_SETTINGS_KEY,
 			JSON.stringify({ enabled: settings.enabled, channels: settings.channels }),
+			settings.updatedAt,
+		);
+	return settings;
+}
+
+// --- Keyboard shortcut bindings -----------------------------------------
+//
+// The three hub shortcuts (focus the first workflow, toggle dictation, open
+// the create-workflow modal) are configurable from the Settings view: the
+// operator picks the letter each one fires on. The modifier is still Alt or
+// Shift (the hook honours either, never both — see useKeyboardShortcuts), so
+// only the key is stored, one per action. Stored the same way as the
+// notification preferences: one JSON blob in the `settings` table.
+
+/** The actions a shortcut can be bound to — the three the hub ships with. */
+export type ShortcutAction = "focusWorkflow" | "toggleDictation" | "createWorkflow";
+
+/** A single binding: which letter fires the action (lowercased on the way in). */
+export interface ShortcutBinding {
+	key: string;
+}
+
+export interface ShortcutSettings {
+	bindings: Record<ShortcutAction, ShortcutBinding>;
+	/** Null until the bindings have been saved at least once. */
+	updatedAt: string | null;
+}
+
+/** The defaults the hub shipped with before this was configurable: W, R, N. */
+export function defaultShortcutSettings(): ShortcutSettings {
+	return {
+		bindings: {
+			focusWorkflow: { key: "w" },
+			toggleDictation: { key: "r" },
+			createWorkflow: { key: "n" },
+		},
+		updatedAt: null,
+	};
+}
+
+const SHORTCUT_KEYS: readonly ShortcutAction[] = ["focusWorkflow", "toggleDictation", "createWorkflow"];
+
+/**
+ * Coerces a single binding a client sent: a single a–z letter, lowercased.
+ * Anything else (a number, punctuation, a multi-char string, the wrong type)
+ * falls back to that action's default key rather than throwing — the route
+ * decides whether a full binding set is valid (e.g. no two actions on the same
+ * key), storage just keeps the shape sane.
+ */
+function normalizeShortcutBinding(action: ShortcutAction, raw: unknown): ShortcutBinding {
+	if (typeof raw === "string" && /^[a-z]$/.test(raw)) return { key: raw };
+	if (typeof raw === "object" && raw !== null && typeof (raw as Record<string, unknown>).key === "string") {
+		const key = ((raw as Record<string, unknown>).key as string).trim().toLowerCase();
+		if (/^[a-z]$/.test(key)) return { key };
+	}
+	return { key: defaultShortcutSettings().bindings[action].key };
+}
+
+/**
+ * Coerces a whole binding set into shape, falling back per action as above.
+ * Absent actions keep their default key, so a client that only sends one
+ * binding can't silently blank the other two.
+ */
+export function normalizeShortcutBindings(bindings: unknown): Record<ShortcutAction, ShortcutBinding> {
+	const obj = (bindings ?? {}) as Record<string, unknown>;
+	const out = {} as Record<ShortcutAction, ShortcutBinding>;
+	for (const action of SHORTCUT_KEYS) {
+		out[action] = normalizeShortcutBinding(action, obj[action]);
+	}
+	return out;
+}
+
+export function getShortcutSettings(): ShortcutSettings {
+	const row = open().prepare("SELECT * FROM settings WHERE key = ?").get(SHORTCUT_SETTINGS_KEY) as
+		| Record<string, unknown>
+		| undefined;
+	if (!row) return defaultShortcutSettings();
+	try {
+		const parsed = JSON.parse(String(row.value)) as Record<string, unknown>;
+		return {
+			bindings: normalizeShortcutBindings(parsed.bindings),
+			updatedAt: row.updated_at == null ? null : String(row.updated_at),
+		};
+	} catch {
+		// Tolerate malformed/legacy data rather than break the settings page
+		// (same rationale as getNotificationSettings).
+		return defaultShortcutSettings();
+	}
+}
+
+/** Replaces the stored bindings wholesale and returns what was written. */
+export function saveShortcutSettings(input: {
+	bindings: Record<ShortcutAction, ShortcutBinding>;
+}): ShortcutSettings {
+	const settings: ShortcutSettings = {
+		bindings: normalizeShortcutBindings(input.bindings),
+		updatedAt: new Date().toISOString(),
+	};
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(
+			SHORTCUT_SETTINGS_KEY,
+			JSON.stringify({ bindings: settings.bindings }),
 			settings.updatedAt,
 		);
 	return settings;

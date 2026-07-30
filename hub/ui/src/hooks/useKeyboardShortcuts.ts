@@ -1,40 +1,47 @@
 import { useEffect, useRef } from "react";
 import type { View } from "../components/Header.tsx";
+import type { ShortcutAction, ShortcutBinding } from "../api/types.ts";
 import type { Dictation } from "./useDictation.ts";
 
 /**
- * Global keyboard shortcuts. Three combos — each usable with either Alt or
- * Shift — let an operator drive the hub without reaching for the mouse:
+ * Global keyboard shortcuts. Three actions — each bound to a configurable
+ * letter and usable with either Alt or Shift — let an operator drive the hub
+ * without reaching for the mouse:
  *
- * - **Alt+W** / **Shift+W** — focus the first workflow in the list, so keyboard
+ * - **focusWorkflow** — focus the first workflow in the list, so keyboard
  *   navigation starts at the top. When a search/filter has narrowed the list to
  *   nothing, it falls back to the search box so the shortcut still lands
- *   somewhere useful (clear the filter, try again).
- * - **Alt+R** / **Shift+R** — start dictating into whichever field last had
- *   focus, the same action as the VoiceDock's mic. It *starts* — it does not
- *   toggle, so pressing it again while already listening is a no-op rather than
- *   a stop.
- * - **Alt+N** / **Shift+N** — open the create-workflow modal, the same as the
- *   "New" button.
+ *   somewhere useful (clear the filter, try again). Default key: W.
+ * - **toggleDictation** — toggle dictation into whichever field last had focus.
+ *   Press the combo to start recording (the same start as the VoiceDock's mic),
+ *   press it again to stop — a plain toggle, not a hold. Default key: R.
+ * - **createWorkflow** — open the create-workflow modal, the same as the "New"
+ *   button. Default key: N.
  *
- * The handlers are read through a ref so the listener is attached once and
- * always sees the latest props — the same trick `usePolling` uses to spare
- * callers from memoising an inline callback that would otherwise restart the
- * effect on every render (and this app re-renders every 2s on the poll).
+ * Which letter fires which action is configured in the Settings view and
+ * persisted by the hub (see `ShortcutSettings` in api/types.ts). The bindings
+ * are read through a ref, so the listener is attached once and always sees the
+ * latest values — the same trick `usePolling` uses, and it matters here both
+ * because the app re-renders every 2s on the poll and because a saved change
+ * to the bindings takes effect on the next keydown without re-attaching the
+ * listener.
  *
  * Exactly one of Alt or Shift must be held (never both): Alt+Shift is left for
  * layout switching on some systems and Ctrl/Cmd is left for the OS and window
- * manager. `repeat`/IME-composing keydowns are ignored so holding a combo
- * doesn't toggle dictation on and off or reopen a modal. The list and create
- * shortcuts also skip while a modal dialog is open, so they don't fight the
- * dialog's own focus handling; dictation is left alone because a dialog's text
- * fields are exactly where you might want to dictate.
+ * manager. `repeat`/IME-composing keydowns are ignored, so holding a combo
+ * fires it once — for dictation that means a held key toggles a single time
+ * rather than streaming starts and stops. The list and create shortcuts also
+ * skip while a modal dialog is open, so they don't fight the dialog's own focus
+ * handling; dictation is left alone because a dialog's text fields are exactly
+ * where you might want to dictate.
  */
 
 export interface KeyboardShortcutHandlers {
 	view: View;
 	dictation: Dictation;
 	onCreateWorkflow: () => void;
+	/** Configured key per action; defaults to W/R/N when nothing is saved yet. */
+	bindings: Record<ShortcutAction, ShortcutBinding>;
 }
 
 const WORKFLOW_LIST_SELECTOR = "[data-workflow-list]";
@@ -46,9 +53,9 @@ function modalOpen(): boolean {
 	return document.querySelector('[role="dialog"][aria-modal="true"]') !== null;
 }
 
-export function useKeyboardShortcuts({ view, dictation, onCreateWorkflow }: KeyboardShortcutHandlers): void {
-	const handlersRef = useRef({ view, dictation, onCreateWorkflow });
-	handlersRef.current = { view, dictation, onCreateWorkflow };
+export function useKeyboardShortcuts({ view, dictation, onCreateWorkflow, bindings }: KeyboardShortcutHandlers): void {
+	const handlersRef = useRef({ view, dictation, onCreateWorkflow, bindings });
+	handlersRef.current = { view, dictation, onCreateWorkflow, bindings };
 
 	useEffect(() => {
 		const onKeyDown = (ev: KeyboardEvent): void => {
@@ -60,31 +67,45 @@ export function useKeyboardShortcuts({ view, dictation, onCreateWorkflow }: Keyb
 				return;
 			}
 
-			switch (ev.key.toLowerCase()) {
-				case "r": {
-					// Start dictation into the last-focused field. Leaves a running
-					// session alone — the shortcut starts, it doesn't toggle.
-					ev.preventDefault();
-					const { dictation: d } = handlersRef.current;
-					if (!d.supported || d.listening) return;
+			const key = ev.key.toLowerCase();
+			const { view: currentView, dictation: d, onCreateWorkflow: create, bindings: currentBindings } = handlersRef.current;
+
+			// Resolve the pressed key to an action via the configured bindings. Two
+			// actions can't share a key (the route rejects it), so the first match is
+			// the only match — but iterate rather than early-return so a malformed
+			// binding set still picks a deterministic action.
+			let action: ShortcutAction | null = null;
+			for (const candidate of ["focusWorkflow", "toggleDictation", "createWorkflow"] as ShortcutAction[]) {
+				if (currentBindings[candidate]?.key === key) {
+					action = candidate;
+					break;
+				}
+			}
+			if (!action) return;
+			ev.preventDefault();
+
+			switch (action) {
+				case "toggleDictation": {
+					// Toggle dictation: press to start, press again to stop — the same
+					// toggle as the mic button. The modifier guard above rejected
+					// auto-repeat, so holding the key fires it once rather than streaming.
+					if (!d.supported) return;
 					d.toggle();
 					return;
 				}
 
-				case "n": {
+				case "createWorkflow": {
 					// Open the create-workflow modal (same as the "New" button).
-					ev.preventDefault();
-					if (handlersRef.current.view !== "workflows" || modalOpen()) return;
-					handlersRef.current.onCreateWorkflow();
+					if (currentView !== "workflows" || modalOpen()) return;
+					create();
 					return;
 				}
 
-				case "w": {
+				case "focusWorkflow": {
 					// Focus the first workflow in the list; fall back to the search
 					// box when there are no cards to focus (e.g. a filter with no
 					// matches), so the shortcut still does something useful.
-					ev.preventDefault();
-					if (handlersRef.current.view !== "workflows" || modalOpen()) return;
+					if (currentView !== "workflows" || modalOpen()) return;
 					const list = document.querySelector(WORKFLOW_LIST_SELECTOR);
 					if (!list) return;
 					const first = list.querySelector<HTMLElement>(WORKFLOW_CARD_SELECTOR);
@@ -96,9 +117,6 @@ export function useKeyboardShortcuts({ view, dictation, onCreateWorkflow }: Keyb
 					list.querySelector<HTMLInputElement>(WORKFLOW_SEARCH_SELECTOR)?.focus();
 					return;
 				}
-
-				default:
-					return;
 			}
 		};
 

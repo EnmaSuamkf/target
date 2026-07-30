@@ -238,6 +238,25 @@ export interface NotificationSettingsInput {
 	channels: NotificationChannels;
 }
 
+/** The actions a hub shortcut can be bound to — the three the hub ships with. */
+export type ShortcutAction = "focusWorkflow" | "toggleDictation" | "createWorkflow";
+
+/** A single shortcut binding: the letter that fires the action (lowercased). */
+export interface ShortcutBinding {
+	key: string;
+}
+
+export interface ShortcutSettings {
+	bindings: Record<ShortcutAction, ShortcutBinding>;
+	/** Null until the bindings have been saved at least once. */
+	updatedAt: string | null;
+}
+
+/** Payload accepted by PUT /api/settings/shortcuts (a full replace). */
+export interface ShortcutSettingsInput {
+	bindings: Record<ShortcutAction, ShortcutBinding>;
+}
+
 /** Token usage for the workflow's session, read off the harness transcript. */
 export interface TokenUsage {
 	turns: number;
