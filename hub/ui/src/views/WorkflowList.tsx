@@ -93,6 +93,7 @@ export function WorkflowList({
 								value={query}
 								onChange={(ev) => setQuery(ev.target.value)}
 								aria-label="Search workflows by name or agent"
+								data-workflow-search
 							/>
 						</div>
 
@@ -123,7 +124,7 @@ export function WorkflowList({
 				)}
 			</div>
 
-			<div className={styles.list}>
+			<div className={styles.list} data-workflow-list>
 				{visible.length === 0 ? (
 					workflows.length === 0 ? (
 						<EmptyState
@@ -146,6 +147,7 @@ export function WorkflowList({
 							className={`${styles.card} ${workflow.id === selectedId ? styles.cardSelected : ""}`}
 							onClick={() => onSelect(workflow.id)}
 							aria-current={workflow.id === selectedId ? "true" : undefined}
+							data-workflow-card
 						>
 							<span className={styles.cardHead}>
 								<span className={styles.cardName}>{workflow.name}</span>
