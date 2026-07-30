@@ -701,7 +701,8 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	//
 	// The keyboard-shortcut bindings behind the UI's Settings view: one key per
 	// action (focus the first workflow, toggle dictation, open the create-workflow
-	// modal). The modifier is still Alt or Shift — only the letter is stored.
+	// modal, press a held step's Continue, press the workflow's Start). The
+	// modifier is still Alt or Shift — only the letter is stored.
 	// Reading is open, like the notification preferences; the PUT replaces the
 	// whole binding set and is admin-gated like every other mutating route.
 	//
@@ -721,13 +722,19 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			}
 			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
 				// Omitting `bindings` keeps whatever is stored, so a client that only
-				// flips one key can't silently wipe the other two.
+				// flips one key can't silently wipe the others.
 				const bindings =
 					"bindings" in body
 						? normalizeShortcutBindings(body.bindings)
 						: getShortcutSettings().bindings;
 				const keys = new Set<string>();
-				for (const action of ["focusWorkflow", "toggleDictation", "createWorkflow"] as ShortcutAction[]) {
+				for (const action of [
+					"focusWorkflow",
+					"toggleDictation",
+					"createWorkflow",
+					"continueStep",
+					"startWorkflow",
+				] as ShortcutAction[]) {
 					const key = bindings[action].key;
 					if (keys.has(key)) {
 						sendJson(res, 400, {

@@ -1,10 +1,12 @@
 import { useEffect, useRef } from "react";
 import type { View } from "../components/Header.tsx";
 import type { ShortcutAction, ShortcutBinding } from "../api/types.ts";
+import { isTypingTarget, pressContinueButton } from "../lib/continueShortcut.ts";
+import { pressStartButton } from "../lib/startShortcut.ts";
 import type { Dictation } from "./useDictation.ts";
 
 /**
- * Global keyboard shortcuts. Three actions — each bound to a configurable
+ * Global keyboard shortcuts. Five actions — each bound to a configurable
  * letter and usable with either Alt or Shift — let an operator drive the hub
  * without reaching for the mouse:
  *
@@ -17,6 +19,18 @@ import type { Dictation } from "./useDictation.ts";
  *   press it again to stop — a plain toggle, not a hold. Default key: R.
  * - **createWorkflow** — open the create-workflow modal, the same as the "New"
  *   button. Default key: N.
+ * - **continueStep** — press the Continue button of the step held at its
+ *   manual-review gate, by clicking the button itself (see
+ *   lib/continueShortcut.ts), so approving a hold is one keystroke instead of a
+ *   trip to the mouse. With no such button on screen — no step waiting, or a
+ *   Continue already in flight and therefore disabled — the combo does nothing
+ *   at all. Default key: C.
+ * - **startWorkflow** — press the open workflow's run button (Start, or Resume
+ *   / Start over when that's what the same button reads), again by clicking the
+ *   button itself (see lib/startShortcut.ts). The button's own `disabled` is the
+ *   only condition: no workflow open, nothing selected, a run already going, a
+ *   step held for review — in all of those the combo does nothing at all.
+ *   Default key: S.
  *
  * Which letter fires which action is configured in the Settings view and
  * persisted by the hub (see `ShortcutSettings` in api/types.ts). The bindings
@@ -30,17 +44,24 @@ import type { Dictation } from "./useDictation.ts";
  * layout switching on some systems and Ctrl/Cmd is left for the OS and window
  * manager. `repeat`/IME-composing keydowns are ignored, so holding a combo
  * fires it once — for dictation that means a held key toggles a single time
- * rather than streaming starts and stops. The list and create shortcuts also
- * skip while a modal dialog is open, so they don't fight the dialog's own focus
- * handling; dictation is left alone because a dialog's text fields are exactly
- * where you might want to dictate.
+ * rather than streaming starts and stops. Every shortcut except dictation also
+ * skips while a modal dialog is open, so they don't fight the dialog's own
+ * focus handling; dictation is left alone because a dialog's text fields are
+ * exactly where you might want to dictate.
+ *
+ * Continue and Start additionally ignore keystrokes aimed at a text field:
+ * Shift+C and Shift+S are how a capital C and S are typed, and approving
+ * someone's held step — or launching a run — because they wrote "Continue" or
+ * "Start" in a description would be the worst kind of surprise. The other three
+ * keep the older behaviour rather than being changed here — none of them
+ * commits anything.
  */
 
 export interface KeyboardShortcutHandlers {
 	view: View;
 	dictation: Dictation;
 	onCreateWorkflow: () => void;
-	/** Configured key per action; defaults to W/R/N when nothing is saved yet. */
+	/** Configured key per action; defaults to W/R/N/C/S when nothing is saved yet. */
 	bindings: Record<ShortcutAction, ShortcutBinding>;
 }
 
@@ -75,13 +96,28 @@ export function useKeyboardShortcuts({ view, dictation, onCreateWorkflow, bindin
 			// the only match — but iterate rather than early-return so a malformed
 			// binding set still picks a deterministic action.
 			let action: ShortcutAction | null = null;
-			for (const candidate of ["focusWorkflow", "toggleDictation", "createWorkflow"] as ShortcutAction[]) {
+			for (const candidate of [
+				"focusWorkflow",
+				"toggleDictation",
+				"createWorkflow",
+				"continueStep",
+				"startWorkflow",
+			] as ShortcutAction[]) {
 				if (currentBindings[candidate]?.key === key) {
 					action = candidate;
 					break;
 				}
 			}
 			if (!action) return;
+			// Checked before preventDefault so a capital C or S still types as one:
+			// the shortcut declines the keystroke rather than swallowing it. Only the
+			// two actions that commit something need it — the others are harmless.
+			if (
+				(action === "continueStep" || action === "startWorkflow") &&
+				isTypingTarget(ev.target as HTMLElement | null)
+			) {
+				return;
+			}
 			ev.preventDefault();
 
 			switch (action) {
@@ -98,6 +134,30 @@ export function useKeyboardShortcuts({ view, dictation, onCreateWorkflow, bindin
 					// Open the create-workflow modal (same as the "New" button).
 					if (currentView !== "workflows" || modalOpen()) return;
 					create();
+					return;
+				}
+
+				case "continueStep": {
+					// Click the held step's own Continue button, so the keystroke and
+					// the mouse take exactly the same path. Silently a no-op when there
+					// is no enabled one on screen — which is most of the time.
+					if (currentView !== "workflows" || modalOpen()) return;
+					pressContinueButton({
+						querySelectorAll: (selector) => document.querySelectorAll<HTMLButtonElement>(selector),
+					});
+					return;
+				}
+
+				case "startWorkflow": {
+					// Click the open workflow's own run button, so the keystroke and the
+					// mouse take exactly the same path — including which of
+					// start/resume/restart that button decided to call. Silently a no-op
+					// when there is no enabled one on screen: no workflow open, no steps
+					// selected, or nothing to start in this status.
+					if (currentView !== "workflows" || modalOpen()) return;
+					pressStartButton({
+						querySelectorAll: (selector) => document.querySelectorAll<HTMLButtonElement>(selector),
+					});
 					return;
 				}
 

@@ -231,12 +231,16 @@ export function StepItem({
 				    always there would just be 400s waiting to happen. */}
 				{waiting && (
 					<>
+						{/* data-continue-step is the stable hook the Alt/Shift+C shortcut
+						    clicks (CSS Module class names are hashed, so they can't be
+						    querySelector'd) — see lib/continueShortcut.ts. */}
 						<button
 							type="button"
 							className="btn btn--primary btn--sm"
 							onClick={() => onContinue(step.id)}
 							disabled={busy}
-							title="Approve this step's result: it's marked done and the workflow carries on with the next step."
+							title="Approve this step's result: it's marked done and the workflow carries on with the next step. Alt/Shift+C presses this button."
+							data-continue-step
 						>
 							Continue
 						</button>

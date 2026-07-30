@@ -232,11 +232,17 @@ export function WorkflowDetail({
 				</div>
 
 				<div className={styles.controls}>
+					{/* data-start-workflow is the stable hook the Alt/Shift+S shortcut
+					    clicks (CSS Module class names are hashed, so they can't be
+					    querySelector'd) — see lib/startShortcut.ts. It sits on the button
+					    whatever its label reads: it's the one run control, and `disabled`
+					    below is already the whole answer to "can this be started now?". */}
 					<button
 						type="button"
 						className="btn btn--primary"
 						onClick={() => onStart([...selection])}
 						disabled={!startAction || busy || selectedCount === 0}
+						data-start-workflow
 						title={
 							!startAction
 								? workflow.status === "waiting"
@@ -244,7 +250,7 @@ export function WorkflowDetail({
 									: "Already running."
 								: selectedCount === 0
 									? "Select at least one step to run."
-									: `${startLabel} the ${selectedCount} selected step${selectedCount === 1 ? "" : "s"}.`
+									: `${startLabel} the ${selectedCount} selected step${selectedCount === 1 ? "" : "s"}. Alt/Shift+S presses this button.`
 						}
 					>
 						{startLabel}

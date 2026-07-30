@@ -193,15 +193,19 @@ export function App(): React.JSX.Element {
 	}, POLL_INTERVAL_MS);
 
 	// Keyboard shortcuts: Alt+W focuses the first workflow, Alt+R starts
-	// dictation into the focused field, Alt+N opens the create-workflow modal.
-	// The key per action is configurable in Settings; until the bindings load,
-	// the hook gets the defaults (W/R/N) so the shortcuts work from first paint.
+	// dictation into the focused field, Alt+N opens the create-workflow modal,
+	// Alt+C presses the Continue button of a step held for review, Alt+S presses
+	// the open workflow's Start button. The key per action is configurable in
+	// Settings; until the bindings load, the hook gets the defaults (W/R/N/C/S)
+	// so the shortcuts work from first paint.
 	const shortcutBindings = useMemo<Record<ShortcutAction, ShortcutBinding>>(() => {
 		const stored = shortcutSettings?.bindings;
 		return {
-			focusWorkflow: { key: stored?.focusWorkflow.key ?? "w" },
-			toggleDictation: { key: stored?.toggleDictation.key ?? "r" },
-			createWorkflow: { key: stored?.createWorkflow.key ?? "n" },
+			focusWorkflow: { key: stored?.focusWorkflow?.key ?? "w" },
+			toggleDictation: { key: stored?.toggleDictation?.key ?? "r" },
+			createWorkflow: { key: stored?.createWorkflow?.key ?? "n" },
+			continueStep: { key: stored?.continueStep?.key ?? "c" },
+			startWorkflow: { key: stored?.startWorkflow?.key ?? "s" },
 		};
 	}, [shortcutSettings]);
 

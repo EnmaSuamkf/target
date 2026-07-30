@@ -8,7 +8,7 @@ import styles from "./SettingsView.module.css";
 /**
  * Configuration: hub-wide preferences, one section per topic. Notifications is
  * the master switch plus the channels it gates; Shortcuts (Atajos) is the key
- * each of the three hub shortcuts fires on.
+ * each of the five hub shortcuts fires on.
  *
  * Everything is edited locally and committed by a per-section Save (a single
  * PUT each), rather than saving on every keystroke: a half-typed username or a
@@ -21,9 +21,17 @@ const SHORTCUT_LABELS: Record<ShortcutAction, string> = {
 	focusWorkflow: "Focus the first workflow",
 	toggleDictation: "Toggle dictation",
 	createWorkflow: "Create a workflow",
+	continueStep: "Continue a step waiting for review",
+	startWorkflow: "Start the open workflow",
 };
 
-const SHORTCUT_ORDER: readonly ShortcutAction[] = ["focusWorkflow", "toggleDictation", "createWorkflow"];
+const SHORTCUT_ORDER: readonly ShortcutAction[] = [
+	"focusWorkflow",
+	"toggleDictation",
+	"createWorkflow",
+	"continueStep",
+	"startWorkflow",
+];
 
 export function SettingsView({
 	settings,
@@ -47,9 +55,11 @@ export function SettingsView({
 	// input. Seeded from the saved bindings, never re-seeded mid-edit (the
 	// parent keys this view on the save stamp, so a save remounts fresh).
 	const [keys, setKeys] = useState<Record<ShortcutAction, string>>({
-		focusWorkflow: shortcutSettings.bindings.focusWorkflow.key,
-		toggleDictation: shortcutSettings.bindings.toggleDictation.key,
-		createWorkflow: shortcutSettings.bindings.createWorkflow.key,
+		focusWorkflow: shortcutSettings.bindings.focusWorkflow?.key ?? "w",
+		toggleDictation: shortcutSettings.bindings.toggleDictation?.key ?? "r",
+		createWorkflow: shortcutSettings.bindings.createWorkflow?.key ?? "n",
+		continueStep: shortcutSettings.bindings.continueStep?.key ?? "c",
+		startWorkflow: shortcutSettings.bindings.startWorkflow?.key ?? "s",
 	});
 	const [shortcutError, setShortcutError] = useState<string | null>(null);
 	const [savingShortcuts, setSavingShortcuts] = useState(false);
@@ -84,6 +94,8 @@ export function SettingsView({
 			focusWorkflow: keys.focusWorkflow.trim().toLowerCase(),
 			toggleDictation: keys.toggleDictation.trim().toLowerCase(),
 			createWorkflow: keys.createWorkflow.trim().toLowerCase(),
+			continueStep: keys.continueStep.trim().toLowerCase(),
+			startWorkflow: keys.startWorkflow.trim().toLowerCase(),
 		};
 		// Each key must be a single a–z letter (the only thing the hook matches).
 		for (const action of SHORTCUT_ORDER) {
@@ -111,6 +123,8 @@ export function SettingsView({
 					focusWorkflow: { key: normalized.focusWorkflow },
 					toggleDictation: { key: normalized.toggleDictation },
 					createWorkflow: { key: normalized.createWorkflow },
+					continueStep: { key: normalized.continueStep },
+					startWorkflow: { key: normalized.startWorkflow },
 				},
 			});
 		} finally {
@@ -200,7 +214,7 @@ export function SettingsView({
 				</div>
 			</form>
 
-			{/* Atajos: the key each of the three hub shortcuts fires on. The
+			{/* Atajos: the key each of the five hub shortcuts fires on. The
 			    modifier is always Alt or Shift (the hook honours either), so only
 			    the letter is configurable — one field per action. A Save here is a
 			    separate PUT from notifications: they're independent resources with
