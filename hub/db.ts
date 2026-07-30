@@ -1412,15 +1412,22 @@ export function saveNotificationSettings(input: { enabled: boolean; channels: No
 
 // --- Keyboard shortcut bindings -----------------------------------------
 //
-// The three hub shortcuts (focus the first workflow, toggle dictation, open
-// the create-workflow modal) are configurable from the Settings view: the
-// operator picks the letter each one fires on. The modifier is still Alt or
-// Shift (the hook honours either, never both — see useKeyboardShortcuts), so
-// only the key is stored, one per action. Stored the same way as the
-// notification preferences: one JSON blob in the `settings` table.
+// The five hub shortcuts (focus the first workflow, toggle dictation, open the
+// create-workflow modal, press a held step's Continue button, press the open
+// workflow's Start button) are configurable from the Settings view: the
+// operator picks the letter each one fires on. The
+// modifier is still Alt or Shift (the hook honours either, never both — see
+// useKeyboardShortcuts), so only the key is stored, one per action. Stored the
+// same way as the notification preferences: one JSON blob in the `settings`
+// table.
 
-/** The actions a shortcut can be bound to — the three the hub ships with. */
-export type ShortcutAction = "focusWorkflow" | "toggleDictation" | "createWorkflow";
+/** The actions a shortcut can be bound to — the five the hub ships with. */
+export type ShortcutAction =
+	| "focusWorkflow"
+	| "toggleDictation"
+	| "createWorkflow"
+	| "continueStep"
+	| "startWorkflow";
 
 /** A single binding: which letter fires the action (lowercased on the way in). */
 export interface ShortcutBinding {
@@ -1433,19 +1440,30 @@ export interface ShortcutSettings {
 	updatedAt: string | null;
 }
 
-/** The defaults the hub shipped with before this was configurable: W, R, N. */
+/**
+ * The defaults the hub ships with: W, R, N — C for the manual-review Continue,
+ * and S for the workflow's Start button.
+ */
 export function defaultShortcutSettings(): ShortcutSettings {
 	return {
 		bindings: {
 			focusWorkflow: { key: "w" },
 			toggleDictation: { key: "r" },
 			createWorkflow: { key: "n" },
+			continueStep: { key: "c" },
+			startWorkflow: { key: "s" },
 		},
 		updatedAt: null,
 	};
 }
 
-const SHORTCUT_KEYS: readonly ShortcutAction[] = ["focusWorkflow", "toggleDictation", "createWorkflow"];
+const SHORTCUT_KEYS: readonly ShortcutAction[] = [
+	"focusWorkflow",
+	"toggleDictation",
+	"createWorkflow",
+	"continueStep",
+	"startWorkflow",
+];
 
 /**
  * Coerces a single binding a client sent: a single a–z letter, lowercased.
@@ -1466,7 +1484,9 @@ function normalizeShortcutBinding(action: ShortcutAction, raw: unknown): Shortcu
 /**
  * Coerces a whole binding set into shape, falling back per action as above.
  * Absent actions keep their default key, so a client that only sends one
- * binding can't silently blank the other two.
+ * binding can't silently blank the others — which is also what makes adding an
+ * action (continueStep, then startWorkflow) safe for a hub whose stored blob
+ * predates it: the new action reads back on its default key.
  */
 export function normalizeShortcutBindings(bindings: unknown): Record<ShortcutAction, ShortcutBinding> {
 	const obj = (bindings ?? {}) as Record<string, unknown>;

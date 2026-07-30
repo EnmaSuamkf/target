@@ -238,8 +238,13 @@ export interface NotificationSettingsInput {
 	channels: NotificationChannels;
 }
 
-/** The actions a hub shortcut can be bound to — the three the hub ships with. */
-export type ShortcutAction = "focusWorkflow" | "toggleDictation" | "createWorkflow";
+/** The actions a hub shortcut can be bound to — the five the hub ships with. */
+export type ShortcutAction =
+	| "focusWorkflow"
+	| "toggleDictation"
+	| "createWorkflow"
+	| "continueStep"
+	| "startWorkflow";
 
 /** A single shortcut binding: the letter that fires the action (lowercased). */
 export interface ShortcutBinding {
