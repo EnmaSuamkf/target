@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import type { StepConfigInput } from "../api/types.ts";
+import type { StagedStepImages, StepConfigInput } from "../api/types.ts";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { Field } from "../components/Field.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { Switch } from "../components/Switch.tsx";
+import { useStagedImages } from "../hooks/useStagedImages.ts";
 import styles from "./AddStepModal.module.css";
 
 /**
@@ -30,8 +31,11 @@ export function AddStepModal({
 	/** 1-based number of the step this one is inserted after, for the copy. */
 	afterIndex: number;
 	onClose: () => void;
-	onAdd: (input: StepConfigInput) => Promise<void>;
+	onAdd: (input: StepConfigInput, staged?: StagedStepImages) => Promise<void>;
 }): React.JSX.Element {
+	// The step doesn't exist yet, so its images are held here and uploaded by the
+	// caller right after the create returns an id.
+	const staged = useStagedImages("add-step-after");
 	const [description, setDescription] = useState("");
 	const [criteria, setCriteria] = useState("");
 	const [manualReview, setManualReview] = useState(false);
@@ -51,6 +55,10 @@ export function AddStepModal({
 		setUseSubagent(true);
 		setMaxRetries("0");
 		setInterval("0");
+		staged.reset();
+		// `staged.reset` is stable (useCallback with no deps); listing it would only
+		// add noise to a "clear the form when it opens" effect.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open]);
 
 	// The wait between retries only means something with more than one retry.
@@ -62,16 +70,19 @@ export function AddStepModal({
 		if (!canSubmit) return;
 		setSaving(true);
 		try {
-			await onAdd({
-				description: description.trim(),
-				acceptanceCriteria: criteria.trim(),
-				// Always sent, like the other two step forms: the server only touches
-				// the stored gate when the field is present.
-				manualReview,
-				useSubagent,
-				maxRetries: Math.max(0, parseInt(maxRetries, 10) || 0),
-				retryIntervalSeconds: intervalEnabled ? Math.max(0, parseInt(interval, 10) || 0) : 0,
-			});
+			await onAdd(
+				{
+					description: description.trim(),
+					acceptanceCriteria: criteria.trim(),
+					// Always sent, like the other two step forms: the server only touches
+					// the stored gate when the field is present.
+					manualReview,
+					useSubagent,
+					maxRetries: Math.max(0, parseInt(maxRetries, 10) || 0),
+					retryIntervalSeconds: intervalEnabled ? Math.max(0, parseInt(interval, 10) || 0) : 0,
+				},
+				staged.staged,
+			);
 		} finally {
 			setSaving(false);
 		}
@@ -103,6 +114,7 @@ export function AddStepModal({
 							placeholder="What the agent should do in this step…"
 							onChange={setDescription}
 							expandTitle="Edit task description"
+							attachments={staged.attachmentsFor("description")}
 							required
 							autoFocus
 						/>
@@ -120,6 +132,7 @@ export function AddStepModal({
 							placeholder="Optional — what a good result must satisfy."
 							onChange={setCriteria}
 							expandTitle="Edit acceptance criteria"
+							attachments={staged.attachmentsFor("acceptance")}
 						/>
 					)}
 				</Field>

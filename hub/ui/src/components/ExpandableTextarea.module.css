@@ -8,6 +8,13 @@
 	padding-right: var(--space-8);
 }
 
+/* While an image is being dragged over the field, so it's obvious the drop will
+   land here rather than navigate the browser to the file. */
+.dropTarget {
+	border-color: var(--accent-500);
+	box-shadow: 0 0 0 3px var(--accent-100);
+}
+
 .expand {
 	position: absolute;
 	top: var(--space-1);

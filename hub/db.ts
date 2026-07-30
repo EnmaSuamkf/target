@@ -282,6 +282,18 @@ function open(): DatabaseSync {
 			value TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS attachments (
+			id TEXT PRIMARY KEY,
+			workflow_id TEXT NOT NULL,
+			step_id TEXT,
+			field TEXT NOT NULL,
+			filename TEXT NOT NULL,
+			mime TEXT NOT NULL,
+			size INTEGER NOT NULL,
+			path TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_attachments_owner ON attachments(workflow_id, step_id, field);
 	`);
 	// `CREATE TABLE IF NOT EXISTS` above is a no-op on a `steps` table that
 	// already existed before these columns were added — add any that are missing
@@ -1392,4 +1404,135 @@ export function saveNotificationSettings(input: { enabled: boolean; channels: No
 			settings.updatedAt,
 		);
 	return settings;
+}
+
+// --- Attachments ------------------------------------------------------
+//
+// Images the operator pinned to one of the three text inputs a workflow is
+// written in: the workflow-level conversation context, and each step's task
+// description and acceptance criteria. Only the METADATA lives here — the bytes
+// are files under ~/.target/attachments/<workflow_id>/ (see attachments.ts),
+// because the whole point of the feature is that the agent can `Read` them from
+// a real absolute path, which a BLOB in SQLite could never give it.
+//
+// `step_id` is NULL for a conversation-context attachment (it belongs to the
+// workflow, not to any step) and set for the two per-step fields; `field` says
+// which of the three inputs it hangs off. That pair is what the prompt composer
+// queries when it builds each labelled image section.
+
+/** Which of the three text inputs an attachment is pinned to. */
+export type AttachmentField = "context" | "description" | "acceptance";
+
+export const ATTACHMENT_FIELDS: readonly AttachmentField[] = ["context", "description", "acceptance"];
+
+export interface Attachment {
+	id: string;
+	workflowId: string;
+	/** Null for a conversation-context attachment — that one belongs to the workflow itself. */
+	stepId: string | null;
+	field: AttachmentField;
+	/** Original (sanitised) name, shown in the UI and used to build the on-disk name. */
+	filename: string;
+	mime: string;
+	size: number;
+	/** Absolute path of the stored file — this is what reaches the agent's prompt. */
+	path: string;
+	createdAt: string;
+}
+
+function rowToAttachment(row: Record<string, unknown>): Attachment {
+	return {
+		id: String(row.id),
+		workflowId: String(row.workflow_id),
+		stepId: row.step_id == null ? null : String(row.step_id),
+		field: String(row.field) as AttachmentField,
+		filename: String(row.filename),
+		mime: String(row.mime),
+		size: Number(row.size ?? 0),
+		path: String(row.path),
+		createdAt: String(row.created_at),
+	};
+}
+
+export function insertAttachment(input: {
+	id: string;
+	workflowId: string;
+	stepId: string | null;
+	field: AttachmentField;
+	filename: string;
+	mime: string;
+	size: number;
+	path: string;
+}): Attachment {
+	const createdAt = new Date().toISOString();
+	open()
+		.prepare(
+			`INSERT INTO attachments (id, workflow_id, step_id, field, filename, mime, size, path, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		)
+		.run(
+			input.id,
+			input.workflowId,
+			input.stepId,
+			input.field,
+			input.filename,
+			input.mime,
+			input.size,
+			input.path,
+			createdAt,
+		);
+	return { ...input, createdAt };
+}
+
+export function getAttachment(id: string): Attachment | null {
+	const row = open().prepare("SELECT * FROM attachments WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+	return row ? rowToAttachment(row) : null;
+}
+
+/** Every attachment of a workflow, both its own and its steps', oldest first. */
+export function listWorkflowAttachments(workflowId: string): Attachment[] {
+	return (
+		open()
+			.prepare("SELECT * FROM attachments WHERE workflow_id = ? ORDER BY created_at, id")
+			.all(workflowId) as Record<string, unknown>[]
+	).map(rowToAttachment);
+}
+
+/**
+ * The attachments of ONE input: pass `stepId: null` for the workflow's
+ * conversation context, or a step id for that step's description/acceptance
+ * criteria. This is the query the prompt composer uses, so its ordering
+ * (oldest first) is the order the paths appear in the agent's prompt.
+ */
+export function listFieldAttachments(workflowId: string, stepId: string | null, field: AttachmentField): Attachment[] {
+	const sql = `SELECT * FROM attachments WHERE workflow_id = ? AND field = ? AND step_id IS ${
+		stepId === null ? "NULL" : "?"
+	} ORDER BY created_at, id`;
+	const statement = open().prepare(sql);
+	const rows = (stepId === null ? statement.all(workflowId, field) : statement.all(workflowId, field, stepId)) as Record<
+		string,
+		unknown
+	>[];
+	return rows.map(rowToAttachment);
+}
+
+export function listStepAttachments(stepId: string): Attachment[] {
+	return (
+		open().prepare("SELECT * FROM attachments WHERE step_id = ? ORDER BY created_at, id").all(stepId) as Record<
+			string,
+			unknown
+		>[]
+	).map(rowToAttachment);
+}
+
+export function deleteAttachment(id: string): boolean {
+	return open().prepare("DELETE FROM attachments WHERE id = ?").run(id).changes > 0;
+}
+
+export function deleteStepAttachments(stepId: string): void {
+	open().prepare("DELETE FROM attachments WHERE step_id = ?").run(stepId);
+}
+
+export function deleteWorkflowAttachments(workflowId: string): void {
+	open().prepare("DELETE FROM attachments WHERE workflow_id = ?").run(workflowId);
 }

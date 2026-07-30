@@ -27,16 +27,22 @@ import styles from "./DetailPanels.module.css";
 export function ContextPanel({
 	workflow,
 	onSave,
+	onAttach,
+	onRemoveAttachment,
 }: {
 	workflow: Workflow;
 	/** Resolves true only when the server really stored the context. */
 	onSave: (context: string) => Promise<boolean>;
+	/** Pins images to the context. They upload immediately — unlike the text, there's no draft to save. */
+	onAttach: (files: File[]) => Promise<boolean>;
+	onRemoveAttachment: (id: string) => void;
 }): React.JSX.Element {
 	const injected = workflow.contextInjected;
 	const serverValue = workflow.conversationContext ?? "";
 
 	const [state, setState] = useState(() => initialDraftState(workflow.id, serverValue));
 	const [saving, setSaving] = useState(false);
+	const [attaching, setAttaching] = useState(false);
 
 	// Reconcile during render (React's derived-state pattern) rather than in an
 	// effect, so adoption can never land between a blur and the click that
@@ -82,6 +88,24 @@ export function ContextPanel({
 				onChange={setDraft}
 				aria-label="Conversation context"
 				expandTitle="Edit conversation context"
+				attachments={{
+					items: workflow.attachments,
+					// Attached images are uploaded on the spot rather than following the
+					// draft's Save: they're files, not text, so there's nothing to merge —
+					// and the server has to assign the path before the strip can show it.
+					onAdd: async (files) => {
+						setAttaching(true);
+						try {
+							await onAttach(files);
+						} finally {
+							setAttaching(false);
+						}
+					},
+					onRemove: onRemoveAttachment,
+					busy: attaching,
+					label: "the conversation context",
+					idPrefix: `context-${workflow.id}`,
+				}}
 			/>
 
 			{!injected && (

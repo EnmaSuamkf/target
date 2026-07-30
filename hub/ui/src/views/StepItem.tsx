@@ -1,5 +1,11 @@
 import { useState } from "react";
-import type { OverridableStepStatus, Step, StepConfigInput } from "../api/types.ts";
+import type {
+	AttachmentField,
+	OverridableStepStatus,
+	StagedStepImages,
+	Step,
+	StepConfigInput,
+} from "../api/types.ts";
 import { OVERRIDABLE_STEP_STATUSES } from "../api/types.ts";
 import { Badge } from "../components/Badge.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
@@ -54,6 +60,8 @@ export function StepItem({
 	onOpenConversation,
 	onAddStepAfter,
 	onSetStatus,
+	onAttachImages,
+	onRemoveAttachment,
 	busy,
 }: {
 	step: Step;
@@ -67,9 +75,12 @@ export function StepItem({
 	/** Opens a terminal on this step's own session, not the workflow's newest. */
 	onOpenConversation: (id: string) => void;
 	/** Adds a step immediately after this one, so it runs next. Resolves false when the server refused it, which keeps the dialog open on its typed-in text. */
-	onAddStepAfter: (id: string, input: StepConfigInput) => Promise<boolean>;
+	onAddStepAfter: (id: string, input: StepConfigInput, staged?: StagedStepImages) => Promise<boolean>;
 	/** Forces the step's status by hand; never runs the step. */
 	onSetStatus: (id: string, status: OverridableStepStatus) => void;
+	/** Pins images to one of this step's two text inputs. */
+	onAttachImages: (field: AttachmentField, stepId: string | null, files: File[]) => Promise<boolean>;
+	onRemoveAttachment: (id: string) => void;
 	busy: boolean;
 }): React.JSX.Element {
 	const [editing, setEditing] = useState(false);
@@ -99,6 +110,8 @@ export function StepItem({
 						await onSave(step.id, input);
 						setEditing(false);
 					}}
+					onAttachImages={onAttachImages}
+					onRemoveAttachment={onRemoveAttachment}
 				/>
 			</li>
 		);
@@ -326,8 +339,8 @@ export function StepItem({
 					open={adding}
 					afterIndex={step.orderIndex + 1}
 					onClose={() => setAdding(false)}
-					onAdd={async (input) => {
-						if (await onAddStepAfter(step.id, input)) setAdding(false);
+					onAdd={async (input, staged) => {
+						if (await onAddStepAfter(step.id, input, staged)) setAdding(false);
 					}}
 				/>
 			)}
@@ -340,10 +353,14 @@ function StepEditor({
 	step,
 	onCancel,
 	onSave,
+	onAttachImages,
+	onRemoveAttachment,
 }: {
 	step: Step;
 	onCancel: () => void;
 	onSave: (input: StepConfigInput) => Promise<void>;
+	onAttachImages: (field: AttachmentField, stepId: string | null, files: File[]) => Promise<boolean>;
+	onRemoveAttachment: (id: string) => void;
 }): React.JSX.Element {
 	const [description, setDescription] = useState(step.description);
 	const [criteria, setCriteria] = useState(step.acceptanceCriteria ?? "");
@@ -353,9 +370,32 @@ function StepEditor({
 	const [maxRetries, setMaxRetries] = useState(String(step.maxRetries ?? 0));
 	const [interval, setInterval] = useState(String(step.retryIntervalSeconds ?? 0));
 	const [saving, setSaving] = useState(false);
+	const [attaching, setAttaching] = useState(false);
 
 	// The wait between retries only means something with more than one retry.
 	const intervalEnabled = (parseInt(maxRetries, 10) || 0) > 1;
+
+	/**
+	 * The step already exists here, so an image is uploaded the moment it's picked
+	 * rather than waiting for Save — the strip can only show the absolute path once
+	 * the server has assigned it, and a file "saved" alongside text edits that were
+	 * then cancelled would be a confusing half-state either way.
+	 */
+	const attach = (field: AttachmentField) => ({
+		items: step.attachments.filter((a) => a.field === field),
+		onAdd: async (files: File[]) => {
+			setAttaching(true);
+			try {
+				await onAttachImages(field, step.id, files);
+			} finally {
+				setAttaching(false);
+			}
+		},
+		onRemove: onRemoveAttachment,
+		busy: attaching,
+		label: field === "description" ? "the task description" : "the acceptance criteria",
+		idPrefix: `${field}-${step.id}`,
+	});
 
 	const submit = async (ev: React.FormEvent): Promise<void> => {
 		ev.preventDefault();
@@ -394,6 +434,7 @@ function StepEditor({
 				value={description}
 				onChange={setDescription}
 				expandTitle="Edit task description"
+				attachments={attach("description")}
 				required
 			/>
 
@@ -406,6 +447,7 @@ function StepEditor({
 				placeholder="Optional — what a good result must satisfy. Empty = no judge."
 				onChange={setCriteria}
 				expandTitle="Edit acceptance criteria"
+				attachments={attach("acceptance")}
 			/>
 			<p className="hint">
 				If set, the agent self-evaluates its result against this after running. On a reject it re-runs the step up to

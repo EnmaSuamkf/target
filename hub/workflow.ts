@@ -10,6 +10,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { listFieldAttachments, removeStepAttachments, removeWorkflowAttachments } from "./attachments.ts";
 import { createAwbHook, deleteAwbHook, abortAwbRun, type HookOptions } from "./awb.ts";
 import { targetDir, type HubConfig } from "./config.ts";
 import {
@@ -595,7 +596,14 @@ function chainSession(workflowId: string, sessionId: string | undefined | null):
 	// Only tracked when there IS a context: with an empty context nothing was
 	// injected, so the flag stays false (the tracker stays honest / irrelevant).
 	const workflow = getWorkflow(workflowId);
-	if (workflow && workflow.conversationContext && !workflow.contextInjected) setContextInjected(workflowId, true);
+	// A context that is only images (no text) was still injected — the preamble
+	// was built and the image paths were handed to the agent — so the guard has to
+	// close for it too, or the preamble would be re-injected and the UI would keep
+	// offering to edit a context the agent is already running under.
+	const hasContext =
+		!!workflow &&
+		(!!workflow.conversationContext || listFieldAttachments(workflowId, null, "context").length > 0);
+	if (workflow && hasContext && !workflow.contextInjected) setContextInjected(workflowId, true);
 }
 
 /**
@@ -634,6 +642,9 @@ export function removeWorkflow(workflowId: string): void {
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	deleteAwbHook(workflow.agentName);
 	fs.rmSync(workflow.mdPath, { force: true });
+	// Its attached images live in ~/.target/attachments/<id>/ — delete the rows
+	// and the directory, or a removed workflow would leak both forever.
+	removeWorkflowAttachments(workflowId);
 	deleteWorkflow(workflowId);
 }
 
@@ -742,6 +753,8 @@ export function removeStep(workflowId: string, stepId: string): void {
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
 	if (step.status !== "pending") throw new WorkflowError("only a pending step can be removed");
+	// The step's own attached images go with it (the workflow's context ones stay).
+	removeStepAttachments(stepId);
 	deleteStep(stepId);
 	reconcileStatus(workflowId);
 	writeStatusMd(workflowId);

@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
+	AttachmentField,
 	OverridableStepStatus,
 	OverridableWorkflowStatus,
 	SessionInfo,
+	StagedStepImages,
 	Step,
 	StepConfigInput,
 	Template,
@@ -14,6 +16,7 @@ import { EmptyState } from "../components/EmptyState.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { ProgressBar } from "../components/Progress.tsx";
 import { Switch } from "../components/Switch.tsx";
+import { useStagedImages } from "../hooks/useStagedImages.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
 import { ContextPanel } from "./ContextPanel.tsx";
 import { SessionPanel } from "./SessionPanel.tsx";
@@ -58,6 +61,8 @@ export function WorkflowDetail({
 	onDelete,
 	onSetStatus,
 	onSaveContext,
+	onAttachImages,
+	onRemoveAttachment,
 	onOpenTerminal,
 	onAddStep,
 	onSaveStep,
@@ -84,8 +89,14 @@ export function WorkflowDetail({
 	onSetStatus: (status: OverridableWorkflowStatus) => void;
 	/** Resolves true only when the server really stored the context. */
 	onSaveContext: (context: string) => Promise<boolean>;
+	/**
+	 * Pins images to one of this workflow's text inputs. `stepId` is null for the
+	 * conversation context and the step's id for its description / criteria.
+	 */
+	onAttachImages: (field: AttachmentField, stepId: string | null, files: File[]) => Promise<boolean>;
+	onRemoveAttachment: (id: string) => void;
 	onOpenTerminal: () => void;
-	onAddStep: (input: StepConfigInput) => Promise<void>;
+	onAddStep: (input: StepConfigInput, staged?: StagedStepImages) => Promise<void>;
 	onSaveStep: (id: string, input: StepConfigInput) => Promise<void>;
 	onRemoveStep: (id: string) => void;
 	onRunStep: (id: string) => void;
@@ -94,7 +105,7 @@ export function WorkflowDetail({
 	/** Opens a terminal on one step's own session (the held step's "Open conversation"). */
 	onOpenStepConversation: (id: string) => void;
 	/** Inserts a step right after the given one, so it runs next. */
-	onAddStepAfter: (afterStepId: string, input: StepConfigInput) => Promise<boolean>;
+	onAddStepAfter: (afterStepId: string, input: StepConfigInput, staged?: StagedStepImages) => Promise<boolean>;
 	/** Forces one step's status by hand; never runs the step. */
 	onSetStepStatus: (id: string, status: OverridableStepStatus) => void;
 	onAddStepsFromTemplate: (templateId: string) => Promise<void>;
@@ -273,7 +284,12 @@ export function WorkflowDetail({
 			    conversation starts from, the steps that run, then the session those
 			    steps produced. */}
 			<div className={styles.body}>
-				<ContextPanel workflow={workflow} onSave={onSaveContext} />
+				<ContextPanel
+					workflow={workflow}
+					onSave={onSaveContext}
+					onAttach={(files) => onAttachImages("context", null, files)}
+					onRemoveAttachment={onRemoveAttachment}
+				/>
 
 				<div className={styles.stepsSection}>
 					<div className={styles.stepsHead}>
@@ -309,6 +325,8 @@ export function WorkflowDetail({
 									onOpenConversation={onOpenStepConversation}
 									onAddStepAfter={onAddStepAfter}
 									onSetStatus={onSetStepStatus}
+									onAttachImages={onAttachImages}
+									onRemoveAttachment={onRemoveAttachment}
 									busy={busy}
 								/>
 							))}
@@ -341,9 +359,11 @@ function AddStepForm({
 	onAddFromTemplate,
 }: {
 	templates: Template[];
-	onAdd: (input: StepConfigInput) => Promise<void>;
+	onAdd: (input: StepConfigInput, staged?: StagedStepImages) => Promise<void>;
 	onAddFromTemplate: (templateId: string) => Promise<void>;
 }): React.JSX.Element {
+	// Images picked before the step exists; uploaded by the caller once it does.
+	const staged = useStagedImages("new-step");
 	const [open, setOpen] = useState(false);
 	const [description, setDescription] = useState("");
 	const [criteria, setCriteria] = useState("");
@@ -364,6 +384,7 @@ function AddStepForm({
 		setUseSubagent(true);
 		setMaxRetries("0");
 		setInterval("0");
+		staged.reset();
 	};
 
 	const submit = async (ev: React.FormEvent): Promise<void> => {
@@ -372,14 +393,17 @@ function AddStepForm({
 		if (!trimmed || saving) return;
 		setSaving(true);
 		try {
-			await onAdd({
-				description: trimmed,
-				acceptanceCriteria: criteria.trim(),
-				manualReview,
-				useSubagent,
-				maxRetries: Math.max(0, parseInt(maxRetries, 10) || 0),
-				retryIntervalSeconds: intervalEnabled ? Math.max(0, parseInt(interval, 10) || 0) : 0,
-			});
+			await onAdd(
+				{
+					description: trimmed,
+					acceptanceCriteria: criteria.trim(),
+					manualReview,
+					useSubagent,
+					maxRetries: Math.max(0, parseInt(maxRetries, 10) || 0),
+					retryIntervalSeconds: intervalEnabled ? Math.max(0, parseInt(interval, 10) || 0) : 0,
+				},
+				staged.staged,
+			);
 			reset();
 		} finally {
 			setSaving(false);
@@ -421,6 +445,7 @@ function AddStepForm({
 						placeholder="What the agent should do in this step…"
 						onChange={setDescription}
 						expandTitle="Edit task description"
+						attachments={staged.attachmentsFor("description")}
 						required
 						autoFocus
 					/>
@@ -436,6 +461,7 @@ function AddStepForm({
 						placeholder="Optional — what a good result must satisfy. Empty = no judge."
 						onChange={setCriteria}
 						expandTitle="Edit acceptance criteria"
+						attachments={staged.attachmentsFor("acceptance")}
 					/>
 					<p className="hint">
 						If set, the agent self-evaluates its result after running and re-runs the step on a reject, up to the
