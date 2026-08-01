@@ -29,6 +29,13 @@ export function SessionPanel({
 	// to compaction, which is worth seeing before starting more steps.
 	const meterClass = pct >= 90 ? styles.meterDanger : pct >= 70 ? styles.meterWarn : "";
 
+	// Past this the hub overrides every step's "run inline" toggle and delegates
+	// to a subagent anyway (CONTEXT_PRESSURE_RATIO in hub/context-pressure.ts —
+	// kept in sync by hand, since the UI doesn't import server modules). This is
+	// the panel that already shows the number the rule is about, so it's where an
+	// operator should find out their toggle is no longer being honoured.
+	const pressured = pct > 60;
+
 	return (
 		<section className={styles.block}>
 			<div className={styles.blockHead}>
@@ -87,6 +94,12 @@ export function SessionPanel({
 								{compactNumber(usage.outputTokens)}
 								{usage.includesSubagents && " · incl. subagents"}
 							</p>
+							{pressured && (
+								<p className="hint">
+									Over 60% — steps set to run inline are delegated to a subagent anyway, so this conversation doesn't
+									fill up and degrade.
+								</p>
+							)}
 						</div>
 					)}
 				</>
