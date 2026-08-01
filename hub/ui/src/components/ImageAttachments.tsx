@@ -62,7 +62,7 @@ export function rejectionReason(file: File): string | null {
 
 /**
  * The strip of attached images under a text input: a thumbnail per image with a
- * remove button, plus an "Add image" button that opens the file picker.
+ * remove button, plus an "Attach file" button that opens the file picker.
  *
  * Paste and drag&drop are NOT handled here — they belong to the textarea the
  * images are attached to (see `ExpandableTextarea`), which forwards the files to
@@ -167,19 +167,20 @@ export function ImageAttachments({
 					/>
 					<button
 						type="button"
-						className="btn btn--sm btn--ghost"
+						className={`${styles.attach} btn btn--sm`}
 						disabled={busy}
 						onClick={() => inputRef.current?.click()}
-						aria-label={`Attach an image to ${label}`}
+						aria-label={`Attach a file to ${label}`}
 					>
-						<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-							<rect x="3" y="3" width="18" height="18" rx="2" />
-							<circle cx="8.5" cy="8.5" r="1.5" />
-							<path d="M21 15l-5-5L5 21" />
+						{/* A paperclip, not a picture frame: the button is named for files, and
+						    the paperclip is the one attachment glyph that stays true whatever
+						    the picker ends up accepting. */}
+						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+							<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
 						</svg>
-						{busy ? "Attaching…" : items.length > 0 ? "Add another image" : "Attach image"}
+						{busy ? "Attaching…" : items.length > 0 ? "Add another file" : "Attach file"}
 					</button>
-					<span className="hint">or paste (Ctrl+V) / drop one on the field — the agent reads it from disk.</span>
+					<span className="hint">or paste (Ctrl+V) / drop it on the field — the agent reads it from disk.</span>
 				</div>
 			)}
 

@@ -108,6 +108,69 @@
 	gap: var(--space-2);
 }
 
+/* The picker button.
+ *
+ * It used to be a `--ghost`: borderless muted text that sat under the field
+ * looking like one more caption next to the paste/drop hint, and got missed.
+ * It now keeps the app's default button chrome (border, surface, shadow) from
+ * `.btn` and adds weight, full-strength text and an accent-tinted hover on top,
+ * so it reads as a control without shouting louder than the primary action on
+ * the same form.
+ *
+ * Every rule below is scoped under `.actions` on purpose, the same way
+ * `Modal.module.css` and `SettingsView.module.css` reach for `.btn`. Module CSS
+ * is emitted well before `global.css` in the bundle, so a bare `.attach` ties
+ * `.btn` on specificity, loses on source order, and silently does nothing. The
+ * extra class buys the one point that makes these win — 0,2,0 over `.btn`'s
+ * 0,1,0, and 0,4,0 over `.btn:hover:not(:disabled)`'s 0,3,0.
+ *
+ * Deliberately no padding/size overrides: `.btn--sm` grows to the 44px tap
+ * target on coarse pointers, and beating that here would shrink it on a phone. */
+.actions .attach {
+	font-weight: 600;
+	color: var(--text);
+}
+
+/* The paperclip is supporting detail, not the label — it sits back a step at
+   rest and comes up with the text on hover. */
+.actions .attach > svg {
+	opacity: 0.65;
+	transition: opacity var(--transition);
+}
+
+.actions .attach:hover:not(:disabled),
+.actions .attach:focus-visible:not(:disabled) {
+	background: var(--accent-50);
+	border-color: var(--accent-500);
+	color: var(--accent-700);
+}
+
+.actions .attach:hover:not(:disabled) > svg,
+.actions .attach:focus-visible:not(:disabled) > svg {
+	opacity: 1;
+}
+
+.actions .attach:active:not(:disabled) {
+	background: var(--accent-100);
+	border-color: var(--accent-500);
+	color: var(--accent-700);
+	box-shadow: none;
+}
+
+/* Hover never resolves on touch and would leave the button stuck in the accent
+   state after a tap; the press state carries it there instead. */
+@media (pointer: coarse) {
+	.actions .attach:hover:not(:disabled) {
+		background: var(--surface);
+		border-color: var(--border-strong);
+		color: var(--text);
+	}
+
+	.actions .attach:hover:not(:disabled) > svg {
+		opacity: 0.65;
+	}
+}
+
 /* Hidden but still a real input: the visible button clicks it, which keeps the
    native picker (and its keyboard behaviour) without styling a file input. */
 .fileInput {

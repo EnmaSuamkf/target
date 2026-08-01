@@ -89,7 +89,7 @@ would never reach it.
 ## UI
 
 `ImageAttachments` (`hub/ui/src/components/ImageAttachments.tsx`) is the strip of
-thumbnails with a remove button and an "Attach image" picker. It is wired in
+thumbnails with a remove button and an "Attach file" picker. It is wired in
 through `ExpandableTextarea`'s optional `attachments` prop, so all three fields
 get it uniformly — and **paste** (Ctrl+V) and **drag & drop** are handled on the
 textarea itself, which is what makes pasting into the acceptance criteria land on
