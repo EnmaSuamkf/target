@@ -84,6 +84,22 @@ export interface Workflow {
 	 */
 	contextInjected: boolean;
 	/**
+	 * Timestamp of the most recent compaction boundary observed in this
+	 * workflow's conversation, or null if it has never been compacted. Written
+	 * from the transcript (see compaction.ts) — the harness's own timestamp, not
+	 * the hub's clock, so it can be compared against anything else the transcript
+	 * says.
+	 */
+	lastCompactionAt: string | null;
+	/**
+	 * The boundary whose recovery the hub has already performed. When it differs
+	 * from `lastCompactionAt` there is a compaction the conversation hasn't been
+	 * re-primed for yet, and the next exec dispatch re-injects the conversation
+	 * context. Kept as the boundary's own timestamp rather than a boolean so a
+	 * SECOND compaction after the first was handled is detected too.
+	 */
+	compactionHandledAt: string | null;
+	/**
 	 * Whether the CURRENT status was forced by a human rather than derived from
 	 * the steps. It's what makes an override stick: `reconcileStatus` (which runs
 	 * on every read) refuses to re-derive a status a person asserted, so a
@@ -233,6 +249,8 @@ function open(): DatabaseSync {
 			md_path TEXT NOT NULL,
 			conversation_context TEXT,
 			context_injected INTEGER NOT NULL DEFAULT 0,
+			last_compaction_at TEXT,
+			compaction_handled_at TEXT,
 			completion_notified INTEGER NOT NULL DEFAULT 0,
 			status_manual INTEGER NOT NULL DEFAULT 0,
 			status_manual_at TEXT,
@@ -334,6 +352,11 @@ function open(): DatabaseSync {
 	};
 	addWorkflowColumn("conversation_context", "conversation_context TEXT");
 	addWorkflowColumn("context_injected", "context_injected INTEGER NOT NULL DEFAULT 0");
+	// Compaction bookkeeping. Both nullable with no default, so an existing DB
+	// upgrades to "never compacted, nothing to re-inject" — which is exactly what
+	// a workflow that ran before the hub could see compactions should read as.
+	addWorkflowColumn("last_compaction_at", "last_compaction_at TEXT");
+	addWorkflowColumn("compaction_handled_at", "compaction_handled_at TEXT");
 	addWorkflowColumn("status_before_review", "status_before_review TEXT");
 	addWorkflowColumn("completion_notified", "completion_notified INTEGER NOT NULL DEFAULT 0");
 	addWorkflowColumn("status_manual", "status_manual INTEGER NOT NULL DEFAULT 0");
@@ -365,6 +388,8 @@ function rowToWorkflow(row: Record<string, unknown>): Workflow {
 		mdPath: String(row.md_path),
 		conversationContext: row.conversation_context == null ? null : String(row.conversation_context),
 		contextInjected: Number(row.context_injected ?? 0) === 1,
+		lastCompactionAt: row.last_compaction_at == null ? null : String(row.last_compaction_at),
+		compactionHandledAt: row.compaction_handled_at == null ? null : String(row.compaction_handled_at),
 		statusManual: Number(row.status_manual ?? 0) === 1,
 		statusManualAt: row.status_manual_at == null ? null : String(row.status_manual_at),
 		createdAt: String(row.created_at),
@@ -394,6 +419,8 @@ export function insertWorkflow(input: {
 		mdPath: input.mdPath,
 		conversationContext,
 		contextInjected: false,
+		lastCompactionAt: null,
+		compactionHandledAt: null,
 		statusManual: false,
 		statusManualAt: null,
 		createdAt: now,
@@ -530,6 +557,49 @@ export function setContextInjected(id: string, value: boolean): void {
 	open()
 		.prepare("UPDATE workflows SET context_injected = ?, updated_at = ? WHERE id = ?")
 		.run(value ? 1 : 0, new Date().toISOString(), id);
+}
+
+/**
+ * Records that this workflow's conversation was compacted at `at` (the
+ * harness's own timestamp, read from the transcript).
+ *
+ * Guarded in SQL rather than in the caller: the write only lands when `at` is
+ * strictly newer than what's stored, so re-observing the same boundary on every
+ * dispatch and every UI poll is a no-op, and an older boundary (a stale read of
+ * a transcript that has since been replaced) can never walk the marker
+ * backwards. Returns whether it actually recorded something — that's the signal
+ * "this is a compaction we hadn't seen", which is the one worth logging.
+ *
+ * Deliberately leaves `updated_at` alone: observing a compaction is the hub
+ * noticing a fact about the outside world, not the operator changing the
+ * workflow.
+ */
+export function recordCompaction(id: string, at: string): boolean {
+	return (
+		open()
+			.prepare("UPDATE workflows SET last_compaction_at = ? WHERE id = ? AND (last_compaction_at IS NULL OR last_compaction_at < ?)")
+			.run(at, id, at).changes > 0
+	);
+}
+
+/**
+ * Marks the compaction at `at` as recovered from — i.e. the conversation
+ * context has been re-injected on a dispatch that followed it. A later
+ * compaction writes a newer `last_compaction_at`, which makes them differ again
+ * and arms the next re-injection.
+ */
+export function markCompactionHandled(id: string, at: string | null): void {
+	open().prepare("UPDATE workflows SET compaction_handled_at = ? WHERE id = ?").run(at, id);
+}
+
+/**
+ * Forgets both compaction markers. Only a restart does this: it abandons the
+ * conversation the compaction happened in, so both "it was compacted" and "we
+ * recovered from that" stop being statements about the session the workflow is
+ * now on.
+ */
+export function clearCompactionMarkers(id: string): void {
+	open().prepare("UPDATE workflows SET last_compaction_at = NULL, compaction_handled_at = NULL WHERE id = ?").run(id);
 }
 
 /**

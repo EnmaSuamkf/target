@@ -16,6 +16,7 @@ import { targetDir, type HubConfig } from "./config.ts";
 import {
 	beginRetry,
 	claimWorkflowCompletionNotice,
+	clearCompactionMarkers,
 	completeStep,
 	deleteStep,
 	deleteWorkflow,
@@ -62,6 +63,7 @@ import {
 import { sendManualReviewNotification, sendWorkflowCompletedNotification } from "./notifier.ts";
 import { forgetProbe, humanizeSeconds, probeStepProgress, pruneProbes, stepActivity } from "./progress.ts";
 import { dispatchStep, type Logger } from "./runner.ts";
+import { writeStepResults } from "./step-results.ts";
 
 export class WorkflowError extends Error {}
 
@@ -469,11 +471,24 @@ function truncateMd(s: string, n = 120): string {
 	return t.length > n ? `${t.slice(0, n)}…` : t;
 }
 
-/** Rewrites the workflow's whole progress file — cheap enough to do on every state change. */
+/**
+ * Rewrites the workflow's whole progress file — cheap enough to do on every
+ * state change — and, in the same breath, the agent-facing copies of each
+ * step's result under `<workdir>/.target/steps/` (see step-results.ts).
+ *
+ * The two files serve different readers and neither replaces the other: this
+ * one is the operator's view (every step, truncated results, statuses, under
+ * `~/.target`), those are the agent's (one full result per step, inside the
+ * workdir so a sandboxed run can actually open them). They're written together
+ * because this function is the single choke point every step transition already
+ * passes through — hanging the agent-facing write off any one of the six
+ * done-paths would mean the seventh silently not having it.
+ */
 export function writeStatusMd(workflowId: string): void {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) return;
 	const steps = listSteps(workflowId);
+	writeStepResults(workflow, steps);
 	const progress = stepProgress(workflowId);
 	const lines: string[] = [
 		`# Workflow: ${workflow.name}`,
@@ -484,6 +499,16 @@ export function writeStatusMd(workflowId: string): void {
 		`- Agent: ${workflow.agentName}`,
 		`- Session: ${workflow.lastSessionId ?? "(none yet)"}`,
 		`- Conversation context: ${workflow.conversationContext ? truncateMd(workflow.conversationContext) : "(none)"}${workflow.conversationContext ? ` — injected: ${workflow.contextInjected ? "yes" : "no"}` : ""}`,
+		// Only when it happened: a line saying "never compacted" on every workflow
+		// would bury the one workflow where it did. `pending` is the honest state
+		// between observing a boundary and the next dispatch re-stating the context.
+		...(workflow.lastCompactionAt
+			? [
+					`- Conversation compacted: ${workflow.lastCompactionAt} — earlier history replaced by a summary (context re-injection: ${
+						workflow.compactionHandledAt === workflow.lastCompactionAt ? "done" : "pending"
+					})`,
+				]
+			: []),
 		`- Last updated: ${new Date().toISOString()}`,
 		"",
 		"## Steps",
@@ -1021,6 +1046,11 @@ export async function restartWorkflow(
 	// A restart starts a brand-new conversation, so the conversation context
 	// (if any) must be injected again on the new first step — reset the guard.
 	setContextInjected(workflowId, false);
+	// …and the compaction that happened in the OLD conversation is not something
+	// the new one has to recover from. Clearing both markers together keeps
+	// "compaction pending" from surviving into a session that never had one, which
+	// would re-inject the preamble twice on the very first step.
+	clearCompactionMarkers(workflowId);
 	setWorkflowStatus(workflowId, "running");
 	writeStatusMd(workflowId);
 	log(`workflow ${workflowId} restarted`);
@@ -1148,6 +1178,15 @@ export async function onStepResult(
 
 	// --- exec phase: the step's actual work finished ---
 	if (!outcome.ok) {
+		// Chain the session even on the failure path. A failed run still HAPPENED:
+		// it started (or resumed) a conversation, said things in it, and
+		// `completeStep` stores its id on the step row. Leaving the workflow's
+		// `lastSessionId` behind made the hub's two answers to "which session is
+		// this workflow on" disagree — the next dispatch reads
+		// `workflow.lastSessionId` (runner.ts) while the UI's "Open conversation"
+		// reads `latestStepSession()` (server.ts), so after a failure the operator
+		// was shown one conversation and the retry resumed a different, older one.
+		chainSession(step.workflowId, outcome.sessionId);
 		completeStep(stepId, outcome);
 		setWorkflowStatus(step.workflowId, "failed");
 		writeStatusMd(step.workflowId);

@@ -64,6 +64,7 @@ import {
 	type PublishableRunner,
 	type PublishableSandbox,
 } from "./awb.ts";
+import { needsContextReinjection, observeCompaction } from "./compaction.ts";
 import type { HubConfig } from "./config.ts";
 import {
 	promoteQueuedToRunning,
@@ -1121,12 +1122,21 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 		const runtime = hookRuntime(workflow.hookUrl);
 		const sessionId = latestStepSession(workflowId) ?? workflow.lastSessionId;
+		// The UI polls this route, so it's also where a compaction gets noticed
+		// without waiting for another step to be dispatched — an operator watching
+		// a long-running workflow should see the boundary the moment it lands, not
+		// on the next dispatch. `observeCompaction` only writes when the boundary is
+		// newer than the stored one, so polling this doesn't write on every poll.
+		const observed = observeCompaction(workflow, sessionId, log);
 		sendJson(res, 200, {
 			sessionId,
 			harness: runtime.harness,
 			sandbox: runtime.sandbox?.kind ?? "host",
 			image: runtime.sandbox?.image ?? null,
 			usage: sessionId && runtime.workdir ? readTokenUsage(runtime.workdir, sessionId) : null,
+			lastCompactionAt: observed.lastCompactionAt,
+			/** True between observing a boundary and the next dispatch re-stating the conversation context. */
+			compactionPending: needsContextReinjection(observed),
 		});
 		return;
 	}
