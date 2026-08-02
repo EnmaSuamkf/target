@@ -40,6 +40,7 @@ const { loadConfig } = await import("./config.ts");
 const { createServer } = await import("./server.ts");
 const { _impl: terminalImpl } = await import("./terminal.ts");
 const { transcriptPath } = await import("./transcript.ts");
+const { FALLBACK_CONTEXT_WINDOW_TOKENS } = await import("./models.ts");
 
 const cfg = loadConfig();
 const silent = () => {};
@@ -487,7 +488,10 @@ test("GET /api/workflows/:id/session-info with a resolvable session returns the 
 	assert.equal(body.usage.totalInputTokens, 1700);
 	assert.equal(body.usage.outputTokens, 300);
 	assert.equal(body.usage.contextTokens, 1700);
-	assert.equal(body.usage.contextWindow, 200_000);
+	// The window is derived from the transcript's model (hub/models.ts); this
+	// fixture's turn names none, so it measures against the documented fallback.
+	// The derivation itself is pinned in models.test.ts.
+	assert.equal(body.usage.contextWindow, FALLBACK_CONTEXT_WINDOW_TOKENS);
 	assert.equal(body.usage.includesSubagents, false);
 });
 

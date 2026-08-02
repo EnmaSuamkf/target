@@ -23,11 +23,22 @@ export function SessionPanel({
 	opening: boolean;
 }): React.JSX.Element {
 	const usage = info?.usage ?? null;
+	// `contextWindow` is the window of the model this session actually ran on
+	// (the hub derives it from the transcript — see hub/models.ts), not a fixed
+	// 200k. Every threshold below is therefore a percentage of the real window;
+	// against the old assumed one a 1M-context session read as permanently over
+	// 100% and the meter said nothing at all.
 	const pct = usage && usage.contextWindow > 0 ? (100 * usage.contextTokens) / usage.contextWindow : 0;
 
 	// Warn as the context window fills — past ~90% a resumed session is close
 	// to compaction, which is worth seeing before starting more steps.
 	const meterClass = pct >= 90 ? styles.meterDanger : pct >= 70 ? styles.meterWarn : "";
+
+	// Already compacted at least once: the conversation the steps share has lost
+	// its earlier turns. The hub recovers by re-injecting the workflow's
+	// conversation context on the next step, but this is the panel where an
+	// operator finds out it happened at all.
+	const compactedAt = info?.lastCompactionAt ?? usage?.lastCompactionAt ?? null;
 
 	// Past this the hub overrides every step's "run inline" toggle and delegates
 	// to a subagent anyway (CONTEXT_PRESSURE_RATIO in hub/context-pressure.ts —
@@ -78,10 +89,24 @@ export function SessionPanel({
 						</div>
 					</dl>
 
+					{compactedAt && (
+						<p className="hint">
+							This conversation was compacted on {new Date(compactedAt).toLocaleString()} — its earlier turns are now a
+							summary.{" "}
+							{info?.compactionPending
+								? "The workflow's conversation context will be re-stated on the next step."
+								: "The workflow's conversation context has been re-stated since."}{" "}
+							Each completed step's full result is also on disk in the workdir, under <code>.target/steps/</code>.
+						</p>
+					)}
+
 					{usage && usage.turns > 0 && (
 						<div className={styles.usage}>
 							<div className={styles.usageHead}>
-								<span>
+								{/* The window is per-model, so name the model it belongs to — otherwise
+								    the same session showing "of 1M" one day and "of 200k" the next
+								    (because the operator switched models) looks like a bug. */}
+								<span title={usage.model ? `window for ${usage.model}` : "no model reported yet — assuming the fallback window"}>
 									Context {compactNumber(usage.contextTokens)} / {compactNumber(usage.contextWindow)}
 								</span>
 								<span className={styles.usagePct}>{pct.toFixed(1)}%</span>

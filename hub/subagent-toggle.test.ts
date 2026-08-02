@@ -72,6 +72,14 @@ const legacyDbFile = path.join(tmpHome, "target.db");
 const { getStep, insertStep, insertWorkflow, listSteps } = await import("./db.ts");
 const { loadConfig } = await import("./config.ts");
 const { INLINE_SUFFIX, SUBAGENT_SUFFIX, judgeInput } = await import("./runner.ts");
+const { hookRuntime } = await import("./awb.ts");
+// Every exec prompt now names the on-disk copies of the prior steps' results
+// (step-results.ts). The byte-for-byte assertions below keep being byte-for-byte
+// by spelling that note out too.
+const { stepResultsNote } = await import("./step-results.ts");
+const { getWorkflow } = await import("./db.ts");
+/** The prior-results pointer as it appears in this workflow's prompts. */
+const priorResults = (workflowId: string) => stepResultsNote(hookRuntime(getWorkflow(workflowId)!.hookUrl).workdir);
 const { addStep, editStep, onStepResult, startWorkflow, writeStatusMd } = await import("./workflow.ts");
 const { createServer } = await import("./server.ts");
 
@@ -229,7 +237,7 @@ test("a step that never mentions the toggle is dispatched exactly as before the 
 	await startWorkflow(workflow.id, cfg, silent, [steps[0].id]);
 
 	// The whole input, byte for byte, is what the old unconditional code built.
-	assert.equal(dispatches[0].input, `step 1${SUBAGENT_SUFFIX}`);
+	assert.equal(dispatches[0].input, `step 1${priorResults(workflow.id)}${SUBAGENT_SUFFIX}`);
 });
 
 test("the toggle doesn't disturb the criteria note or its ordering", async (t) => {
@@ -240,7 +248,9 @@ test("the toggle doesn't disturb the criteria note or its ordering", async (t) =
 
 	assert.equal(
 		dispatches[0].input,
-		`step 1\n\nThe result of this step MUST satisfy the following acceptance criterion, so aim explicitly to meet it: "must be X".${INLINE_SUFFIX}`,
+		`step 1\n\nThe result of this step MUST satisfy the following acceptance criterion, so aim explicitly to meet it: "must be X".${priorResults(
+			workflow.id,
+		)}${INLINE_SUFFIX}`,
 	);
 });
 
@@ -430,11 +440,15 @@ test("acceptance: a two-step workflow sends the delegation instruction for step 
 	// Spelled out, since this is the assertion the feature exists for:
 	assert.equal(
 		turnA.input,
-		"Step A: the one that must run through a subagent\n\nImportant: run this step by delegating the work to a subagent (the Task tool) instead of solving it yourself directly in this thread — this same session is reused sequentially for every step of the workflow, and delegating keeps the main thread lightweight.",
+		`Step A: the one that must run through a subagent${priorResults(
+			workflow.id,
+		)}\n\nImportant: run this step by delegating the work to a subagent (the Task tool) instead of solving it yourself directly in this thread — this same session is reused sequentially for every step of the workflow, and delegating keeps the main thread lightweight.`,
 	);
 	assert.equal(
 		turnB.input,
-		"Step B: the one that must run inline\n\nImportant: run this step yourself, directly in this thread — do NOT delegate it to a subagent (do not use the Task tool for it). This step was explicitly configured to run inline, so its work belongs in this conversation.",
+		`Step B: the one that must run inline${priorResults(
+			workflow.id,
+		)}\n\nImportant: run this step yourself, directly in this thread — do NOT delegate it to a subagent (do not use the Task tool for it). This step was explicitly configured to run inline, so its work belongs in this conversation.`,
 	);
 
 	// The workflow's own progress file agrees on which step was which.

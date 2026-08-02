@@ -27,12 +27,24 @@
  * inline step dispatched onto a session that is already more than 60% full is
  * delegated anyway, because pouring its working context into a crowded thread
  * is what degrades the agent's thinking for this step and every step after it.
+ *
+ * Two things here exist because that shared conversation is not permanent. It
+ * gets COMPACTED — the harness drops the earlier turns and keeps a summary —
+ * and when that happens the agent stops being able to see the steps before it.
+ * So every exec prompt names the on-disk copy of the prior steps' results
+ * (step-results.ts), and a dispatch onto a conversation that has been compacted
+ * since we last used it re-states the workflow's conversation context
+ * (compaction.ts), which the once-only `context_injected` guard would otherwise
+ * never allow again short of a full restart.
  */
 import { attachmentSection, listFieldAttachments } from "./attachments.ts";
+import { hookRuntime } from "./awb.ts";
+import { markContextReinjected, needsContextReinjection, observeCompaction } from "./compaction.ts";
 import type { HubConfig } from "./config.ts";
 import { CONTEXT_PRESSURE_PERCENT, shouldForceSubagent, workflowContextRatio } from "./context-pressure.ts";
 import type { Attachment, Step, Workflow } from "./db.ts";
 import { completeStep, markStepQueued } from "./db.ts";
+import { stepResultsNote } from "./step-results.ts";
 
 export type Logger = (message: string, type?: "info" | "warning" | "error") => void;
 
@@ -132,12 +144,21 @@ function criteriaNote(criteria: string | null | undefined, images: Attachment[] 
  * attaching a spec screenshot and writing nothing is a legitimate way to use
  * this, and returning "" there would throw the attachment away.
  */
-function contextPreamble(context: string | null | undefined, images: Attachment[] = []): string {
+function contextPreamble(context: string | null | undefined, images: Attachment[] = [], afterCompaction = false): string {
 	const trimmed = (context ?? "").trim();
 	const section = attachmentSection("attached to this workflow's conversation context", images);
 	if (!trimmed && !section) return "";
 	const body = trimmed || "(No background text — the background for this workflow is in the attached image(s) below.)";
-	return `Conversation context — this background applies to every step of this workflow:\n\n${body}${section}\n\n---\n\n`;
+	// A re-injection has to say it IS one. The agent may still be able to see a
+	// summary of the original preamble in its compacted history, and an
+	// unexplained second copy of the same background reads as either a mistake or
+	// a new instruction. Saying why also tells it something true and useful: the
+	// conversation it is in has lost detail, so it should trust the files on disk
+	// over its recollection.
+	const lead = afterCompaction
+		? "This conversation was compacted, so its earlier turns have been replaced by a summary and detail has been lost. Restating the workflow's background in full — treat this as authoritative over anything you remember, and prefer re-reading the artifacts on disk over recalling them.\n\n"
+		: "";
+	return `${lead}Conversation context — this background applies to every step of this workflow:\n\n${body}${section}\n\n---\n\n`;
 }
 
 /**
@@ -198,6 +219,13 @@ export function composeStepInput(
 		mode?: "exec" | "judge";
 		/** Prepend the conversation-context preamble (and its images). */
 		injectContext?: boolean;
+		/**
+		 * This injection is a RE-injection forced by a detected compaction, not the
+		 * first one. Only changes the preamble's opening line — see
+		 * `contextPreamble` — but that line is the difference between the agent
+		 * reading a duplicate and reading an explanation.
+		 */
+		afterCompaction?: boolean;
 		retryReason?: string;
 		timedOut?: boolean;
 		/**
@@ -221,7 +249,11 @@ export function composeStepInput(
 		return judgeInput(step.acceptanceCriteria ?? "", delegated, acceptanceImages);
 	}
 	const preamble = options.injectContext
-		? contextPreamble(workflow.conversationContext, listFieldAttachments(workflow.id, null, "context"))
+		? contextPreamble(
+				workflow.conversationContext,
+				listFieldAttachments(workflow.id, null, "context"),
+				options.afterCompaction ?? false,
+			)
 		: "";
 	// Straight after the description, so "do what this screenshot shows" reads as
 	// one instruction rather than a task and an unrelated file list.
@@ -229,10 +261,17 @@ export function composeStepInput(
 		"attached to this step's task description",
 		listFieldAttachments(workflow.id, step.id, "description"),
 	);
-	return `${preamble}${step.description}${descriptionImages}${criteriaNote(step.acceptanceCriteria, acceptanceImages)}${subagentInstruction(
-		step.useSubagent,
-		options.forceSubagent ?? false,
-	)}${options.retryReason ? retryNote(options.retryReason) : ""}${options.timedOut ? TIMEOUT_NOTE : ""}`;
+	// Where the previous steps' results are on disk (see step-results.ts). On
+	// EVERY exec prompt, not just the ones after a compaction: by the time the
+	// hub notices a boundary the agent has already lost the history, so the
+	// pointer has to have been given while the conversation was still intact.
+	const priorResults = stepResultsNote(hookRuntime(workflow.hookUrl).workdir);
+	return `${preamble}${step.description}${descriptionImages}${criteriaNote(
+		step.acceptanceCriteria,
+		acceptanceImages,
+	)}${priorResults}${subagentInstruction(step.useSubagent, options.forceSubagent ?? false)}${
+		options.retryReason ? retryNote(options.retryReason) : ""
+	}${options.timedOut ? TIMEOUT_NOTE : ""}`;
 }
 
 /**
@@ -291,6 +330,19 @@ export async function dispatchStep(
 	// re-injecting would duplicate it. A failed first dispatch that produced no
 	// session leaves the guard false, so the next attempt re-injects cleanly.
 	const freshConversation = sessionToResume === null;
+	// Did the conversation we're about to resume get compacted since we last used
+	// it? Read from the transcript, persisted on the workflow, and — for an exec
+	// dispatch — answered by re-stating the conversation context, which the
+	// once-only `context_injected` guard would otherwise never allow again. Only
+	// exec: the judge is a single graded turn on a session it was just given, and
+	// prefixing a workflow-wide preamble to a verdict prompt is noise.
+	//
+	// This costs a scan of a transcript that grows all workflow long, which is why
+	// the context-pressure read below is careful to avoid one it doesn't need.
+	// Paid here anyway, and unconditionally: it happens once per dispatched step,
+	// and the alternative is not knowing that the agent has forgotten the workflow.
+	const observed = mode === "exec" && sessionToResume ? observeCompaction(workflow, sessionToResume, log) : workflow;
+	const afterCompaction = mode === "exec" && needsContextReinjection(observed);
 	// The context-pressure override, measured on `sessionToResume` — the session
 	// this dispatch is about to add to — and therefore only after it's known.
 	// A fresh conversation has no session, so the ratio is null and the step's own
@@ -312,9 +364,20 @@ export async function dispatchStep(
 			"warning",
 		);
 	}
-	const input = composeStepInput(step, workflow, {
+	if (afterCompaction) {
+		log(
+			`step ${step.id} (workflow ${workflow.id}) resumes conversation ${sessionToResume}, which was compacted at ` +
+				`${observed.lastCompactionAt} — re-injecting the workflow's conversation context`,
+			"warning",
+		);
+	}
+	const input = composeStepInput(step, observed, {
 		mode,
-		injectContext: mode === "exec" && freshConversation && !workflow.contextInjected,
+		// Two independent reasons to inject: this is the conversation's first
+		// dispatch and the guard is still open, or the conversation was compacted
+		// and what was injected at the top of it is gone.
+		injectContext: mode === "exec" && ((freshConversation && !workflow.contextInjected) || afterCompaction),
+		afterCompaction,
 		retryReason: options.retryReason,
 		timedOut: options.timedOut,
 		forceSubagent,
@@ -342,6 +405,10 @@ export async function dispatchStep(
 			// `started` callback flips it to `running` and starts the timeout clock
 			// at the real run start (fair to queued steps).
 			markStepQueued(step.id, options.manual ?? false);
+			// The re-injected context is only "delivered" once the broker has taken
+			// the input. A rejected or unreachable dispatch leaves the marker armed,
+			// so the retry carries the preamble instead of silently dropping it.
+			if (afterCompaction) markContextReinjected(observed);
 			log(`step ${step.id} (workflow ${workflow.id}, ${mode}) -> '${workflow.agentName}' accepted (queued)`);
 		} else {
 			completeStep(step.id, { ok: false, error: `hook answered ${res.status}` });

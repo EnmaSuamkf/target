@@ -145,12 +145,38 @@ context** is an optional preamble injected **before the first step** of a
 fresh run, so every step inherits that background (audience, constraints,
 definitions, a persona) without repeating it. It's injected once: later steps
 resume the session, which already carries it in history, so it's never
-re-injected automatically. Restarting the workflow starts a new conversation
-and injects it again. Once injected, the context is **locked** (the field
-becomes read-only and Save is disabled) — to change it, restart the workflow
-first. You add it to an existing workflow with `target set-context` (or the
-**Conversation context** block in the detail panel); it isn't part of workflow
-creation.
+re-injected automatically — **except after a compaction**, see below.
+Restarting the workflow starts a new conversation and injects it again. Once
+injected, the context is **locked** (the field becomes read-only and Save is
+disabled) — to change it, restart the workflow first. You add it to an existing
+workflow with `target set-context` (or the **Conversation context** block in the
+detail panel); it isn't part of workflow creation.
+
+### When the conversation is compacted
+
+A conversation that reaches the model's context limit is **compacted** by the
+harness: its earlier turns are dropped and replaced by a summary. The session id
+survives, so nothing looks broken — but the agent stops being able to see the
+steps before it, and the conversation context injected at the top is gone with
+them.
+
+The hub detects the boundary in both harnesses' transcripts (Claude Code's
+`compact_boundary` system record and free-code's `type: "compaction"` record,
+which carries no token metadata at all), records it on the workflow, and
+re-states the conversation context on the next step — no restart, no progress
+discarded. It shows up in the log, in the progress `.md` and in the
+**Conversation** panel.
+
+Independently of that, every completed step's **full** result is written inside
+the workdir at `<workdir>/.target/steps/<NN>-<slug>.md`, and every step prompt
+names that directory. The workdir is mounted in every sandbox mode, so a
+sandboxed agent can read what step 3 actually produced instead of trying to
+remember it. (The `~/.target/<name>-<id>.md` progress file stays the
+operator-facing view, results still truncated to 500 chars.)
+
+The context meter's window is derived from the model the session actually ran
+on, not assumed — override it per model with `modelContextWindows` in
+`~/.target/config.json`. Full write-up in `docs/compaction-resilience.md`.
 
 ### Status and progress bar always agree
 

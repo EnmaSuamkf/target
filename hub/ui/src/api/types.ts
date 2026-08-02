@@ -266,10 +266,16 @@ export interface ShortcutSettingsInput {
 export interface TokenUsage {
 	turns: number;
 	contextTokens: number;
+	/** Derived from `model`, not a constant — see hub/models.ts. */
 	contextWindow: number;
+	/** Model id the last turn ran on, as the harness wrote it; null before the first turn. */
+	model: string | null;
 	totalInputTokens: number;
 	outputTokens: number;
 	includesSubagents: boolean;
+	/** ISO timestamp of the last compaction of this conversation, or null if it was never compacted. */
+	lastCompactionAt: string | null;
+	compactions: number;
 }
 
 export interface SessionInfo {
@@ -278,6 +284,10 @@ export interface SessionInfo {
 	sandbox: Sandbox;
 	image: string | null;
 	usage: TokenUsage | null;
+	/** Latest compaction boundary the hub has recorded for this workflow. */
+	lastCompactionAt: string | null;
+	/** A compaction the next step hasn't re-injected the conversation context for yet. */
+	compactionPending: boolean;
 }
 
 /** One level of the server-side directory listing (GET /api/fs/dirs). */

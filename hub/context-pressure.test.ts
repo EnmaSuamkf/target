@@ -41,11 +41,19 @@ const { createAwbHook } = await import("./awb.ts");
 const { getStep, getWorkflow, insertStep, insertWorkflow, markStepJudging, markStepRunning, setWorkflowSessionId, updateStepConfig } =
 	await import("./db.ts");
 const { loadConfig } = await import("./config.ts");
-const { claudeProjectDir, CONTEXT_WINDOW_TOKENS } = await import("./transcript.ts");
+const { claudeProjectDir } = await import("./transcript.ts");
+// The window is derived from the transcript's model now (models.ts). These
+// fixtures name no model on purpose, so they measure against the documented
+// fallback — the ratios under test are about the 60% rule, not the window.
+const { FALLBACK_CONTEXT_WINDOW_TOKENS } = await import("./models.ts");
 const { CONTEXT_PRESSURE_RATIO, isContextPressured, sessionContextRatio, shouldForceSubagent, workflowContextRatio } =
 	await import("./context-pressure.ts");
 const { CONTEXT_PRESSURE_SUFFIX, INLINE_SUFFIX, SUBAGENT_SUFFIX, composeStepInput, dispatchStep, subagentInstruction } =
 	await import("./runner.ts");
+// Every exec prompt names the on-disk copies of the prior steps' results
+// (step-results.ts); the byte-for-byte assertion below spells it out.
+const { stepResultsNote } = await import("./step-results.ts");
+const { hookRuntime } = await import("./awb.ts");
 
 const cfg = loadConfig();
 const silent = () => {};
@@ -141,7 +149,10 @@ function writeTranscript(workdir: string, sessionId: string, ratio: number): voi
 			type: "assistant",
 			message: { id, role: "assistant", usage: { input_tokens: tokens, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 10 } },
 		});
-	const lines = [turn("msg-early", CONTEXT_WINDOW_TOKENS), turn("msg-last", Math.round(ratio * CONTEXT_WINDOW_TOKENS))];
+	const lines = [
+		turn("msg-early", FALLBACK_CONTEXT_WINDOW_TOKENS),
+		turn("msg-last", Math.round(ratio * FALLBACK_CONTEXT_WINDOW_TOKENS)),
+	];
 	fs.writeFileSync(file, `${lines.join("\n")}\n`);
 }
 
@@ -253,7 +264,12 @@ test("a delegated step is dispatched identically whether or not the session is c
 	await dispatchStep(step, withSession(workflow.id, "sess-full"), cfg, silent);
 
 	assert.ok(!dispatches[0].input.includes(CONTEXT_PRESSURE_SUFFIX), "no need to explain an override that didn't happen");
-	assert.equal(dispatches[0].input, `the step${SUBAGENT_SUFFIX}`, "byte-identical to a step dispatched on an empty session");
+	const priorResults = stepResultsNote(hookRuntime(getWorkflow(workflow.id)!.hookUrl).workdir);
+	assert.equal(
+		dispatches[0].input,
+		`the step${priorResults}${SUBAGENT_SUFFIX}`,
+		"byte-identical to a step dispatched on an empty session",
+	);
 });
 
 test("a fresh conversation is never pressured — the first step honours its toggle", async () => {

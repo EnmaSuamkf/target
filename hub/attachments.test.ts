@@ -30,6 +30,11 @@ const { loadConfig } = await import("./config.ts");
 const { createServer } = await import("./server.ts");
 const { composeStepInput, dispatchStep } = await import("./runner.ts");
 const { attachmentSection, MAX_ATTACHMENT_BYTES, saveAttachment, sanitizeFilename } = await import("./attachments.ts");
+const { hookRuntime } = await import("./awb.ts");
+// Every exec prompt now points at the on-disk copies of the prior steps'
+// results (step-results.ts), so the "exactly as before" assertions below spell
+// it out rather than dropping to a looser `includes`.
+const { stepResultsNote } = await import("./step-results.ts");
 const { removeStep, removeWorkflow } = await import("./workflow.ts");
 
 const cfg = loadConfig();
@@ -362,6 +367,7 @@ test("a step with no attachments composes exactly what it did before the feature
 	assert.equal(
 		input,
 		'do the thing\n\nThe result of this step MUST satisfy the following acceptance criterion, so aim explicitly to meet it: "must be X".' +
+			stepResultsNote(hookRuntime(getWorkflow(workflow.id)!.hookUrl).workdir) +
 			"\n\nImportant: run this step by delegating the work to a subagent (the Task tool) instead of solving it yourself directly in this thread — this same session is reused sequentially for every step of the workflow, and delegating keeps the main thread lightweight.",
 		"no attachments means no extra sections at all",
 	);
