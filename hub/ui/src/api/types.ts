@@ -136,9 +136,20 @@ export interface Workflow {
 	updatedAt: string;
 }
 
+/**
+ * What a step row IS. `task` is one the operator wrote — everything the UI has
+ * ever shown. `context` is the hub-owned step that delivers the workflow's
+ * conversation context as its own turn before every other step: it's pinned
+ * above the list, kept out of the run selection and the progress count, and
+ * every mutating action on it is refused by the server.
+ */
+export type StepKind = "task" | "context";
+
 export interface Step {
 	id: string;
 	workflowId: string;
+	/** See `StepKind`. Absent on a server that predates it, hence the default at every read site. */
+	kind: StepKind;
 	orderIndex: number;
 	description: string;
 	status: StepStatus;

@@ -412,11 +412,6 @@ export function App(): React.JSX.Element {
 		await act("Could not remove the step", () => api.removeStep(selectedId, stepId), refreshCurrent);
 	};
 
-	const handleRunStep = async (stepId: string): Promise<void> => {
-		if (!selectedId) return;
-		await act("Could not run the step", () => api.runStep(selectedId, stepId), refreshCurrent);
-	};
-
 	/**
 	 * One button, two meanings — which is why the confirmation is written from
 	 * the step's status rather than being one fixed sentence. On a stuck step
@@ -431,8 +426,8 @@ export function App(): React.JSX.Element {
 		const confirmed = await confirm({
 			title: held ? "Abort this step and stop the workflow?" : "Abort this step?",
 			description: held
-				? "Refuses this step's result: it's recorded failed and the workflow stops here — no further step runs. Its result and session are kept, so you can still read it and talk to the agent, and a ▶ re-run later clears the failure."
-				: "Force-fails a step whose run never called back, so it can be re-run. Its session is preserved.",
+				? "Refuses this step's result: it's recorded failed and the workflow stops here — no further step runs. Its result and session are kept, so you can still read it and talk to the agent, and re-running it later — check it, then Start over — clears the failure."
+				: "Force-fails a step whose run never called back, so it can be re-run by checking it and pressing Start over. Its session is preserved.",
 			confirmLabel: held ? "Abort and stop" : "Abort step",
 			danger: true,
 		});
@@ -651,7 +646,6 @@ export function App(): React.JSX.Element {
 								onAddStep={handleAddStep}
 								onSaveStep={handleSaveStep}
 								onRemoveStep={(id) => void handleRemoveStep(id)}
-								onRunStep={(id) => void handleRunStep(id)}
 								onAbortStep={(id) => void handleAbortStep(id)}
 								onContinueStep={(id) => void handleContinueStep(id)}
 								onOpenStepConversation={(id) => void handleOpenStepConversation(id)}

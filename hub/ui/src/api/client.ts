@@ -221,14 +221,9 @@ export function removeStep(workflowId: string, stepId: string): Promise<{ ok: tr
 	return request<{ ok: true }>(`/api/workflows/${workflowId}/steps/${stepId}`, { method: "DELETE", admin: true });
 }
 
-/** Runs one step now, outside the sequential order, on its own fresh session. */
-export async function runStep(workflowId: string, stepId: string): Promise<Step> {
-	const data = await request<{ step: Step }>(`/api/workflows/${workflowId}/steps/${stepId}/run`, {
-		method: "POST",
-		admin: true,
-	});
-	return data.step;
-}
+// No wrapper for POST /steps/:stepId/run: the endpoint still exists as an admin
+// HTTP surface, but nothing in this UI dispatches a single step out of order any
+// more — running is the workflow's Start acting on the checked steps.
 
 /**
  * Releases a step held at its manual-review gate: it goes `done` and the
