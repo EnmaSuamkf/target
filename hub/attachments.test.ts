@@ -25,7 +25,7 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-test-attachments-"
 process.env.TARGET_HOME = tmpHome;
 process.env.AWB_HOME = tmpHome;
 
-const { getStep, insertStep, insertWorkflow, getWorkflow, setContextInjected } = await import("./db.ts");
+const { getContextStep, getStep, insertStep, insertWorkflow, getWorkflow, setContextInjected } = await import("./db.ts");
 const { loadConfig } = await import("./config.ts");
 const { createServer } = await import("./server.ts");
 const { composeStepInput, dispatchStep } = await import("./runner.ts");
@@ -230,7 +230,14 @@ test("GET /api/workflows/:id returns the context attachments on the workflow and
 		[ctx.id],
 		"the workflow carries only its context images",
 	);
-	const stepAttachments = body.steps[0].attachments as any[];
+	// By id, not by position: uploading a context image materialises the workflow's
+	// hub-owned context step, which sorts FIRST (order_index -1), so `steps[0]` is
+	// no longer the step this test is about.
+	const taskStep = body.steps.find((s: any) => s.id === step.id);
+	assert.ok(taskStep, "the task step is still in the list, behind the context step");
+	assert.equal(taskStep.kind, "task");
+	assert.equal(body.steps[0].kind, "context", "the context step leads the list");
+	const stepAttachments = taskStep.attachments as any[];
 	assert.deepEqual(
 		stepAttachments.map((a) => a.id).sort(),
 		[desc.id, acc.id].sort(),
@@ -409,7 +416,7 @@ test("attachmentSection returns nothing at all when there is nothing attached", 
 
 // --- end to end: the string that really goes over the wire ------------
 
-test("a real dispatch POSTs a hook input containing all three fields' image paths", async () => {
+test("a real dispatch POSTs hook inputs containing all three fields' image paths", async () => {
 	// A fake awb hook that records the body it is sent, so this asserts on the
 	// actual wire payload rather than on the composer alone.
 	const dispatched: { input: string }[] = [];
@@ -441,19 +448,31 @@ test("a real dispatch POSTs a hook input containing all three fields' image path
 	const acc = (await upload(workflow.id, { field: "acceptance", stepId: step.id, filename: "mockup.png" })).json
 		.attachment;
 
+	// The conversation context now travels as its OWN dispatch (the hub-owned
+	// context step, materialised by the upload above), so the images arrive over
+	// two turns rather than one: the context's on the context step, the step's own
+	// two on the step. Both are real POSTs to the hook, which is the point of this
+	// test — it asserts on the wire payload, not on the composer.
+	const contextStep = getContextStep(workflow.id);
+	assert.ok(contextStep, "attaching a context image materialised the context step");
+	await dispatchStep(contextStep, getWorkflow(workflow.id)!, cfg, silent);
 	await dispatchStep(getStep(step.id)!, getWorkflow(workflow.id)!, cfg, silent);
 
-	assert.equal(dispatched.length, 1, "the hook was called once");
-	const input = dispatched[0].input;
-	for (const [label, attachment] of [
-		["conversation context", ctx],
-		["task description", desc],
-		["acceptance criteria", acc],
+	assert.equal(dispatched.length, 2, "the hook was called for the context step and for the step");
+	const contextInput = dispatched[0].input;
+	const stepInput = dispatched[1].input;
+	for (const [label, attachment, input] of [
+		["conversation context", ctx, contextInput],
+		["task description", desc, stepInput],
+		["acceptance criteria", acc, stepInput],
 	] as const) {
 		assert.ok(input.includes(attachment.path), `the ${label} image path reached the hook`);
 		// And the path really points at a readable file — the agent's Read would work.
 		assert.deepEqual(fs.readFileSync(attachment.path), PNG_BYTES);
 	}
+	// And the step's own dispatch is clean: the background is not glued to it.
+	assert.equal(stepInput.includes(ctx.path), false, "the context image is not repeated on the step");
+	assert.doesNotMatch(stepInput, /Conversation context/);
 });
 
 test("saveAttachment keeps a workflow's images in one stable directory across fields and steps", () => {

@@ -21,13 +21,21 @@ import styles from "./StepItem.module.css";
  * constraints, not styling choices:
  *
  * - A `running` step can't be edited, and only a `pending` one can be removed.
- * - A `waiting` step (held at its manual-review gate) can't be edited or ▶ re-run
- *   either — the server refuses both.
+ * - A `waiting` step (held at its manual-review gate) can't be edited either —
+ *   the server refuses it.
  * - The retry interval only applies with more than one retry, so the field is
  *   disabled and forced to 0 below that.
  * - A step running its judge phase reads "judging", not "running".
  * - The status picker can't touch a step with a job in flight (the server
  *   refuses it) — Abort is the action for that, and it's right there.
+ *
+ * No row has a run control of its own. Dispatching is the workflow's single
+ * Start button acting on the checked steps, so there is one answer to "what will
+ * run when I press go" instead of two competing ones — a per-row ▶ used to fire
+ * a step immediately and outside the sequential order, which meant the checkbox
+ * beside it described a run that button didn't take part in. The row still SAYS
+ * what it is doing while a job is in flight (below), because that was feedback
+ * the ▶ happened to carry, not a reason to keep a button.
  *
  * A `waiting` step gets its own set of four actions, because "Continue" alone
  * was a dead end: the operator being asked to approve a result had no way to say
@@ -54,7 +62,6 @@ export function StepItem({
 	onToggleSelected,
 	onSave,
 	onRemove,
-	onRun,
 	onAbort,
 	onContinue,
 	onOpenConversation,
@@ -69,7 +76,6 @@ export function StepItem({
 	onToggleSelected: (id: string, selected: boolean) => void;
 	onSave: (id: string, input: StepConfigInput) => Promise<void>;
 	onRemove: (id: string) => void;
-	onRun: (id: string) => void;
 	onAbort: (id: string) => void;
 	onContinue: (id: string) => void;
 	/** Opens a terminal on this step's own session, not the workflow's newest. */
@@ -87,6 +93,13 @@ export function StepItem({
 	const [expanded, setExpanded] = useState(false);
 	const [adding, setAdding] = useState(false);
 
+	// The hub-owned conversation-context step. Everything an operator can do to a
+	// step is refused for it by the server (edit, remove, Continue, Set status),
+	// so the buttons are hidden rather than left to 400 — with the one exception of
+	// Abort, which the server DOES allow, because a context dispatch that hangs has
+	// to be recoverable like any other. It also has no checkbox: it is always part
+	// of the run, and it isn't counted in "N steps".
+	const isContext = step.kind === "context";
 	const running = step.status === "running";
 	const waiting = step.status === "waiting";
 	// A step with a job in flight is the one state the override refuses: its
@@ -128,22 +141,31 @@ export function StepItem({
 			<div className={styles.head}>
 				{/* The checkbox is wrapped so its tappable area can be grown to a
 				    thumb's size on a phone without drawing a giant checkbox. */}
-				<label
-					className={styles.checkWrap}
-					title="Check to run only the selected steps on Start. Leave all unchecked to run nothing."
-				>
-					<input
-						type="checkbox"
-						className={styles.check}
-						checked={selected}
-						onChange={(ev) => onToggleSelected(step.id, ev.target.checked)}
-						aria-label={`Include step ${step.orderIndex + 1} in the next run`}
-					/>
-				</label>
-				<span className={styles.index}>{step.orderIndex + 1}</span>
+				{!isContext && (
+					<label
+						className={styles.checkWrap}
+						title="Check to run only the selected steps on Start. Leave all unchecked to run nothing."
+					>
+						<input
+							type="checkbox"
+							className={styles.check}
+							checked={selected}
+							onChange={(ev) => onToggleSelected(step.id, ev.target.checked)}
+							aria-label={`Include step ${step.orderIndex + 1} in the next run`}
+						/>
+					</label>
+				)}
+				<span className={styles.index}>{isContext ? "ctx" : step.orderIndex + 1}</span>
 				<p className={styles.description}>{step.description}</p>
 				<Badge status={step.status} label={statusLabel} manual={step.statusManual} manualAt={step.statusManualAt} />
 			</div>
+
+			{isContext && (
+				<p className="hint">
+					Automatic — the workflow's conversation context, delivered to the agent as its own turn before every
+					other step. Edit it in the Conversation context box above.
+				</p>
+			)}
 
 			{(step.acceptanceCriteria || elapsed || step.manualRun || step.manualReview || step.useSubagent === false || activity) && (
 				<div className={styles.meta}>
@@ -271,15 +293,13 @@ export function StepItem({
 						</button>
 					</>
 				)}
-				<button
-					type="button"
-					className="btn btn--sm"
-					onClick={() => onRun(step.id)}
-					disabled={running || waiting || busy}
-					{...(waiting ? { title: "This step is waiting for your review — continue it instead." } : {})}
-				>
-					{step.status === "running" ? "Running…" : step.status === "queued" ? "Queued…" : "▶ Run"}
-				</button>
+				{/* Plain text, not a button: no row runs itself any more, but the state
+				    the removed ▶ used to spell out is still worth spelling out, in the
+				    row of actions where the eye already is. The badge above carries the
+				    same fact and keeps the finer "judging" distinction; this is the
+				    second, closer copy that stops the action row from looking idle
+				    while a job is actually in flight. */}
+				{inFlight && <span className={styles.metaItem}>{running ? "Running…" : "Queued…"}</span>}
 				<button
 					type="button"
 					className="btn btn--sm btn--danger"
@@ -293,18 +313,22 @@ export function StepItem({
 				>
 					Abort
 				</button>
-				<button type="button" className="btn btn--sm" onClick={() => setEditing(true)} disabled={!editable || busy}>
-					Edit
-				</button>
-				<button
-					type="button"
-					className="btn btn--sm btn--ghost"
-					onClick={() => onRemove(step.id)}
-					disabled={!removable || busy}
-					title={removable ? "Remove this step" : "Only a pending step can be removed."}
-				>
-					Remove
-				</button>
+				{!isContext && (
+					<button type="button" className="btn btn--sm" onClick={() => setEditing(true)} disabled={!editable || busy}>
+						Edit
+					</button>
+				)}
+				{!isContext && (
+					<button
+						type="button"
+						className="btn btn--sm btn--ghost"
+						onClick={() => onRemove(step.id)}
+						disabled={!removable || busy}
+						title={removable ? "Remove this step" : "Only a pending step can be removed."}
+					>
+						Remove
+					</button>
+				)}
 
 				{/* Correcting the status is a picker rather than a button per status:
 				    it's three options, it's rare, and one native <select> is a single
@@ -312,6 +336,7 @@ export function StepItem({
 				    It never holds a value — picking one fires the action and the control
 				    snaps back to its prompt, because the step's real status is the badge
 				    above, not this. */}
+				{!isContext && (
 				<select
 					className={`select ${styles.statusSelect}`}
 					value=""
@@ -335,6 +360,7 @@ export function StepItem({
 						</option>
 					))}
 				</select>
+				)}
 			</div>
 
 			{/* Rendered from the step it inserts after, so the dialog knows where the

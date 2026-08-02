@@ -35,6 +35,39 @@ export type StepStatus = "pending" | "queued" | "running" | "waiting" | "done" |
 export type StepPhase = "exec" | "judge";
 
 /**
+ * What a step row IS.
+ *
+ *  - `task` — a step the operator wrote. Everything that existed before this
+ *    column did, which is why it is the DEFAULT: an upgraded DB reads every
+ *    pre-existing row as a task, and a workflow that never uses a conversation
+ *    context never sees any other kind.
+ *  - `context` — the workflow's conversation context, materialised as its own
+ *    step so the background is delivered as its own turn on the shared session
+ *    BEFORE any real work. Hub-owned, not operator-authored: it is created,
+ *    refreshed and deleted by `reconcileContextStep` (workflow.ts), pinned at
+ *    `CONTEXT_STEP_ORDER_INDEX`, and refused by every operator-facing mutator.
+ *
+ * The distinction is load-bearing for every read path that COUNTS steps
+ * (`stepProgress`, the completion notification, the on-disk `<NN>-<slug>.md`
+ * files): a context step is plumbing, not work, and must not show up as either.
+ */
+export type StepKind = "task" | "context";
+
+/**
+ * Where the hub-owned context step sits: BEFORE the first operator step, at a
+ * negative index rather than at 0.
+ *
+ * This is the detail the whole design rests on. `ORDER BY order_index` (and so
+ * `listSteps` and `nextPendingStep`) puts it first for free, while renumbering
+ * NOTHING — every task step keeps the index it already had, so
+ * `stepResultFileName` keeps emitting the same `01-….md`, `02-….md` names, no
+ * orphaned duplicates are left behind in `.target/steps/` (which never deletes),
+ * and `steps.at(-1)` still means "the last real step". At index 0 all of that
+ * would have had to be migrated exactly once, and could not be rolled back.
+ */
+export const CONTEXT_STEP_ORDER_INDEX = -1;
+
+/**
  * Statuses a HUMAN may force a step into (see `overrideStepStatus`).
  *
  * Deliberately only the settled ones. `running`/`queued` are owned by the
@@ -117,6 +150,13 @@ export interface Workflow {
 export interface Step {
 	id: string;
 	workflowId: string;
+	/**
+	 * What this row is: an operator-authored `task`, or the hub-owned `context`
+	 * step (see `StepKind`). Defaults to `task` everywhere it's absent — an old
+	 * DB row, a template, an API body that never heard of it — so nothing that
+	 * predates this column changes meaning.
+	 */
+	kind: StepKind;
 	orderIndex: number;
 	description: string;
 	status: StepStatus;
@@ -260,6 +300,7 @@ function open(): DatabaseSync {
 		CREATE TABLE IF NOT EXISTS steps (
 			id TEXT PRIMARY KEY,
 			workflow_id TEXT NOT NULL,
+			kind TEXT NOT NULL DEFAULT 'task',
 			order_index INTEGER NOT NULL,
 			description TEXT NOT NULL,
 			status TEXT NOT NULL DEFAULT 'pending',
@@ -342,6 +383,13 @@ function open(): DatabaseSync {
 	addColumn("last_progress_token", "last_progress_token TEXT");
 	addColumn("status_manual", "status_manual INTEGER NOT NULL DEFAULT 0");
 	addColumn("status_manual_at", "status_manual_at TEXT");
+	// DEFAULT 'task': every step that exists is one the operator wrote, so an
+	// upgraded row has to keep saying exactly that. This is a pure ADD COLUMN with
+	// a non-null default — no row is rewritten, no table is recreated, and a
+	// workflow that is MID-RUN while the upgrade happens is untouched: an older
+	// process still reading this DB sees `SELECT *` gain a column it ignores, and
+	// its INSERTs name their columns explicitly, so the default fills this one in.
+	addColumn("kind", "kind TEXT NOT NULL DEFAULT 'task'");
 	// Same upgrade safety for the `workflows` table: `conversation_context` and
 	// `context_injected` were added after launch, so an older DB won't have them.
 	const existingWorkflowColumns = new Set(
@@ -629,6 +677,9 @@ function rowToStep(row: Record<string, unknown>): Step {
 	return {
 		id: String(row.id),
 		workflowId: String(row.workflow_id),
+		// Absent column / NULL (a row written before the kind existed) is a task —
+		// which is what every row written before this feature actually was.
+		kind: (row.kind as StepKind) ?? "task",
 		orderIndex: Number(row.order_index),
 		description: String(row.description),
 		status: row.status as StepStatus,
@@ -676,11 +727,24 @@ export function insertStep(
 		 * arithmetic.
 		 */
 		afterOrderIndex?: number | null;
+		/** What the row IS (see `StepKind`). Omitted = `task`, the only kind an operator can author. */
+		kind?: StepKind;
+		/**
+		 * Writes this exact `order_index` instead of computing one. The escape
+		 * hatch for the hub-owned context step, which has to land at
+		 * `CONTEXT_STEP_ORDER_INDEX` (-1) WITHOUT the append/insert-after
+		 * arithmetic — that arithmetic exists to make room by shifting later rows
+		 * down, and shifting is the one thing this row must never cause. Wins over
+		 * `afterOrderIndex` when both are given.
+		 */
+		orderIndex?: number;
 	} = {},
 ): Step {
 	const database = open();
 	let orderIndex: number;
-	if (options.afterOrderIndex == null) {
+	if (options.orderIndex != null) {
+		orderIndex = options.orderIndex;
+	} else if (options.afterOrderIndex == null) {
 		const maxRow = database
 			.prepare("SELECT COALESCE(MAX(order_index), -1) AS maxIdx FROM steps WHERE workflow_id = ?")
 			.get(workflowId) as Record<string, unknown>;
@@ -705,6 +769,7 @@ export function insertStep(
 	const step: Step = {
 		id: crypto.randomUUID(),
 		workflowId,
+		kind: options.kind ?? "task",
 		orderIndex,
 		description,
 		status: "pending",
@@ -733,12 +798,13 @@ export function insertStep(
 	};
 	database
 		.prepare(
-			`INSERT INTO steps (id, workflow_id, order_index, description, status, callback_token, created_at, acceptance_criteria, manual_review, use_subagent, max_retries, retry_interval_seconds)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO steps (id, workflow_id, kind, order_index, description, status, callback_token, created_at, acceptance_criteria, manual_review, use_subagent, max_retries, retry_interval_seconds)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			step.id,
 			step.workflowId,
+			step.kind,
 			step.orderIndex,
 			step.description,
 			step.status,
@@ -755,6 +821,20 @@ export function insertStep(
 
 export function getStep(id: string): Step | null {
 	const row = open().prepare("SELECT * FROM steps WHERE id = ?").get(id);
+	return row ? rowToStep(row as Record<string, unknown>) : null;
+}
+
+/**
+ * The workflow's hub-owned conversation-context step, if it has one. At most
+ * one ever exists per workflow — `reconcileContextStep` (workflow.ts) is the
+ * only writer and it is idempotent — but the query is ordered and limited
+ * anyway so a duplicate written by a future bug degrades to "the first one"
+ * instead of throwing on a read path the whole UI polls.
+ */
+export function getContextStep(workflowId: string): Step | null {
+	const row = open()
+		.prepare("SELECT * FROM steps WHERE workflow_id = ? AND kind = 'context' ORDER BY order_index LIMIT 1")
+		.get(workflowId);
 	return row ? rowToStep(row as Record<string, unknown>) : null;
 }
 
@@ -1213,6 +1293,15 @@ export function failTimedOutStep(stepId: string, error: string): boolean {
  * Otherwise only the listed steps are selected and the rest are skipped. Ids
  * that don't belong to the workflow are ignored.
  *
+ * The one exception is the hub-owned context step. The UI sends an explicit id
+ * list built from the step checkboxes, and that list can never contain the
+ * context step (it isn't offered as a checkbox), so the plain CASE would
+ * deselect it — and `nextPendingStep` only ever returns a SELECTED step, so the
+ * workflow would then run perfectly with its background silently missing. That's
+ * the worst failure this feature could have, so the kind is forced selected here
+ * rather than trusted to every caller. Only in the non-empty branch: "select
+ * nothing" still means nothing runs, context included.
+ *
  * Note this only governs runs that actually call this function (Start/Resume/
  * Restart). Brand-new steps still default to `selected = 1` at the column
  * level (see `insertStep`/the `selected` column default), so existing
@@ -1228,7 +1317,7 @@ export function setStepSelection(workflowId: string, stepIds: string[]): void {
 	const placeholders = stepIds.map(() => "?").join(", ");
 	database
 		.prepare(
-			`UPDATE steps SET selected = CASE WHEN id IN (${placeholders}) THEN 1 ELSE 0 END WHERE workflow_id = ?`,
+			`UPDATE steps SET selected = CASE WHEN id IN (${placeholders}) OR kind = 'context' THEN 1 ELSE 0 END WHERE workflow_id = ?`,
 		)
 		.run(...stepIds, workflowId);
 }
@@ -1239,6 +1328,14 @@ export function setStepSelection(workflowId: string, stepIds: string[]): void {
  * subset chosen leaves the unselected steps' results intact and re-runs just
  * the chosen ones. With nothing selected (see `setStepSelection`), no step is
  * selected, so this resets nothing at all.
+ *
+ * The context step rides along because `setStepSelection` always selects it
+ * (unless the selection is empty), and that pairing is deliberate: a restart
+ * also resets `context_injected` and drops the session, so a context step left
+ * `done` from the OLD conversation would mean nothing ever re-primes the NEW
+ * one — and the legacy prepend, which used to cover that, is now disabled for
+ * workflows that have a context step. Selected-and-reset is what keeps the two
+ * halves of a restart in agreement.
  */
 export function resetSteps(workflowId: string): void {
 	open()
@@ -1259,13 +1356,19 @@ export interface Progress {
 	pct: number;
 }
 
+/**
+ * Progress over the workflow's REAL work only — `kind = 'task'`. The hub-owned
+ * context step is plumbing, not a step the operator asked for: counting it would
+ * make a 2-step workflow read "0/3", stall the bar at 66% when everything the
+ * operator wrote is finished, and put a third step in the completion DM.
+ */
 export function stepProgress(workflowId: string): Progress {
 	const row = open()
 		.prepare(
 			`SELECT COUNT(*) AS total,
 			        SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS done,
 			        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
-			 FROM steps WHERE workflow_id = ?`,
+			 FROM steps WHERE workflow_id = ? AND kind = 'task'`,
 		)
 		.get(workflowId) as Record<string, unknown>;
 	const total = Number(row.total ?? 0);

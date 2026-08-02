@@ -77,7 +77,8 @@ export function ContextPanel({
 			</div>
 
 			<p className="hint">
-				Background every step inherits. Injected once, before the first step of a fresh conversation.
+				Background every step inherits. Delivered as its own step, pinned above the list, which the agent
+				receives as its own turn before any of the workflow's real steps run.
 				{injected && " Locked — the agent is already running under it. Start the workflow over to change it."}
 			</p>
 

@@ -18,12 +18,14 @@ import {
 	claimWorkflowCompletionNotice,
 	clearCompactionMarkers,
 	completeStep,
+	CONTEXT_STEP_ORDER_INDEX,
 	deleteStep,
 	deleteWorkflow,
 	failRunningStep,
 	failTimedOutStep,
 	findTimeoutCandidates,
 	finishStepDone,
+	getContextStep,
 	getStep,
 	getWorkflow,
 	insertStep,
@@ -321,6 +323,9 @@ export async function continueStep(workflowId: string, stepId: string, cfg: HubC
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
+	// Belt and braces: the context step never carries the manual-review gate, so it
+	// can never be `waiting` — but saying so here keeps the rule in one place.
+	refuseContextStep(step);
 	if (step.status !== "waiting") throw new WorkflowError("only a step waiting for its manual review can be continued");
 	if (!releaseWaitingStep(stepId)) throw new WorkflowError("only a step waiting for its manual review can be continued");
 	const stashed = takeStatusBeforeReview(workflowId);
@@ -392,6 +397,7 @@ export function forceStepStatus(
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
+	refuseContextStep(step);
 	if (!OVERRIDABLE_STEP_STATUSES.includes(status)) {
 		throw new WorkflowError(`a step's status can only be set to ${OVERRIDABLE_STEP_STATUSES.join(", ")}`);
 	}
@@ -487,8 +493,13 @@ function truncateMd(s: string, n = 120): string {
 export function writeStatusMd(workflowId: string): void {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) return;
-	const steps = listSteps(workflowId);
-	writeStepResults(workflow, steps);
+	const allSteps = listSteps(workflowId);
+	writeStepResults(workflow, allSteps);
+	// The hub-owned context step is reported on its own line above the list rather
+	// than numbered into it: `orderIndex + 1` would print it as "0." and it isn't
+	// one of the N steps the operator wrote.
+	const contextStep = allSteps.find((s) => s.kind === "context") ?? null;
+	const steps = allSteps.filter((s) => s.kind === "task");
 	const progress = stepProgress(workflowId);
 	const lines: string[] = [
 		`# Workflow: ${workflow.name}`,
@@ -499,6 +510,14 @@ export function writeStatusMd(workflowId: string): void {
 		`- Agent: ${workflow.agentName}`,
 		`- Session: ${workflow.lastSessionId ?? "(none yet)"}`,
 		`- Conversation context: ${workflow.conversationContext ? truncateMd(workflow.conversationContext) : "(none)"}${workflow.conversationContext ? ` — injected: ${workflow.contextInjected ? "yes" : "no"}` : ""}`,
+		// Which mechanism actually delivers that background, and where it got to.
+		// Without this line a workflow with a context step looks identical to one
+		// still on the legacy prepend, and the two fail in completely different ways.
+		...(contextStep
+			? [
+					`- Conversation context step: [${statusMark(contextStep.status)}] delivered as its own turn before every other step — **${contextStep.status}**`,
+				]
+			: []),
 		// Only when it happened: a line saying "never compacted" on every workflow
 		// would bury the one workflow where it did. `pending` is the honest state
 		// between observing a boundary and the next dispatch re-stating the context.
@@ -635,6 +654,123 @@ function chainSession(workflowId: string, sessionId: string | undefined | null):
 	if (workflow && hasContext && !workflow.contextInjected) setContextInjected(workflowId, true);
 }
 
+// --- the conversation context, as its own step ---------------------------
+//
+// The workflow's conversation context is background that applies to EVERY step.
+// It used to be delivered by prepending it to whatever step happened to be
+// dispatched first, which made the background and that step's task arrive as one
+// indivisible instruction. It is now delivered as its own step — its own turn on
+// the shared session, before any work — materialised as a real row so it reuses
+// the entire dispatch/callback/timeout/abort pipeline instead of inventing a
+// parallel one.
+//
+// The row is hub-owned: nobody types it, nobody edits it, and the three
+// functions below are the only things that create, refresh or delete it. It sits
+// at `CONTEXT_STEP_ORDER_INDEX` (-1) so it sorts first without renumbering any
+// step the operator wrote (see that constant in db.ts).
+
+/**
+ * What the context step's `description` holds. Normally the context text itself,
+ * so the row is self-describing in the UI and the status file. An images-only
+ * context (a pinned screenshot and no prose — a legitimate way to use this,
+ * mirroring `contextPreamble`'s own images-only case) has no text to show, so it
+ * gets a fixed marker instead of an empty description, which `insertStep` would
+ * otherwise store as a blank row.
+ *
+ * Note this string is NOT what the agent receives: the payload is built by
+ * `composeStepInput` from `contextPreamble`, off the workflow's live columns.
+ * This is the operator-facing label.
+ */
+const CONTEXT_STEP_IMAGES_ONLY_DESCRIPTION = "Conversation context (attached image(s))";
+
+function contextStepDescription(workflow: Workflow): string {
+	return workflow.conversationContext?.trim() || CONTEXT_STEP_IMAGES_ONLY_DESCRIPTION;
+}
+
+/** Whether the workflow has any background at all to deliver — text or images. */
+function workflowHasContext(workflow: Workflow): boolean {
+	return (
+		!!workflow.conversationContext?.trim() ||
+		listFieldAttachments(workflow.id, null, "context").length > 0
+	);
+}
+
+/**
+ * Creates, refreshes or removes the workflow's context step so it always agrees
+ * with the workflow's conversation context. Idempotent — calling it twice, or on
+ * every Start, changes nothing the second time. Returns the step, or null when
+ * the workflow shouldn't have one.
+ *
+ * Three rules, in order:
+ *
+ *  1. **No context → no step.** Any PENDING context step is deleted; one that
+ *     already ran is history and stays, because it did happen and its result is
+ *     part of the conversation.
+ *  2. **Already injected → hands off.** `context_injected` means this
+ *     conversation is already operating under the background (that's also why
+ *     editing it is frozen). Creating a pending step now would deliver it a
+ *     second time; fabricating a `done` one would invent a run that never
+ *     happened. This is the rule that makes the change safe for workflows that
+ *     were mid-run when it landed — they keep the legacy prepend they already
+ *     got, and gain a context step the next time they're restarted (which resets
+ *     the flag and starts a fresh conversation anyway).
+ *  3. **Otherwise** ensure exactly one pending `kind='context'` row at
+ *     `CONTEXT_STEP_ORDER_INDEX`, with its description refreshed from the
+ *     current text.
+ */
+export function reconcileContextStep(workflowId: string): Step | null {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) return null;
+	const existing = getContextStep(workflowId);
+	if (!workflowHasContext(workflow)) {
+		if (existing && existing.status === "pending") {
+			deleteStep(existing.id);
+			return null;
+		}
+		return existing;
+	}
+	if (workflow.contextInjected) return existing;
+	if (existing) {
+		// Only a step that hasn't run yet may be reworded: once it has been
+		// dispatched, its description is the label on a turn the agent actually
+		// received, and rewriting it would make the UI describe something else.
+		const wanted = contextStepDescription(workflow);
+		if (existing.status === "pending" && existing.description !== wanted) {
+			updateStepDescription(existing.id, wanted);
+			return getStep(existing.id);
+		}
+		return existing;
+	}
+	return insertStep(workflowId, contextStepDescription(workflow), {
+		kind: "context",
+		orderIndex: CONTEXT_STEP_ORDER_INDEX,
+		// No criterion (nothing to verify: "the agent received it" is what the
+		// result callback already proves, and a judge pass would burn a second turn
+		// grading a paragraph of prose), no gate (holding a human on the delivery of
+		// background text would stall every run for no decision), no retries (there
+		// is no judge, so no reject-and-retry cycle exists), and never delegated —
+		// see CONTEXT_STEP_SUFFIX in runner.ts.
+		acceptanceCriteria: null,
+		manualReview: false,
+		useSubagent: false,
+		maxRetries: 0,
+		retryIntervalSeconds: 0,
+	});
+}
+
+/**
+ * Guard for the operator-facing step mutators. The context step is the hub's,
+ * not the operator's: editing its text, removing it, re-running it on demand or
+ * forcing its status would all desynchronise it from the workflow column it
+ * mirrors. Abort is deliberately NOT guarded — a context dispatch that hangs has
+ * to be recoverable like any other.
+ */
+function refuseContextStep(step: Step): void {
+	if (step.kind === "context") {
+		throw new WorkflowError("the conversation-context step is managed by the hub — edit the workflow's conversation context instead");
+	}
+}
+
 /**
  * Updates a workflow's conversation context — the preamble injected before
  * the first step of a fresh conversation (see runner.ts). The context is
@@ -654,6 +790,10 @@ export function setConversationContext(workflowId: string, context: string | nul
 	// (restart resets `context_injected` and starts a fresh conversation).
 	if (workflow.contextInjected) throw new WorkflowError("context already injected");
 	setWorkflowConversationContext(workflowId, context);
+	// Saved text creates (or refreshes) the step that will deliver it; cleared text
+	// removes it. Before writeStatusMd, so the status file it writes already shows
+	// the step rather than describing a state one save behind.
+	reconcileContextStep(workflowId);
 	writeStatusMd(workflowId);
 	const updated = getWorkflow(workflowId);
 	if (!updated) throw new WorkflowError("workflow disappeared");
@@ -713,6 +853,12 @@ export function addStep(
 	if (options.afterStepId) {
 		const anchor = getStep(options.afterStepId);
 		if (!anchor || anchor.workflowId !== workflowId) throw new WorkflowError("unknown step");
+		// Anchoring on the context step would compute -1 + 1 = 0 and shift every
+		// task step down a slot — precisely the renumbering (and the orphaned
+		// `<NN>-<slug>.md` files that come with it) that pinning it at -1 exists to
+		// prevent. "After the background" is "at the front", which is what omitting
+		// the anchor already means.
+		refuseContextStep(anchor);
 		afterOrderIndex = anchor.orderIndex;
 	}
 	const step = insertStep(workflowId, trimmed, {
@@ -748,6 +894,7 @@ export function editStep(
 	if (!trimmed) throw new WorkflowError("description is required");
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
+	refuseContextStep(step);
 	if (step.status === "running" || step.status === "queued") throw new WorkflowError("cannot edit a step while its job is running");
 	// A step held at its gate has already produced the result the human is
 	// reviewing — editing the task under them (or switching the gate off from
@@ -781,6 +928,10 @@ export function editStep(
 export function removeStep(workflowId: string, stepId: string): void {
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
+	// The context step is removed by clearing the workflow's conversation context,
+	// which is the thing it mirrors — deleting the row directly would leave a
+	// context that says it will be delivered and nothing to deliver it.
+	refuseContextStep(step);
 	if (step.status !== "pending") throw new WorkflowError("only a pending step can be removed");
 	// The step's own attached images go with it (the workflow's context ones stay).
 	removeStepAttachments(stepId);
@@ -835,7 +986,10 @@ async function notifyWorkflowCompleted(workflowId: string, log?: Logger): Promis
 	if (!claimWorkflowCompletionNotice(workflowId)) return;
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) return;
-	const steps = listSteps(workflowId);
+	// Task steps only: the hub-owned context step is not work the operator asked
+	// for, so counting it would inflate "N steps" in the DM by one. (`at(-1)` was
+	// already safe — the context step sorts to the FRONT — but the count was not.)
+	const steps = listSteps(workflowId).filter((s) => s.kind === "task");
 	// The workflow's "result" is the last step's — it's the one whose output the
 	// run ended on, and every earlier step's result is already folded into it by
 	// the shared session. A completed workflow with no steps at all (starting an
@@ -986,6 +1140,11 @@ export async function startWorkflow(
 	// Persist the run selection so the sequential engine (which advances across
 	// async job callbacks) only ever dispatches the chosen steps. Empty = none.
 	setStepSelection(workflowId, stepIds);
+	// Belt and braces for a workflow whose context was set before this feature
+	// existed (or through a path that didn't reconcile): the step is materialised
+	// here, at the last moment before anything is dispatched, so the background
+	// still leads the run. No-op when it already exists or must not exist.
+	reconcileContextStep(workflowId);
 	if (workflow.status !== "running") {
 		setWorkflowStatus(workflowId, "running");
 		writeStatusMd(workflowId);
@@ -1017,6 +1176,10 @@ export async function resumeWorkflow(
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	if (workflow.status !== "paused") throw new WorkflowError("only a paused workflow can be resumed");
 	setStepSelection(workflowId, stepIds);
+	// A resume mid-run finds the context step already `done` and leaves it alone —
+	// the session being resumed is the one it primed. Rule 2 also declines here for
+	// anything already injected, so this only ever acts on a run that never started.
+	reconcileContextStep(workflowId);
 	setWorkflowStatus(workflowId, "running");
 	writeStatusMd(workflowId);
 	await advance(workflowId, cfg, log);
@@ -1051,6 +1214,12 @@ export async function restartWorkflow(
 	// "compaction pending" from surviving into a session that never had one, which
 	// would re-inject the preamble twice on the very first step.
 	clearCompactionMarkers(workflowId);
+	// AFTER the guard is reset, not before: rule 2 declines while `context_injected`
+	// is still true. `resetSteps` above has already put the existing context step
+	// back to `pending` (it is always selected — see `setStepSelection`), so this is
+	// what materialises one for a workflow that didn't have it, and what refreshes
+	// its text now that the context is editable again.
+	reconcileContextStep(workflowId);
 	setWorkflowStatus(workflowId, "running");
 	writeStatusMd(workflowId);
 	log(`workflow ${workflowId} restarted`);
@@ -1434,6 +1603,10 @@ export async function runStep(workflowId: string, stepId: string, cfg: HubConfig
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
+	// A ▶ on the context step would deliver the background as a one-off manual run
+	// outside the sequential engine, which is neither what "before every other
+	// step" means nor something the operator can undo. Restart re-primes it.
+	refuseContextStep(step);
 	if (listSteps(workflowId).some((s) => s.status === "running" || s.status === "queued")) {
 		throw new WorkflowError("a step is already running for this workflow");
 	}

@@ -67,7 +67,6 @@ export function WorkflowDetail({
 	onAddStep,
 	onSaveStep,
 	onRemoveStep,
-	onRunStep,
 	onAbortStep,
 	onContinueStep,
 	onOpenStepConversation,
@@ -99,7 +98,6 @@ export function WorkflowDetail({
 	onAddStep: (input: StepConfigInput, staged?: StagedStepImages) => Promise<void>;
 	onSaveStep: (id: string, input: StepConfigInput) => Promise<void>;
 	onRemoveStep: (id: string) => void;
-	onRunStep: (id: string) => void;
 	onAbortStep: (id: string) => void;
 	onContinueStep: (id: string) => void;
 	/** Opens a terminal on one step's own session (the held step's "Open conversation"). */
@@ -117,8 +115,17 @@ export function WorkflowDetail({
 
 	const sectionRef = useRef<HTMLElement>(null);
 
+	// The hub-owned conversation-context step is split off BEFORE any selection
+	// state is computed. It is not work the operator chose, and leaving it in
+	// would break all three derived numbers at once: "Select all" could never
+	// reach `allSelected` (nothing can check it), `selectedCount` would overstate
+	// the run by one, and the count next to "Steps" would disagree with the
+	// progress bar, which counts task steps only. It's rendered separately below.
+	const contextStep = useMemo(() => steps.find((s) => s.kind === "context") ?? null, [steps]);
+	const taskSteps = useMemo(() => steps.filter((s) => s.kind !== "context"), [steps]);
+
 	useEffect(() => {
-		setSelection(new Set(steps.filter((s) => s.selected).map((s) => s.id)));
+		setSelection(new Set(taskSteps.filter((s) => s.selected).map((s) => s.id)));
 		// Re-seed only when the workflow changes, not on every poll — otherwise
 		// the operator's checkbox changes would be reverted every 2 seconds.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
@@ -136,11 +143,11 @@ export function WorkflowDetail({
 	// Drop ids of steps that no longer exist so a stale selection can't be sent.
 	useEffect(() => {
 		setSelection((current) => {
-			const live = new Set(steps.map((s) => s.id));
+			const live = new Set(taskSteps.map((s) => s.id));
 			const next = new Set([...current].filter((id) => live.has(id)));
 			return next.size === current.size ? current : next;
 		});
-	}, [steps]);
+	}, [taskSteps]);
 
 	const startAction = startActionFor(workflow.status);
 	const running = workflow.status === "running";
@@ -148,7 +155,7 @@ export function WorkflowDetail({
 	// coming — that callback would write a status over it seconds later.
 	const stepInFlight = steps.some((s) => s.status === "running" || s.status === "queued");
 	const selectedCount = selection.size;
-	const allSelected = steps.length > 0 && selectedCount === steps.length;
+	const allSelected = taskSteps.length > 0 && selectedCount === taskSteps.length;
 
 	const startLabel = useMemo(() => {
 		if (startAction === "resume") return "Resume";
@@ -166,7 +173,7 @@ export function WorkflowDetail({
 	};
 
 	const toggleAll = (): void => {
-		setSelection(allSelected ? new Set() : new Set(steps.map((s) => s.id)));
+		setSelection(allSelected ? new Set() : new Set(taskSteps.map((s) => s.id)));
 	};
 
 	const handleOpenTerminal = async (): Promise<void> => {
@@ -312,23 +319,46 @@ export function WorkflowDetail({
 					<div className={styles.stepsHead}>
 						<h3 className={styles.sectionTitle}>
 							Steps
-							{steps.length > 0 && <span className={styles.count}>{steps.length}</span>}
+							{taskSteps.length > 0 && <span className={styles.count}>{taskSteps.length}</span>}
 						</h3>
-						{steps.length > 0 && (
+						{taskSteps.length > 0 && (
 							<button type="button" className="btn btn--sm btn--ghost" onClick={toggleAll}>
 								{allSelected ? "Deselect all" : "Select all"}
 							</button>
 						)}
 					</div>
 
-					{steps.length === 0 ? (
+					{/* Pinned above the numbered list, not inside it: it runs before step 1
+					    but it isn't step 0, and putting it in the <ol> would number it. */}
+					{contextStep && (
+						<ul className={styles.steps}>
+							<StepItem
+								key={contextStep.id}
+								step={contextStep}
+								selected={false}
+								onToggleSelected={toggleStep}
+								onSave={onSaveStep}
+								onRemove={onRemoveStep}
+								onAbort={onAbortStep}
+								onContinue={onContinueStep}
+								onOpenConversation={onOpenStepConversation}
+								onAddStepAfter={onAddStepAfter}
+								onSetStatus={onSetStepStatus}
+								onAttachImages={onAttachImages}
+								onRemoveAttachment={onRemoveAttachment}
+								busy={busy}
+							/>
+						</ul>
+					)}
+
+					{taskSteps.length === 0 ? (
 						<EmptyState
 							title="No steps yet"
 							description="Add the first task for this workflow's agent, or seed it from a template."
 						/>
 					) : (
 						<ol className={styles.steps}>
-							{steps.map((step) => (
+							{taskSteps.map((step) => (
 								<StepItem
 									key={step.id}
 									step={step}
@@ -336,7 +366,6 @@ export function WorkflowDetail({
 									onToggleSelected={toggleStep}
 									onSave={onSaveStep}
 									onRemove={onRemoveStep}
-									onRun={onRunStep}
 									onAbort={onAbortStep}
 									onContinue={onContinueStep}
 									onOpenConversation={onOpenStepConversation}
