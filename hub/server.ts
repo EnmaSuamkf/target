@@ -111,6 +111,7 @@ import {
 	forceWorkflowStatus,
 	onStepResult,
 	pauseWorkflow,
+	reconcileContextStep,
 	removeStep,
 	removeWorkflow,
 	restartWorkflow,
@@ -273,6 +274,11 @@ function publicStep(step: Step, cfg: HubConfig): Record<string, unknown> {
 	return {
 		id: step.id,
 		workflowId: step.workflowId,
+		// "task" (what the operator wrote) or "context" (the hub-owned step that
+		// delivers the workflow's background before everything else). The UI needs
+		// it to pin that row, drop it from the selection maths and hide the actions
+		// the server would refuse anyway.
+		kind: step.kind,
 		orderIndex: step.orderIndex,
 		description: step.description,
 		status: step.status,
@@ -553,10 +559,16 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			sendJson(res, 401, { error: "unauthorized" });
 			return;
 		}
+		// Read the row BEFORE deleting it: removing the last context image can leave
+		// a workflow with no background at all, and the context step then has to go
+		// with it — but afterwards there's nothing left to say which workflow that
+		// was, or that this was a context attachment in the first place.
+		const doomed = getAttachment(parts[2]);
 		if (!removeAttachment(parts[2])) {
 			sendJson(res, 404, { error: "unknown_attachment" });
 			return;
 		}
+		if (doomed?.field === "context") reconcileContextStep(doomed.workflowId);
 		log(`attachment ${parts[2]} deleted`);
 		sendJson(res, 200, { ok: true });
 		return;
@@ -1082,6 +1094,11 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					mime,
 					data,
 				});
+				// An images-only conversation context is a real context (see
+				// `contextPreamble`), so pinning the first context image is what brings
+				// the context step into existence — the text path can't be the only
+				// trigger or that workflow's background would never be delivered.
+				if (field === "context") reconcileContextStep(workflowId);
 				log(
 					`attachment ${attachment.id} (${attachment.mime}, ${attachment.size}B) pinned to ${field}${
 						stepId ? ` of step ${stepId}` : ""
@@ -1238,7 +1255,15 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return;
 			}
 			try {
-				const existingDescriptions = new Set(listSteps(workflowId).map((step) => step.description));
+				// Task steps only. The context step's description holds the workflow's
+				// conversation-context text, which could coincide with a template step's
+				// wording — and a template step silently skipped as a "duplicate" of the
+				// background would never run.
+				const existingDescriptions = new Set(
+					listSteps(workflowId)
+						.filter((step) => step.kind === "task")
+						.map((step) => step.description),
+				);
 				let added = 0;
 				let skipped = 0;
 				for (const step of template.steps) {

@@ -1,7 +1,17 @@
 /**
  * Tests for the Conversation context feature (see docs/feature.md and
- * docs/acceptanceCriteria.md): a workflow-level preamble injected before the
- * first step of a fresh conversation, exactly once, never re-injected.
+ * docs/acceptanceCriteria.md): workflow-level background delivered to the agent
+ * exactly once, before every other step of a fresh conversation, and never
+ * re-delivered.
+ *
+ * HOW it is delivered changed: it used to be a string prepended to whatever step
+ * happened to be dispatched first, and it is now its own hub-owned step
+ * (`kind: "context"`, order index -1) that runs before the operator's step 1 —
+ * see `reconcileContextStep` in workflow.ts. The acceptance criteria these tests
+ * are named after are unchanged; what they assert about the wire is not. Every
+ * test below that used to expect N dispatches now expects N+1, with the
+ * background alone in the first and the step's task alone in the second.
+ * `context-step.test.ts` covers the step itself.
  *
  * The injection lives in runner.ts's `dispatchStep`, which POSTs the step's
  * input to the workflow's awb hook. To observe the actual input string the
@@ -26,7 +36,7 @@ process.env.TARGET_HOME = tmpHome;
 // operator's real ~/.agent-webhook-bridge/hooks.json. See server.test.ts.
 process.env.AWB_HOME = tmpHome;
 
-const { insertStep, insertWorkflow, getWorkflow } = await import("./db.ts");
+const { getContextStep, insertStep, insertWorkflow, getWorkflow } = await import("./db.ts");
 const { createServer } = await import("./server.ts");
 const { loadConfig } = await import("./config.ts");
 const { startWorkflow, restartWorkflow, setConversationContext } = await import("./workflow.ts");
@@ -84,6 +94,18 @@ async function finishStepOk(stepId: string, sessionId: string) {
 	await onStepResult(stepId, { ok: true, result: "fine", sessionId }, cfg, silent);
 }
 
+/**
+ * Settles the workflow's context step, which is always the first thing
+ * dispatched. Every run in this file now starts with it, so it gets a name: the
+ * alternative is `getContextStep(...)!.id` inlined a dozen times, which reads as
+ * incidental when it is in fact the behaviour under test.
+ */
+async function finishContextStep(workflowId: string, sessionId: string) {
+	const step = getContextStep(workflowId);
+	assert.ok(step, "the workflow has a context step to settle");
+	await finishStepOk(step.id, sessionId);
+}
+
 test("context is injected before all, on the first dispatched step only (acceptance #1)", async () => {
 	const inputs: { input: string }[] = [];
 	const { server, url } = await startFakeHook((body) => inputs.push({ input: body.input }));
@@ -92,17 +114,23 @@ test("context is injected before all, on the first dispatched step only (accepta
 	const { workflow, steps } = makeWorkflow(2, "You are writing for a junior audience.", url);
 
 	await startWorkflow(workflow.id, cfg, silent, [steps[0].id, steps[1].id]);
+	await finishContextStep(workflow.id, "sess-1");
 	await finishStepOk(steps[0].id, "sess-1");
 	await finishStepOk(steps[1].id, "sess-1"); // resumed — same session
 
-	assert.equal(inputs.length, 2, "both steps were dispatched");
-	// First dispatch: the preamble is prepended before the step description.
+	assert.equal(inputs.length, 3, "the context step and both steps were dispatched");
+	// First dispatch: the background, ON ITS OWN. This is the change — it is a
+	// turn of its own, not the first N bytes of step 1's instruction.
 	assert.match(inputs[0].input, /^Conversation context — this background applies to every step of this workflow:/);
 	assert.match(inputs[0].input, /You are writing for a junior audience\./);
-	assert.match(inputs[0].input, /step 1/);
-	// Second dispatch: resumes the session, so NO preamble — just the step.
+	assert.doesNotMatch(inputs[0].input, /step 1/);
+	// Second dispatch: the operator's step 1, CLEAN — no preamble glued to it.
+	assert.match(inputs[1].input, /^step 1/);
 	assert.doesNotMatch(inputs[1].input, /Conversation context/);
-	assert.match(inputs[1].input, /^step 2/);
+	assert.doesNotMatch(inputs[1].input, /junior audience/);
+	// Third: resumes the session, so no preamble either.
+	assert.doesNotMatch(inputs[2].input, /Conversation context/);
+	assert.match(inputs[2].input, /^step 2/);
 });
 
 test("context is not re-injected on subsequent steps once a session exists (acceptance #2)", async () => {
@@ -113,15 +141,18 @@ test("context is not re-injected on subsequent steps once a session exists (acce
 	const { workflow, steps } = makeWorkflow(3, "BACKGROUND-XYZ", url);
 
 	await startWorkflow(workflow.id, cfg, silent, [steps[0].id, steps[1].id, steps[2].id]);
+	await finishContextStep(workflow.id, "sess-1");
 	await finishStepOk(steps[0].id, "sess-1");
 	await finishStepOk(steps[1].id, "sess-1");
 	await finishStepOk(steps[2].id, "sess-1");
 
-	// Only the first of three dispatches carries the preamble.
+	// Only the first of four dispatches — the context step's — carries it.
+	assert.equal(inputs.length, 4);
 	assert.equal(inputs.filter((d) => d.input.includes("BACKGROUND-XYZ")).length, 1);
 	assert.match(inputs[0].input, /BACKGROUND-XYZ/);
 	assert.doesNotMatch(inputs[1].input, /BACKGROUND-XYZ/);
 	assert.doesNotMatch(inputs[2].input, /BACKGROUND-XYZ/);
+	assert.doesNotMatch(inputs[3].input, /BACKGROUND-XYZ/);
 });
 
 test("contextInjected flag tracks injection state and is observable (acceptance #3)", async () => {
@@ -134,12 +165,15 @@ test("contextInjected flag tracks injection state and is observable (acceptance 
 	assert.equal(getWorkflow(workflow.id)?.contextInjected, false);
 
 	await startWorkflow(workflow.id, cfg, silent, [steps[0].id]);
-	// Dispatched but no session reported yet — still not injected.
+	// The context step dispatched, but no session reported yet — still not injected.
 	assert.equal(getWorkflow(workflow.id)?.contextInjected, false);
 	assert.match(inputs[0].input, /ctx/);
 
-	await finishStepOk(steps[0].id, "sess-1");
-	// Session established → the guard flips to injected.
+	await finishContextStep(workflow.id, "sess-1");
+	// Session established by the context step's own callback → the guard flips.
+	// This is strictly more accurate than it used to be: the flag now closes on the
+	// callback of the turn that actually carried the background, rather than on
+	// whichever step happened to run first.
 	assert.equal(getWorkflow(workflow.id)?.contextInjected, true);
 });
 
@@ -152,16 +186,19 @@ test("a failed first dispatch (no session) re-injects on the next attempt (accep
 	const { onStepResult } = await import("./workflow.ts");
 
 	await startWorkflow(workflow.id, cfg, silent, [steps[0].id]);
-	// First attempt fails with no session — the flag stays false.
-	await onStepResult(steps[0].id, { ok: false, error: "boom" }, cfg, silent);
+	// The context step is what dispatches first, so it's what can fail first. It
+	// fails with no session — the once-only guard stays open, exactly as before.
+	const failed = getContextStep(workflow.id);
+	assert.ok(failed);
+	await onStepResult(failed.id, { ok: false, error: "boom" }, cfg, silent);
 	assert.equal(getWorkflow(workflow.id)?.contextInjected, false);
 	assert.equal(getWorkflow(workflow.id)?.lastSessionId, null);
-	// Re-run the same step on demand (the ▶ button): runStep starts a manual
-	// run, which is a fresh conversation (still no session) → re-injects.
-	const { runStep } = await import("./workflow.ts");
-	await runStep(workflow.id, steps[0].id, cfg, silent);
+	assert.equal(inputs.length, 1, "the operator's step never ran — the background never landed");
 
-	// The re-run is a fresh conversation (still no session) → re-injected.
+	// Start over: the guard is still open and the context step is reset to pending
+	// along with the selection, so the background leads the new conversation again
+	// instead of being silently skipped.
+	await restartWorkflow(workflow.id, cfg, silent, [steps[0].id]);
 	assert.equal(inputs.length, 2);
 	assert.match(inputs[1].input, /PREAMBLE/);
 });
@@ -174,11 +211,13 @@ test("restart re-injects the context on the new first step (acceptance #5)", asy
 	const { workflow, steps } = makeWorkflow(1, "RESTART-CTX", url);
 
 	await startWorkflow(workflow.id, cfg, silent, [steps[0].id]);
+	await finishContextStep(workflow.id, "sess-1");
 	await finishStepOk(steps[0].id, "sess-1");
 	assert.equal(getWorkflow(workflow.id)?.contextInjected, true);
 	assert.equal(inputs.filter((d) => d.input.includes("RESTART-CTX")).length, 1);
 
-	// Restart: fresh conversation, guard reset → injected again.
+	// Restart: fresh conversation, guard reset → the context step is reset with it
+	// and re-delivers the background before step 1.
 	await restartWorkflow(workflow.id, cfg, silent, [steps[0].id]);
 	assert.equal(getWorkflow(workflow.id)?.contextInjected, false); // reset before the callback
 	assert.match(inputs.at(-1)!.input, /RESTART-CTX/);
@@ -218,7 +257,7 @@ test("an injected context is locked for the rest of the in-flight conversation",
 
 	const { workflow, steps } = makeWorkflow(2, "OLD", url);
 	await startWorkflow(workflow.id, cfg, silent, [steps[0].id, steps[1].id]);
-	await finishStepOk(steps[0].id, "sess-1"); // session established, OLD injected on step 1
+	await finishContextStep(workflow.id, "sess-1"); // session established, OLD delivered
 	assert.equal(getWorkflow(workflow.id)?.contextInjected, true);
 
 	// The context is now locked: editing mid-conversation is rejected, so the
@@ -226,12 +265,15 @@ test("an injected context is locked for the rest of the in-flight conversation",
 	assert.throws(() => setConversationContext(workflow.id, "NEW"), /context already injected/);
 	assert.equal(getWorkflow(workflow.id)?.conversationContext, "OLD");
 
+	await finishStepOk(steps[0].id, "sess-1");
 	await finishStepOk(steps[1].id, "sess-1"); // resumes — no preamble
-	assert.equal(inputs.length, 2);
+	assert.equal(inputs.length, 3);
 	assert.match(inputs[0].input, /OLD/);
-	// Step 2 resumes the session → no preamble (and the blocked edit never landed).
-	assert.doesNotMatch(inputs[1].input, /OLD/);
-	assert.doesNotMatch(inputs[1].input, /NEW/);
+	// Both steps resume the session → no preamble (and the blocked edit never landed).
+	for (const later of [inputs[1], inputs[2]]) {
+		assert.doesNotMatch(later.input, /OLD/);
+		assert.doesNotMatch(later.input, /NEW/);
+	}
 });
 
 test("an empty context behaves exactly as before — no preamble ever (acceptance #7)", async () => {

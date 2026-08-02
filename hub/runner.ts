@@ -43,7 +43,7 @@ import { markContextReinjected, needsContextReinjection, observeCompaction } fro
 import type { HubConfig } from "./config.ts";
 import { CONTEXT_PRESSURE_PERCENT, shouldForceSubagent, workflowContextRatio } from "./context-pressure.ts";
 import type { Attachment, Step, Workflow } from "./db.ts";
-import { completeStep, markStepQueued } from "./db.ts";
+import { completeStep, getContextStep, markStepQueued } from "./db.ts";
 import { stepResultsNote } from "./step-results.ts";
 
 export type Logger = (message: string, type?: "info" | "warning" | "error") => void;
@@ -162,6 +162,26 @@ function contextPreamble(context: string | null | undefined, images: Attachment[
 }
 
 /**
+ * What the conversation-context STEP says after the background itself.
+ *
+ * Every dispatch is wrapped by the workflow's awb `promptTemplate`, which is
+ * fixed at workflow-creation time and ends with "Carry out the step and respond
+ * with the final result of that step" — and `hub/awb.ts` has no update path
+ * (`createAwbHook` throws when the hook exists, `deleteAwbHook` is the only
+ * other verb), so EXISTING workflows can never be re-templated. This suffix is
+ * therefore the only lever: the payload has to talk the agent out of the frame
+ * the template puts it in, in the payload itself, or the agent reads a paragraph
+ * of background as a task and goes off doing work nobody asked for.
+ *
+ * Hence the four explicit prohibitions (no tools, no delegation, no starting a
+ * later step) and the one-line acknowledgement — which is also what keeps this
+ * turn's cost to the background text plus a sentence, on a session whose
+ * occupancy is the very thing context-pressure.ts exists to protect.
+ */
+export const CONTEXT_STEP_SUFFIX =
+	"This step exists only to establish that background for the rest of this workflow. There is no work to do here: do not use any tools, do not delegate anything to a subagent, and do not start on any later step. Confirm in one line that you have read the background above and will apply it; the workflow's real steps follow in separate turns on this same conversation.";
+
+/**
  * Builds the input for the self-evaluation ("judge") pass: the same agent,
  * resuming the same session, is asked to grade its own previous result against
  * the step's acceptance criteria and answer with a strict JSON verdict.
@@ -237,6 +257,24 @@ export function composeStepInput(
 		forceSubagent?: boolean;
 	} = {},
 ): string {
+	// The hub-owned context step: the background, and nothing else. Deliberately
+	// before every other consideration in this function, because every one of them
+	// is wrong for it — there are no description images (the context's own images
+	// are already in the preamble), no acceptance criterion (there is nothing to
+	// verify beyond "the agent received it", which the result callback proves), no
+	// prior step results to point at (this runs first, by construction), and no
+	// subagent instruction of any kind: delegating the background would put it in a
+	// subagent that then exits, leaving the shared session — the entire point —
+	// without it. `injectContext` is not consulted either: this step IS the
+	// injection, so it always carries the preamble.
+	if (step.kind === "context") {
+		const preamble = contextPreamble(
+			workflow.conversationContext,
+			listFieldAttachments(workflow.id, null, "context"),
+			options.afterCompaction ?? false,
+		);
+		return `${preamble}${CONTEXT_STEP_SUFFIX}`;
+	}
 	const acceptanceImages = listFieldAttachments(workflow.id, step.id, "acceptance");
 	// What actually ran (or is about to): the toggle, unless pressure overrode it.
 	const delegated = step.useSubagent || (options.forceSubagent ?? false);
@@ -351,8 +389,16 @@ export async function dispatchStep(
 	// Only measured for a step that could be overridden. Reading it costs a full
 	// scan of a transcript that grows all workflow long, and for a step already
 	// delegating the answer changes nothing.
-	const contextRatio = step.useSubagent ? null : workflowContextRatio(workflow, sessionToResume);
-	const forceSubagent = shouldForceSubagent(step.useSubagent, contextRatio);
+	//
+	// The context step is exempt outright, and the exemption is not an
+	// optimisation: `shouldForceSubagent` would happily delegate it under pressure,
+	// and background delivered inside a subagent dies with that subagent — the
+	// shared session, which is the only reason this step exists, would end up
+	// without it. Skipping the read also avoids a transcript scan on the one
+	// dispatch that never needs one (a fresh conversation has no ratio anyway).
+	const isContextStep = step.kind === "context";
+	const contextRatio = step.useSubagent || isContextStep ? null : workflowContextRatio(workflow, sessionToResume);
+	const forceSubagent = !isContextStep && shouldForceSubagent(step.useSubagent, contextRatio);
 	// Worth a line only for the pass it actually redirects. The judge always runs
 	// on this thread (its verdict has to come straight back), so there the flag
 	// just keeps the prompt's wording honest about who produced the output.
@@ -371,12 +417,24 @@ export async function dispatchStep(
 			"warning",
 		);
 	}
+	// Does this workflow deliver its background as its own step? If so the legacy
+	// prepend must NOT also fire, or the agent would get the same background twice
+	// in two consecutive turns. Keeping the prepend alive (rather than deleting it)
+	// is what makes this change additive: a workflow with no materialised context
+	// step — one whose context was already injected before this feature existed,
+	// mid-run right now — behaves exactly as it always did.
+	const hasContextStep = getContextStep(workflow.id) !== null;
 	const input = composeStepInput(step, observed, {
 		mode,
 		// Two independent reasons to inject: this is the conversation's first
 		// dispatch and the guard is still open, or the conversation was compacted
-		// and what was injected at the top of it is gone.
-		injectContext: mode === "exec" && ((freshConversation && !workflow.contextInjected) || afterCompaction),
+		// and what was injected at the top of it is gone. Compaction recovery is
+		// deliberately left on the prepend even when a context step exists: it fires
+		// mid-run, long after that step settled, so it is the only mechanism in play
+		// and re-arming the step instead would need `advance()` to learn about
+		// compaction, which happens here, after `advance()` has already chosen.
+		injectContext:
+			mode === "exec" && ((freshConversation && !workflow.contextInjected && !hasContextStep) || afterCompaction),
 		afterCompaction,
 		retryReason: options.retryReason,
 		timedOut: options.timedOut,

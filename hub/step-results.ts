@@ -102,7 +102,14 @@ export function writeStepResults(workflow: Workflow, steps: Step[]): string[] {
 	const workdir = hookRuntime(workflow.hookUrl).workdir;
 	if (!workdir) return [];
 	const written: string[] = [];
-	const withResults = steps.filter((step) => step.result !== null && step.result !== "");
+	// Task steps only. The hub-owned context step's "result" is a one-line
+	// acknowledgement, and its order index is -1, so it would land as `00-….md` in
+	// the very directory the prompt tells the agent to trust for "what earlier
+	// steps actually produced" — noise at best, and at worst a file that reads like
+	// a step-zero nobody wrote.
+	const withResults = steps.filter(
+		(step) => step.kind !== "context" && step.result !== null && step.result !== "",
+	);
 	if (withResults.length === 0) return [];
 	try {
 		fs.mkdirSync(stepResultsDir(workdir), { recursive: true });

@@ -117,6 +117,8 @@ interface WorkflowJson {
 
 interface StepJson {
 	id: string;
+	/** "context" is the hub-owned step that delivers the workflow's background; everything else is "task". */
+	kind?: "task" | "context";
 	orderIndex: number;
 	description: string;
 	status: string;
@@ -314,6 +316,13 @@ async function main(): Promise<void> {
 		}
 		console.log("");
 		for (const s of steps) {
+			// The context step is the hub's, not one of the N the operator wrote: it
+			// sits at order index -1, so numbering it would print "0.", and none of the
+			// per-step commands accept it anyway.
+			if (s.kind === "context") {
+				console.log(`  ctx. [${s.status}] Conversation context — delivered before every other step\n     ${s.id}`);
+				continue;
+			}
 			// The id is printed because `set-step-status` needs it and this is the
 			// only command that shows it.
 			console.log(

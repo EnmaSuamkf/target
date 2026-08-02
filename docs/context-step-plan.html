@@ -1,0 +1,721 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plan — Conversation context as its own automatic first step</title>
+<style>
+  :root {
+    --ink: #1c1f24;
+    --ink-soft: #4a5159;
+    --ink-faint: #6b737c;
+    --rule: #e2e5ea;
+    --rule-soft: #eef0f4;
+    --bg: #ffffff;
+    --bg-soft: #f7f8fa;
+    --accent: #1f5fbf;
+    --accent-soft: #eaf1fc;
+    --good: #17694a;
+    --good-soft: #e6f4ee;
+    --warn: #8a5300;
+    --warn-soft: #fdf3e2;
+    --bad: #97231f;
+    --bad-soft: #fceceb;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    padding: 0 1.5rem 6rem;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 16.5px;
+    line-height: 1.65;
+  }
+  .wrap { max-width: 62rem; margin: 0 auto; }
+  header.masthead {
+    padding: 3rem 0 1.75rem;
+    border-bottom: 3px solid var(--ink);
+    margin-bottom: 2.5rem;
+  }
+  header.masthead .eyebrow {
+    font-size: 0.78rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    font-weight: 600;
+    margin: 0 0 0.6rem;
+  }
+  h1 { font-size: 2.1rem; line-height: 1.2; margin: 0 0 0.6rem; letter-spacing: -0.015em; }
+  header.masthead .meta { color: var(--ink-faint); font-size: 0.9rem; margin: 0; }
+  h2 {
+    font-size: 1.45rem;
+    letter-spacing: -0.01em;
+    margin: 3.25rem 0 1rem;
+    padding-bottom: 0.45rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  h3 { font-size: 1.1rem; margin: 2rem 0 0.6rem; }
+  h4 { font-size: 0.97rem; margin: 1.4rem 0 0.4rem; color: var(--ink-soft); }
+  p { margin: 0 0 1rem; }
+  ul, ol { margin: 0 0 1rem; padding-left: 1.35rem; }
+  li { margin-bottom: 0.45rem; }
+  li > ul, li > ol { margin-top: 0.45rem; }
+  code {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    background: var(--bg-soft);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 0.08em 0.34em;
+    white-space: nowrap;
+  }
+  pre {
+    background: var(--bg-soft);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    border-radius: 6px;
+    padding: 0.9rem 1.05rem;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 0.83rem;
+    line-height: 1.55;
+    margin: 0 0 1.25rem;
+  }
+  pre code { background: none; border: 0; padding: 0; font-size: inherit; white-space: pre; }
+  a { color: var(--accent); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 1.5rem;
+    font-size: 0.92rem;
+  }
+  th, td {
+    text-align: left;
+    vertical-align: top;
+    padding: 0.6rem 0.7rem;
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  th {
+    border-bottom: 2px solid var(--rule);
+    font-size: 0.78rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  tbody tr:last-child td { border-bottom: 1px solid var(--rule); }
+  .callout {
+    border: 1px solid var(--rule);
+    border-left: 4px solid var(--accent);
+    background: var(--accent-soft);
+    border-radius: 6px;
+    padding: 1rem 1.15rem;
+    margin: 0 0 1.5rem;
+  }
+  .callout > :last-child { margin-bottom: 0; }
+  .callout.good { border-left-color: var(--good); background: var(--good-soft); }
+  .callout.warn { border-left-color: var(--warn); background: var(--warn-soft); }
+  .callout.bad  { border-left-color: var(--bad);  background: var(--bad-soft); }
+  .callout .label {
+    display: block;
+    font-size: 0.74rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-weight: 700;
+    margin-bottom: 0.4rem;
+    color: var(--ink-soft);
+  }
+  .ref { font-family: var(--mono); font-size: 0.82em; color: var(--ink-soft); white-space: nowrap; }
+  .verdict {
+    border: 2px solid var(--ink);
+    border-radius: 8px;
+    padding: 1.35rem 1.5rem;
+    margin: 0 0 2rem;
+    background: var(--bg-soft);
+  }
+  .verdict p:first-child { font-size: 1.08rem; }
+  .verdict > :last-child { margin-bottom: 0; }
+  .pill {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.14rem 0.5rem;
+    border-radius: 999px;
+    vertical-align: 0.12em;
+  }
+  .pill.yes { background: var(--good-soft); color: var(--good); border: 1px solid #bfe0d1; }
+  .pill.no  { background: var(--bad-soft);  color: var(--bad);  border: 1px solid #f0c8c6; }
+  .pill.maybe { background: var(--warn-soft); color: var(--warn); border: 1px solid #f0dcb4; }
+  nav.toc {
+    background: var(--bg-soft);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 1.1rem 1.4rem;
+    margin: 0 0 2.5rem;
+  }
+  nav.toc h2 { margin: 0 0 0.6rem; font-size: 0.8rem; letter-spacing: 0.12em; text-transform: uppercase; border: 0; padding: 0; color: var(--ink-faint); }
+  nav.toc ol { margin: 0; padding-left: 1.2rem; columns: 2; column-gap: 2.5rem; }
+  nav.toc li { margin-bottom: 0.28rem; break-inside: avoid; }
+  .phase {
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 1.1rem 1.3rem;
+    margin: 0 0 1.4rem;
+  }
+  .phase > h3 { margin-top: 0; }
+  .phase .goal { color: var(--ink-soft); font-style: italic; margin-bottom: 0.9rem; }
+  footer { margin-top: 4rem; padding-top: 1.25rem; border-top: 1px solid var(--rule); color: var(--ink-faint); font-size: 0.85rem; }
+  @media (max-width: 720px) {
+    body { font-size: 16px; padding: 0 1rem 4rem; }
+    nav.toc ol { columns: 1; }
+    table { font-size: 0.85rem; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">The Target Project — hub</p>
+  <h1>Making the Conversation context its own automatic first step</h1>
+  <p class="meta">Investigation &amp; implementation plan · written 2026-08-02 · branch <code>main</code> @ <code>ecbe391</code></p>
+</header>
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#summary">Executive summary</a></li>
+    <li><a href="#findings">Investigation findings</a></li>
+    <li><a href="#recommended">Recommended design</a></li>
+    <li><a href="#alternatives">Alternatives considered</a></li>
+    <li><a href="#implementation">Implementation plan</a></li>
+    <li><a href="#testing">Testing strategy</a></li>
+    <li><a href="#risks">Risks &amp; edge cases</a></li>
+    <li><a href="#migration">Migration</a></li>
+    <li><a href="#unknowns">Open questions / not verified</a></li>
+  </ol>
+</nav>
+
+<!-- ===================================================================== -->
+<section id="summary">
+<h2>1. Executive summary</h2>
+
+<div class="verdict">
+  <p><strong>Yes — this is possible</strong> <span class="pill yes">feasible</span>, and it is a moderate-sized but well-bounded change. The hub already treats "one step = one dispatch = one turn on the shared Claude session", so "the context is its own step that runs before every other step" is expressible in exactly the vocabulary the engine already speaks. Nothing about the runner, the awb hook protocol, the session-resume chain or the result-callback pipeline has to be reinvented.</p>
+  <p>The catch is not feasibility, it is <em>blast radius</em>. Steps are counted, numbered, selected, reset, timed out, judged, progress-barred and written to disk as <code>&lt;NN&gt;-&lt;slug&gt;.md</code> — so a new row at the front of the list touches a dozen read paths that all assume "every step is a task the operator wrote".</p>
+  <p><strong>Recommendation:</strong> add a <code>kind</code> column to the <code>steps</code> table (<code>'task'</code> | <code>'context'</code>) and materialise a single auto-managed <code>kind='context'</code> step per workflow, pinned at <code>order_index = -1</code> (not <code>0</code>). The negative index is the load-bearing detail: it sorts first for <code>ORDER BY order_index</code> and for <code>nextPendingStep</code>, while renumbering <em>nothing</em> — so <code>stepResultFileName</code> keeps producing the same <code>01-…md</code>, <code>02-…md</code> names for existing steps and <code>steps.at(-1)</code> (the completion notification's "the workflow's result") still means the last task step.</p>
+</div>
+
+<p>The change is <strong>strictly additive</strong> if done as planned: a workflow with no conversation context and no context images gets no context step and behaves byte-for-byte as it does today, and the existing prepend path stays in place as the fallback for any workflow that has no materialised context step.</p>
+
+<p>Estimated shape of the work: ~6 hub source files, 4 UI files, one new schema column, one new engine helper (<code>reconcileContextStep</code>), and a new test file alongside the existing <code>hub/context.test.ts</code>. No new HTTP route is strictly required.</p>
+</section>
+
+<!-- ===================================================================== -->
+<section id="findings">
+<h2>2. Investigation findings</h2>
+
+<h3>2.1 Where the context lives and how it is injected today</h3>
+
+<p>The context is a <strong>workflow-level</strong> column, not a step-level one.</p>
+
+<ul>
+  <li><span class="ref">hub/db.ts:250-251</span> — the <code>workflows</code> table carries <code>conversation_context TEXT</code> and <code>context_injected INTEGER NOT NULL DEFAULT 0</code>. Both are also added defensively for older DBs by <code>addWorkflowColumn</code> at <span class="ref">hub/db.ts:353-354</span>.</li>
+  <li><span class="ref">hub/db.ts:59-115</span> — <code>interface Workflow</code>, fields <code>conversationContext</code> and <code>contextInjected</code>.</li>
+  <li><span class="ref">hub/db.ts:615</span> — <code>setWorkflowConversationContext()</code>, the low-level setter; <span class="ref">hub/db.ts:556</span> — <code>setContextInjected()</code>, the guard.</li>
+  <li>Context <em>images</em> are separate: <code>attachments</code> rows with <code>field = 'context'</code> and <code>step_id = NULL</code> — <span class="ref">hub/db.ts:1624-1626</span> (<code>AttachmentField</code>), read via <code>listFieldAttachments(workflowId, null, "context")</code> <span class="ref">hub/db.ts:1707</span>.</li>
+</ul>
+
+<p>The injection itself is a <strong>string prefix built at dispatch time</strong> — there is no persisted "injected preamble" anywhere:</p>
+
+<ul>
+  <li><span class="ref">hub/runner.ts:147</span> — <code>contextPreamble(context, images, afterCompaction)</code> builds the blob. <span class="ref">hub/runner.ts:161</span> is the literal the user is describing:
+    <pre><code>return `${lead}Conversation context — this background applies to every step
+of this workflow:\n\n${body}${section}\n\n---\n\n`;</code></pre>
+  </li>
+  <li><span class="ref">hub/runner.ts:215-275</span> — <code>composeStepInput()</code> is the single place all three attachment-bearing inputs meet. At <span class="ref">hub/runner.ts:251-257</span> the preamble is computed, and at <span class="ref">hub/runner.ts:269-274</span> it is concatenated in front of <code>step.description</code>, the description images, the criteria note, the step-results note and the subagent suffix.</li>
+  <li><span class="ref">hub/runner.ts:332</span> — <code>const freshConversation = sessionToResume === null;</code></li>
+  <li><span class="ref">hub/runner.ts:379</span> — the decision itself:
+    <pre><code>injectContext: mode === "exec" &&
+  ((freshConversation && !workflow.contextInjected) || afterCompaction),</code></pre>
+  </li>
+</ul>
+
+<p>So today "before all" is implemented as "first N bytes of the first exec dispatch's input". The guard is closed elsewhere: <code>chainSession()</code> at <span class="ref">hub/workflow.ts:620-636</span> sets <code>context_injected = true</code> the first time a session id is chained, and only when there actually <em>is</em> a context (text or images). <code>restartWorkflow</code> resets it at <span class="ref">hub/workflow.ts:1048</span>.</p>
+
+<p>Once injected, the context is frozen: <code>setConversationContext</code> throws <code>"context already injected"</code> <span class="ref">hub/workflow.ts:648-661</span>, the route returns 400 <span class="ref">hub/server.ts:992-1013</span>, attaching a context image is refused the same way <span class="ref">hub/server.ts:~1050</span>, and the UI renders the textarea read-only <span class="ref">hub/ui/src/views/ContextPanel.tsx:40, 84-89</span>.</p>
+
+<h3>2.2 How a step is modelled and persisted</h3>
+
+<ul>
+  <li><span class="ref">hub/db.ts:260-289</span> — the <code>steps</code> table. Ordering is a plain <code>order_index INTEGER NOT NULL</code> with <code>CREATE INDEX idx_steps_workflow ON steps(workflow_id, order_index)</code>. Identity is the UUID <code>id</code>; <code>order_index</code> is explicitly documented as "an ordering, not an identity" at <span class="ref">hub/db.ts:692-693</span>.</li>
+  <li><span class="ref">hub/db.ts:117-203</span> — <code>interface Step</code>. There is <strong>no <code>kind</code>/<code>type</code> column today</strong>. I grepped for it; the only <code>kind</code> in the schema is <code>last_progress_kind</code> (the watchdog artifact type).</li>
+  <li><span class="ref">hub/db.ts:661-754</span> — <code>insertStep()</code>. Appends at <code>MAX(order_index) + 1</code>, or with <code>afterOrderIndex</code> inserts at <code>afterOrderIndex + 1</code> and shifts every row <code>&gt;=</code> that index down by one.</li>
+  <li><span class="ref">hub/db.ts:761</span> — <code>listSteps()</code> is <code>ORDER BY order_index</code>, unfiltered.</li>
+  <li><span class="ref">hub/db.ts:778</span> — <code>nextPendingStep()</code> is <code>status = 'pending' AND selected = 1 ORDER BY order_index LIMIT 1</code>. <strong>This is the whole scheduler.</strong></li>
+</ul>
+
+<h3>2.3 Do special step kinds already exist? (Important — the answer is "no")</h3>
+
+<div class="callout warn">
+  <span class="label">Key finding</span>
+  <p>There is <strong>no existing precedent for a special step kind</strong> to copy. The two features that look like they might be one are not:</p>
+  <ul>
+    <li><strong>The acceptance-criteria judge is a <em>phase</em>, not a step.</strong> <code>StepPhase = "exec" | "judge"</code> <span class="ref">hub/db.ts:35</span> is a column on the <em>same</em> step row. <code>onStepResult</code> routes on <code>step.phase</code> <span class="ref">hub/workflow.ts:1174</span> and <code>dispatchStep(step, wf, cfg, log, {mode:"judge"})</code> reuses the same step id and callback token. No second row is ever created.</li>
+    <li><strong>Manual review is a <em>flag</em>, not a step.</strong> <code>Step.manualReview</code> <span class="ref">hub/db.ts:152</span> plus the <code>waiting</code> status.</li>
+  </ul>
+  <p>So this change introduces the first real step <em>kind</em>. That means there is no established pattern to imitate — but it also means <code>kind</code> is genuinely new information the schema does not already encode some other way, which is the honest justification for adding a column.</p>
+</div>
+
+<h3>2.4 How a step executes end to end</h3>
+
+<ol>
+  <li><code>advance()</code> <span class="ref">hub/workflow.ts:936-967</span> — the only "what runs next" decision. Refuses if the workflow is not <code>running</code>, if any step is <code>running</code>/<code>queued</code>/<code>waiting</code>; otherwise takes <code>nextPendingStep()</code> and dispatches it. If there is none <em>and</em> nothing is pending at all, it settles the workflow <code>completed</code> or <code>failed</code>.</li>
+  <li><code>dispatchStep()</code> <span class="ref">hub/runner.ts:293-421</span> — builds the input via <code>composeStepInput</code>, then <code>POST</code>s <code>{jobId: step.id, input, callbackUrl, startedCallbackUrl}</code> to <code>workflow.hookUrl</code> with an optional <code>sessionid</code> header. Marks the step <code>queued</code> on a 2xx.</li>
+  <li>The broker answers <code>{ok:true}</code> immediately and posts back to <code>/api/steps/:id/started</code> <span class="ref">hub/server.ts:471</span> then <code>/api/steps/:id/result</code> <span class="ref">hub/server.ts:486</span>.</li>
+  <li><code>onStepResult()</code> <span class="ref">hub/workflow.ts:1146-1221</span> — <strong>keyed on the step id</strong>: <code>const step = getStep(stepId); if (!step) return;</code>. Chains the session, then either judges, holds for manual review, or completes and calls <code>advance()</code>.</li>
+  <li><code>writeStatusMd()</code> <span class="ref">hub/workflow.ts:487-564</span> runs on every transition and also calls <code>writeStepResults()</code>.</li>
+</ol>
+
+<div class="callout">
+  <span class="label">Constraint from the transport</span>
+  <p>Every dispatch is wrapped by the awb hook's <code>promptTemplate</code>, fixed at workflow-creation time in <code>createWorkflow</code> <span class="ref">hub/workflow.ts:594</span>:</p>
+  <pre><code>`You are the agent of a workflow in The Target Project named "${trimmed}".
+This session is reused in order for every step of the workflow. Current step:
+
+{{payload}}
+
+Carry out the step and respond with the final result of that step.`</code></pre>
+  <p>Two consequences. (a) A context-only turn will be framed to the agent as a task to <em>carry out</em>, so the context step's payload must explicitly say "this is background, do no work, acknowledge". (b) <code>hub/awb.ts</code> exports only <code>createAwbHook</code> <span class="ref">hub/awb.ts:421</span> and <code>deleteAwbHook</code> <span class="ref">hub/awb.ts:458</span> — <strong>there is no update path</strong>, and <code>createAwbHook</code> throws <code>HookExistsError</code> if the hook exists. Changing the template therefore only affects newly created workflows, so the plan must work under the <em>existing</em> template.</p>
+</div>
+
+<h3>2.5 Step numbering, slugs and the on-disk results</h3>
+
+<ul>
+  <li><span class="ref">hub/step-results.ts:43</span> — <code>STEP_RESULTS_SUBDIR = ".target/steps"</code>, relative to the hook's <code>workdir</code>.</li>
+  <li><span class="ref">hub/step-results.ts:59-63</span> — <code>stepResultFileName(step)</code>:
+    <pre><code>const position = String(step.orderIndex + 1).padStart(2, "0");
+const slug = slugify(step.description).slice(0, 60).replace(/-+$/, "") || "step";
+return `${position}-${slug}.md`;</code></pre>
+    So the filename is derived from <code>orderIndex</code> <em>and</em> the description. Both change if a step is renumbered or reworded.</li>
+  <li><span class="ref">hub/step-results.ts:101-130</span> — <code>writeStepResults()</code> only writes; it <strong>never deletes</strong>. Any renumbering therefore leaves orphaned <code>.md</code> files behind that the agent will still read, because the pointer sentence in <code>stepResultsNote()</code> <span class="ref">hub/step-results.ts:143</span> names the whole directory.</li>
+  <li>The live directory on this checkout confirms the format: <code>.target/steps/01-investigate-…md</code> … <code>04-merge-pr-…md</code>.</li>
+</ul>
+
+<div class="callout bad">
+  <span class="label">This is why order_index 0 is the wrong choice</span>
+  <p>If the context step took <code>order_index = 0</code>, every existing task step shifts by one, <code>01-investigate-….md</code> becomes <code>02-investigate-….md</code>, and the old <code>01-…</code> file <em>stays on disk</em> — the agent would then read two files claiming to be step 1 and 2 with the same content. <code>order_index = -1</code> avoids the whole class of problem.</p>
+</div>
+
+<h3>2.6 Selection, reset, progress, timeouts — the read paths that count steps</h3>
+
+<table>
+  <thead><tr><th>Symbol</th><th>Location</th><th>Why a context row matters</th></tr></thead>
+  <tbody>
+    <tr><td><code>stepProgress()</code></td><td><span class="ref">hub/db.ts:1262-1275</span></td><td><code>COUNT(*)</code> over all steps → the progress bar and % would count the context step as work.</td></tr>
+    <tr><td><code>setStepSelection()</code></td><td><span class="ref">hub/db.ts:1222-1234</span></td><td>Sets <code>selected = CASE WHEN id IN (…) THEN 1 ELSE 0 END</code>. The UI sends explicit ids; a context step not in that list is deselected and <code>nextPendingStep</code> skips it — the context would silently never be delivered.</td></tr>
+    <tr><td><code>resetSteps()</code></td><td><span class="ref">hub/db.ts:1243-1253</span></td><td><code>WHERE selected = 1</code>. Restart resets <code>context_injected = false</code> but would leave an unselected context step <code>done</code>.</td></tr>
+    <tr><td><code>findTimeoutCandidates()</code></td><td><span class="ref">hub/db.ts:1171</span></td><td>The stale sweep (<code>expireStale</code>, <span class="ref">hub/workflow.ts:141</span>) applies to any <code>running</code>/<code>queued</code> step, including this one.</td></tr>
+    <tr><td><code>reconcileStatus()</code></td><td><span class="ref">hub/workflow.ts:877-921</span></td><td>Derives the workflow badge from <code>stepProgress</code> — inherits whatever <code>stepProgress</code> counts.</td></tr>
+    <tr><td><code>notifyWorkflowCompleted()</code></td><td><span class="ref">hub/workflow.ts:834-855</span></td><td>Reports <code>stepCount: steps.length</code> and uses <code>steps.at(-1)</code> as "the workflow's result". Safe with <code>-1</code>; wrong with <code>0</code> only for the count.</td></tr>
+    <tr><td><code>runStep()</code> / <code>abortStep()</code> / <code>forceStepStatus()</code></td><td><span class="ref">hub/workflow.ts:1432 / 1478 / 385</span></td><td>All are reachable per-step from the UI and would need to refuse a context step.</td></tr>
+  </tbody>
+</table>
+
+<h3>2.7 Session reuse and compaction resilience (prior art that constrains this)</h3>
+
+<ul>
+  <li><code>observeCompaction()</code> <span class="ref">hub/compaction.ts:68</span>, <code>needsContextReinjection()</code> <span class="ref">hub/compaction.ts:88</span>, <code>markContextReinjected()</code> <span class="ref">hub/compaction.ts:103</span>. Backed by <code>last_compaction_at</code> / <code>compaction_handled_at</code> on the workflow <span class="ref">hub/db.ts:577, 591, 601</span>.</li>
+  <li><code>dispatchStep</code> calls <code>observeCompaction</code> <span class="ref">hub/runner.ts:344</span>, computes <code>afterCompaction</code> <span class="ref">hub/runner.ts:345</span>, and re-injects the preamble with an explanatory lead line (<code>contextPreamble</code>'s <code>lead</code>, <span class="ref">hub/runner.ts:158-160</span>). <code>markContextReinjected</code> only fires after the broker accepted the POST <span class="ref">hub/runner.ts:411</span>.</li>
+</ul>
+
+<p><strong>Implication:</strong> there are now two candidate mechanisms for "the agent needs the background again". They must not both fire. The plan keeps compaction recovery exactly as it is (a preamble on the next exec dispatch) and does <em>not</em> route it through the context step in phase 1 — see §5 Phase 4 for the optional unification.</p>
+
+<h3>2.8 The UI</h3>
+
+<ul>
+  <li><code>hub/ui/src/views/ContextPanel.tsx</code> — the workflow-level textarea, its <code>injected</code>/<code>pending</code>/<code>none</code> badge (line 74-77) and the lock message (line 81). Draft reconciliation lives in <code>hub/ui/src/views/contextDraft.ts</code>.</li>
+  <li><code>hub/ui/src/views/WorkflowDetail.tsx</code> — renders <code>&lt;ol&gt;{steps.map(step =&gt; &lt;StepItem …/&gt;)}&lt;/ol&gt;</code> (line ~331), owns the selection <code>Set</code> (lines 114-169) and disables Start when <code>selectedCount === 0</code> (line 244).</li>
+  <li><code>hub/ui/src/views/StepItem.tsx</code> — shows the number as <code>{step.orderIndex + 1}</code> (lines 143 and 432), plus Edit / Remove / ▶ Run / Abort / Continue / status picker.</li>
+  <li><code>hub/ui/src/api/types.ts</code> — the client mirror of <code>publicWorkflow</code>/<code>publicStep</code>; <code>Workflow</code> at line 109, <code>Step</code> at line 139.</li>
+  <li>Server serialisers: <code>publicWorkflow</code> <span class="ref">hub/server.ts:240</span>, <code>publicStep</code> <span class="ref">hub/server.ts:272</span>.</li>
+  <li>The UI is served from <code>hub/ui/dist</code> (<code>UI_DIR</code>, <span class="ref">hub/server.ts:130</span>). <code>hub/ui/legacy-index.html</code> also contains the string "Conversation context" but is <strong>not referenced by <code>hub/server.ts</code></strong> — it appears to be dead legacy markup (see §9).</li>
+</ul>
+
+<h3>2.9 CLI and docs</h3>
+<ul>
+  <li><code>hub/cli.ts:313</code> (<code>show</code> prints the context and its injected flag) and <code>hub/cli.ts:375-386</code> (<code>set-context</code> → <code>PATCH /api/workflows/:id/context</code>).</li>
+  <li><code>docs/feature.md</code> is the original spec for this feature; requirement #2 there literally reads "prepended to the first dispatched step's input". This plan supersedes that sentence.</li>
+  <li><code>README.md</code> and <code>web-docs/index.html</code> both document the current behaviour.</li>
+</ul>
+</section>
+
+<!-- ===================================================================== -->
+<section id="recommended">
+<h2>3. Recommended design</h2>
+
+<p><strong>A single auto-managed, persisted step row of a new kind <code>'context'</code>, pinned at <code>order_index = -1</code>, owned by the hub rather than by the operator.</strong></p>
+
+<h3>3.1 The shape</h3>
+
+<table>
+  <thead><tr><th>Property</th><th>Value</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td><code>kind</code></td><td><code>'context'</code></td><td>New column, <code>NOT NULL DEFAULT 'task'</code>, so every existing row upgrades to <code>'task'</code>.</td></tr>
+    <tr><td><code>order_index</code></td><td><code>-1</code></td><td>Sorts first everywhere without renumbering anything (§2.5). Only one such row per workflow, enforced by the reconciler.</td></tr>
+    <tr><td><code>description</code></td><td>the workflow's <code>conversationContext</code> (or a fixed marker when the context is images-only)</td><td>Keeps <code>composeStepInput</code>'s existing shape; the payload is still derived from <code>contextPreamble</code>, not from this field verbatim.</td></tr>
+    <tr><td><code>acceptance_criteria</code></td><td><code>NULL</code>, always</td><td>There is nothing to verify — the step's success condition is "the agent received it", which the result callback already proves. A judge pass here would burn a second turn to grade a paragraph of prose.</td></tr>
+    <tr><td><code>manual_review</code></td><td><code>false</code>, always</td><td>Gating a human on the delivery of background text would stall every run for no decision.</td></tr>
+    <tr><td><code>use_subagent</code></td><td><code>false</code>, always, and exempt from the pressure override</td><td><strong>Load-bearing.</strong> The point is for the background to live in the <em>shared</em> thread. Delegating it (<code>SUBAGENT_SUFFIX</code>, <span class="ref">hub/runner.ts:53</span>) would put the context inside a subagent that then exits. <code>shouldForceSubagent</code> <span class="ref">hub/context-pressure.ts:75</span> must not be allowed to flip it either — though in practice the ratio is <code>null</code> on a fresh conversation.</td></tr>
+    <tr><td><code>max_retries</code> / <code>retry_interval_seconds</code></td><td><code>0</code></td><td>No judge, so no reject-and-retry cycle exists for it.</td></tr>
+    <tr><td><code>selected</code></td><td>forced <code>1</code> whenever at least one task step is selected</td><td>Otherwise <code>nextPendingStep</code> skips it (§2.6).</td></tr>
+  </tbody>
+</table>
+
+<h3>3.2 The lifecycle: one reconciler</h3>
+
+<p>A new exported function in <code>hub/workflow.ts</code>:</p>
+
+<pre><code>/** Creates, updates or removes the workflow's synthetic context step so it
+ *  always agrees with the workflow's conversation context. Idempotent. */
+export function reconcileContextStep(workflowId: string): Step | null</code></pre>
+
+<p>Rules, in order:</p>
+<ol>
+  <li>If the workflow has neither <code>conversationContext</code> nor any <code>field='context'</code> attachment → delete any existing <code>kind='context'</code> row and return <code>null</code>. (Only when it is still <code>pending</code>; a context step that already ran is history and stays.)</li>
+  <li>If <code>workflow.contextInjected</code> is <code>true</code> → do nothing. The background is already in the conversation; creating a pending step now would re-inject it. This is also what keeps legacy workflows safe (§8).</li>
+  <li>Otherwise ensure exactly one <code>kind='context'</code> row exists at <code>order_index = -1</code>, <code>status='pending'</code>, with <code>description</code> refreshed from the current context text.</li>
+</ol>
+
+<p>Call sites — all existing functions, no new route needed:</p>
+<ul>
+  <li><code>setConversationContext()</code> <span class="ref">hub/workflow.ts:648</span> — text saved or cleared.</li>
+  <li>The attachment add/delete paths for <code>field='context'</code> — <span class="ref">hub/server.ts:1024</span> and <span class="ref">hub/server.ts:551</span> (or better, inside <code>hub/attachments.ts</code>' callers in <code>workflow.ts</code>).</li>
+  <li><code>startWorkflow()</code> / <code>resumeWorkflow()</code> / <code>restartWorkflow()</code> <span class="ref">hub/workflow.ts:969 / 1010 / 1033</span> — belt-and-braces, immediately after <code>setStepSelection</code> and (for restart) after <code>setContextInjected(id,false)</code>.</li>
+</ul>
+
+<h3>3.3 The prompt the context step sends</h3>
+
+<p><code>composeStepInput</code> <span class="ref">hub/runner.ts:215</span> gains an early branch. For <code>step.kind === "context"</code> it returns the preamble and <em>nothing else</em> — no description images duplicated, no criteria note, no <code>stepResultsNote</code> (there are no prior results by definition), no subagent suffix — plus one sentence that survives the fixed hook template (§2.4):</p>
+
+<pre><code>Conversation context — this background applies to every step of this workflow:
+
+&lt;the context text&gt;
+
+&lt;image list, if any&gt;
+
+---
+
+This step exists only to establish that background for the rest of this
+workflow. There is no work to do here: do not use any tools, do not delegate
+anything, and do not start on any later step. Confirm in one line that you
+have read and will apply the background above; the workflow's real steps
+follow in separate turns on this same conversation.</code></pre>
+
+<p>Reusing <code>contextPreamble()</code> unchanged is deliberate — it already handles the images-only case and the compaction lead line.</p>
+
+<h3>3.4 What the guard means now</h3>
+
+<p><code>context_injected</code> keeps its exact current meaning and its current writer (<code>chainSession</code>, <span class="ref">hub/workflow.ts:620</span>): the first session established for this workflow carries the context. With a context step that session is established by the context step's own callback, which is strictly more accurate than today — today the flag is set by whichever step happened to run first, whether or not the preamble was actually delivered. The freeze on editing (§2.1) and the <code>injected</code> badge in <code>ContextPanel.tsx</code> continue to work untouched.</p>
+
+<h3>3.5 Why this design over the others</h3>
+<ul>
+  <li>It reuses the <em>entire</em> expensive half of the system: dispatch, session resume, <code>started</code>/<code>result</code> callbacks, timeouts, abort, the progress watchdog, the status file. The alternatives all rebuild some of it.</li>
+  <li>It gives the operator exactly what they asked for and can <em>see</em>: a real row, first in the list, with a status and a result, that ran automatically before step 1.</li>
+  <li><code>order_index = -1</code> makes it additive at the storage layer — no renumbering, no filename churn, no data migration of existing rows beyond a column default.</li>
+  <li>The blast radius is real but it is a <em>finite, enumerable list</em> of read paths (§2.6), each fixed by one <code>WHERE kind = 'task'</code> or one guard clause.</li>
+</ul>
+</section>
+
+<!-- ===================================================================== -->
+<section id="alternatives">
+<h2>4. Alternatives considered</h2>
+
+<h3>Alternative B — persisted context step at <code>order_index = 0</code> <span class="pill no">rejected</span></h3>
+<p>Mechanically simpler to reason about ("it's just the first step"), but it renumbers every task step in every workflow that has a context. That breaks <code>stepResultFileName</code> <span class="ref">hub/step-results.ts:59</span>, orphans the old <code>&lt;NN&gt;-&lt;slug&gt;.md</code> files (<code>writeStepResults</code> never deletes), changes the numbers the operator sees in <code>writeStatusMd</code> <span class="ref">hub/workflow.ts:522</span> and in <code>target show</code> <span class="ref">hub/cli.ts:319</span>, and forces a genuine data migration (<code>UPDATE steps SET order_index = order_index + 1</code>) that has to be exactly-once. All of that cost buys nothing that <code>-1</code> does not already give.</p>
+
+<h3>Alternative C — a synthetic / virtual step, not persisted <span class="pill no">rejected</span></h3>
+<p>Attractive on paper: no schema change, no migration, nothing to delete. It does not survive contact with the callback pipeline. <code>dispatchStep</code> sends <code>jobId: step.id</code> and a <code>callbackUrl</code> containing <code>step.callbackToken</code> <span class="ref">hub/runner.ts:319</span>; <code>markStepQueued</code>, <code>completeStep</code>, <code>markStepRunning</code> are all <code>UPDATE … WHERE id = ?</code>; and <code>onStepResult</code> opens with <code>const step = getStep(stepId); if (!step) return;</code> <span class="ref">hub/workflow.ts:1152-1153</span> — a virtual step's result callback would be silently <em>dropped</em>, leaving the workflow with no session id and no way to advance. Making it work means a parallel dispatch path, a parallel callback route, parallel timeout handling and a UI row with no id to hang actions off. That is strictly more new code than adding one column.</p>
+
+<h3>Alternative D — keep it at the transport layer, but emit it as its own turn <span class="pill no">rejected</span></h3>
+<p>The awb hook protocol is one input and one result callback per job: <code>POST {jobId, input, callbackUrl, startedCallbackUrl}</code> and the broker answers <code>{ok:true}</code> then calls back once <span class="ref">hub/runner.ts:386-412</span>. There is no way to send two turns within one job, so "its own turn" necessarily means "its own dispatch", which needs its own <code>jobId</code> and its own callback — i.e. a step row, which is Alternative A. Beyond that, this option fails the user's stated requirement in a softer way: a turn nobody can see in the step list is not "a separate step", it is the current behaviour with extra whitespace.</p>
+
+<h3>Alternative E — status quo (keep prepending) <span class="pill no">rejected</span></h3>
+<p>Worth stating what is actually wrong with it, since it does work: the background and step 1's task arrive as one indivisible instruction, so (a) <code>01-&lt;slug&gt;.md</code> is named after step 1 but its conversation turn also contains the whole workflow's background; (b) a retry of step 1 (<code>retryNote</code>, <span class="ref">hub/runner.ts:93</span>) re-sends the task but the background is only in the compacted history; (c) a workflow whose first selected step is <em>not</em> step 1 still gets the preamble glued to whatever ran first, which reads oddly. These are the concrete symptoms the requested change fixes.</p>
+
+<h3>Design questions answered explicitly</h3>
+<ul>
+  <li><strong>Should the context step have an acceptance criterion?</strong> No. See §3.1. If a future operator wants one, it would have to be operator-authored, which contradicts "automatic".</li>
+  <li><strong>What do judge steps do with it?</strong> Nothing — the judge is a phase of the step being judged <span class="ref">hub/db.ts:35</span>, and the context step never enters it because it has no criteria (<code>onStepResult</code>'s <code>if (!step.acceptanceCriteria)</code> branch, <span class="ref">hub/workflow.ts:1200</span>).</li>
+  <li><strong>Workflows with no context?</strong> No row is created; <code>listSteps</code> returns exactly what it returns today; <code>composeStepInput</code>'s preamble is <code>""</code> as before. Zero behavioural delta.</li>
+  <li><strong>Does the context step re-run when a task step retries?</strong> No. Retries re-dispatch the same step id (<code>beginRetry</code> <span class="ref">hub/db.ts:999</span>); nothing re-opens a <code>done</code> step at <code>-1</code>.</li>
+  <li><strong>Resuming a workflow mid-way?</strong> The context step is already <code>done</code>, so <code>nextPendingStep</code> passes over it and the run continues from where it stopped — which is correct, because the session it primed is the one being resumed.</li>
+</ul>
+</section>
+
+<!-- ===================================================================== -->
+<section id="implementation">
+<h2>5. Implementation plan</h2>
+
+<div class="phase">
+<h3>Phase 0 — Baseline</h3>
+<p class="goal">Prove the current behaviour before changing it.</p>
+<ul>
+  <li>Run <code>npm test</code> (root → <code>npm --prefix hub test</code>, i.e. <code>node --test --import ./test-setup.ts</code>) and <code>npm run typecheck</code> (hub + <code>hub/ui</code>). Record the pass counts.</li>
+  <li>Re-read <code>hub/context.test.ts</code>'s assertions at lines 100-105 and 247-248 — they assert the <em>current</em> prepend shape and will be the tests that change meaning.</li>
+</ul>
+</div>
+
+<div class="phase">
+<h3>Phase 1 — Storage: the <code>kind</code> column</h3>
+<p class="goal">Make a context step representable. No behaviour change yet.</p>
+<ul>
+  <li><strong><code>hub/db.ts</code></strong>
+    <ul>
+      <li>Add <code>export type StepKind = "task" | "context";</code> next to <code>StepPhase</code> (~line 35).</li>
+      <li>Add <code>kind: StepKind;</code> to <code>interface Step</code> (~line 117) with a doc comment saying it is hub-owned, not operator-authored.</li>
+      <li>Add <code>kind TEXT NOT NULL DEFAULT 'task'</code> to the <code>CREATE TABLE steps</code> block (~line 281) <em>and</em> an <code>addColumn("kind", "kind TEXT NOT NULL DEFAULT 'task'")</code> next to the others (~line 337) so existing DBs upgrade.</li>
+      <li><code>rowToStep</code> (~line 628): <code>kind: (row.kind as StepKind) ?? "task"</code>.</li>
+      <li><code>insertStep</code> (~line 661): accept <code>kind?: StepKind</code> and an explicit <code>orderIndex?: number</code> escape hatch (or a dedicated <code>insertContextStep</code>) so <code>-1</code> can be written without going through the append/insert-after arithmetic. Persist <code>kind</code> in the INSERT column list.</li>
+      <li><code>stepProgress</code> (~line 1262): add <code>AND kind = 'task'</code>.</li>
+      <li><code>setStepSelection</code> (~line 1222): in the non-empty branch, <code>selected = CASE WHEN id IN (…) OR kind = 'context' THEN 1 ELSE 0 END</code>. Leave the empty branch alone — "select nothing" must still run nothing.</li>
+      <li>New helper <code>getContextStep(workflowId): Step | null</code> — <code>WHERE workflow_id = ? AND kind = 'context'</code>.</li>
+    </ul>
+  </li>
+</ul>
+</div>
+
+<div class="phase">
+<h3>Phase 2 — Engine: materialise and dispatch it</h3>
+<p class="goal">The context step exists, runs first, and its payload is right.</p>
+<ul>
+  <li><strong><code>hub/workflow.ts</code></strong>
+    <ul>
+      <li>New <code>reconcileContextStep(workflowId)</code> implementing the three rules in §3.2.</li>
+      <li>Call it from <code>setConversationContext</code> (line 648, after <code>setWorkflowConversationContext</code>, before <code>writeStatusMd</code>), from the context-attachment add/remove paths, and from <code>startWorkflow</code>/<code>resumeWorkflow</code>/<code>restartWorkflow</code> right after <code>setStepSelection</code>.</li>
+      <li>Guard the operator-facing mutators against a context step: <code>editStep</code> (line 735), <code>removeStep</code> (line 781), <code>runStep</code> (line 1432), <code>forceStepStatus</code> (line 385), <code>continueStep</code> (line 319) → throw <code>new WorkflowError("the conversation-context step is managed by the hub")</code>. Leave <code>abortStep</code> (line 1478) <em>allowed</em> — a hung context dispatch must be recoverable.</li>
+      <li><code>addStep</code> (line 691): refuse <code>afterStepId</code> pointing at the context step (it would insert at <code>0</code> and shift every task step).</li>
+      <li><code>writeStatusMd</code> (line 487): render the context step as a labelled line ("Conversation context — delivered / pending") rather than <code>0. [x] …</code>, and keep the existing per-step loop over <code>kind === 'task'</code> only.</li>
+    </ul>
+  </li>
+  <li><strong><code>hub/step-results.ts</code></strong>
+    <ul>
+      <li><code>writeStepResults</code> (line 101): filter out <code>kind === 'context'</code>. Its "result" is a one-line acknowledgement; writing <code>00-…md</code> into <code>.target/steps/</code> would add noise to the very directory the compaction-resilience feature asks the agent to trust.</li>
+    </ul>
+  </li>
+  <li><strong><code>hub/runner.ts</code></strong>
+    <ul>
+      <li><code>composeStepInput</code> (line 215): early branch for <code>step.kind === "context"</code> returning <code>contextPreamble(...) + CONTEXT_STEP_SUFFIX</code> (§3.3). Export <code>CONTEXT_STEP_SUFFIX</code> so tests can assert on it.</li>
+      <li><code>dispatchStep</code> (line 293): for a context step force <code>forceSubagent = false</code> and skip the <code>workflowContextRatio</code> read entirely.</li>
+      <li>Line 379 — change the fallback condition to <code>… && !workflowHasContextStep</code>, so the old prepend fires only for workflows that have no materialised context step. This is what makes the change additive and lets legacy workflows keep working (§8).</li>
+    </ul>
+  </li>
+</ul>
+</div>
+
+<div class="phase">
+<h3>Phase 3 — API + UI</h3>
+<p class="goal">Show it, and make it un-editable.</p>
+<ul>
+  <li><strong><code>hub/server.ts</code></strong>: add <code>kind: step.kind</code> to <code>publicStep</code> (line 272). The step PATCH/DELETE/run/status routes (lines 1272, 1289, 1305, 1448) will already 400 via the <code>WorkflowError</code>s added in phase 2 — no route logic needed, but confirm each one's <code>catch</code> maps <code>WorkflowError → 400</code> (they do).</li>
+  <li><strong><code>hub/ui/src/api/types.ts</code></strong>: <code>export type StepKind = "task" | "context";</code> and <code>kind: StepKind</code> on <code>interface Step</code> (line 139).</li>
+  <li><strong><code>hub/ui/src/views/WorkflowDetail.tsx</code></strong>: split <code>steps</code> into <code>contextStep</code> and <code>taskSteps</code>. Render the context step pinned above the <code>&lt;ol&gt;</code> (or as its first <code>&lt;li&gt;</code> with a distinct class). <strong>Exclude it from the selection <code>Set</code></strong> (lines 114-169) so <code>allSelected</code>, <code>selectedCount</code> and the Start button's <code>selectedCount === 0</code> disable (line 244) keep counting only real work.</li>
+  <li><strong><code>hub/ui/src/views/StepItem.tsx</code></strong>: when <code>step.kind === "context"</code>, render the index as a "ctx" marker rather than <code>{step.orderIndex + 1}</code> (lines 143, 432), hide the selection checkbox, Edit, Remove, ▶ Run, Continue and the status picker, and keep only Abort (while running) and Open conversation. Add a short explanatory line: "Automatic — delivered to the agent before every other step."</li>
+  <li><strong><code>hub/ui/src/views/ContextPanel.tsx</code></strong>: update the hint at line 80 from "Injected once, before the first step of a fresh conversation" to describe the dedicated step, and point the lock message (line 81) at it.</li>
+</ul>
+</div>
+
+<div class="phase">
+<h3>Phase 4 — Optional follow-up (do <em>not</em> bundle with phases 1-3)</h3>
+<p class="goal">Unify compaction recovery with the context step.</p>
+<p>Once the context step exists, compaction recovery could stop being a preamble on the next task step and instead reset the context step to <code>pending</code>, letting <code>advance()</code> re-dispatch it as its own re-priming turn (it is at <code>-1</code>, so it is picked first). That is conceptually cleaner and gives the operator a visible "re-primed after compaction" event. It is deliberately deferred because it changes an area with its own recently-landed test suite (<code>hub/compaction.test.ts</code>, <code>hub/compaction-fixtures.ts</code>) and because the detection happens <em>inside</em> <code>dispatchStep</code> (line 344), which is past the point where <code>advance()</code> chooses what to run — so it needs a small restructure, not a flag flip.</p>
+</div>
+
+<div class="phase">
+<h3>Phase 5 — Docs</h3>
+<ul>
+  <li><code>docs/feature.md</code> — requirement #2 currently says "prepended to the first dispatched step's input"; supersede it and add a status note.</li>
+  <li><code>README.md</code> and <code>web-docs/index.html</code> — both describe the current injection.</li>
+  <li><code>hub/cli.ts</code> — <code>show</code> (line 313) may want to print the context step separately now that <code>orderIndex + 1</code> would print <code>0</code> for it (line 319).</li>
+</ul>
+</div>
+</section>
+
+<!-- ===================================================================== -->
+<section id="testing">
+<h2>6. Testing strategy</h2>
+
+<p>The harness that already exists is close to ideal for this. <code>hub/context.test.ts:45-63</code> stands up a fake awb hook that records <em>every dispatched input in order</em> and answers <code>{ok:true}</code>, and <code>finishStepOk</code> (line 82) drives the real <code>onStepResult</code> path. Asserting "there are now two dispatches where there used to be one, and the first is the context" is a two-line change to that harness's expectations.</p>
+
+<h3>6.1 New / changed unit + integration tests</h3>
+<ul>
+  <li><strong>Ordering:</strong> a 2-step workflow with a context dispatches <em>three</em> inputs; <code>inputs[0]</code> matches <code>/^Conversation context —/</code> and contains the "no work to do here" sentence; <code>inputs[1]</code> starts with <code>step 1</code> and does <strong>not</strong> contain <code>Conversation context</code>.</li>
+  <li><strong>No context → no context step:</strong> <code>listSteps</code> length is unchanged and the dispatched inputs are byte-identical to the pre-change baseline. This is the regression guard for the "strictly additive" claim.</li>
+  <li><strong>Images-only context</strong> still produces a context step (mirrors the existing <code>chainSession</code> rule at <span class="ref">hub/workflow.ts:632-634</span> and the assertion in <code>hub/attachments.test.ts:393</code>).</li>
+  <li><strong>Idempotency:</strong> calling <code>reconcileContextStep</code> twice, and saving the same context text twice, yields exactly one <code>kind='context'</code> row.</li>
+  <li><strong>Clearing the context</strong> (while not yet injected) deletes the pending context step.</li>
+  <li><strong>Restart</strong> resets the context step to <code>pending</code> and re-dispatches it first, even when the operator restarted with only step 3 selected (this is the <code>resetSteps</code>/<code>setStepSelection</code> interaction from §2.6).</li>
+  <li><strong>Resume mid-way</strong> does <em>not</em> re-dispatch a <code>done</code> context step.</li>
+  <li><strong>Retry of a task step</strong> (judge rejects) does not re-dispatch the context step.</li>
+  <li><strong>Progress:</strong> <code>stepProgress</code> for a 2-task workflow with a context reports <code>total: 2</code>, and the progress bar reaches 100% without the context step.</li>
+  <li><strong>Immutability:</strong> <code>PATCH</code>/<code>DELETE</code>/<code>run</code>/<code>status</code> on the context step's id all return 400 (server-level, in <code>hub/server.test.ts</code>).</li>
+  <li><strong>Subagent:</strong> the context step's input contains neither <code>SUBAGENT_SUFFIX</code> nor <code>INLINE_SUFFIX</code> nor <code>CONTEXT_PRESSURE_SUFFIX</code> and no <code>stepResultsNote</code> text.</li>
+  <li><strong>Files:</strong> no <code>00-*.md</code> appears in <code>.target/steps/</code>, and the existing steps' filenames are unchanged (the anti-renumbering guarantee).</li>
+  <li><strong>Compaction:</strong> the existing <code>hub/compaction.test.ts</code> expectations must still hold — the re-injection preamble still lands on the next exec dispatch and is not doubled by the context step.</li>
+</ul>
+
+<h3>6.2 Commands</h3>
+<pre><code>npm test          # root → npm --prefix hub test → node --test --import ./test-setup.ts
+npm run typecheck # hub tsc --noEmit + hub/ui typecheck</code></pre>
+
+<h3>6.3 Manual verification</h3>
+<ol>
+  <li>Create a workflow, add 2 steps, save a conversation context → the context step appears pinned and <code>pending</code>, progress still reads <code>0/2</code>.</li>
+  <li>Start → the context step runs first and settles; step 1 dispatches after it, and its input carries no preamble.</li>
+  <li>Open the conversation (the terminal action) and confirm the background is its own turn.</li>
+  <li>Clear the context on a fresh workflow → the context step disappears.</li>
+</ol>
+</section>
+
+<!-- ===================================================================== -->
+<section id="risks">
+<h2>7. Risks &amp; edge cases</h2>
+
+<p>These are the ones found in this code, not generic ones.</p>
+
+<table>
+  <thead><tr><th>#</th><th>Risk</th><th>Where</th><th>Mitigation</th></tr></thead>
+  <tbody>
+  <tr>
+    <td>1</td>
+    <td><strong>The context step is deselected and silently never runs.</strong> The UI sends an explicit id list to Start; <code>setStepSelection</code> deselects everything not in it, and <code>nextPendingStep</code> requires <code>selected = 1</code>. The workflow would run normally with the background silently missing.</td>
+    <td><span class="ref">hub/db.ts:1222, 778</span></td>
+    <td>Force <code>kind='context'</code> selected in the non-empty branch of <code>setStepSelection</code>; assert it in a test.</td>
+  </tr>
+  <tr>
+    <td>2</td>
+    <td><strong>Restart resets the guard but not the step.</strong> <code>restartWorkflow</code> sets <code>context_injected = false</code> and drops the session, but <code>resetSteps</code> only touches <code>selected = 1</code> rows — an unselected context step stays <code>done</code>, so nothing re-primes the new conversation and the fallback prepend is now disabled.</td>
+    <td><span class="ref">hub/workflow.ts:1044-1048</span>, <span class="ref">hub/db.ts:1243</span></td>
+    <td>Mitigated by risk 1's fix (always selected) plus an explicit <code>reconcileContextStep</code> call after the reset.</td>
+  </tr>
+  <tr>
+    <td>3</td>
+    <td><strong>Filename renumbering / orphaned result files.</strong> Only bites if <code>order_index = 0</code> is chosen: <code>writeStepResults</code> never deletes, so the old <code>01-…md</code> would sit next to the new <code>02-…md</code> with identical content, and the agent is explicitly told to trust that directory.</td>
+    <td><span class="ref">hub/step-results.ts:59, 101</span></td>
+    <td>Use <code>order_index = -1</code>. Filter <code>kind='context'</code> out of <code>writeStepResults</code>.</td>
+  </tr>
+  <tr>
+    <td>4</td>
+    <td><strong>Progress and the completion DM count a non-task.</strong> <code>stepProgress</code> is <code>COUNT(*)</code>; <code>notifyWorkflowCompleted</code> reports <code>steps.length</code>.</td>
+    <td><span class="ref">hub/db.ts:1262</span>, <span class="ref">hub/workflow.ts:838-848</span></td>
+    <td><code>AND kind='task'</code> in <code>stepProgress</code>; filter the list in the notifier. (<code>steps.at(-1)</code> is already safe with <code>-1</code>.)</td>
+  </tr>
+  <tr>
+    <td>5</td>
+    <td><strong>Two re-priming mechanisms.</strong> Compaction recovery re-prepends the preamble to the next exec dispatch. If the context step were also re-armed on compaction, the agent would get the background twice in two consecutive turns.</td>
+    <td><span class="ref">hub/runner.ts:344-380</span>, <span class="ref">hub/compaction.ts:88</span></td>
+    <td>Phase 1-3 leave compaction recovery exactly as-is. Unification is Phase 4, on its own.</td>
+  </tr>
+  <tr>
+    <td>6</td>
+    <td><strong>The hook template frames it as a task.</strong> Every payload is wrapped in "Current step: … Carry out the step and respond with the final result of that step" — and there is no way to update an existing hook's template (<code>createAwbHook</code> throws if the hook exists; no updater exists).</td>
+    <td><span class="ref">hub/workflow.ts:594</span>, <span class="ref">hub/awb.ts:421-450</span></td>
+    <td>The context step's payload must itself say "no work to do here, do not use tools, acknowledge in one line" (§3.3). Never rely on changing the template.</td>
+  </tr>
+  <tr>
+    <td>7</td>
+    <td><strong>Delegating the context to a subagent would defeat the feature.</strong> <code>subagentInstruction</code> always appends one of three suffixes, and <code>shouldForceSubagent</code> can override an inline step under context pressure. Background delivered inside a subagent dies with it.</td>
+    <td><span class="ref">hub/runner.ts:83</span>, <span class="ref">hub/context-pressure.ts:75</span></td>
+    <td>No suffix at all for <code>kind='context'</code>; skip the pressure read entirely for it.</td>
+  </tr>
+  <tr>
+    <td>8</td>
+    <td><strong>A failed context step fails the whole workflow.</strong> <code>onStepResult</code>'s <code>!outcome.ok</code> branch sets the workflow <code>failed</code>, and <code>advance</code>'s terminal derivation treats any <code>failed</code> step as workflow failure.</td>
+    <td><span class="ref">hub/workflow.ts:1180-1195, 953</span></td>
+    <td>This is arguably <em>correct</em> (the background never landed, so every later step is running blind) — but it must be a deliberate decision, and the operator needs an obvious recovery. Abort stays allowed and a re-run path should exist (either allow ▶ on a failed context step, or have restart rebuild it).</td>
+  </tr>
+  <tr>
+    <td>9</td>
+    <td><strong>Timeouts apply.</strong> The context step is a real dispatch, so <code>findTimeoutCandidates</code> / <code>expireStale</code> can time it out — including the <code>queued</code> timeout while it waits on the workdir <code>flock</code> behind another workflow.</td>
+    <td><span class="ref">hub/db.ts:1171</span>, <span class="ref">hub/workflow.ts:141</span></td>
+    <td>Acceptable (it is one short turn), but note that this adds one more dispatch per workflow that can hit the queue.</td>
+  </tr>
+  <tr>
+    <td>10</td>
+    <td><strong><code>afterStepId</code> pointing at the context step.</strong> <code>insertStep</code> would compute <code>orderIndex = -1 + 1 = 0</code> and shift every task step down — the exact renumbering the <code>-1</code> choice exists to avoid.</td>
+    <td><span class="ref">hub/db.ts:688-697</span>, <span class="ref">hub/workflow.ts:712-717</span></td>
+    <td>Reject it in <code>addStep</code>; the UI's "Add step after" only appears on a <code>waiting</code> step anyway (<code>StepItem.tsx</code>), which a context step never is.</td>
+  </tr>
+  <tr>
+    <td>11</td>
+    <td><strong>Two extra turns of context budget.</strong> The context step adds one dispatch and one agent reply to the shared session, on top of the background text that was going to be sent anyway. Marginal, but the context-pressure feature exists precisely because this session's occupancy matters.</td>
+    <td><span class="ref">hub/context-pressure.ts</span></td>
+    <td>Keep the acknowledgement explicitly one line.</td>
+  </tr>
+  <tr>
+    <td>12</td>
+    <td><strong>UI selection maths.</strong> <code>allSelected</code>, <code>selectedCount</code> and the Start-disabled rule all derive from the full <code>steps</code> array; leaving the context step in it makes "all selected" unreachable and the count wrong.</td>
+    <td><span class="ref">hub/ui/src/views/WorkflowDetail.tsx:114-169, 244</span></td>
+    <td>Split <code>contextStep</code> out of <code>steps</code> before any selection state is computed.</td>
+  </tr>
+  <tr>
+    <td>13</td>
+    <td><strong>Template import dedupe.</strong> <code>POST …/steps/from-template</code> dedupes by <code>description</code> against existing steps. A context step whose <code>description</code> holds the context text could theoretically collide with a template step's text.</td>
+    <td><span class="ref">hub/server.ts:1241-1248</span></td>
+    <td>Build the existing-descriptions set from <code>kind === 'task'</code> steps only.</td>
+  </tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ===================================================================== -->
+<section id="migration">
+<h2>8. Migration</h2>
+
+<p>There is no row migration and no renumbering. The only schema change is one nullable-by-default column, added the same way every other late column in this file was:</p>
+
+<pre><code>addColumn("kind", "kind TEXT NOT NULL DEFAULT 'task'");   // hub/db.ts, ~line 337</code></pre>
+
+<p>Existing workflows fall into three buckets:</p>
+
+<ol>
+  <li><strong>No conversation context.</strong> Nothing happens, ever. No context step, no behaviour change.</li>
+  <li><strong>Context set but not yet injected</strong> (<code>context_injected = 0</code>). The next call to <code>reconcileContextStep</code> — triggered by the next context save, or by Start/Resume/Restart — materialises the step, and the run gets the new behaviour.</li>
+  <li><strong>Context already injected</strong> (<code>context_injected = 1</code>, mid-run). <code>reconcileContextStep</code> deliberately does nothing (rule 2, §3.2). The background is already in that conversation's history; fabricating a <code>done</code> context step would invent a run that never happened, and creating a <code>pending</code> one would re-inject. The workflow keeps its history, and gets a context step the next time it is restarted (which resets the flag and starts a fresh conversation anyway).</li>
+</ol>
+
+<div class="callout good">
+  <span class="label">The safety valve</span>
+  <p>The old prepend path in <code>composeStepInput</code>/<code>dispatchStep</code> is <strong>not deleted</strong>. It is gated on "this workflow has no materialised context step" (Phase 2). So bucket 3, and any workflow where <code>reconcileContextStep</code> declined to act, keeps working exactly as it does today. The two mechanisms are mutually exclusive by construction, and the change can be rolled back by simply not creating context steps.</p>
+</div>
+
+<p>Rollback: dropping the feature means (a) stop calling <code>reconcileContextStep</code>, (b) delete any <code>kind='context'</code> rows. The column can stay — SQLite makes dropping it awkward and nothing reads it once no such rows exist.</p>
+</section>
+
+<!-- ===================================================================== -->
+<section id="unknowns">
+<h2>9. Open questions / things I could not verify</h2>
+
+<p>Stated explicitly rather than guessed:</p>
+
+<ul>
+  <li><strong>The awb broker's behaviour on a trivial turn.</strong> I read the hub's side of the protocol (<code>hub/runner.ts</code>, <code>hub/awb.ts</code>) but not <code>vendor/agent-webhook-bridge</code> itself. I have <em>not</em> verified how the broker handles a job whose agent reply is a single acknowledgement line, nor whether the <code>free-code</code> runner returns a session id for such a short run the same way <code>claude</code> does. If it does not, the context step would never chain a session and the workflow would stall — <strong>this should be smoke-tested against a real hook before Phase 2 is considered done.</strong></li>
+  <li><strong><code>hub/ui/legacy-index.html</code>.</strong> It contains the string "Conversation context", but <code>hub/server.ts</code> serves the UI from <code>hub/ui/dist</code> (<code>UI_DIR</code>, line 130) and I found no reference to <code>legacy-index.html</code> anywhere in <code>hub/server.ts</code> or <code>hub/ui/src</code>. It looks like dead legacy markup, but I did not confirm that with the build config — check <code>hub/ui/vite.config</code> before deciding whether it needs the same copy changes.</li>
+  <li><strong>The <code>.code-graph</code> index.</strong> There is a committed <code>.code-graph/</code> directory and a recent commit "chore: refresh the .code-graph index". I did not inspect what generates it or whether adding a column/symbol requires regenerating it.</li>
+  <li><strong>Exact line numbers will drift.</strong> Every reference in this document was read at <code>ecbe391</code>. The symbol names are the durable part.</li>
+  <li><strong>Whether the operator should be able to re-run a <em>failed</em> context step with ▶.</strong> Risk 8 argues both ways and I did not find an existing convention for "hub-owned step that failed". This needs a product decision, not a code reading.</li>
+  <li><strong>Precise UI copy and placement</strong> for the pinned row (inside the <code>&lt;ol&gt;</code> vs. above it) — a design call, not something the code dictates.</li>
+</ul>
+</section>
+
+<footer>
+  <p>Investigation performed against <code>/home/lenovo/Documentos/target</code> at commit <code>ecbe391</code>. All file paths, symbol names and line numbers cited above were read directly from the working tree; anything not verified is listed in §9. No source files were modified in producing this plan.</p>
+</footer>
+
+</div>
+</body>
+</html>
