@@ -38,7 +38,9 @@ the session-id shape differ (a claude uuid vs. a free-code `.jsonl` path).
 ## Install
 
 Needs **Node >= 24** (see `.nvmrc`; the installer activates it through nvm/fnm
-if the node in your PATH is older).
+if the node in your PATH is older). Runs on Linux, macOS and Windows —
+"Open conversation" launches the terminal each one actually has (an X11
+emulator, Terminal.app, or Windows Terminal / `cmd start`).
 
 ```bash
 npm run target:install
