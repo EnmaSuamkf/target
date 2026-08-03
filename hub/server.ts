@@ -66,6 +66,7 @@ import {
 } from "./awb.ts";
 import { needsContextReinjection, observeCompaction } from "./compaction.ts";
 import type { HubConfig } from "./config.ts";
+import { findConversation, listConversations, readConversationDigest } from "./conversations.ts";
 import {
 	promoteQueuedToRunning,
 	deleteTemplate,
@@ -841,6 +842,107 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		return;
 	}
 
+	// --- /api/conversations ---
+	//
+	// The harness conversations already on this machine, so a workflow can be
+	// created FROM one (see conversations.ts). Three routes, matching the three
+	// things the create form does with them: list the ones belonging to the
+	// selected agent, show what would actually be imported, and reopen one in a
+	// real terminal so the operator can confirm by eye that it's the right
+	// conversation before committing to it.
+	//
+	// All three are admin-gated, unlike GET /api/runners next to them: that route
+	// reports which CLIs are installed, these return the CONTENT of the
+	// operator's conversations (and the third spawns a process on their desktop).
+
+	if (parts[1] === "conversations") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		// Which harness's conversations. Required on the two read routes and
+		// validated against the same list a workflow's runner is, because it selects
+		// the on-disk layout to walk and the resume command to build. (The POST
+		// below takes it from the body instead, like every other mutating route.)
+		const runner = (url.searchParams.get("runner") ?? "").trim() as PublishableRunner;
+		if (req.method === "GET" && !PUBLISHABLE_RUNNERS.includes(runner)) {
+			sendJson(res, 400, { error: `invalid runner (allowed: ${PUBLISHABLE_RUNNERS.join(", ")})` });
+			return;
+		}
+
+		if (!parts[2] && req.method === "GET") {
+			// `no-store`, unlike every other GET here: this list changes whenever the
+			// operator says anything to any agent, and the whole point of reopening
+			// the form is to see the conversation you just had. A cached response —
+			// the browser may heuristically reuse one, since this has no validator —
+			// would answer "your new conversation isn't there" with stale bytes.
+			res.setHeader("cache-control", "no-store");
+			const { conversations, total } = listConversations(runner);
+			sendJson(res, 200, { conversations, total });
+			return;
+		}
+
+		// What the workflow would actually be given: the condensed transcript, so
+		// the operator sees the import before it happens rather than after.
+		if (parts[2] === "preview" && !parts[3] && req.method === "GET") {
+			const sessionId = url.searchParams.get("sessionId") ?? "";
+			const conversation = findConversation(runner, sessionId);
+			if (!conversation) {
+				sendJson(res, 404, { error: "unknown_conversation" });
+				return;
+			}
+			const digest = readConversationDigest(conversation);
+			sendJson(res, 200, { conversation, digest });
+			return;
+		}
+
+		// Reopens the conversation in a terminal on this machine — the same
+		// mechanism as a workflow's "Open conversation" button (terminal.ts), but
+		// pointed at a conversation that has no workflow yet. `cd`'d into the
+		// conversation's OWN workdir, which for claude is what makes `--resume`
+		// find the transcript at all.
+		if (parts[2] === "open-terminal" && !parts[3] && req.method === "POST") {
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				const bodyRunner = typeof body.runner === "string" ? body.runner : "";
+				if (!PUBLISHABLE_RUNNERS.includes(bodyRunner as PublishableRunner)) {
+					sendJson(res, 400, { error: `invalid runner (allowed: ${PUBLISHABLE_RUNNERS.join(", ")})` });
+					return;
+				}
+				const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+				// Resolved through the index rather than trusted: a free-code session
+				// id is an absolute path, so this is what stops an arbitrary one being
+				// handed to the terminal launcher.
+				const conversation = findConversation(bodyRunner as PublishableRunner, sessionId);
+				if (!conversation) {
+					sendJson(res, 404, { error: "unknown_conversation" });
+					return;
+				}
+				const command = harnessResumeCommand(conversation.runner, conversation.sessionId);
+				if (!command) {
+					sendJson(res, 400, { error: "unknown_harness" });
+					return;
+				}
+				// No workdir in the transcript (an old or truncated one): fall back to
+				// home rather than refusing. For free-code the session id is an absolute
+				// path so the resume still finds it; for claude the resume may miss,
+				// which the harness reports in the terminal the operator is watching.
+				const workdir = conversation.workdir ?? os.homedir();
+				void (async () => {
+					try {
+						await openResumeTerminal(workdir, command);
+						sendJson(res, 200, { ok: true, sessionId: conversation.sessionId, workdir });
+					} catch (err) {
+						sendJson(res, 500, { error: String((err as Error).message ?? err) });
+					}
+				})();
+			});
+			return;
+		}
+
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
 	if (parts[1] !== "workflows") {
 		sendJson(res, 404, { error: "not_found" });
 		return;
@@ -929,6 +1031,48 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				// (a docker tag / name), never a path or a command, so it's taken as
 				// an opaque trimmed string.
 				const image = typeof body.image === "string" && body.image.trim() !== "" ? body.image.trim() : undefined;
+				// Optional: create the workflow FROM an existing harness conversation.
+				// The named transcript is condensed here (conversations.ts) and stored
+				// as the workflow's conversation context, which `createWorkflow` then
+				// materialises as the hub-owned context step — so the background is
+				// delivered by the machinery that already exists for it: before any
+				// real step, on the shared session, exactly once.
+				//
+				// This is the ONE way a workflow may be born with a context, and it is
+				// deliberately not a free-text field: `conversationContext` in a create
+				// body is still ignored (acceptance criterion #8 — a context is set on
+				// an existing workflow, via PATCH). What's accepted here is a REFERENCE
+				// to a transcript that exists on this machine, which the server resolves
+				// and condenses itself. `conversationNote` rides along as the operator's
+				// own framing of the import and is meaningless without it; it goes
+				// FIRST, because it is what they wrote for THIS workflow, with the
+				// transcript as reference material underneath.
+				let conversationContext: string | undefined;
+				const source = body.conversation as { runner?: unknown; sessionId?: unknown } | null | undefined;
+				if (source && typeof source === "object") {
+					const note =
+						typeof body.conversationNote === "string" && body.conversationNote.trim() !== ""
+							? body.conversationNote.trim()
+							: null;
+					const sourceRunner = typeof source.runner === "string" ? source.runner : "";
+					if (!PUBLISHABLE_RUNNERS.includes(sourceRunner as PublishableRunner)) {
+						sendJson(res, 400, {
+							error: `invalid conversation.runner (allowed: ${PUBLISHABLE_RUNNERS.join(", ")})`,
+						});
+						return;
+					}
+					const sessionId = typeof source.sessionId === "string" ? source.sessionId : "";
+					// Same index-resolution guard as the /api/conversations routes: a
+					// free-code session id is an absolute path, so it is never trusted
+					// as one.
+					const conversation = findConversation(sourceRunner as PublishableRunner, sessionId);
+					if (!conversation) {
+						sendJson(res, 404, { error: "unknown_conversation" });
+						return;
+					}
+					const digest = readConversationDigest(conversation);
+					conversationContext = note ? `${note}\n\n${digest.text}` : digest.text;
+				}
 				// Optional: seed the new workflow with a template's steps (same order,
 				// same judge config), leaving the template itself untouched — a
 				// template's name/tags never carry over, only its steps.
@@ -941,7 +1085,14 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					}
 				}
 				try {
-					const workflow = createWorkflow(name, { workdir, permissionMode, runner, sandbox, image });
+					const workflow = createWorkflow(name, {
+						workdir,
+						permissionMode,
+						runner,
+						sandbox,
+						image,
+						conversationContext,
+					});
 					if (template) {
 						for (const step of template.steps) {
 							addStep(workflow.id, step.description, {

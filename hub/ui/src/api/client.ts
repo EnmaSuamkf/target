@@ -15,12 +15,15 @@
 import type {
 	Attachment,
 	AttachmentField,
+	Conversation,
+	ConversationDigest,
 	CreateWorkflowInput,
 	DirListing,
 	NotificationSettings,
 	NotificationSettingsInput,
 	OverridableStepStatus,
 	OverridableWorkflowStatus,
+	Runner,
 	RunnerAvailability,
 	SessionInfo,
 	ShortcutSettings,
@@ -119,6 +122,50 @@ export async function listWorkflows(): Promise<Workflow[]> {
 export async function listRunners(): Promise<RunnerAvailability[]> {
 	const data = await request<{ runners: RunnerAvailability[] }>("/api/runners");
 	return data.runners;
+}
+
+// --- conversations (the source a workflow can be created from) ---
+//
+// Admin-gated, unlike listRunners above: these return the CONTENT of the
+// operator's own conversations, and the last one spawns a terminal on their
+// desktop.
+
+/**
+ * This machine's `runner` conversations, newest first, with `total` — how many
+ * exist, so the form can say when the list it's showing is not all of them.
+ */
+export function listConversations(runner: Runner): Promise<{ conversations: Conversation[]; total: number }> {
+	return request<{ conversations: Conversation[]; total: number }>(
+		`/api/conversations?runner=${encodeURIComponent(runner)}`,
+		{ admin: true },
+	);
+}
+
+/** Exactly what would be imported as the new workflow's context, before importing it. */
+export function previewConversation(
+	runner: Runner,
+	sessionId: string,
+): Promise<{ conversation: Conversation; digest: ConversationDigest }> {
+	const query = `runner=${encodeURIComponent(runner)}&sessionId=${encodeURIComponent(sessionId)}`;
+	return request<{ conversation: Conversation; digest: ConversationDigest }>(`/api/conversations/preview?${query}`, {
+		admin: true,
+	});
+}
+
+/**
+ * Reopens the conversation in a terminal on this machine, so the operator can
+ * see with their own eyes that it's the one they meant before creating a
+ * workflow from it.
+ */
+export function openConversationTerminal(
+	runner: Runner,
+	sessionId: string,
+): Promise<{ ok: true; sessionId: string; workdir: string }> {
+	return request<{ ok: true; sessionId: string; workdir: string }>("/api/conversations/open-terminal", {
+		method: "POST",
+		admin: true,
+		body: json({ runner, sessionId }),
+	});
 }
 
 export function getWorkflow(id: string): Promise<{ workflow: Workflow; steps: Step[] }> {

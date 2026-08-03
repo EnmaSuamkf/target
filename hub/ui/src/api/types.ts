@@ -55,6 +55,32 @@ export interface RunnerAvailability {
 }
 
 /**
+ * One conversation already on this machine, from `GET /api/conversations`
+ * (hub/conversations.ts) — the source a workflow can be created from.
+ *
+ * `sessionId` is the harness's own handle (a uuid for claude, the transcript's
+ * absolute path for free-code) and is the only field the API takes back; the
+ * rest is what makes the list readable.
+ */
+export interface Conversation {
+	runner: Runner;
+	sessionId: string;
+	path: string;
+	workdir: string | null;
+	title: string;
+	updatedAt: string;
+	sizeBytes: number;
+}
+
+/** What importing a conversation would actually hand the workflow. */
+export interface ConversationDigest {
+	text: string;
+	turns: number;
+	includedTurns: number;
+	truncated: boolean;
+}
+
+/**
  * Where a workflow's agent runs (server-validated). Orthogonal to the runner:
  * `host` is the historical behaviour — the CLI runs as you, on your
  * filesystem — while `docker` runs the same invocation in a container whose
@@ -325,6 +351,18 @@ export interface CreateWorkflowInput {
 	/** Image for a docker sandbox; the server falls back to its own default image. */
 	image?: string;
 	templateId?: string;
+	/**
+	 * Create the workflow FROM this existing conversation: the server condenses
+	 * that transcript and stores it as the workflow's conversation context, so it
+	 * is delivered as the context step before any real work.
+	 */
+	conversation?: { runner: Runner; sessionId: string };
+	/**
+	 * The operator's own framing of the import, placed above the transcript.
+	 * Only meaningful together with `conversation` — a workflow still cannot be
+	 * created with a free-text context (that's PATCH /api/workflows/:id/context).
+	 */
+	conversationNote?: string;
 	/** Required confirmation when permissionMode is "bypassPermissions". */
 	acceptBypassRisk?: boolean;
 }

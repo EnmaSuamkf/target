@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { listRunners } from "../api/client.ts";
+import { ApiError, listConversations, listRunners, openConversationTerminal, previewConversation } from "../api/client.ts";
 import type {
+	Conversation,
 	CreateWorkflowInput,
 	PermissionMode,
 	Runner,
@@ -11,6 +12,7 @@ import type {
 import { DirectoryBrowser } from "../components/DirectoryBrowser.tsx";
 import { Field } from "../components/Field.tsx";
 import { Modal } from "../components/Modal.tsx";
+import { prettyPath, relativeTime, truncate } from "../lib/format.ts";
 import styles from "./CreateWorkflowModal.module.css";
 
 /**
@@ -28,8 +30,14 @@ import styles from "./CreateWorkflowModal.module.css";
  * `bypassPermissions` in a container means "anything inside these mounts",
  * not "anything on this machine".
  *
- * Conversation context is deliberately absent: the API ignores it at creation
- * time, it's set from the workflow's detail pane afterwards.
+ * The conversation picker under the runtime is the "create a workflow from a
+ * conversation you're already having" path. It reads the chosen runtime's
+ * on-disk sessions (`GET /api/conversations`), and the order is deliberate: the
+ * agent selector above it is the filter, so picking claude or free-code narrows
+ * the list to that harness's conversations. "Open in terminal" reopens the
+ * selected one in a real terminal window, because the titles alone are not
+ * enough to be sure it's the right conversation, and the import is not something
+ * you want to discover was wrong two steps in.
  */
 
 const PERMISSION_OPTIONS: { value: "" | PermissionMode; label: string; description: string }[] = [
@@ -107,6 +115,21 @@ export function CreateWorkflowModal({
 	// NOT silently degrade to offering both, so it surfaces an explicit error
 	// and disables submission until the operator retries.
 	const [probeFailed, setProbeFailed] = useState(false);
+	// The conversation this workflow is created from, if any — see the header
+	// comment. Keyed by session id, which is the only handle the API takes.
+	const [conversations, setConversations] = useState<Conversation[]>([]);
+	const [conversationTotal, setConversationTotal] = useState(0);
+	const [conversationId, setConversationId] = useState("");
+	const [conversationQuery, setConversationQuery] = useState("");
+	const [loadingConversations, setLoadingConversations] = useState(false);
+	const [conversationError, setConversationError] = useState<string | null>(null);
+	// Bumped by Refresh. A conversation you had seconds ago should be one click
+	// away, without closing and reopening the form to trigger a refetch.
+	const [conversationNonce, setConversationNonce] = useState(0);
+	const [preview, setPreview] = useState<string | null>(null);
+	const [previewing, setPreviewing] = useState(false);
+	const [opening, setOpening] = useState(false);
+	const [terminalNote, setTerminalNote] = useState<string | null>(null);
 
 	// Fresh form on every open. Also fetch which agent CLIs are installed on
 	// the host so the runtime selector below only offers ones the operator can
@@ -126,6 +149,13 @@ export function CreateWorkflowModal({
 		setBrowsing(false);
 		setLoadingRunners(true);
 		setProbeFailed(false);
+		setConversations([]);
+		setConversationTotal(0);
+		setConversationId("");
+		setConversationQuery("");
+		setConversationError(null);
+		setPreview(null);
+		setTerminalNote(null);
 		let cancelled = false;
 		void (async () => {
 			let avail: RunnerAvailability[] = [];
@@ -147,6 +177,103 @@ export function CreateWorkflowModal({
 			cancelled = true;
 		};
 	}, [open]);
+
+	// The conversation list is per runtime — that IS the agent filter — so it is
+	// refetched whenever the selected runtime changes, and any conversation
+	// already picked is dropped with it (a claude session id means nothing to
+	// free-code). Waits for the runner probe, since before it lands `runner` is
+	// only the provisional default.
+	useEffect(() => {
+		if (!open || loadingRunners || probeFailed) return;
+		setConversationId("");
+		setPreview(null);
+		setTerminalNote(null);
+		setLoadingConversations(true);
+		setConversationError(null);
+		let cancelled = false;
+		void (async () => {
+			try {
+				const found = await listConversations(runner);
+				if (cancelled) return;
+				setConversations(found.conversations);
+				setConversationTotal(found.total);
+			} catch (err) {
+				if (cancelled) return;
+				setConversations([]);
+				setConversationTotal(0);
+				// A missing admin token is the common case and has an obvious fix, so
+				// it's named rather than shown as a bare "unauthorized".
+				setConversationError(
+					err instanceof ApiError && err.isAuth
+						? "Enter your admin token to browse this machine's conversations."
+						: err instanceof Error
+							? err.message
+							: "Couldn't read this machine's conversations.",
+				);
+			} finally {
+				if (!cancelled) setLoadingConversations(false);
+			}
+		})();
+		return () => {
+			cancelled = true;
+		};
+	}, [open, runner, loadingRunners, probeFailed, conversationNonce]);
+
+	const conversation = conversations.find((c) => c.sessionId === conversationId) ?? null;
+	// Free-text narrowing over title and directory. With hundreds of sessions on
+	// a working machine, scrolling a <select> to find "the one about the login
+	// bug" is not a realistic way to find it.
+	const query = conversationQuery.trim().toLowerCase();
+	const visibleConversations = query
+		? conversations.filter(
+				(c) => c.title.toLowerCase().includes(query) || (c.workdir ?? "").toLowerCase().includes(query),
+			)
+		: conversations;
+
+	/**
+	 * Adopting a conversation also proposes its working directory, because a
+	 * workflow continuing that conversation's work almost always belongs in the
+	 * same repo. Only when the operator hasn't typed one — never overwriting a
+	 * deliberate choice.
+	 */
+	const pickConversation = (sessionId: string): void => {
+		setConversationId(sessionId);
+		setPreview(null);
+		setTerminalNote(null);
+		const picked = conversations.find((c) => c.sessionId === sessionId);
+		if (picked?.workdir && workdir.trim() === "") setWorkdir(picked.workdir);
+	};
+
+	const openInTerminal = async (): Promise<void> => {
+		if (!conversation) return;
+		setOpening(true);
+		setTerminalNote(null);
+		try {
+			const result = await openConversationTerminal(conversation.runner, conversation.sessionId);
+			setTerminalNote(`Opened in a terminal at ${prettyPath(result.workdir)}.`);
+		} catch (err) {
+			setTerminalNote(err instanceof Error ? err.message : "Couldn't open a terminal.");
+		} finally {
+			setOpening(false);
+		}
+	};
+
+	const togglePreview = async (): Promise<void> => {
+		if (preview !== null) {
+			setPreview(null);
+			return;
+		}
+		if (!conversation) return;
+		setPreviewing(true);
+		try {
+			const result = await previewConversation(conversation.runner, conversation.sessionId);
+			setPreview(result.digest.text);
+		} catch (err) {
+			setPreview(err instanceof Error ? err.message : "Couldn't read that conversation.");
+		} finally {
+			setPreviewing(false);
+		}
+	};
 
 	const bypass = permissionMode === "bypassPermissions";
 	// Only installed runners are selectable: `RUNNER_OPTIONS` is used to look up
@@ -186,6 +313,7 @@ export function CreateWorkflowModal({
 			if (sandbox === "docker" && image.trim()) input.image = image.trim();
 			if (permissionMode) input.permissionMode = permissionMode;
 			if (templateId) input.templateId = templateId;
+			if (conversation) input.conversation = { runner: conversation.runner, sessionId: conversation.sessionId };
 			if (bypass) input.acceptBypassRisk = true;
 			await onCreate(input);
 		} finally {
@@ -302,6 +430,90 @@ export function CreateWorkflowModal({
 						</select>
 					)}
 				</Field>
+
+				<Field
+					label="Create from a conversation"
+					hint={
+						loadingConversations
+							? `Reading this machine's ${runner} conversations…`
+							: conversations.length === 0 && !conversationError
+								? `No ${runner} conversations found on this machine. Only conversations this machine has on disk can be imported.`
+								: query
+									? `${visibleConversations.length} of ${conversations.length} match “${conversationQuery.trim()}”.`
+									: conversationTotal > conversations.length
+										? `Showing the ${conversations.length} most recent of ${conversationTotal}. Search to reach the rest.`
+										: `${conversations.length} conversation${conversations.length === 1 ? "" : "s"} — the chosen one becomes this workflow's context, delivered to the agent before the first step. The list follows the agent runtime above.`
+					}
+					{...(conversationError ? { error: conversationError } : {})}
+				>
+					{(props) => (
+						<div className={styles.conversationPicker}>
+							<div className={styles.conversationRow}>
+								<input
+									type="search"
+									className="input"
+									value={conversationQuery}
+									placeholder="Search by what was said, or by directory…"
+									disabled={runnerDisabled || conversations.length === 0}
+									aria-label="Search conversations"
+									onChange={(ev) => setConversationQuery(ev.target.value)}
+								/>
+								{/* Just had the conversation you want? It appears here without
+								    closing and reopening the form. */}
+								<button
+									type="button"
+									className="btn"
+									disabled={runnerDisabled || loadingConversations}
+									onClick={() => setConversationNonce((n) => n + 1)}
+									title="Re-read this machine's conversations"
+								>
+									{loadingConversations ? "Reading…" : "Refresh"}
+								</button>
+							</div>
+							<div className={styles.conversationRow}>
+								<select
+									{...props}
+									className="select"
+									value={conversationId}
+									disabled={runnerDisabled || loadingConversations || conversations.length === 0}
+									onChange={(ev) => pickConversation(ev.target.value)}
+								>
+									<option value="">No conversation — start with an empty context</option>
+									{visibleConversations.map((option) => (
+										<option key={option.sessionId} value={option.sessionId}>
+											{`${truncate(option.title, 70)} · ${prettyPath(option.workdir) || "unknown dir"} · ${relativeTime(option.updatedAt)}`}
+										</option>
+									))}
+								</select>
+								{/* The titles are one line of a long conversation; this is how you
+								    confirm it's the right one before importing it. */}
+								<button
+									type="button"
+									className="btn"
+									disabled={!conversation || opening}
+									onClick={() => void openInTerminal()}
+									title="Reopen this conversation in a terminal window"
+								>
+									{opening ? "Opening…" : "Open in terminal"}
+								</button>
+							</div>
+						</div>
+					)}
+				</Field>
+
+				{conversation && (
+					<div className={styles.conversation}>
+						<p className={styles.conversationMeta}>
+							{conversation.runner} · {prettyPath(conversation.workdir) || "unknown directory"} ·{" "}
+							{Math.max(1, Math.round(conversation.sizeBytes / 1024))} KB · last active {relativeTime(conversation.updatedAt)}
+						</p>
+						<button type="button" className="btn btn--ghost" onClick={() => void togglePreview()} disabled={previewing}>
+							{previewing ? "Reading…" : preview !== null ? "Hide what will be imported" : "Show what will be imported"}
+						</button>
+						{preview !== null && <pre className={styles.preview}>{preview}</pre>}
+						{terminalNote && <p className={styles.conversationMeta}>{terminalNote}</p>}
+					</div>
+				)}
 
 				<Field label="Sandbox" hint={SANDBOX_OPTIONS.find((o) => o.value === sandbox)?.description ?? ""}>
 					{(props) => (
