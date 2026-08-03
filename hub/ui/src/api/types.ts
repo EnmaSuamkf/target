@@ -89,6 +89,23 @@ export interface ConversationDigest {
 export const SANDBOXES = ["host", "docker"] as const;
 export type Sandbox = (typeof SANDBOXES)[number];
 
+/**
+ * Whether each sandbox can actually run here (from `GET /api/runners`, which
+ * reports both halves of the host's capabilities). `docker` is available only
+ * when the hub found a docker binary AND reached its daemon — an unreachable
+ * daemon fails a `docker run` exactly as hard as no docker at all.
+ */
+export interface SandboxAvailability {
+	id: Sandbox;
+	available: boolean;
+}
+
+/** The host capabilities the create form needs before it can render: which agent CLIs, and which sandboxes. */
+export interface HostCapabilities {
+	runners: RunnerAvailability[];
+	sandboxes: SandboxAvailability[];
+}
+
 export interface Progress {
 	done: number;
 	total: number;

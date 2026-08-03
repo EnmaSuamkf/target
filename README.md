@@ -48,9 +48,20 @@ npm run target:install
 
 One command from the repo root: installs the hub's dependencies, installs and
 **builds the web UI** (`hub/ui` → `hub/ui/dist`), clones
-`agent-webhook-bridge` into `vendor/` (gitignored) and installs its own. It's
-idempotent — re-run it any time. Set `AWB_DIR` to point at an existing
+`agent-webhook-bridge` into `vendor/` (gitignored), installs its own, and —
+when docker is available — **builds the default agent images** so
+[`--sandbox docker`](#containing-the-agent---sandbox) works out of the box.
+It's idempotent — re-run it any time. Set `AWB_DIR` to point at an existing
 `agent-webhook-bridge` clone instead of vendoring a second copy.
+
+**Docker is optional.** With no docker (or no daemon running) the installer
+says so and carries on: everything except container workflows works, and the
+UI simply doesn't offer the Docker sandbox. Install/start Docker and re-run
+the installer to enable it. Images that already exist are left alone, so
+re-running costs nothing; `TARGET_REBUILD_IMAGES=1` forces a rebuild after you
+edit a Dockerfile or want a newer agent CLI baked in, and
+`TARGET_SKIP_IMAGES=1` skips the builds altogether — the hub builds whatever a
+docker workflow needs the first time it dispatches one anyway.
 
 The UI is the only part of the repo with a build step, so `npm start` refuses
 to boot until `hub/ui/dist` exists. Rebuild it on its own with:
@@ -362,31 +373,48 @@ workflow with `--sandbox docker` to run every step inside a container
 instead:
 
 ```bash
-docker build -t target-agent:latest .            # once; see ./Dockerfile
 node hub/cli.ts create "release-notes" --sandbox docker --permission-mode acceptEdits
+```
+
+The default images are built for you by `npm run target:install`, so there is
+no separate step to remember. Build them by hand only if you skipped that
+(or changed a Dockerfile):
+
+```bash
+docker build -t target-agent:latest .                                    # ./Dockerfile
+docker build -t target-agent-freecode:latest -f Dockerfile.free-code .   # ./Dockerfile.free-code
 ```
 
 The image built from `./Dockerfile` only ships `claude`. A workflow whose
 runner is `free-code` invokes `free-code` as the container command, so it needs
 an image that has it — otherwise the step dies with `exit 127` before an agent
-exists. **The default image follows the runner**, so a free-code docker
-workflow defaults to `target-agent-freecode:latest`; you only have to build it
-once:
-
-```bash
-docker build -t target-agent-freecode:latest -f Dockerfile.free-code .
-node hub/cli.ts create "release-notes" --runner free-code --sandbox docker
-```
+exists. **The default image follows the runner**:
 
 | runner | default image | built from |
 | --- | --- | --- |
 | `claude` | `target-agent:latest` | `Dockerfile` |
 | `free-code` | `target-agent-freecode:latest` | `Dockerfile.free-code` |
 
-`--image` still overrides either one. Note the default is only a *name*: the
-hub writes it into the hook, it doesn't build it for you, so an image you never
-built still fails — with docker's `Unable to find image … locally` rather than
-`exit 127`.
+`--image` still overrides either one.
+
+**A default image is built, never pulled.** These two names exist in no
+registry, so the installer builds them up front and the hub builds one on the
+spot if a docker step is dispatched and it isn't there (pruned images, an
+install that skipped it, a workflow older than the image). That first step is
+slow — minutes — instead of dead, and a build that fails settles the step with
+docker's own last lines plus the `docker build` that reproduces it. An image
+you named yourself is left to docker, which is right: yours may genuinely live
+in a registry. When such a pull fails, the step's error says so rather than
+leaving you with `pull access denied … requires 'docker login'` and no idea
+that `docker login` is the wrong road.
+
+**No docker, no docker workflows.** The hub probes `docker info` (a binary on
+PATH with no daemon behind it is not availability) and reports the answer on
+`GET /api/runners`, so the New-workflow form doesn't offer the Docker sandbox
+on a machine that can't run it, and `POST /api/workflows` refuses
+`sandbox: docker` there with a plain 400 rather than letting the workflow fail
+at its first step. The answer is cached for a minute, so starting Docker is
+picked up without restarting the hub.
 
 - **The broker stays on the host.** It shells out to `docker run --rm` per
   step and posts the callback itself, so the container needs no port, no

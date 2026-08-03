@@ -348,7 +348,12 @@ export type PublishableRunner = (typeof PUBLISHABLE_RUNNERS)[number];
 // host install-check in POST /api/workflows (which calls `availableRunners`)
 // can only be exercised against an uninstalled runner by swapping this. Same
 // seam shape terminal.ts uses for its spawn.
-export const _impl = { spawnSync: cp.spawnSync };
+//
+// `spawn` is the same seam for the one long-running command in here: the
+// on-demand `docker build` of a missing sandbox image (`ensureSandboxImage`),
+// which is async precisely because it takes minutes and must not block the
+// hub's event loop the way the synchronous probes can afford to.
+export const _impl = { spawnSync: cp.spawnSync, spawn: cp.spawn };
 
 export function availableRunners(): { id: PublishableRunner; installed: boolean }[] {
 	return PUBLISHABLE_RUNNERS.map((id) => {
@@ -400,6 +405,297 @@ export const DEFAULT_SANDBOX_IMAGE = DEFAULT_SANDBOX_IMAGES.claude;
 /** The image a docker workflow gets when it doesn't name one, given its runner. */
 export function defaultSandboxImage(runner: PublishableRunner = "claude"): string {
 	return DEFAULT_SANDBOX_IMAGES[runner] ?? DEFAULT_SANDBOX_IMAGES.claude;
+}
+
+/**
+ * How long a docker probe answer is reused. Docker availability is not static
+ * — the operator can start Docker Desktop, or the daemon can die, while the
+ * hub keeps running — so the answer expires instead of being resolved once at
+ * boot. A minute is long enough that the create form and the create route
+ * don't shell out per request, and short enough that starting the daemon shows
+ * up without restarting the hub.
+ */
+const DOCKER_PROBE_TTL_MS = 60_000;
+
+let dockerProbe: { available: boolean; at: number } | null = null;
+
+/**
+ * Forgets the cached probe, so the next `dockerAvailable()` asks docker again.
+ * Exported for the tests that swap `_impl.spawnSync` — a cached answer from an
+ * earlier test would otherwise outlive the seam it was measured through.
+ */
+export function clearDockerProbe(): void {
+	dockerProbe = null;
+}
+
+/**
+ * Whether this host can actually run a `sandbox: "docker"` workflow.
+ *
+ * Probed with `docker info`, not `docker --version`: the binary being on PATH
+ * proves nothing, since a `docker run` against a stopped daemon fails just as
+ * hard as a missing docker (`Cannot connect to the Docker daemon`). `info` is
+ * the cheapest command that only succeeds when the CLI can reach a daemon, so
+ * it answers the question the create form is really asking.
+ *
+ * Same `spawnSync` seam and same "can't answer → unavailable" default as
+ * `availableRunners` above: a missing binary surfaces as `status === null`,
+ * and so does a daemon that hangs past the timeout. The timeout is longer than
+ * the runners' because `info` talks to the daemon over its socket, and on a
+ * cold Docker Desktop that round-trip is not instant.
+ */
+export function dockerAvailable(): boolean {
+	const now = Date.now();
+	if (dockerProbe && now - dockerProbe.at < DOCKER_PROBE_TTL_MS) return dockerProbe.available;
+	const result = _impl.spawnSync("docker", ["info", "--format", "{{.ServerVersion}}"], {
+		stdio: ["ignore", "pipe", "pipe"],
+		timeout: 10_000,
+	});
+	const available = result.status === 0;
+	dockerProbe = { available, at: now };
+	return available;
+}
+
+/**
+ * Which sandboxes this host can actually offer, shaped like
+ * `availableRunners` because the create form consumes them the same way: it
+ * builds its selector from what comes back, so an unavailable sandbox is never
+ * offered rather than being offered and failing at the first step's spawn.
+ *
+ * `host` is unconditionally available — it is the hub running as itself, which
+ * is what asked the question.
+ */
+export function availableSandboxes(): { id: PublishableSandbox; available: boolean }[] {
+	return PUBLISHABLE_SANDBOXES.map((id) => ({ id, available: id === "docker" ? dockerAvailable() : true }));
+}
+
+/**
+ * The images this repo can build itself, and the Dockerfile each comes from —
+ * the same two names `DEFAULT_SANDBOX_IMAGES` resolves to. Both the installer
+ * (scripts/install.ts, which builds them up front) and `ensureSandboxImage`
+ * below (which builds a missing one at dispatch time) read this list, so the
+ * tag→Dockerfile mapping exists once.
+ *
+ * Order matters: the free-code image is `FROM target-agent:latest`, so the
+ * base has to be built first — which is also why it names its `base`.
+ */
+export interface BuildableImage {
+	tag: string;
+	/** Path relative to the repo root — `docker build -f <dockerfile>`. */
+	dockerfile: string;
+	runner: PublishableRunner;
+	/** The image this one is `FROM`, when that image is also ours to build. */
+	base: string | null;
+}
+
+export const BUILDABLE_SANDBOX_IMAGES: BuildableImage[] = [
+	{ tag: DEFAULT_SANDBOX_IMAGES.claude, dockerfile: "Dockerfile", runner: "claude", base: null },
+	{
+		tag: DEFAULT_SANDBOX_IMAGES["free-code"],
+		dockerfile: "Dockerfile.free-code",
+		runner: "free-code",
+		base: DEFAULT_SANDBOX_IMAGES.claude,
+	},
+];
+
+/** The buildable spec for `image`, or null when it isn't one of ours (a registry image, or the operator's own). */
+export function buildableImage(image: string): BuildableImage | null {
+	return BUILDABLE_SANDBOX_IMAGES.find((spec) => spec.tag === image) ?? null;
+}
+
+/** This repo's root, from `hub/` — where the Dockerfiles and the build context live. */
+const REPO_DIR = path.resolve(import.meta.dirname, "..");
+
+/**
+ * `--build-arg AGENT_UID/AGENT_GID`, so the ids baked into the image are the
+ * operator's own: the broker runs the container as `--user <uid>:<gid>`, and
+ * files the agent writes into the bind-mounted repo have to come back owned by
+ * the operator rather than by root (or by a uid that doesn't exist in the
+ * image). Empty on Windows, where node has no getuid/getgid and the
+ * Dockerfiles' 1000 default is as good an answer as any.
+ */
+function imageBuildArgs(): string[] {
+	const uid = process.getuid?.();
+	const gid = process.getgid?.();
+	if (uid === undefined || gid === undefined) return [];
+	return ["--build-arg", `AGENT_UID=${uid}`, "--build-arg", `AGENT_GID=${gid}`];
+}
+
+/** The exact `docker build` the installer and the on-demand build both run — one definition, so they can't drift apart. */
+export function imageBuildCommand(spec: BuildableImage): { cmd: string; args: string[]; cwd: string } {
+	return {
+		cmd: "docker",
+		args: ["build", "-t", spec.tag, "-f", spec.dockerfile, ...imageBuildArgs(), "."],
+		cwd: REPO_DIR,
+	};
+}
+
+/** Whether the docker daemon already has `image`. Same `spawnSync` seam (and same "can't answer → no" default) as the probes above. */
+export function sandboxImageExists(image: string): boolean {
+	const result = _impl.spawnSync("docker", ["image", "inspect", image], {
+		stdio: ["ignore", "pipe", "pipe"],
+		timeout: 10_000,
+	});
+	return result.status === 0;
+}
+
+/**
+ * Hard cap on one `docker build`. Generous on purpose — the base image installs
+ * from apt and npm and the free-code one clones and compiles a repo, so minutes
+ * are normal — but not unbounded: the dispatch that triggered the build is
+ * awaiting it, and a build wedged forever would hold a step `pending` forever.
+ */
+const IMAGE_BUILD_TIMEOUT_MS = 30 * 60_000;
+
+/** In-flight builds by tag, so N steps dispatched at once trigger one build and all wait on it rather than racing N `docker build`s of the same tag. */
+const buildsInFlight = new Map<string, Promise<EnsureImageResult>>();
+
+export type EnsureImageResult = { ok: true; built: boolean } | { ok: false; error: string };
+
+type BuildLogger = (message: string, type?: "info" | "warning" | "error") => void;
+
+function runImageBuild(spec: BuildableImage): Promise<{ ok: boolean; output: string }> {
+	const { cmd, args, cwd } = imageBuildCommand(spec);
+	return new Promise((resolve) => {
+		const child = _impl.spawn(cmd, args, { cwd, stdio: ["ignore", "pipe", "pipe"], timeout: IMAGE_BUILD_TIMEOUT_MS });
+		// Only the tail is kept: a full build log is megabytes of layer chatter,
+		// and what has to reach the operator is the line the build died on.
+		let tail = "";
+		const keep = (chunk: unknown): void => {
+			tail = `${tail}${String(chunk)}`.slice(-4000);
+		};
+		child.stdout?.on("data", keep);
+		child.stderr?.on("data", keep);
+		child.on("error", (err: Error) => resolve({ ok: false, output: String(err.message ?? err) }));
+		child.on("close", (code: number | null) => resolve({ ok: code === 0, output: tail }));
+	});
+}
+
+function lastLines(output: string, count = 12): string {
+	return output.split(/\r?\n/).filter((line) => line.trim() !== "").slice(-count).join("\n");
+}
+
+/**
+ * Makes sure the image a docker step is about to run actually exists, building
+ * it when it doesn't and we know how.
+ *
+ * This is the fix for the failure the operator actually hit: the hub writes the
+ * default image NAME into the hook, but nothing ever built it, so the first
+ * step died with docker's `Unable to find image 'target-agent:latest' locally`
+ * / `pull access denied … may require 'docker login'` — a registry error for an
+ * image that only ever exists locally. The installer now builds both images up
+ * front (scripts/install.ts), and this is the runtime half of the same
+ * guarantee: a machine that skipped that step, or an operator who pruned their
+ * images, gets the build here instead of a dead end.
+ *
+ * An image that isn't one of ours is left alone: it may genuinely live in a
+ * registry (`python:3.12`, a private base), where docker's own pull is exactly
+ * the right behaviour and there is no Dockerfile to build from anyway. Those
+ * failures are still made readable, by `explainRunError`.
+ *
+ * Never throws: the caller is a dispatch, and a build problem has to settle the
+ * step with a message, not blow up the engine.
+ */
+export async function ensureSandboxImage(image: string, log: BuildLogger = () => {}): Promise<EnsureImageResult> {
+	const spec = buildableImage(image);
+	if (!spec) return { ok: true, built: false };
+	if (sandboxImageExists(image)) return { ok: true, built: false };
+	const running = buildsInFlight.get(image);
+	if (running) return await running;
+	const build = (async (): Promise<EnsureImageResult> => {
+		// A stopped daemon answers `image inspect` exactly like a missing image, so
+		// without this the operator would be told the build failed when the truth
+		// is that docker isn't running — and the build's own error ("Cannot connect
+		// to the Docker daemon") would be buried under a paragraph about
+		// Dockerfiles. The workflow was created when docker WAS available; it can
+		// be again, and the step can be retried.
+		if (!dockerAvailable()) {
+			return {
+				ok: false,
+				error: `docker is not available on this host (no docker on PATH, or the daemon isn't running), so this workflow's containerised step can't run. Start Docker and retry the step, or recreate the workflow on the host sandbox.`,
+			};
+		}
+		// `FROM target-agent:latest` can't be resolved from a registry either, so
+		// the parent is ensured first — otherwise building the free-code image on
+		// a fresh machine reproduces the very error this function exists to stop.
+		if (spec.base) {
+			const base = await ensureSandboxImage(spec.base, log);
+			if (!base.ok) return base;
+		}
+		const dockerfile = path.join(REPO_DIR, spec.dockerfile);
+		if (!fs.existsSync(dockerfile)) {
+			return {
+				ok: false,
+				error: `the docker image '${spec.tag}' is not on this machine and ${dockerfile} isn't there to build it from. Name an image that exists with the workflow's image field, or run this hub from a full checkout of the repo.`,
+			};
+		}
+		log(`docker image '${spec.tag}' is missing — building it from ${spec.dockerfile}; this takes a few minutes the first time`, "warning");
+		const result = await runImageBuild(spec);
+		if (!result.ok) {
+			const { cmd, args, cwd } = imageBuildCommand(spec);
+			return {
+				ok: false,
+				error:
+					`could not build the docker image '${spec.tag}' from ${spec.dockerfile}, so this ${spec.runner} docker workflow has no image to run in. ` +
+					`Fix the build and retry the step, or build it by hand with \`${cmd} ${args.join(" ")}\` in ${cwd}.` +
+					`\n\ndocker build said:\n${lastLines(result.output) || "(no output)"}`,
+			};
+		}
+		log(`docker image '${spec.tag}' built`);
+		return { ok: true, built: true };
+	})();
+	buildsInFlight.set(image, build);
+	try {
+		return await build;
+	} finally {
+		buildsInFlight.delete(image);
+	}
+}
+
+/**
+ * Which of our images (if any) a docker failure is about. The tag is looked for
+ * first, then the bare repository name, because docker names the image both
+ * ways in the same breath: `Unable to find image 'target-agent:latest' locally`
+ * and then `pull access denied for target-agent, repository does not exist`.
+ * The repository match is bounded so `target-agent` doesn't claim a message
+ * about `target-agent-freecode`.
+ */
+function mentionedBuildableImage(error: string): BuildableImage | null {
+	const tagged = BUILDABLE_SANDBOX_IMAGES.find((spec) => error.includes(spec.tag));
+	if (tagged) return tagged;
+	return (
+		BUILDABLE_SANDBOX_IMAGES.find((spec) => {
+			const repo = (spec.tag.split(":")[0] ?? spec.tag).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			return new RegExp(`(^|[^\\w./-])${repo}([^\\w.-]|$)`).test(error);
+		}) ?? null
+	);
+}
+
+/**
+ * Advice appended to the docker failures whose own text names no fix. The
+ * broker forwards the CLI's stderr verbatim (see the result route in
+ * server.ts), and docker's answer to an image it can't resolve is `Unable to
+ * find image … locally` followed by `pull access denied … may require 'docker
+ * login'` — which sends the operator to a registry login for something that,
+ * for the default images, is only ever built locally.
+ *
+ * The dispatch-time build above means a default image should never get this
+ * far; this is the net under it (a build that raced, an image deleted between
+ * the check and the run, a hook written by hand).
+ *
+ * Two different fixes, so two branches. A failure naming one of OUR images
+ * means the local build never ran (or was pruned): the way out is the
+ * installer, or the `docker build` it runs — never a login. Any other image is
+ * the operator's own, and there the registry reading is the right one, so the
+ * note only says which half of it to check.
+ */
+export function explainRunError(error: string): string {
+	if (!/pull access denied|Unable to find image|manifest unknown|manifest for .* not found/i.test(error)) return error;
+	const mine = mentionedBuildableImage(error);
+	if (mine) {
+		const { cmd, args } = imageBuildCommand(mine);
+		return `${error}\n\n'${mine.tag}' is built on this machine, never pulled from a registry, so \`docker login\` is not the fix — the build simply hasn't run here. Re-run \`npm run target:install\` (it builds the default agent images), or build it by hand: \`${cmd} ${args.join(" ")}\` from the repo root.`;
+	}
+	return `${error}\n\nThis workflow names an image that isn't on this machine and couldn't be pulled. Build or pull it on this host (or point the workflow at an image that exists) — the hub only builds its own default images, ${BUILDABLE_SANDBOX_IMAGES.map((spec) => spec.tag).join(" and ")}.`;
 }
 
 export interface HookOptions {

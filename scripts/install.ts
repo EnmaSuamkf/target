@@ -16,6 +16,10 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+// The one definition of which images back a `sandbox: docker` workflow and how
+// each is built. hub/awb.ts imports nothing but node builtins, so it is safe to
+// pull in here — before any dependency has been installed.
+import { BUILDABLE_SANDBOX_IMAGES, imageBuildCommand } from "../hub/awb.ts";
 
 const REPO_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HUB_DIR = path.join(REPO_DIR, "hub");
@@ -142,29 +146,105 @@ function buildUi(): void {
 	}
 }
 
+/**
+ * Whether docker is usable here — `info` rather than `--version`, because a
+ * binary on PATH with no daemon behind it fails every `docker run` just as
+ * hard as no docker at all. Mirrors `dockerAvailable()` in hub/awb.ts, which
+ * is what later decides whether the UI offers the docker sandbox. Not imported
+ * from there because that one caches its answer for a running hub, which is
+ * meaningless for a one-shot script.
+ */
+function dockerIsReady(): boolean {
+	const res = spawnSync("docker", ["info", "--format", "{{.ServerVersion}}"], { encoding: "utf8", timeout: 20_000 });
+	return !res.error && res.status === 0;
+}
+
+function imageExists(tag: string): boolean {
+	const res = spawnSync("docker", ["image", "inspect", tag], { stdio: "ignore", timeout: 20_000 });
+	return !res.error && res.status === 0;
+}
+
+/**
+ * Builds the default agent images, so that choosing "Docker container" in the
+ * New-workflow form yields a workflow that actually runs. Before this existed
+ * the image was an undocumented manual step, and skipping it surfaced at the
+ * first step as docker's `pull access denied … repository does not exist` —
+ * a registry-login error for an image that is only ever built locally.
+ *
+ * The list and the exact `docker build` come from hub/awb.ts, which is also
+ * what the hub uses to build a missing image on demand: two places build these
+ * images, from one definition of what they are.
+ *
+ * Docker is OPTIONAL, and so is this whole step: everything the hub does on
+ * the host works without it. A machine with no docker — and equally a build
+ * that fails, since the free-code image clones a third-party repo from
+ * `master` and the base image installs from apt and npm — gets a note naming
+ * what is missing and the command that fixes it, and the install still
+ * succeeds. Losing an optional sandbox must not cost the operator the hub.
+ *
+ * Idempotent by existence: an image that is already here is left alone, so a
+ * second run costs two `docker image inspect` calls and no build. That
+ * deliberately does NOT notice an edited Dockerfile — the escape hatch for
+ * that (and for picking up a newer claude CLI) is TARGET_REBUILD_IMAGES=1,
+ * which is named in the skip message so it is discoverable at the moment it
+ * is wanted. TARGET_SKIP_IMAGES=1 is the other direction: skip the builds on a
+ * machine that has docker but doesn't want to spend the minutes now — the hub
+ * builds what a docker workflow needs at its first dispatch anyway.
+ */
+function buildAgentImages(): void {
+	if (process.env.TARGET_SKIP_IMAGES === "1") {
+		log("TARGET_SKIP_IMAGES=1 — skipping the agent images; the hub will build one the first time a docker workflow needs it.");
+		return;
+	}
+	if (!dockerIsReady()) {
+		log("docker not found (or its daemon isn't running) — skipping the agent images.", "warning");
+		log("Docker workflows will be unavailable and the UI won't offer them. Install/start Docker and re-run this installer to enable them.", "warning");
+		return;
+	}
+	const force = process.env.TARGET_REBUILD_IMAGES === "1";
+	for (const image of BUILDABLE_SANDBOX_IMAGES) {
+		if (!force && imageExists(image.tag)) {
+			log(`${image.tag} already built — skipping (TARGET_REBUILD_IMAGES=1 to rebuild).`);
+			continue;
+		}
+		log(`building ${image.tag} from ${image.dockerfile} (${image.runner} workflows) — this takes a few minutes the first time...`);
+		const { cmd, args, cwd } = imageBuildCommand(image);
+		if (run(cmd, args, cwd) === 0) continue;
+		log(`could not build ${image.tag} — ${image.runner} docker workflows won't run until it exists:`, "warning");
+		log(`  ${cmd} ${args.join(" ")}`, "warning");
+		// Every later image is FROM an earlier one, so once one is missing the
+		// rest can only fail with a confusing "pull access denied" on the parent
+		// — the exact error this step exists to prevent.
+		break;
+	}
+}
+
 function main(): void {
 	const awb = awbDir();
-	log("[1/6] node");
+	log("[1/7] node");
 	log(`node ${process.version} satisfies the >=24 requirement.`);
 
-	log("[2/6] hub dependencies");
+	log("[2/7] hub dependencies");
 	installDeps("hub", HUB_DIR);
 
-	log("[3/6] ui dependencies");
+	log("[3/7] ui dependencies");
 	installDeps("ui", UI_DIR);
 
-	log("[4/6] ui build");
+	log("[4/7] ui build");
 	buildUi();
 
-	log("[5/6] agent-webhook-bridge");
+	log("[5/7] agent-webhook-bridge");
 	requireGit();
 	syncAwb(awb);
 	if (!fs.existsSync(path.join(awb, "package.json"))) {
 		throw new InstallError(`${awb} has no package.json — that doesn't look like an agent-webhook-bridge clone.`);
 	}
 
-	log("[6/6] agent-webhook-bridge dependencies");
+	log("[6/7] agent-webhook-bridge dependencies");
 	installDeps("agent-webhook-bridge", awb);
+
+	log("[7/7] agent images (docker)");
+	buildAgentImages();
 
 	console.log(`
 Ready to start. One command brings up both the broker and the hub and opens
