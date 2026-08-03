@@ -592,6 +592,15 @@ export function writeStatusMd(workflowId: string): void {
  * `image` — which is the only thing that makes the workdir a real boundary
  * rather than a naming convention. Steps are added afterwards, one at a time,
  * from the Workflow section's "+ step" button.
+ *
+ * `conversationContext` is the background every step of this workflow runs
+ * under, set at creation because that's when it's known: the workflow was
+ * created FROM an existing conversation (see conversations.ts and
+ * `POST /api/workflows`), so there is no moment at which the workflow exists
+ * and its background doesn't. It's stored on the row and immediately
+ * materialised as the hub-owned context step, so an imported conversation is
+ * delivered by exactly the same path as one typed into the context panel
+ * afterwards — one turn, before any real step, exactly once.
  */
 export function createWorkflow(
 	name: string,
@@ -601,6 +610,7 @@ export function createWorkflow(
 		runner?: HookOptions["runner"];
 		sandbox?: HookOptions["sandbox"];
 		image?: HookOptions["image"];
+		conversationContext?: string | null;
 	} = {},
 ): Workflow {
 	const trimmed = name.trim();
@@ -625,7 +635,11 @@ export function createWorkflow(
 		hookUrl: hook.hookUrl,
 		secret: hook.secret,
 		mdPath,
+		conversationContext: options.conversationContext ?? null,
 	});
+	// Before writeStatusMd, so a workflow created with a context has that step in
+	// its progress file from the first write rather than only after the next edit.
+	reconcileContextStep(workflow.id);
 	writeStatusMd(workflow.id);
 	return workflow;
 }

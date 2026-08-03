@@ -1,0 +1,1057 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crear un workflow a partir de una conversación — The Target Project</title>
+<style>
+	:root {
+		--bg: #f7f7f5;
+		--surface: #ffffff;
+		--surface-2: #f1f1ee;
+		--text: #1b1b19;
+		--text-muted: #5c5c56;
+		--border: #dcdcd6;
+		--border-strong: #c3c3bb;
+		--accent: #9a4a20;
+		--accent-soft: #f3e4dc;
+		--code-bg: #f0efec;
+		--code-text: #7a3a17;
+		--pre-bg: #24231f;
+		--pre-text: #eae8e2;
+		--ok: #2f6b3f;
+		--warn: #8a5a10;
+		--risk: #97331f;
+		--shadow: 0 1px 2px rgba(0,0,0,.05), 0 8px 24px rgba(0,0,0,.05);
+	}
+
+	@media (prefers-color-scheme: dark) {
+		:root {
+			--bg: #16161a;
+			--surface: #1e1e23;
+			--surface-2: #26262c;
+			--text: #e8e7e3;
+			--text-muted: #a3a29b;
+			--border: #33333b;
+			--border-strong: #45454f;
+			--accent: #e39a6d;
+			--accent-soft: #35281f;
+			--code-bg: #2a2a31;
+			--code-text: #e7b48c;
+			--pre-bg: #101014;
+			--pre-text: #d9d7d1;
+			--ok: #79c08c;
+			--warn: #d9ac5c;
+			--risk: #e08a75;
+			--shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.35);
+		}
+	}
+
+	* { box-sizing: border-box; }
+
+	html { -webkit-text-size-adjust: 100%; }
+
+	body {
+		margin: 0;
+		background: var(--bg);
+		color: var(--text);
+		font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+		font-size: 16.5px;
+		line-height: 1.65;
+		-webkit-font-smoothing: antialiased;
+	}
+
+	.wrap {
+		max-width: 60rem;
+		margin: 0 auto;
+		padding: 3.5rem 1.5rem 6rem;
+	}
+
+	header.doc {
+		border-bottom: 1px solid var(--border);
+		padding-bottom: 2rem;
+		margin-bottom: 2.5rem;
+	}
+
+	.eyebrow {
+		font-size: .78rem;
+		letter-spacing: .11em;
+		text-transform: uppercase;
+		color: var(--accent);
+		font-weight: 650;
+		margin: 0 0 .7rem;
+	}
+
+	h1 {
+		font-size: clamp(1.9rem, 4.4vw, 2.7rem);
+		line-height: 1.15;
+		letter-spacing: -.02em;
+		margin: 0 0 .8rem;
+		font-weight: 700;
+	}
+
+	.lede {
+		font-size: 1.1rem;
+		color: var(--text-muted);
+		margin: 0;
+		max-width: 46rem;
+	}
+
+	.meta {
+		margin-top: 1.4rem;
+		font-size: .85rem;
+		color: var(--text-muted);
+		display: flex;
+		flex-wrap: wrap;
+		gap: .4rem 1.4rem;
+	}
+
+	h2 {
+		font-size: 1.5rem;
+		letter-spacing: -.012em;
+		margin: 3.5rem 0 1rem;
+		padding-bottom: .5rem;
+		border-bottom: 1px solid var(--border);
+		font-weight: 680;
+	}
+
+	h3 {
+		font-size: 1.13rem;
+		margin: 2rem 0 .6rem;
+		font-weight: 660;
+	}
+
+	h4 {
+		font-size: .82rem;
+		letter-spacing: .09em;
+		text-transform: uppercase;
+		color: var(--text-muted);
+		margin: 1.6rem 0 .5rem;
+		font-weight: 650;
+	}
+
+	p { margin: 0 0 1rem; }
+
+	ul, ol { margin: 0 0 1rem; padding-left: 1.35rem; }
+	li { margin-bottom: .45rem; }
+	li > ul, li > ol { margin-top: .45rem; margin-bottom: .3rem; }
+
+	a { color: var(--accent); }
+
+	code {
+		font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+		font-size: .875em;
+		background: var(--code-bg);
+		color: var(--code-text);
+		padding: .1em .38em;
+		border-radius: 4px;
+		border: 1px solid var(--border);
+		word-break: break-word;
+	}
+
+	pre {
+		background: var(--pre-bg);
+		color: var(--pre-text);
+		padding: 1rem 1.15rem;
+		border-radius: 10px;
+		overflow-x: auto;
+		font-size: .84rem;
+		line-height: 1.6;
+		margin: 0 0 1.2rem;
+		border: 1px solid var(--border);
+	}
+
+	pre code {
+		background: none;
+		border: none;
+		color: inherit;
+		padding: 0;
+		font-size: 1em;
+	}
+
+	table {
+		width: 100%;
+		border-collapse: collapse;
+		margin: 1.2rem 0 1.6rem;
+		font-size: .92rem;
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow: hidden;
+	}
+
+	thead th {
+		background: var(--surface-2);
+		text-align: left;
+		font-weight: 650;
+		font-size: .8rem;
+		letter-spacing: .05em;
+		text-transform: uppercase;
+		color: var(--text-muted);
+		padding: .75rem .85rem;
+		border-bottom: 1px solid var(--border-strong);
+		vertical-align: bottom;
+	}
+
+	tbody td {
+		padding: .7rem .85rem;
+		border-bottom: 1px solid var(--border);
+		vertical-align: top;
+	}
+
+	tbody tr:last-child td { border-bottom: none; }
+	tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--surface-2) 45%, transparent); }
+	tbody th {
+		text-align: left;
+		padding: .7rem .85rem;
+		border-bottom: 1px solid var(--border);
+		font-weight: 640;
+		white-space: nowrap;
+	}
+
+	.table-scroll { overflow-x: auto; }
+
+	.card {
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: 14px;
+		padding: 1.5rem 1.6rem 1.2rem;
+		margin: 1.6rem 0 2.2rem;
+		box-shadow: var(--shadow);
+	}
+
+	.card > h3:first-child { margin-top: 0; }
+
+	.card-head {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: baseline;
+		gap: .7rem;
+		margin-bottom: .3rem;
+	}
+
+	.card-num {
+		font-size: .78rem;
+		font-weight: 700;
+		letter-spacing: .08em;
+		color: var(--accent);
+		background: var(--accent-soft);
+		border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+		padding: .12rem .55rem;
+		border-radius: 999px;
+	}
+
+	.card-title {
+		font-size: 1.28rem;
+		font-weight: 680;
+		letter-spacing: -.012em;
+		margin: 0;
+	}
+
+	.tagline {
+		color: var(--text-muted);
+		font-size: .95rem;
+		margin: 0 0 1.2rem;
+	}
+
+	.callout {
+		background: var(--surface-2);
+		border-left: 3px solid var(--accent);
+		border-radius: 0 8px 8px 0;
+		padding: .9rem 1.1rem;
+		margin: 1.2rem 0;
+		font-size: .95rem;
+	}
+
+	.callout p:last-child { margin-bottom: 0; }
+
+	.pill {
+		display: inline-block;
+		font-size: .74rem;
+		font-weight: 640;
+		letter-spacing: .04em;
+		padding: .1rem .5rem;
+		border-radius: 999px;
+		border: 1px solid var(--border-strong);
+		color: var(--text-muted);
+		background: var(--surface-2);
+		white-space: nowrap;
+	}
+
+	.pill--low { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+	.pill--mid { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+	.pill--high { color: var(--risk); border-color: color-mix(in srgb, var(--risk) 45%, transparent); }
+
+	.pros li::marker { color: var(--ok); }
+	.cons li::marker { color: var(--risk); }
+
+	.grid2 {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 0 2rem;
+	}
+
+	@media (max-width: 44rem) {
+		.grid2 { grid-template-columns: 1fr; gap: 0; }
+		.wrap { padding: 2.5rem 1.1rem 4rem; }
+	}
+
+	.toc {
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: 12px;
+		padding: 1.1rem 1.4rem;
+		margin: 2rem 0 0;
+	}
+
+	.toc h4 { margin-top: 0; }
+	.toc ol { margin-bottom: 0; }
+	.toc li { margin-bottom: .25rem; }
+
+	.rec {
+		border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+		background: color-mix(in srgb, var(--accent-soft) 55%, var(--surface));
+	}
+
+	footer.doc {
+		margin-top: 4rem;
+		padding-top: 1.5rem;
+		border-top: 1px solid var(--border);
+		font-size: .85rem;
+		color: var(--text-muted);
+	}
+
+	.path { white-space: nowrap; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+	<p class="eyebrow">The Target Project — Propuesta de diseño</p>
+	<h1>Crear un workflow a partir de una conversación</h1>
+	<p class="lede">
+		Cómo convertir una sesión viva de <code>claude</code> o <code>free-code</code> en un workflow del hub,
+		llevándose esa conversación como contexto de todos sus pasos. Análisis del código actual y tres
+		enfoques alternativos, con su coste y sus riesgos.
+	</p>
+	<div class="meta">
+		<span>Repositorio: <code>/home/lenovo/Documentos/target</code></span>
+		<span>Rama: <code>main</code></span>
+		<span>Base: <code>366c625</code></span>
+	</div>
+
+	<nav class="toc">
+		<h4>Contenido</h4>
+		<ol>
+			<li>Resumen ejecutivo</li>
+			<li>Cómo funciona hoy</li>
+			<li>Propuesta 1 — Importar la transcripción desde el hub</li>
+			<li>Propuesta 2 — Handoff desde dentro de la sesión</li>
+			<li>Propuesta 3 — Adoptar la sesión (continuar la misma conversación)</li>
+			<li>Tabla comparativa</li>
+			<li>Recomendación</li>
+		</ol>
+	</nav>
+</header>
+
+<h2 id="resumen">1. Resumen ejecutivo</h2>
+
+<p>
+	Hoy un workflow se crea vacío (<code>POST /api/workflows</code>, <code>createWorkflow</code> en
+	<code class="path">hub/workflow.ts</code>), se le añaden pasos uno a uno, y opcionalmente se le escribe a mano
+	un <em>conversation context</em> que el hub entrega como un paso propio antes de todo lo demás. Ese último
+	mecanismo — añadido en los commits <code>2e52a80</code> y <code>53ab32e</code> — es exactamente la pieza que
+	falta aprovechar: <strong>ya existe un canal para inyectar «background» en la sesión compartida antes del
+	primer paso real</strong>. Lo que no existe es ninguna forma de <em>rellenarlo desde una conversación</em>.
+</p>
+
+<p>
+	El problema real no es dónde poner el texto, sino <strong>cómo capturarlo</strong>. Las transcripciones de las
+	dos runtimes viven en disco y son grandes: en esta máquina hay 39 directorios de proyecto bajo
+	<code>~/.claude/projects/</code> con ficheros <code>.jsonl</code> de hasta 13,6 MB, y sesiones de free-code de
+	hasta 28,7 MB bajo <code>~/.free-code/agent/sessions/</code>. El cuerpo JSON que acepta el hub está limitado a
+	<code>maxInputBytes</code> = 64 KiB (<code class="path">hub/config.ts</code>), y el paso de contexto se entrega
+	como <em>un turno</em> de una sesión cuya ocupación es justo lo que <code class="path">hub/context-pressure.ts</code>
+	existe para proteger. Volcar la transcripción entera no es una opción; hay que decidir <em>quién</em> la
+	condensa y <em>dónde</em>.
+</p>
+
+<p>
+	De ahí las tres propuestas, que se diferencian en las tres decisiones que importan — dónde vive el disparador,
+	cómo se captura la conversación y cómo llega a los pasos:
+</p>
+
+<ol>
+	<li><strong>Importar la transcripción</strong> — disparador en la UI del hub, captura = fichero <code>.jsonl</code> en disco condensado por el hub, entrega = el paso de contexto que ya existe.</li>
+	<li><strong>Handoff desde dentro de la sesión</strong> — disparador dentro del agente que estás usando, captura = resumen generado por el propio modelo (que además propone los pasos), entrega = contexto + pasos en una sola llamada.</li>
+	<li><strong>Adoptar la sesión</strong> — disparador en la UI o el CLI, sin captura: el workflow <em>hereda el session id</em> y continúa literalmente la misma conversación.</li>
+</ol>
+
+<p>
+	La recomendación es empezar por la <strong>Propuesta 2</strong>: es la más barata en código, la única que
+	produce un payload del tamaño correcto sin escribir un condensador, y la única que cubre el momento que el
+	usuario describe («estoy conversando y quiero crear un workflow desde aquí»).
+</p>
+
+<h2 id="hoy">2. Cómo funciona hoy</h2>
+
+<h3>2.1. Crear un workflow y asignarle un agente</h3>
+
+<p>
+	Un workflow se crea con <code>createWorkflow(name, options)</code>
+	(<code class="path">hub/workflow.ts</code>, línea 596). Esa función hace cuatro cosas, en este orden:
+</p>
+
+<ol>
+	<li>Genera <code>agentName = &lt;slug&gt;-&lt;shortId&gt;</code> a partir del nombre (<code>slugify</code> en <code class="path">hub/db.ts</code>).</li>
+	<li>Resuelve el <code>workdir</code>: el que le pasen, o <code>~/.target/sandboxes/&lt;agentName&gt;</code>.</li>
+	<li>Llama a <code>createAwbHook(agentName, workdir, promptTemplate, {permissionMode, runner, sandbox, image})</code>
+		(<code class="path">hub/awb.ts</code>, línea 421), que escribe el hook en
+		<code>~/.agent-webhook-bridge/hooks.json</code> con <code>consumers: ["spawn:claude"]</code> o
+		<code>"spawn:free-code"</code>. <strong>Aquí es donde se «asigna el agente»</strong>: la runtime es una
+		propiedad del hook, no del workflow, y <code>createAwbHook</code> lanza <code>HookExistsError</code> si el
+		hook ya existe — no hay ruta de actualización, así que un workflow nunca puede cambiar de runtime ni de
+		<code>promptTemplate</code>.</li>
+	<li>Inserta la fila con <code>insertWorkflow</code> (<code class="path">hub/db.ts</code>, línea 448) y escribe
+		el <code>.md</code> de progreso en <code>~/.target/&lt;slug&gt;-&lt;shortId&gt;.md</code>.</li>
+</ol>
+
+<p>
+	La ruta HTTP es <code>POST /api/workflows</code> (<code class="path">hub/server.ts</code>, línea 857). Valida
+	<code>permissionMode</code>, <code>runner</code>, <code>sandbox</code>, <code>image</code> y un
+	<code>templateId</code> opcional, comprueba con <code>availableRunners()</code> que el CLI elegido esté
+	instalado en el host, y devuelve <code>publicWorkflow(workflow)</code>. En la UI el formulario es
+	<code class="path">hub/ui/src/views/CreateWorkflowModal.tsx</code>, que envía un
+	<code>CreateWorkflowInput</code> (<code class="path">hub/ui/src/api/types.ts</code>, línea 317) vía
+	<code>api.createWorkflow</code> (<code class="path">hub/ui/src/api/client.ts</code>, línea 128), invocado desde
+	<code>handleCreate</code> en <code class="path">hub/ui/src/App.tsx</code>. Por CLI:
+	<code>node hub/cli.ts create &lt;name&gt; [--runner …]</code>
+	(<code class="path">hub/cli.ts</code>).
+</p>
+
+<div class="callout">
+	<p>
+		<strong>Detalle relevante:</strong> <code>insertWorkflow</code> ya acepta un parámetro opcional
+		<code>conversationContext</code>, pero <code>createWorkflow</code> <em>no se lo pasa nunca</em>. El
+		comentario del modal lo dice explícitamente: «Conversation context is deliberately absent: the API ignores
+		it at creation time». Es decir: <strong>la capacidad de crear un workflow ya con contexto existe en la capa
+		de almacenamiento y sólo está desconectada</strong>.
+	</p>
+</div>
+
+<h3>2.2. La sesión compartida entre pasos</h3>
+
+<p>
+	Cada paso se despacha con <code>dispatchStep</code> (<code class="path">hub/runner.ts</code>, línea 331) al hook
+	del workflow. Si <code>workflow.lastSessionId</code> existe, se envía en la cabecera <code>sessionid</code> y awb
+	hace <code>claude --resume &lt;uuid&gt;</code> o <code>free-code --session &lt;ruta .jsonl&gt;</code>; si no,
+	arranca una sesión nueva. El id que devuelve el callback se persiste con <code>chainSession</code>
+	(<code class="path">hub/workflow.ts</code>, línea 639) → <code>setWorkflowSessionId</code>. Ese encadenamiento es
+	lo que hace que todo el workflow lea como una única conversación.
+</p>
+
+<p>
+	Alrededor de esa sesión hay tres mecanismos que cualquier propuesta debe respetar:
+</p>
+
+<ul>
+	<li><strong>Presión de contexto</strong> — <code class="path">hub/context-pressure.ts</code>: por encima de
+		<code>CONTEXT_PRESSURE_RATIO = 0.6</code> (60 %) un paso marcado «inline» se delega igualmente a un subagente.
+		La ocupación se mide leyendo la transcripción real (<code>readTokenUsage</code> en
+		<code class="path">hub/transcript.ts</code>).</li>
+	<li><strong>Compactación</strong> — <code class="path">hub/compaction.ts</code> detecta el registro
+		<code>compact_boundary</code> de Claude Code y el <code>type: "compaction"</code> de free-code, y reinyecta
+		el contexto de conversación en el siguiente despacho.</li>
+	<li><strong>Resultados en disco</strong> — <code class="path">hub/step-results.ts</code> escribe cada resultado en
+		<code>&lt;workdir&gt;/.target/steps/&lt;NN&gt;-&lt;slug&gt;.md</code> y <code>stepResultsNote()</code> nombra
+		ese directorio en <em>cada</em> prompt de ejecución.</li>
+</ul>
+
+<h3>2.3. El paso de contexto (lo que ya existe y hay que reutilizar)</h3>
+
+<p>
+	Desde <code>2e52a80</code> («feat(hub): deliver the conversation context as its own step») el <em>conversation
+	context</em> no se antepone al primer paso: <strong>es un paso real</strong>. Las piezas:
+</p>
+
+<ul>
+	<li><code>StepKind = "task" | "context"</code> y <code>CONTEXT_STEP_ORDER_INDEX = -1</code>
+		(<code class="path">hub/db.ts</code>, líneas 54 y 68). El índice negativo es la decisión de diseño clave:
+		ordena primero en <code>ORDER BY order_index</code> sin renumerar nada, así que
+		<code>stepResultFileName</code> sigue emitiendo <code>01-….md</code>, <code>02-….md</code>.</li>
+	<li><code>reconcileContextStep(workflowId)</code> (<code class="path">hub/workflow.ts</code>, línea 721) es su
+		<em>único</em> escritor, es idempotente y sigue tres reglas: sin contexto no hay paso; si
+		<code>context_injected</code> ya es <code>true</code> no toca nada; si no, garantiza exactamente una fila
+		<code>kind='context'</code> pendiente. Se llama desde <code>setConversationContext</code>,
+		<code>startWorkflow</code>, <code>resumeWorkflow</code>, <code>restartWorkflow</code> y desde la ruta de
+		attachments.</li>
+	<li><code>composeStepInput</code> (<code class="path">hub/runner.ts</code>, línea 235) trata el paso de contexto
+		antes que cualquier otra consideración: construye el preámbulo y le añade
+		<code>CONTEXT_STEP_SUFFIX</code> (línea 181), que prohíbe explícitamente usar herramientas, delegar o empezar
+		un paso posterior.</li>
+	<li><code>refuseContextStep</code> impide editarlo, borrarlo o forzarle un estado; la UI oculta esas acciones
+		(<code class="path">hub/ui/src/views/StepItem.tsx</code>, <code>isContext</code>) y
+		<code class="path">hub/ui/src/views/WorkflowDetail.tsx</code> lo separa de <code>taskSteps</code> para que no
+		cuente en el progreso.</li>
+	<li>Se escribe con <code>PATCH /api/workflows/:id/context</code> (<code class="path">hub/server.ts</code>, línea
+		1004), <code>node hub/cli.ts set-context</code>, o el panel
+		<code class="path">hub/ui/src/views/ContextPanel.tsx</code>. <strong>Queda congelado</strong> en cuanto
+		<code>context_injected</code> pasa a <code>true</code>: <code>setConversationContext</code> lanza
+		<code>context already injected</code>.</li>
+</ul>
+
+<p>
+	El plan original de esta feature está en <code class="path">docs/context-step-plan.html</code>, y las pruebas en
+	<code class="path">hub/context-step.test.ts</code> y <code class="path">hub/context.test.ts</code>.
+</p>
+
+<h3>2.4. Dónde viven las conversaciones en disco</h3>
+
+<p>
+	<code class="path">hub/transcript.ts</code> ya documenta y lee ambos formatos — es la base para cualquier
+	importación:
+</p>
+
+<div class="table-scroll">
+<table>
+	<thead>
+		<tr><th>Runtime</th><th>Ubicación</th><th>Forma del session id</th><th>Tamaño observado en esta máquina</th></tr>
+	</thead>
+	<tbody>
+		<tr>
+			<td>Claude Code</td>
+			<td><code>~/.claude/projects/&lt;slug-del-workdir&gt;/&lt;uuid&gt;.jsonl</code>, con subagentes en <code>&lt;uuid&gt;/subagents/*.jsonl</code></td>
+			<td>uuid</td>
+			<td>39 proyectos; mayor fichero 13,6 MB</td>
+		</tr>
+		<tr>
+			<td>free-code (interactivo)</td>
+			<td><code>~/.free-code/agent/sessions/&lt;slug&gt;/&lt;fecha&gt;_&lt;uuid&gt;.jsonl</code></td>
+			<td>ruta absoluta del <code>.jsonl</code></td>
+			<td>mayor fichero 28,7 MB</td>
+		</tr>
+		<tr>
+			<td>free-code (lanzado por awb)</td>
+			<td><code>~/.agent-webhook-bridge/sessions/&lt;hook&gt;/&lt;epoch&gt;-&lt;uuid&gt;.jsonl</code></td>
+			<td>ruta absoluta del <code>.jsonl</code></td>
+			<td>mayor fichero 18,0 MB</td>
+		</tr>
+	</tbody>
+</table>
+</div>
+
+<p>
+	<code>claudeProjectDir(workdir)</code> (<code class="path">hub/transcript.ts</code>, línea 43) deriva el
+	directorio sustituyendo por <code>-</code> todo carácter que no sea <code>a-zA-Z0-9-</code>; ese mismo directorio
+	lo vigila <code class="path">hub/progress.ts</code> para el watchdog de inactividad. El lector de líneas de
+	<code>readTokenUsage</code> ya recorre estos ficheros línea a línea, y
+	<code>compactionBoundaryOfLine</code> (línea 173) ya normaliza los dos formatos de compactación.
+</p>
+
+<h3>2.5. Superficies de disparo existentes</h3>
+
+<ul>
+	<li><strong>UI web</strong> — React + Vite en <code class="path">hub/ui/src</code>, servida por el hub desde
+		<code>hub/ui/dist</code>. Polling cada 2 s; el token admin vive en <code>localStorage</code>.</li>
+	<li><strong>CLI</strong> — <code class="path">hub/cli.ts</code>, que lee el token admin de
+		<code>~/.target/config.json</code> mediante <code>loadConfig()</code> y llama a la API HTTP. <em>Cualquier
+		proceso que corra como el usuario puede hacer lo mismo</em>, incluido un agente en una sesión con permisos de
+		bash.</li>
+	<li><strong>«Open conversation»</strong> — <code>POST /api/workflows/:id/open-terminal</code>
+		(<code class="path">hub/server.ts</code>, línea 1174) → <code>harnessResumeCommand</code>
+		(<code class="path">hub/awb.ts</code>) → <code>openResumeTerminal</code>
+		(<code class="path">hub/terminal.ts</code>). Es el único puente hub → sesión interactiva que existe hoy, y va
+		en la dirección contraria a la que necesitamos.</li>
+	<li><strong>No hay</strong> ningún hook de Claude Code (<code>SessionStart</code>/<code>Stop</code>) ni ningún
+		directorio <code>.claude/commands/</code> en este repositorio: <code class="path">.claude/</code> sólo
+		contiene <code>settings.local.json</code> con permisos. La palabra «hook» en este proyecto significa siempre
+		<em>hook de agent-webhook-bridge</em>.</li>
+</ul>
+
+<h3>2.6. Qué falta, en una frase</h3>
+
+<p>
+	Falta un camino de entrada: nada en el hub sabe leer, resumir o adoptar una conversación existente, y ni
+	<code>POST /api/workflows</code> ni el modal de creación aceptan contexto alguno. Todo lo que hay <em>después</em>
+	del contexto (paso de contexto, inyección, congelado, recuperación tras compactación, presión de contexto) ya
+	está construido y probado.
+</p>
+
+<h2 id="p1">3. Propuesta 1 — Importar la transcripción desde el hub</h2>
+
+<div class="card">
+	<div class="card-head">
+		<span class="card-num">Propuesta 1</span>
+		<h3 class="card-title">Importar la transcripción desde el hub</h3>
+		<span class="pill pill--mid">Esfuerzo medio-alto</span>
+	</div>
+	<p class="tagline">
+		Disparador: UI del hub · Captura: fichero <code>.jsonl</code> en disco, condensado por el hub ·
+		Entrega: el paso de contexto existente
+	</p>
+
+	<h4>Qué es</h4>
+	<p>
+		Un selector de conversaciones dentro del formulario «New workflow»: el hub escanea
+		<code>~/.claude/projects/</code>, <code>~/.free-code/agent/sessions/</code> y
+		<code>~/.agent-webhook-bridge/sessions/</code>, lista las sesiones recientes (proyecto, fecha, número de
+		turnos, tamaño), y al elegir una la <strong>destila a Markdown</strong> y la guarda como
+		<code>conversation_context</code> del workflow nuevo. A partir de ahí no hay nada nuevo: el paso de contexto
+		la entrega en su propio turno antes del primer paso real.
+	</p>
+
+	<h4>Cómo funciona, paso a paso</h4>
+	<ol>
+		<li>El operador abre «New workflow» y activa «Crear desde una conversación».</li>
+		<li>La UI llama a <code>GET /api/conversations?workdir=…</code>, que devuelve las sesiones encontradas en
+			disco, ordenadas por <code>mtime</code>. Se filtra por directorio de trabajo usando la misma regla de
+			slug que <code>claudeProjectDir()</code>.</li>
+		<li>El operador elige una sesión y, opcionalmente, un rango (últimos N turnos) y una plantilla de pasos.</li>
+		<li>La UI hace <code>POST /api/workflows</code> con un bloque nuevo
+			<code>fromConversation: { runtime, sessionRef, lastTurns }</code>.</li>
+		<li>El servidor llama a un módulo nuevo <code>hub/conversations.ts</code>, que recorre el <code>.jsonl</code>
+			línea a línea (igual que <code>accumulateUsage</code>), <strong>descarta</strong> los registros
+			<code>tool_use</code>/<code>tool_result</code>, los <code>thinking</code> y los <code>queue-operation</code>,
+			conserva los turnos <code>user</code> y el texto de los <code>assistant</code>, corta en el último
+			<code>compact_boundary</code> si lo hay, y emite un Markdown con un presupuesto duro de caracteres.</li>
+		<li><code>createWorkflow</code> pasa ese texto a <code>insertWorkflow</code> (que ya lo acepta) y se llama a
+			<code>reconcileContextStep</code>, que materializa la fila <code>kind='context'</code> en
+			<code>order_index = -1</code>.</li>
+		<li>El operador añade sus pasos y pulsa Start. <code>startWorkflow</code> despacha primero el paso de
+			contexto; <code>chainSession</code> marca <code>context_injected</code> y el resto del run es idéntico a
+			cualquier otro.</li>
+	</ol>
+
+	<h4>Qué habría que cambiar</h4>
+	<ul>
+		<li><strong>Nuevo</strong> <code class="path">hub/conversations.ts</code>: <code>listConversations()</code>,
+			<code>readConversation(ref)</code> y <code>condenseConversation(lines, budget)</code>. Reutiliza
+			<code>claudeProjectDir()</code> y <code>compactionBoundaryOfLine()</code> de
+			<code class="path">hub/transcript.ts</code>, y <code>awbDir()</code> de <code class="path">hub/awb.ts</code>.</li>
+		<li><code class="path">hub/server.ts</code>: ruta nueva <code>GET /api/conversations</code> (de lectura, sin
+			token, como <code>GET /api/runners</code> en la línea 839) y ampliación del handler de
+			<code>POST /api/workflows</code> (línea 857) para aceptar <code>fromConversation</code>.</li>
+		<li><code class="path">hub/workflow.ts</code>: <code>createWorkflow</code> gana una opción
+			<code>conversationContext</code> que sí se pasa a <code>insertWorkflow</code>, más una llamada a
+			<code>reconcileContextStep</code> justo después de <code>writeStatusMd</code>.</li>
+		<li><code class="path">hub/ui/src/views/CreateWorkflowModal.tsx</code>: selector de conversación (y un
+			componente nuevo tipo <code>DirectoryBrowser.tsx</code> para la lista).
+			<code class="path">hub/ui/src/api/client.ts</code> y <code class="path">hub/ui/src/api/types.ts</code>:
+			<code>listConversations()</code> y el campo nuevo en <code>CreateWorkflowInput</code>.</li>
+		<li><code class="path">hub/cli.ts</code>: verbo <code>create-from-conversation</code>.</li>
+		<li>Pruebas: un fichero nuevo <code>hub/conversations.test.ts</code> siguiendo el patrón de
+			<code class="path">hub/context-step.test.ts</code>, con fixtures reales de ambos formatos (igual que hace
+			<code class="path">hub/compaction-fixtures.ts</code>).</li>
+	</ul>
+
+	<div class="grid2">
+		<div>
+			<h4>Ventajas</h4>
+			<ul class="pros">
+				<li>No toca el motor: el contexto llega por el canal que ya está probado, y todo lo posterior (congelado, reinyección tras compactación, presión de contexto) sigue igual.</li>
+				<li>Funciona <em>a posteriori</em>: sirve para una conversación de hace tres días tanto como para la de ahora mismo.</li>
+				<li>No exige que el agente tenga permisos de ejecución: el hub lee ficheros que ya son del usuario.</li>
+				<li>Es determinista y auditable — el texto que verá el agente se puede leer antes de arrancar, en el propio <code>ContextPanel</code>.</li>
+			</ul>
+		</div>
+		<div>
+			<h4>Desventajas y riesgos</h4>
+			<ul class="cons">
+				<li>Hay que <strong>escribir un condensador</strong>, que es donde está toda la dificultad: 13–28 MB de <code>.jsonl</code> tienen que caber en un turno y en <code>maxInputBytes</code> (64 KiB). Un recorte tonto pierde justo lo que importa.</li>
+				<li>Acopla el hub a los formatos internos de ambas runtimes más allá de lo que ya hace <code class="path">hub/transcript.ts</code>: un cambio de formato rompe la importación (hoy sólo degradaría el medidor de tokens).</li>
+				<li>El operador tiene que <em>identificar</em> su sesión en una lista de uuids y fechas; el «slug del workdir» ayuda pero no desambigua entre varias sesiones del mismo proyecto.</li>
+				<li>Superficie de lectura nueva: <code>GET /api/conversations</code> expone rutas y metadatos de todas las sesiones de la máquina. Aceptable para una herramienta local monousuario, pero es una decisión consciente.</li>
+				<li>Riesgo de fuga: una transcripción puede contener secretos que el operador no quiere volcar en el <code>.md</code> de progreso ni en <code>&lt;workdir&gt;/.target/steps/</code>.</li>
+			</ul>
+		</div>
+	</div>
+
+	<h4>Esfuerzo estimado</h4>
+	<p>
+		<strong>3–5 días.</strong> El módulo de lectura y condensación es el grueso (2–3 días con pruebas sobre
+		transcripciones reales); la ruta HTTP y el cambio en <code>createWorkflow</code> son de horas; el selector en
+		la UI, medio día.
+	</p>
+</div>
+
+<h2 id="p2">4. Propuesta 2 — Handoff desde dentro de la sesión</h2>
+
+<div class="card">
+	<div class="card-head">
+		<span class="card-num">Propuesta 2</span>
+		<h3 class="card-title">Handoff desde dentro de la sesión</h3>
+		<span class="pill pill--low">Esfuerzo bajo</span>
+	</div>
+	<p class="tagline">
+		Disparador: el propio agente, dentro de la conversación · Captura: resumen generado por el modelo ·
+		Entrega: contexto + pasos creados en una sola llamada
+	</p>
+
+	<h4>Qué es</h4>
+	<p>
+		Invertir la dirección: en lugar de que el hub lea la conversación, es <strong>el agente que está dentro de la
+		conversación</strong> quien crea el workflow. El operador escribe algo como «crea un workflow con esto» y el
+		agente — que ya tiene toda la conversación en su contexto — produce un resumen ejecutivo del hilo y una lista
+		de pasos, y los envía al hub con una única llamada HTTP autenticada con el token admin de
+		<code>~/.target/config.json</code>.
+	</p>
+
+	<h4>Cómo funciona, paso a paso</h4>
+	<ol>
+		<li>El operador, dentro de su sesión de <code>claude</code> o <code>free-code</code>, invoca el disparador
+			(un comando de proyecto en <code>.claude/commands/</code>, un skill de free-code bajo
+			<code>~/.free-code/agent/skills/</code>, o simplemente la frase en lenguaje natural que el
+			<code>CLAUDE.md</code>/<code>AGENTS.md</code> del repo describa).</li>
+		<li>La instrucción le pide al agente exactamente dos artefactos: <em>(a)</em> un resumen del hilo en Markdown
+			con un límite explícito de caracteres — decisiones tomadas, restricciones, vocabulario, ficheros
+			relevantes — y <em>(b)</em> una lista ordenada de pasos ejecutables, cada uno con su descripción y su
+			criterio de aceptación opcional.</li>
+		<li>El agente ejecuta <code>node hub/cli.ts create-from-conversation --json &lt;fichero&gt;</code>, o
+			directamente un <code>curl</code> contra la ruta nueva. El token sale de
+			<code>loadConfig().adminToken</code>, igual que hoy hace todo el resto de
+			<code class="path">hub/cli.ts</code>.</li>
+		<li>El hub, en <code>POST /api/workflows/from-conversation</code>, compone en una transacción lógica lo que
+			hoy son cuatro llamadas: <code>createWorkflow</code> → <code>setConversationContext</code> →
+			<code>addStep</code> × N → <code>reconcileContextStep</code>. Devuelve el workflow y la URL
+			<code>#/w/&lt;id&gt;</code>.</li>
+		<li>El agente responde en el chat con esa URL. El operador abre el hub, revisa el contexto y los pasos (que
+			siguen siendo editables mientras <code>context_injected</code> sea <code>false</code>) y pulsa Start.</li>
+	</ol>
+
+	<pre><code>// Cuerpo de POST /api/workflows/from-conversation
+{
+  "name": "migrar-auth",
+  "runner": "claude",
+  "workdir": "/home/lenovo/Documentos/target",
+  "permissionMode": "acceptEdits",
+  "conversationContext": "## Contexto\nVenimos de una conversación en la que …",
+  "steps": [
+    { "description": "…", "acceptanceCriteria": "…", "useSubagent": true },
+    { "description": "…" }
+  ],
+  "sourceSession": { "runtime": "claude", "sessionId": "091c756b-…" }
+}</code></pre>
+
+	<h4>Qué habría que cambiar</h4>
+	<ul>
+		<li><code class="path">hub/server.ts</code>: una ruta nueva <code>POST /api/workflows/from-conversation</code>,
+			pegada al bloque de <code>POST /api/workflows</code> (línea 857) y reutilizando su validación de
+			<code>permissionMode</code>/<code>runner</code>/<code>sandbox</code>/<code>image</code>. Con
+			<code>isAdmin</code> como el resto de rutas mutantes.</li>
+		<li><code class="path">hub/workflow.ts</code>: una función <code>createWorkflowFromConversation()</code> que
+			envuelve <code>createWorkflow</code> + <code>setConversationContext</code> + <code>addStep</code>, y
+			deshace el workflow con <code>removeWorkflow</code> si algún paso falla la validación (para no dejar hooks
+			huérfanos en <code>hooks.json</code>).</li>
+		<li><code class="path">hub/cli.ts</code>: verbo <code>create-from-conversation</code> que lea el JSON de un
+			fichero o de stdin — es la interfaz que el agente usará, así que debe ser trivial de invocar.</li>
+		<li><strong>Nuevo</strong> <code>.claude/commands/target-from-conversation.md</code> en el repo (hoy
+			<code class="path">.claude/</code> sólo tiene <code>settings.local.json</code>), más su equivalente para
+			free-code. Es el fichero que contiene la instrucción de resumir y el formato exacto del JSON.</li>
+		<li><code class="path">hub/ui/src/views/WorkflowDetail.tsx</code>: mostrar de dónde vino el workflow
+			(«creado desde una conversación de claude, sesión <code>091c756b…</code>»), si se persiste
+			<code>sourceSession</code>. Requiere una columna nueva en <code>workflows</code>, con el mismo patrón
+			<code>addWorkflowColumn</code> de <code class="path">hub/db.ts</code> (línea 398).</li>
+		<li>Pruebas: ampliar <code class="path">hub/server.test.ts</code> y
+			<code class="path">hub/workflow.test.ts</code>; no hace falta ningún fixture de transcripción.</li>
+	</ul>
+
+	<div class="grid2">
+		<div>
+			<h4>Ventajas</h4>
+			<ul class="pros">
+				<li><strong>Es literalmente el momento que el usuario describe</strong>: no hay que salir de la conversación ni buscar un uuid en una lista.</li>
+				<li>El resumen lo hace quien mejor puede hacerlo — el modelo que vivió la conversación —, así que el payload sale pequeño y con alta señal por construcción, sin escribir un condensador ni parsear <code>.jsonl</code>.</li>
+				<li>Es el único de los tres que puede <strong>proponer también los pasos</strong>, que es la mitad del trabajo de crear un workflow.</li>
+				<li>Independiente del formato de transcripción de ambas runtimes: nada que se rompa cuando cambien.</li>
+				<li>El coste en código es el más bajo: una ruta que compone funciones que ya existen.</li>
+			</ul>
+		</div>
+		<div>
+			<h4>Desventajas y riesgos</h4>
+			<ul class="cons">
+				<li>El resumen es <strong>generado, no verificado</strong>: el agente puede omitir una restricción o inventar un matiz, y el operador no tiene la conversación original al lado para contrastarla.</li>
+				<li>Exige que la sesión origen pueda ejecutar comandos. Una sesión en modo lectura (el <em>default</em> conservador del proyecto) no puede disparar nada.</li>
+				<li>Da a un agente la capacidad de crear hooks de awb y workflows con el token admin. En una herramienta local monousuario es coherente con lo que ya hace <code class="path">hub/cli.ts</code>, pero es una ampliación real de lo que un agente puede provocar.</li>
+				<li>El disparador vive en dos ficheros distintos (uno por runtime) que hay que mantener sincronizados con el formato JSON del endpoint.</li>
+				<li>No cubre el caso «quiero recuperar aquella conversación de la semana pasada»: si la sesión ya está cerrada, no hay agente a quien pedírselo.</li>
+			</ul>
+		</div>
+	</div>
+
+	<h4>Esfuerzo estimado</h4>
+	<p>
+		<strong>1–2 días.</strong> La ruta y el envoltorio en <code class="path">hub/workflow.ts</code> son medio día;
+		el verbo del CLI, un par de horas; los ficheros de disparador y su afinado (que el modelo produzca JSON válido
+		de forma fiable), el resto.
+	</p>
+</div>
+
+<h2 id="p3">5. Propuesta 3 — Adoptar la sesión</h2>
+
+<div class="card">
+	<div class="card-head">
+		<span class="card-num">Propuesta 3</span>
+		<h3 class="card-title">Adoptar la sesión (continuar la misma conversación)</h3>
+		<span class="pill pill--high">Esfuerzo medio · riesgo alto</span>
+	</div>
+	<p class="tagline">
+		Disparador: UI o CLI · Captura: ninguna — no se copia nada ·
+		Entrega: el workflow hereda el <code>session_id</code> y sigue el mismo hilo
+	</p>
+
+	<h4>Qué es</h4>
+	<p>
+		En vez de <em>describir</em> la conversación al workflow, hacer que el workflow <strong>sea</strong> esa
+		conversación. El workflow se crea con <code>last_session_id</code> ya apuntando a la sesión existente y con
+		<code>context_injected = true</code>; su primer paso no arranca una sesión nueva sino que hace
+		<code>--resume</code> sobre la del operador. El agente no necesita que le cuenten nada: ya está ahí.
+	</p>
+
+	<h4>Cómo funciona, paso a paso</h4>
+	<ol>
+		<li>El operador crea el workflow indicando la sesión a adoptar: un uuid de Claude Code, o la ruta
+			<code>.jsonl</code> de free-code.</li>
+		<li>El hub valida tres cosas antes de crear nada:
+			<ul>
+				<li>que el <code>runner</code> coincide con el formato del id (uuid → claude; ruta absoluta
+					terminada en <code>.jsonl</code> → free-code, la misma heurística que ya usa
+					<code>readTokenUsage</code>);</li>
+				<li>que el <code>workdir</code> del workflow es <strong>el mismo</strong> en el que corrió la
+					conversación — obligatorio, porque awb ejecuta el <code>--resume</code> en el workdir del hook y
+					porque <code>claudeProjectDir(workdir)</code> deriva la ruta de la transcripción del slug del
+					workdir; con otro workdir el watchdog de <code class="path">hub/progress.ts</code> no encontraría
+					nada y todos los pasos parecerían estancados a los 10 minutos;</li>
+				<li>que la ocupación de esa sesión, medida con <code>readTokenUsage</code>, no está ya por encima del
+					umbral de <code>CONTEXT_PRESSURE_RATIO</code> (60 %) — si lo está, se avisa.</li>
+			</ul>
+		</li>
+		<li><code>createWorkflow</code> hace lo de siempre y, además, <code>setWorkflowSessionId(id, sessionId)</code>
+			y <code>setContextInjected(id, true)</code>.</li>
+		<li><code>reconcileContextStep</code> <strong>no crea ningún paso de contexto</strong>: su regla 2 ya declina
+			cuando <code>context_injected</code> es <code>true</code>. No hace falta tocarla.</li>
+		<li>Al pulsar Start, <code>dispatchStep</code> ve <code>lastSessionId</code> no nulo, envía la cabecera
+			<code>sessionid</code> y awb reanuda la conversación del operador. <code>observeCompaction</code> funciona
+			desde el primer despacho porque la transcripción existe y es legible.</li>
+	</ol>
+
+	<h4>Qué habría que cambiar</h4>
+	<ul>
+		<li><code class="path">hub/workflow.ts</code>: opción <code>adoptSessionId</code> en
+			<code>createWorkflow</code> (línea 596), aplicada después de <code>insertWorkflow</code>. Y — lo más
+			delicado — decidir qué hace <code>restartWorkflow</code> (línea 1196), que hoy hace
+			<code>setWorkflowSessionId(workflowId, null)</code> y <code>setContextInjected(workflowId, false)</code>:
+			un restart destruiría el vínculo con la conversación adoptada y dejaría el workflow sin contexto ninguno.
+			Hay que o bien prohibir el restart, o bien volver a adoptar el mismo id, o bien materializar en ese momento
+			un contexto de respaldo.</li>
+		<li><code class="path">hub/db.ts</code>: columna nueva <code>adopted_session_id</code> (patrón
+			<code>addWorkflowColumn</code>, línea 398) para poder distinguir «sesión heredada» de «sesión que produjo
+			el paso 1», que es lo que <code>last_session_id</code> significa hoy.</li>
+		<li><code class="path">hub/server.ts</code>: aceptar <code>adoptSessionId</code> en
+			<code>POST /api/workflows</code> y validar contra <code>hookRuntime()</code>/<code>readTokenUsage()</code>.</li>
+		<li><code class="path">hub/ui/src/views/CreateWorkflowModal.tsx</code> y
+			<code class="path">hub/ui/src/views/ContextPanel.tsx</code>: el panel de contexto tiene que explicar
+			por qué está bloqueado y vacío en un workflow adoptado — hoy diría «injected» sin texto, que es
+			desconcertante. <code class="path">hub/ui/src/views/SessionPanel.tsx</code> es el sitio natural para
+			mostrar la sesión heredada.</li>
+		<li><code class="path">hub/cli.ts</code>: flag <code>--adopt-session</code> en <code>create</code>.</li>
+	</ul>
+
+	<div class="grid2">
+		<div>
+			<h4>Ventajas</h4>
+			<ul class="pros">
+				<li><strong>Fidelidad perfecta y coste cero de tokens</strong>: no se resume, no se trunca, no se re-inyecta nada. Es la misma conversación.</li>
+				<li>Encaja de forma casi natural con el diseño actual: la regla 2 de <code>reconcileContextStep</code> y el flag <code>context_injected</code> se comportan correctamente sin modificarlos.</li>
+				<li>No necesita parsear transcripciones ni confiar en un resumen generado.</li>
+				<li>Es el único enfoque en el que el agente conserva el estado <em>implícito</em> de la conversación: ficheros que ya leyó, caché de prompts, hilo de razonamiento.</li>
+			</ul>
+		</div>
+		<div>
+			<h4>Desventajas y riesgos</h4>
+			<ul class="cons">
+				<li>El workflow <strong>arranca con la ventana de contexto ya medio llena</strong>. Una conversación larga hará que <code>shouldForceSubagent</code> delegue todo desde el primer paso, y que la compactación llegue a mitad de run.</li>
+				<li><strong>Restart queda roto conceptualmente</strong>: «empezar de cero» y «continuar aquella conversación» son incompatibles. Hay que elegir una semántica y documentarla; es un cambio de comportamiento en una función central.</li>
+				<li>Riesgo de <strong>escritura concurrente</strong> sobre el mismo fichero de sesión: el <code>flock</code> por workdir serializa los runs del broker, no la terminal interactiva del operador. Si el operador sigue escribiendo en su sesión mientras el workflow despacha pasos, ambos escriben en el mismo <code>.jsonl</code>.</li>
+				<li>Ata el workflow a una máquina, un workdir y una runtime concretos, y lo vuelve frágil: si el usuario borra la sesión o cambia de directorio, el workflow deja de tener contexto y no hay copia de respaldo en ninguna parte.</li>
+				<li>Bajo <code>--sandbox docker</code> hay que verificar que la sesión adoptada es visible dentro del contenedor. Los montajes existen (<code>~/.claude</code>, <code>~/.free-code</code>, <code>~/.agent-webhook-bridge/sessions</code> van en sus rutas propias), pero es una superficie de fallo nueva.</li>
+				<li>El operador no puede <em>revisar</em> qué contexto tendrá el workflow: no hay texto que leer, sólo un id.</li>
+			</ul>
+		</div>
+	</div>
+
+	<h4>Esfuerzo estimado</h4>
+	<p>
+		<strong>2–4 días</strong> de código, pero con la mayor parte del tiempo en decidir y probar la semántica de
+		<code>restartWorkflow</code>, la interacción con <code class="path">hub/compaction.ts</code> y el caso
+		docker. Es la propuesta con menos líneas y más superficie de regresión.
+	</p>
+</div>
+
+<h2 id="tabla">6. Tabla comparativa</h2>
+
+<div class="table-scroll">
+<table>
+	<thead>
+		<tr>
+			<th>Criterio</th>
+			<th>1 · Importar transcripción</th>
+			<th>2 · Handoff desde la sesión</th>
+			<th>3 · Adoptar la sesión</th>
+		</tr>
+	</thead>
+	<tbody>
+		<tr>
+			<th>Dónde vive el disparador</th>
+			<td>UI del hub / CLI</td>
+			<td>Dentro de la sesión del agente</td>
+			<td>UI del hub / CLI</td>
+		</tr>
+		<tr>
+			<th>Cómo se captura</th>
+			<td>Fichero <code>.jsonl</code>, condensado por el hub</td>
+			<td>Resumen generado por el modelo</td>
+			<td>No se captura: se hereda el <code>session_id</code></td>
+		</tr>
+		<tr>
+			<th>Cómo llega a los pasos</th>
+			<td>Paso de contexto (<code>kind='context'</code>)</td>
+			<td>Paso de contexto + pasos propuestos</td>
+			<td><code>--resume</code> de la misma sesión</td>
+		</tr>
+		<tr>
+			<th>Fidelidad del contexto</th>
+			<td>Media — depende del condensador</td>
+			<td>Media-alta — alta señal, pero sin verificar</td>
+			<td>Total</td>
+		</tr>
+		<tr>
+			<th>Coste en tokens del arranque</th>
+			<td>Un turno con el resumen</td>
+			<td>Un turno con el resumen</td>
+			<td>Ninguno, pero la ventana ya viene ocupada</td>
+		</tr>
+		<tr>
+			<th>Sirve para conversaciones pasadas</th>
+			<td>Sí</td>
+			<td>No (la sesión debe estar viva)</td>
+			<td>Sí, si la sesión sigue en disco</td>
+		</tr>
+		<tr>
+			<th>Propone también los pasos</th>
+			<td>No</td>
+			<td>Sí</td>
+			<td>No</td>
+		</tr>
+		<tr>
+			<th>Revisable antes de arrancar</th>
+			<td>Sí — texto editable en <code>ContextPanel</code></td>
+			<td>Sí — texto editable en <code>ContextPanel</code></td>
+			<td>No — sólo un id</td>
+		</tr>
+		<tr>
+			<th>Acoplamiento a formatos internos</th>
+			<td>Alto</td>
+			<td>Ninguno</td>
+			<td>Medio (heurística de id y rutas)</td>
+		</tr>
+		<tr>
+			<th>Impacto en el motor</th>
+			<td>Nulo</td>
+			<td>Nulo</td>
+			<td>Alto (<code>restartWorkflow</code>, compactación, docker)</td>
+		</tr>
+		<tr>
+			<th>Requiere permisos de ejecución en la sesión</th>
+			<td>No</td>
+			<td>Sí</td>
+			<td>No</td>
+		</tr>
+		<tr>
+			<th>Ficheros nuevos</th>
+			<td><code>hub/conversations.ts</code> + tests + componente UI</td>
+			<td><code>.claude/commands/…</code> + equivalente free-code</td>
+			<td>Ninguno</td>
+		</tr>
+		<tr>
+			<th>Esfuerzo</th>
+			<td><span class="pill pill--mid">3–5 días</span></td>
+			<td><span class="pill pill--low">1–2 días</span></td>
+			<td><span class="pill pill--high">2–4 días, riesgo alto</span></td>
+		</tr>
+	</tbody>
+</table>
+</div>
+
+<h2 id="recomendacion">7. Recomendación</h2>
+
+<div class="card rec">
+	<h3 style="margin-top:0">Construir primero la Propuesta 2 — Handoff desde dentro de la sesión</h3>
+
+	<p>Por cuatro razones, en orden de peso:</p>
+
+	<ol>
+		<li>
+			<strong>Es la petición literal.</strong> El usuario describe estar conversando y querer crear el workflow
+			<em>desde ahí</em>. Las propuestas 1 y 3 obligan a salir al hub y a identificar la sesión por su uuid; sólo
+			la 2 mantiene el flujo donde el usuario ya está.
+		</li>
+		<li>
+			<strong>Resuelve el problema difícil sin escribir código para él.</strong> El obstáculo técnico central es
+			meter una conversación de decenas de megabytes en un turno y en los 64 KiB de <code>maxInputBytes</code>.
+			La propuesta 1 responde con un condensador que hay que diseñar, mantener y afinar; la 2 delega esa
+			condensación en el único participante que entiende qué era importante del hilo, y a coste cero de código.
+		</li>
+		<li>
+			<strong>Es la de menor superficie de regresión.</strong> No toca <code>dispatchStep</code>,
+			<code>reconcileContextStep</code>, <code>restartWorkflow</code> ni el manejo de compactación. La ruta nueva
+			es composición de <code>createWorkflow</code> + <code>setConversationContext</code> + <code>addStep</code>,
+			funciones que ya están cubiertas por <code class="path">hub/workflow.test.ts</code> y
+			<code class="path">hub/context-step.test.ts</code>.
+		</li>
+		<li>
+			<strong>Aporta el 80 % del valor por su cuenta.</strong> Es la única que también genera la lista de pasos,
+			que es la otra mitad del trabajo manual que hoy hace el operador con «+ Add step».
+		</li>
+	</ol>
+
+	<h4>Orden sugerido para lo demás</h4>
+	<ul>
+		<li>
+			<strong>Segunda, la Propuesta 1</strong>, como red de seguridad y camino retroactivo: cubre el hueco de la 2
+			(la sesión ya cerrada, la sesión sin permisos de bash) y reutiliza el mismo endpoint si la 2 se implementa
+			de forma que <code>conversationContext</code> y <code>steps</code> lleguen ya resueltos —
+			<code>hub/conversations.ts</code> se convierte entonces en un segundo productor del mismo cuerpo JSON, no
+			en un camino paralelo.
+		</li>
+		<li>
+			<strong>Tercera, la Propuesta 3</strong>, como opción avanzada y explícita («continuar esta conversación»
+			frente a «resumirla»), sólo cuando exista un motivo concreto para necesitar fidelidad total. Su coste real
+			no está en las líneas de código sino en redefinir <code>restartWorkflow</code>, y no conviene pagarlo antes
+			de tener las otras dos en marcha.
+		</li>
+	</ul>
+
+	<div class="callout">
+		<p>
+			<strong>Primer paso concreto, sea cual sea el orden:</strong> conectar el parámetro
+			<code>conversationContext</code> que <code>insertWorkflow</code> ya acepta con
+			<code>createWorkflow</code> y con el cuerpo de <code>POST /api/workflows</code>, y llamar a
+			<code>reconcileContextStep</code> justo después. Son unas pocas líneas en
+			<code class="path">hub/workflow.ts</code> y <code class="path">hub/server.ts</code>, no rompen nada, y son
+			la base común de las tres propuestas.
+		</p>
+	</div>
+</div>
+
+<footer class="doc">
+	<p>
+		Documento de análisis y propuesta. Todas las rutas, funciones y endpoints citados fueron verificados
+		contra el árbol de trabajo en <code>/home/lenovo/Documentos/target</code> sobre el commit <code>366c625</code>.
+		Los tamaños de transcripción son medidas reales de esta máquina y varían por instalación.
+	</p>
+</footer>
+
+</div>
+</body>
+</html>

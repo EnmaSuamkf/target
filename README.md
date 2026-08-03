@@ -152,7 +152,21 @@ Restarting the workflow starts a new conversation and injects it again. Once
 injected, the context is **locked** (the field becomes read-only and Save is
 disabled) — to change it, restart the workflow first. You add it to an existing
 workflow with `target set-context` (or the **Conversation context** block in the
-detail panel); it isn't part of workflow creation.
+detail panel).
+
+### Creating a workflow from a conversation
+
+You can also start a workflow **from a conversation you're already having**. In
+the new-workflow form, the **Agent runtime** selector filters the list under it
+to that harness's sessions (`~/.claude/projects/…` for Claude Code,
+`~/.free-code/…` and awb's own session tree for free-code); pick one and it
+becomes the new workflow's conversation context, delivered by the context step
+before the first real step. **Open in terminal** reopens the selected
+conversation in a terminal window here, so you can confirm by eye that it's the
+one you meant, and "Show what will be imported" renders the condensed transcript
+first. The transcript is condensed, not copied — tool calls, tool results and
+internal reasoning are dropped and the result is fitted to a budget, with the
+header saying so. See `docs/createFromConversation.md`.
 
 ### When the conversation is compacted
 

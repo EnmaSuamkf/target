@@ -42,13 +42,23 @@ every item below.
    A workflow with an empty/null context behaves exactly as before: no
    preamble is ever injected, and the flag is irrelevant.
 
-8. **Context is set on an existing workflow, not at creation**
-   The context is not part of workflow creation — `POST /api/workflows`
-   ignores a `conversationContext` field and the new-workflow form has none.
-   It is set/viewed/edited afterward via `PATCH /api/workflows/:id/context`
-   (API) and the **Conversation context** block in the workflow detail panel
-   (UI). The stored value round-trips through the API and is shown back on
-   reload, with its injected state (`yes` / `not yet` / `(none)`).
+8. **Free-text context is set on an existing workflow, not at creation**
+   Arbitrary context is not part of workflow creation — `POST /api/workflows`
+   ignores a `conversationContext` field. It is set/viewed/edited afterward via
+   `PATCH /api/workflows/:id/context` (API) and the **Conversation context**
+   block in the workflow detail panel (UI). The stored value round-trips
+   through the API and is shown back on reload, with its injected state
+   (`yes` / `not yet` / `(none)`).
+
+   **One exception, added with "create a workflow from a conversation"**: the
+   create body may carry `conversation: {runner, sessionId}` — a *reference* to
+   a transcript that already exists on this machine, which the server resolves
+   against its own session index and condenses itself (`hub/conversations.ts`).
+   That import becomes the new workflow's context and is materialised as the
+   context step immediately. It is not a free-text field: `conversationContext`
+   is still ignored at creation, and `conversationNote` (the operator's framing,
+   placed above the transcript) applies only when a `conversation` is present.
+   See `docs/createFromConversation.md`.
 
 9. **CLI support**
    - `target set-context <id> "..."` sets (or, with `""`, clears) the context
