@@ -135,7 +135,9 @@ Notes on behaviour worth knowing:
   warns while none is stored, since every mutating action would 401.
 - **Step selection.** Start/Resume/Start-over dispatch exactly the ticked steps.
   Nothing ticked runs nothing, so the button is disabled rather than a silent
-  no-op.
+  no-op. A step unticks itself the moment it finishes **Done**, so the boxes keep
+  meaning "what the next run should do"; a step that **failed** stays ticked,
+  since that's the one to pick up. Tick a finished step again to re-run it.
 - **One Start button.** It maps to the action that fits the status — `start`
   when draft, `resume` when paused, `restart` when completed or failed.
 - **Set status…** A picker beside the run controls, and one per step, that sets

@@ -228,6 +228,9 @@ export interface Step {
 	 * that never use this feature keep running everything), but an explicit
 	 * empty selection via `setStepSelection` marks every step unselected —
 	 * "select nothing" means nothing runs, not "run everything".
+	 *
+	 * A step that reaches `done` clears its own flag (see `DESELECT_ON_DONE`):
+	 * the selection is what the NEXT run should do, and finished work isn't it.
 	 */
 	selected: boolean;
 	/**
@@ -1049,6 +1052,37 @@ export function markStepWaiting(id: string, outcome: { result?: string; sessionI
 }
 
 /**
+ * Appended to every statement that settles a step as `done`: finishing takes the
+ * step OUT of the run selection, so its checkbox clears the moment it succeeds.
+ *
+ * The checkbox answers "what runs when I press Start", and a step that is done
+ * is not something the next Start should re-run — leaving every finished step
+ * ticked meant the selection slowly became "all of them" again, which is the
+ * opposite of what the operator chose. Nothing is lost by clearing it: the
+ * checkbox is still there, so re-running a finished step is one click away, and
+ * Start/Resume/Restart all call `setStepSelection` with the boxes as they stand
+ * at that moment (see `setStepSelection`), so a re-ticked step runs normally.
+ *
+ * Only `done` does this. A `failed` step stays selected on purpose — that IS the
+ * step the next run should pick up.
+ *
+ * The hub-owned context step is exempt, and that exemption is load-bearing:
+ * `nextPendingStep` only ever returns a SELECTED step, so a context step
+ * deselected when it went `done` would never be dispatched again after a
+ * compaction put it back to `pending`, and the run would carry on with its
+ * background silently missing. It has no checkbox either, so there is nothing to
+ * clear for it in the first place.
+ */
+const DESELECT_ON_DONE = "selected = CASE WHEN kind = 'context' THEN selected ELSE 0 END";
+
+/**
+ * The same rule as `DESELECT_ON_DONE` for the statements whose target status is a
+ * bound parameter rather than a literal `'done'` — bind the status again where
+ * the `?` sits.
+ */
+const DESELECT_IF_STATUS_DONE = "selected = CASE WHEN ? = 'done' AND kind <> 'context' THEN 0 ELSE selected END";
+
+/**
  * Releases a step from the manual-review hold: the human pressed Continue, so
  * it finally becomes `done` exactly as it would have without the gate, and the
  * engine can advance. Only acts on a `waiting` step — Continue on anything else
@@ -1059,7 +1093,7 @@ export function markStepWaiting(id: string, outcome: { result?: string; sessionI
 export function releaseWaitingStep(id: string): boolean {
 	return (
 		open()
-			.prepare("UPDATE steps SET status = 'done', finished_at = ? WHERE id = ? AND status = 'waiting'")
+			.prepare(`UPDATE steps SET status = 'done', finished_at = ?, ${DESELECT_ON_DONE} WHERE id = ? AND status = 'waiting'`)
 			.run(new Date().toISOString(), id).changes > 0
 	);
 }
@@ -1067,7 +1101,10 @@ export function releaseWaitingStep(id: string): boolean {
 /** Marks a judge-accepted step `done`, preserving the exec result already stored by `markStepJudging`. */
 export function finishStepDone(id: string): void {
 	open()
-		.prepare("UPDATE steps SET status = 'done', finished_at = ? WHERE id = ? AND status IN ('running', 'queued')")
+		.prepare(
+			`UPDATE steps SET status = 'done', finished_at = ?, ${DESELECT_ON_DONE}
+			 WHERE id = ? AND status IN ('running', 'queued')`,
+		)
 		.run(new Date().toISOString(), id);
 }
 
@@ -1092,17 +1129,20 @@ export function completeStep(
 	id: string,
 	outcome: { ok: boolean; result?: string; error?: string; sessionId?: string },
 ): void {
+	const status = outcome.ok ? "done" : "failed";
 	open()
 		.prepare(
-			`UPDATE steps SET status = ?, result = ?, error = ?, session_id = ?, finished_at = ?
+			`UPDATE steps SET status = ?, result = ?, error = ?, session_id = ?, finished_at = ?,
+			 ${DESELECT_IF_STATUS_DONE}
 			 WHERE id = ? AND status IN ('pending', 'queued', 'running')`,
 		)
 		.run(
-			outcome.ok ? "done" : "failed",
+			status,
 			outcome.result ?? null,
 			outcome.error ?? null,
 			outcome.sessionId ?? null,
 			new Date().toISOString(),
+			status, // again, for the deselect CASE
 			id,
 		);
 }
@@ -1195,7 +1235,10 @@ export function rejectWaitingStep(stepId: string, error: string): boolean {
  * run really did end then), while putting it back to `pending` clears the
  * finish time, because a step that is going to run again has not finished. A
  * step forced to `done` also drops its `error`: keeping a red error body under a
- * green badge is the contradiction this feature exists to remove. A `failed`
+ * green badge is the contradiction this feature exists to remove — and it leaves
+ * the run selection exactly as a step that finished on its own does
+ * (`DESELECT_IF_STATUS_DONE`), because "this step is done" means the same thing
+ * however it was decided. A `failed`
  * override with no error of its own gets one that says who set it, so the UI is
  * never blank about why.
  *
@@ -1214,10 +1257,11 @@ export function overrideStepStatus(id: string, status: OverridableStepStatus): b
 				 error = CASE WHEN ? = 'done' THEN NULL
 				              WHEN ? = 'pending' THEN NULL
 				              ELSE COALESCE(error, 'Marked failed manually.') END,
-				 status_manual = 1, status_manual_at = ?
+				 status_manual = 1, status_manual_at = ?,
+				 ${DESELECT_IF_STATUS_DONE}
 				 WHERE id = ?`,
 			)
-			.run(status, status, now, status, status, now, id).changes > 0
+			.run(status, status, now, status, status, now, status, id).changes > 0
 	);
 }
 
