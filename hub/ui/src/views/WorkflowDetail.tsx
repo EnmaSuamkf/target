@@ -18,6 +18,7 @@ import { ProgressBar } from "../components/Progress.tsx";
 import { Switch } from "../components/Switch.tsx";
 import { useStagedImages } from "../hooks/useStagedImages.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
+import { selectionAfterPoll, stepStatuses } from "../lib/stepSelection.ts";
 import { ContextPanel } from "./ContextPanel.tsx";
 import { SessionPanel } from "./SessionPanel.tsx";
 import { StepItem } from "./StepItem.tsx";
@@ -34,7 +35,11 @@ import styles from "./WorkflowDetail.module.css";
  *   those). `startActionFor` owns that mapping; the operator never picks.
  * - **Selection is explicit.** `start`/`resume`/`restart` send the checked step
  *   ids and the engine runs exactly those. An empty selection runs nothing, so
- *   the button is disabled and says why rather than silently no-op'ing.
+ *   the button is disabled and says why rather than silently no-op'ing. A step
+ *   unticks itself when it finishes `done` (`selectionAfterPoll`), so the boxes
+ *   keep meaning "what the next run should do" instead of drifting back to
+ *   "everything"; after a whole run that leaves nothing ticked, and Start over
+ *   asks for a choice — "Select all" is one click.
  * - **A `waiting` workflow has no Start at all.** It's held at a step's
  *   manual-review gate, and the only ways out are on that step: Continue to
  *   approve it and carry on, or Abort to refuse it and stop (the server refuses
@@ -112,6 +117,11 @@ export function WorkflowDetail({
 	// `selected` flag and re-seeded when switching workflows.
 	const [selection, setSelection] = useState<Set<string>>(new Set());
 	const [opening, setOpening] = useState(false);
+	// Each step's status as of the previous poll, so a step that FINISHES can be
+	// told apart from one that was already finished when we got here — the whole
+	// difference between "untick it now" and "untick it forever". A ref, not
+	// state: it feeds the next comparison, it is never rendered.
+	const seenStatuses = useRef<Map<string, string>>(new Map());
 
 	const sectionRef = useRef<HTMLElement>(null);
 
@@ -126,10 +136,27 @@ export function WorkflowDetail({
 
 	useEffect(() => {
 		setSelection(new Set(taskSteps.filter((s) => s.selected).map((s) => s.id)));
+		// The steps of the workflow being left tell us nothing about the one being
+		// opened: start the transition history empty so every step of the new
+		// workflow counts as a first sighting and the seed above stands as it is.
+		seenStatuses.current = new Map();
 		// Re-seed only when the workflow changes, not on every poll — otherwise
 		// the operator's checkbox changes would be reverted every 2 seconds.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [workflow.id]);
+
+	// A step that finishes lets go of its checkbox: the selection says what the
+	// next run should do, and a step that just succeeded isn't it. Only the
+	// pending→done transition does this (see `selectionAfterPoll`), so a finished
+	// step the operator re-ticks to run again stays ticked.
+	useEffect(() => {
+		const previous = seenStatuses.current;
+		seenStatuses.current = stepStatuses(taskSteps);
+		// Functional form so the rule always reads the checkboxes as they stand
+		// right now, and returns the same Set when nothing finished (React then
+		// bails out, so the common poll re-renders nothing).
+		setSelection((current) => selectionAfterPoll(current, previous, taskSteps) as Set<string>);
+	}, [taskSteps]);
 
 	// Move focus to the detail pane when a workflow is opened, so keyboard
 	// navigation and screen readers land on the workflow's controls instead of
