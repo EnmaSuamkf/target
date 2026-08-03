@@ -19,12 +19,12 @@ import type {
 	ConversationDigest,
 	CreateWorkflowInput,
 	DirListing,
+	HostCapabilities,
 	NotificationSettings,
 	NotificationSettingsInput,
 	OverridableStepStatus,
 	OverridableWorkflowStatus,
 	Runner,
-	RunnerAvailability,
 	SessionInfo,
 	ShortcutSettings,
 	ShortcutSettingsInput,
@@ -118,15 +118,18 @@ export async function listWorkflows(): Promise<Workflow[]> {
 	return data.workflows;
 }
 
-/** Which agent CLIs are installed on the host, so the create form can show only those. */
-export async function listRunners(): Promise<RunnerAvailability[]> {
-	const data = await request<{ runners: RunnerAvailability[] }>("/api/runners");
-	return data.runners;
+/**
+ * What this host can actually run — which agent CLIs are installed, and which
+ * sandboxes are usable — so the create form offers only those. One request for
+ * both: the form needs them together and neither is useful on its own.
+ */
+export async function listHostCapabilities(): Promise<HostCapabilities> {
+	return await request<HostCapabilities>("/api/runners");
 }
 
 // --- conversations (the source a workflow can be created from) ---
 //
-// Admin-gated, unlike listRunners above: these return the CONTENT of the
+// Admin-gated, unlike listHostCapabilities above: these return the CONTENT of the
 // operator's own conversations, and the last one spawns a terminal on their
 // desktop.
 

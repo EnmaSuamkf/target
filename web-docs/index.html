@@ -700,8 +700,10 @@ target create my-flow --workdir ~/repos/thing --sandbox docker --image my-python
           differs is the image, because the runner&rsquo;s binary <em>is</em> the container
           command. The image this repo&rsquo;s <code>Dockerfile</code> builds ships
           <code>claude</code> only, so pointing a free-code workflow at it makes the step die
-          with <code>exit 127</code> before an agent ever exists. Build the derived image once
-          and name it when you create the workflow:
+          with <code>exit 127</code> before an agent ever exists. Both images are built for you
+          by <code>npm run target:install</code> &mdash; and, if one is missing when a docker
+          step is dispatched, by the hub right there: they exist in no registry, so they are
+          built locally or not at all. To build them by hand, or to name one explicitly:
         </p>
         <pre><code>docker build -t target-agent:latest .                                    # claude
 docker build -t target-agent-freecode:latest -f Dockerfile.free-code .   # + free-code
@@ -853,7 +855,7 @@ npm run target:install</code></pre>
           <table>
             <thead><tr><th>Script</th><th>What it does</th></tr></thead>
             <tbody>
-              <tr><td><code>npm run target:install</code></td><td>One-command bootstrap (hub + UI build + awb). Idempotent.</td></tr>
+              <tr><td><code>npm run target:install</code></td><td>One-command bootstrap (hub + UI build + awb, plus the agent images when docker is available). Idempotent.</td></tr>
               <tr><td><code>npm start</code></td><td>Boots awb + the hub, opens the UI, holds the foreground.</td></tr>
               <tr><td><code>npm test</code></td><td>Runs the hub&rsquo;s tests against a throwaway <code>TARGET_HOME</code>.</td></tr>
               <tr><td><code>npm run typecheck</code></td><td>Type-checks the hub and the UI.</td></tr>

@@ -55,6 +55,8 @@ import {
 } from "./attachments.ts";
 import {
 	availableRunners,
+	availableSandboxes,
+	explainRunError,
 	harnessResumeCommand,
 	hookRuntime,
 	PUBLISHABLE_PERMISSION_MODES,
@@ -505,9 +507,13 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					: typeof body.result === "string"
 						? body.result
 						: JSON.stringify(body.result);
+			// The broker forwards the CLI's own stderr, which is what makes a
+			// failure diagnosable at all — but docker's missing-image text names
+			// the wrong fix, so it is annotated here, at the one place every
+			// failure text enters the hub.
 			const error = ok
 				? undefined
-				: String(body.error ?? (body.exitCode != null ? `exit ${body.exitCode}` : "run failed"));
+				: explainRunError(String(body.error ?? (body.exitCode != null ? `exit ${body.exitCode}` : "run failed")));
 			void onStepResult(
 				step.id,
 				{ ok, result, error, sessionId: typeof body.session_id === "string" ? body.session_id : undefined },
@@ -837,8 +843,13 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// (no admin token): it reports nothing the browser doesn't already know
 	// about the machine it's running on, and the form needs it before any
 	// admin action is even possible.
+	//
+	// `sandboxes` rides along on the same route rather than getting its own:
+	// it answers the same question about the same machine for the same form,
+	// and the form needs both before it can render — one round trip, one
+	// "couldn't reach the hub" failure mode to handle instead of two.
 	if (parts[1] === "runners" && !parts[2] && req.method === "GET") {
-		sendJson(res, 200, { runners: availableRunners() });
+		sendJson(res, 200, { runners: availableRunners(), sandboxes: availableSandboxes() });
 		return;
 	}
 
@@ -1007,6 +1018,20 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						return;
 					}
 					sandbox = body.sandbox as PublishableSandbox;
+				}
+				// A docker workflow needs a reachable daemon on THIS machine, since
+				// the broker runs here and shells out to `docker run` per step. The
+				// UI already hides the option when the probe says no, but the check
+				// belongs here too: the API is reachable without it, and the
+				// alternative to failing now is failing at the first step's spawn
+				// with docker's own text — which, for the default images, is a
+				// registry-login error for something that is only ever built locally.
+				if (sandbox === "docker" && !availableSandboxes().find((s) => s.id === "docker")?.available) {
+					sendJson(res, 400, {
+						error:
+							"docker is not available on this host (no docker on PATH, or the daemon isn't running), so a docker workflow's steps could not run. Start Docker and retry, or create this workflow on the host sandbox.",
+					});
+					return;
 				}
 				// Host sandbox: the runner's CLI has to actually be installed on THIS
 				// machine, because the broker — which runs here in phase 1 — later

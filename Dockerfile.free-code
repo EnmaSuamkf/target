@@ -29,6 +29,14 @@ USER root
 # builds on different days can produce different versions.
 ARG FREE_CODE_REF=master
 
+# Same ids the base image was built with (the installer and the hub's
+# on-demand build pass the operator's own uid/gid to both). Redeclared here
+# because an ARG from before the FROM is out of scope after it, and used for
+# the final USER below — hardcoding 1000 would run the container as a user the
+# base image may not even have.
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
+
 RUN git clone --depth 1 --branch "${FREE_CODE_REF}" \
       https://github.com/EnmaSuamkf/free-code.git /opt/free-code \
  && cd /opt/free-code \
@@ -42,4 +50,4 @@ RUN git clone --depth 1 --branch "${FREE_CODE_REF}" \
  && npm cache clean --force
 
 # Same rule as the base image: nothing runs as root.
-USER 1000:1000
+USER ${AGENT_UID}:${AGENT_GID}

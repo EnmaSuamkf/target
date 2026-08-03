@@ -38,7 +38,7 @@
  * never allow again short of a full restart.
  */
 import { attachmentSection, listFieldAttachments } from "./attachments.ts";
-import { hookRuntime } from "./awb.ts";
+import { ensureSandboxImage, hookRuntime } from "./awb.ts";
 import { markContextReinjected, needsContextReinjection, observeCompaction } from "./compaction.ts";
 import type { HubConfig } from "./config.ts";
 import { CONTEXT_PRESSURE_PERCENT, shouldForceSubagent, workflowContextRatio } from "./context-pressure.ts";
@@ -440,6 +440,23 @@ export async function dispatchStep(
 		timedOut: options.timedOut,
 		forceSubagent,
 	});
+	// A contained workflow can only run if its image exists on this machine. The
+	// broker's `docker run` would otherwise try to PULL it, and the default
+	// images are built here and published nowhere, so that ends in `pull access
+	// denied … may require 'docker login'` — a registry error with no registry
+	// behind it. Building it here instead makes the first step slow rather than
+	// dead; a build that fails settles the step with what docker said and how to
+	// fix it, exactly like the two dispatch failures below. Images the repo
+	// doesn't own are left to docker (see `ensureSandboxImage`).
+	const sandbox = hookRuntime(workflow.hookUrl).sandbox;
+	if (sandbox) {
+		const ready = await ensureSandboxImage(sandbox.image, log);
+		if (!ready.ok) {
+			completeStep(step.id, { ok: false, error: ready.error });
+			log(`step ${step.id} (workflow ${workflow.id}) has no runnable image: ${ready.error}`, "error");
+			return;
+		}
+	}
 	try {
 		const res = await fetch(workflow.hookUrl, {
 			method: "POST",

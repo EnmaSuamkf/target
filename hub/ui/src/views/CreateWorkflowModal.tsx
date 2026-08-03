@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ApiError, listConversations, listRunners, openConversationTerminal, previewConversation } from "../api/client.ts";
+import { ApiError, listConversations, listHostCapabilities, openConversationTerminal, previewConversation } from "../api/client.ts";
 import type {
 	Conversation,
 	CreateWorkflowInput,
@@ -7,6 +7,7 @@ import type {
 	Runner,
 	RunnerAvailability,
 	Sandbox,
+	SandboxAvailability,
 	Template,
 } from "../api/types.ts";
 import { DirectoryBrowser } from "../components/DirectoryBrowser.tsx";
@@ -28,7 +29,11 @@ import styles from "./CreateWorkflowModal.module.css";
  * halves of the same question — which CLI runs the steps, and where it runs —
  * and because the sandbox is what bounds the permission choice below it:
  * `bypassPermissions` in a container means "anything inside these mounts",
- * not "anything on this machine".
+ * not "anything on this machine". Both selectors are built from what the host
+ * reports it can actually run (`GET /api/runners`), never from the static
+ * option lists below: an agent CLI that isn't installed, or a docker whose
+ * daemon isn't reachable, is not offered at all rather than offered and left
+ * to fail at the workflow's first step.
  *
  * The conversation picker under the runtime is the "create a workflow from a
  * conversation you're already having" path. It reads the chosen runtime's
@@ -109,6 +114,7 @@ export function CreateWorkflowModal({
 	const [saving, setSaving] = useState(false);
 	const [browsing, setBrowsing] = useState(false);
 	const [runners, setRunners] = useState<RunnerAvailability[]>([]);
+	const [sandboxes, setSandboxes] = useState<SandboxAvailability[]>([]);
 	const [loadingRunners, setLoadingRunners] = useState(true);
 	// True when the GET /api/runners probe threw (hub down / network blip).
 	// Distinct from "probe returned no installed runners": a failed probe must
@@ -159,9 +165,12 @@ export function CreateWorkflowModal({
 		let cancelled = false;
 		void (async () => {
 			let avail: RunnerAvailability[] = [];
+			let boxes: SandboxAvailability[] = [];
 			let failed = false;
 			try {
-				avail = await listRunners();
+				const caps = await listHostCapabilities();
+				avail = caps.runners;
+				boxes = caps.sandboxes;
 			} catch {
 				// Hub down / network blip — record it so the selector shows an
 				// explicit error instead of degrading to offering both runners.
@@ -169,6 +178,7 @@ export function CreateWorkflowModal({
 			}
 			if (cancelled) return;
 			setRunners(avail);
+			setSandboxes(boxes);
 			setProbeFailed(failed);
 			setLoadingRunners(false);
 			setRunner(avail.find((r) => r.installed)?.id ?? "claude");
@@ -286,6 +296,17 @@ export function CreateWorkflowModal({
 		.filter((o): o is { value: Runner; label: string; description: string } => o !== undefined);
 	const probeDone = !loadingRunners && !probeFailed;
 	const noInstalled = probeDone && installedOptions.length === 0;
+	// Same rule as the runners above, for the same reason: a sandbox this host
+	// can't run is not offered at all. Without docker the selector is left with
+	// "This machine" alone — picking a container on a machine with no daemon
+	// only buys a workflow that dies at its first step, and the server refuses
+	// it anyway. Before the probe lands nothing is available, so the option
+	// can't flash in and out; `host` is the state's default and stays valid.
+	const availableSandboxOptions = SANDBOX_OPTIONS.filter(
+		(option) => sandboxes.find((s) => s.id === option.value)?.available ?? false,
+	);
+	const dockerUnavailable = probeDone && !availableSandboxOptions.some((o) => o.value === "docker");
+	const sandboxDisabled = loadingRunners || probeFailed || availableSandboxOptions.length === 0;
 	const runnerDisabled = loadingRunners || probeFailed || noInstalled;
 	const runnerError = probeFailed
 		? "Couldn't reach the hub to verify installed agent CLIs. Please retry."
@@ -515,19 +536,35 @@ export function CreateWorkflowModal({
 					</div>
 				)}
 
-				<Field label="Sandbox" hint={SANDBOX_OPTIONS.find((o) => o.value === sandbox)?.description ?? ""}>
+				<Field
+					label="Sandbox"
+					hint={
+						loadingRunners
+							? "Checking what this machine can run…"
+							: dockerUnavailable
+								? "Docker isn't available on this machine (no docker on PATH, or its daemon isn't running), so only this machine is offered. Install/start Docker and re-run the installer to enable container workflows."
+								: SANDBOX_OPTIONS.find((o) => o.value === sandbox)?.description ?? ""
+					}
+				>
 					{(props) => (
 						<select
 							{...props}
 							className="select"
-							value={sandbox}
+							value={sandboxDisabled ? "" : sandbox}
+							disabled={sandboxDisabled}
 							onChange={(ev) => setSandbox(ev.target.value as Sandbox)}
 						>
-							{SANDBOX_OPTIONS.map((option) => (
-								<option key={option.value} value={option.value}>
-									{option.label}
+							{sandboxDisabled ? (
+								<option value="" disabled>
+									{loadingRunners ? "Checking this machine…" : "Hub unreachable"}
 								</option>
-							))}
+							) : (
+								availableSandboxOptions.map((option) => (
+									<option key={option.value} value={option.value}>
+										{option.label}
+									</option>
+								))
+							)}
 						</select>
 					)}
 				</Field>
