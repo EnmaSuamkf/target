@@ -54,6 +54,13 @@
 	overflow-wrap: anywhere;
 }
 
+/* "Change" sits with the title, not with the run controls. It must never take
+   space from the name itself, so it can't shrink and stays on one line. */
+.rename {
+	flex: none;
+	white-space: nowrap;
+}
+
 .facts {
 	display: grid;
 	grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
@@ -298,6 +305,14 @@
 
 	.controlsSpacer {
 		display: none;
+	}
+
+	/* Its own full-width row under Start/Stop rather than half of one: the two
+	   run controls share the row above, and a lone half-width button beside a
+	   gap reads as a broken pair. */
+	.clone {
+		grid-column: 1 / -1;
+		min-height: var(--tap-target);
 	}
 
 	/* Its own full-width row under Start/Stop: it isn't a run control, and a

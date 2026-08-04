@@ -10,6 +10,8 @@
  *   GET    /api/workflows/:id/session-info                → harness + session id + token usage of the current/last session
  *   POST   /api/workflows/:id/open-terminal              → spawn a local terminal resuming the current/last session (admin token)
  *   DELETE /api/workflows/:id                          → remove: deletes its awb hook + .md file + DB rows (admin token)
+ *   POST   /api/workflows/:id/clone                    → copy it (steps included) into a new "Clone - <name>" workflow with its own agent (admin token)
+ *   PATCH  /api/workflows/:id/name                     → rename it (admin token)
  *   PATCH  /api/workflows/:id/context                  → set the conversation context preamble (admin token)
  *   POST   /api/workflows/:id/steps                    → add a step (admin token); optional afterStepId inserts it right after that step
  *   POST   /api/workflows/:id/steps/from-template       → append a template's steps (admin token)
@@ -106,6 +108,7 @@ import { readTokenUsage } from "./transcript.ts";
 import {
 	abortStep,
 	addStep,
+	cloneWorkflow,
 	continueStep,
 	createWorkflow,
 	editStep,
@@ -113,16 +116,19 @@ import {
 	forceStepStatus,
 	forceWorkflowStatus,
 	onStepResult,
+	operatorWorkdir,
 	pauseWorkflow,
 	reconcileContextStep,
 	removeStep,
 	removeWorkflow,
+	renameWorkflow,
 	restartWorkflow,
 	resumeWorkflow,
 	runStep,
 	setConversationContext,
 	startWorkflow,
 	WorkflowError,
+	type CloneOverrides,
 } from "./workflow.ts";
 import { getStep } from "./db.ts";
 
@@ -251,7 +257,16 @@ function publicWorkflow(workflow: Workflow): Record<string, unknown> {
 		lastSessionId: workflow.lastSessionId,
 		mdPath: workflow.mdPath,
 		workdir: runtime.workdir,
+		// The directory an operator CHOSE, as opposed to the per-agent sandbox this
+		// workflow fell back to — null when it's on its own. The clone dialog seeds
+		// its workdir field from this and not from `workdir` above: that one belongs
+		// to this agent alone, and offering it to a second agent would put two
+		// independent runs in one directory.
+		chosenWorkdir: operatorWorkdir(runtime.workdir, workflow.agentName),
 		harness: runtime.harness,
+		// Lives in the hook rather than on the row, and is read back so the clone
+		// dialog can open showing the permissions this workflow actually runs with.
+		permissionMode: runtime.permissionMode,
 		// "host" rather than null when there's no sandbox block: the UI shows a
 		// containment badge, and "unknown" would read as a warning where the
 		// honest answer is "the default, on this machine".
@@ -402,6 +417,97 @@ function readJsonBody(
 	req.on("error", () => {
 		if (!aborted) sendJson(res, 400, { error: "bad_request" });
 	});
+}
+
+/**
+ * Reads the runtime fields of a clone body into `CloneOverrides`, answering the
+ * request itself and returning null when one of them is refused.
+ *
+ * Same fields and same rules as POST /api/workflows — the clone dialog is the
+ * new-workflow form — but the semantics differ where it counts, which is why
+ * this is its own parser rather than a share with the create route: there, an
+ * absent field and an empty one both mean "the default"; here an ABSENT field
+ * inherits the source's value and an empty one is an explicit "make it the
+ * default". A clone moved off `bypassPermissions` back to read-only has to be
+ * able to say so, and it can only say it by sending the key empty.
+ */
+function parseCloneOverrides(body: Record<string, unknown>, res: http.ServerResponse): CloneOverrides | null {
+	const overrides: CloneOverrides = {};
+	// Empty string = "no directory of my own", i.e. give the clone its own
+	// per-agent sandbox rather than the source's checkout.
+	if ("workdir" in body) {
+		const raw = typeof body.workdir === "string" ? body.workdir.trim() : "";
+		overrides.workdir = raw === "" ? null : raw.replace(/^~(?=\/|$)/, os.homedir());
+	}
+	if ("name" in body) {
+		const raw = typeof body.name === "string" ? body.name.trim() : "";
+		// A clone with no name would be nameless; `cloneWorkflow` would happily
+		// take "" and `createWorkflow` would then throw a 500-shaped error.
+		if (raw === "") {
+			sendJson(res, 400, { error: "name is required" });
+			return null;
+		}
+		overrides.name = raw;
+	}
+	if ("permissionMode" in body) {
+		const raw = typeof body.permissionMode === "string" ? body.permissionMode : "";
+		if (raw !== "" && !PUBLISHABLE_PERMISSION_MODES.includes(raw as PublishablePermissionMode)) {
+			sendJson(res, 400, { error: `invalid permissionMode (allowed: ${PUBLISHABLE_PERMISSION_MODES.join(", ")})` });
+			return null;
+		}
+		// Inherited or not, bypassPermissions is arbitrary command execution on
+		// this machine and has to be opted into for THIS workflow — a clone is a
+		// second agent with a second sandbox, not a continuation of the first.
+		if (raw === "bypassPermissions" && body.acceptBypassRisk !== true) {
+			sendJson(res, 400, {
+				error:
+					"bypassPermissions disables every permission check for this workflow's steps. Send acceptBypassRisk: true to confirm you want that.",
+			});
+			return null;
+		}
+		overrides.permissionMode = raw === "" ? null : (raw as PublishablePermissionMode);
+	}
+	if ("runner" in body) {
+		const raw = typeof body.runner === "string" ? body.runner : "";
+		if (raw !== "" && !PUBLISHABLE_RUNNERS.includes(raw as PublishableRunner)) {
+			sendJson(res, 400, { error: `invalid runner (allowed: ${PUBLISHABLE_RUNNERS.join(", ")})` });
+			return null;
+		}
+		overrides.runner = raw === "" ? null : (raw as PublishableRunner);
+	}
+	if ("sandbox" in body) {
+		const raw = typeof body.sandbox === "string" ? body.sandbox : "";
+		if (raw !== "" && !PUBLISHABLE_SANDBOXES.includes(raw as PublishableSandbox)) {
+			sendJson(res, 400, { error: `invalid sandbox (allowed: ${PUBLISHABLE_SANDBOXES.join(", ")})` });
+			return null;
+		}
+		overrides.sandbox = raw === "" ? null : (raw as PublishableSandbox);
+	}
+	if ("image" in body) {
+		const raw = typeof body.image === "string" ? body.image.trim() : "";
+		overrides.image = raw === "" ? null : raw;
+	}
+	// Same host checks the create route makes, for the same reason: a clone whose
+	// container has no daemon, or whose CLI isn't installed here, is a workflow
+	// that dies at its first step. Only checked when the field was actually sent —
+	// an inherited runtime already exists on this machine.
+	if (overrides.sandbox === "docker" && !availableSandboxes().find((s) => s.id === "docker")?.available) {
+		sendJson(res, 400, {
+			error:
+				"docker is not available on this host (no docker on PATH, or the daemon isn't running), so a docker workflow's steps could not run. Start Docker and retry, or clone this workflow onto the host sandbox.",
+		});
+		return null;
+	}
+	if (overrides.sandbox === "host" && overrides.runner !== undefined) {
+		const runner = overrides.runner ?? "claude";
+		if (!(availableRunners().find((r) => r.id === runner)?.installed ?? false)) {
+			sendJson(res, 400, {
+				error: `runner '${runner}' is not installed on this host (install it or use sandbox: docker with an image that ships it)`,
+			});
+			return null;
+		}
+	}
+	return overrides;
 }
 
 export function createServer(cfg: HubConfig, log: Logger): http.Server {
@@ -1164,6 +1270,77 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		} catch (err) {
 			sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
 		}
+		return;
+	}
+
+	// --- /api/workflows/:id/clone ---
+	//
+	// Copies the workflow's DEFINITION — every step in order, the conversation
+	// context, the pinned images, the runtime its agent runs under — into a new
+	// workflow with an agent and hook of its own. Nothing a run produced comes
+	// across: the clone is `draft` with every step `pending`, because
+	// `cloneWorkflow` builds it through `createWorkflow`/`addStep` rather than
+	// duplicating rows. The original is untouched.
+	//
+	// The body is optional and carries the same runtime fields as POST
+	// /api/workflows, because the UI's clone dialog IS the new-workflow form:
+	// name, workdir, runner, sandbox, image and permission mode may all be
+	// changed on the way out. A field left out of the body is inherited from the
+	// source; sent empty it means "the default" (see `CloneOverrides`). An empty
+	// body clones as-is, which is what `POST .../clone` with no body has always
+	// done. Steps and context are not settable here — copying them is the point.
+
+	if (workflowId && parts[3] === "clone" && !parts[4] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		if (!getWorkflow(workflowId)) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const overrides = parseCloneOverrides(body, res);
+			if (!overrides) return; // already answered with the reason
+			try {
+				const clone = cloneWorkflow(workflowId, overrides);
+				log(`workflow ${workflowId} cloned as '${clone.name}' (${clone.id}) — agent '${clone.agentName}'`);
+				sendJson(res, 200, {
+					workflow: publicWorkflow(clone),
+					steps: listSteps(clone.id).map((s) => publicStep(s, cfg)),
+				});
+			} catch (err) {
+				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		});
+		return;
+	}
+
+	// --- /api/workflows/:id/name ---
+	//
+	// Renames the workflow. The label only: its agent, hook URL and `.md` path
+	// keep the slug they were created with (see `renameWorkflow`), so this is safe
+	// at any status, including mid-run.
+
+	if (workflowId && parts[3] === "name" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		if (!getWorkflow(workflowId)) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const name = typeof body.name === "string" ? body.name : "";
+			try {
+				const workflow = renameWorkflow(workflowId, name);
+				log(`workflow ${workflowId} renamed to '${workflow.name}'`);
+				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
+			} catch (err) {
+				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		});
 		return;
 	}
 

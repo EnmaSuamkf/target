@@ -10,8 +10,24 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { listFieldAttachments, removeStepAttachments, removeWorkflowAttachments } from "./attachments.ts";
-import { createAwbHook, deleteAwbHook, abortAwbRun, type HookOptions } from "./awb.ts";
+import {
+	listFieldAttachments,
+	listStepAttachments,
+	removeStepAttachments,
+	removeWorkflowAttachments,
+	saveAttachment,
+} from "./attachments.ts";
+import {
+	createAwbHook,
+	deleteAwbHook,
+	abortAwbRun,
+	hookRuntime,
+	PUBLISHABLE_RUNNERS,
+	type HookOptions,
+	type PublishablePermissionMode,
+	type PublishableRunner,
+	type PublishableSandbox,
+} from "./awb.ts";
 import { targetDir, type HubConfig } from "./config.ts";
 import {
 	beginRetry,
@@ -45,6 +61,7 @@ import {
 	resetSteps,
 	setContextInjected,
 	setWorkflowConversationContext,
+	setWorkflowName,
 	setStatusBeforeReview,
 	setStepSelection,
 	setWorkflowSessionId,
@@ -55,6 +72,7 @@ import {
 	takeStatusBeforeReview,
 	updateStepConfig,
 	updateStepDescription,
+	type Attachment,
 	type OverridableStepStatus,
 	type OverridableWorkflowStatus,
 	type Step,
@@ -642,6 +660,195 @@ export function createWorkflow(
 	reconcileContextStep(workflow.id);
 	writeStatusMd(workflow.id);
 	return workflow;
+}
+
+/**
+ * Renames a workflow — the label, and only the label.
+ *
+ * What deliberately does NOT move with it: the awb hook's name, the hook URL,
+ * the agent name and the `.md` path, all of which were slugged from the name at
+ * creation. They are this workflow's identity on the machine — a live URL bound
+ * to a secret, a file the agent may already have been told to read — so renaming
+ * is a display change, not a re-registration, and a running workflow can be
+ * renamed without disturbing the step in flight. (The hook's prompt template
+ * still names the workflow as it was created; it introduces the session, and
+ * rewriting it mid-conversation would rename the workflow the agent believes it
+ * is working on.)
+ *
+ * Renaming to exactly what it already says is a no-op rather than an error, so
+ * a Save on an unchanged field doesn't bump `updated_at` or rewrite the file.
+ */
+export function renameWorkflow(workflowId: string, name: string): Workflow {
+	const trimmed = name.trim();
+	if (!trimmed) throw new WorkflowError("name is required");
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	if (trimmed === workflow.name) return workflow;
+	setWorkflowName(workflowId, trimmed);
+	// The progress file leads with `# Workflow: <name>`, so it would otherwise
+	// keep announcing the old one until the next step landed.
+	writeStatusMd(workflowId);
+	const renamed = getWorkflow(workflowId);
+	if (!renamed) throw new WorkflowError("workflow disappeared");
+	return renamed;
+}
+
+/** What a clone is called by default: the original's name behind a fixed marker, so a copy is one in the list too. */
+const CLONE_NAME_PREFIX = "Clone - ";
+
+/** The name a clone of `workflow` is proposed under — what the clone form starts from. */
+export function cloneName(name: string): string {
+	return `${CLONE_NAME_PREFIX}${name}`;
+}
+
+/**
+ * The working directory an OPERATOR chose for this workflow, as opposed to the
+ * per-agent sandbox it fell back to. Null means "none was chosen": the agent
+ * works in `~/.target/sandboxes/<its own name>`, a directory that belongs to
+ * that agent alone and must never be handed to a second one.
+ *
+ * This is the difference a clone turns on (see `cloneWorkflow`) and the value
+ * the clone form seeds its workdir field from, so it lives here rather than
+ * being re-derived by each caller.
+ */
+export function operatorWorkdir(workdir: string | null, agentName: string): string | null {
+	const ownSandbox = path.join(targetDir(), "sandboxes", agentName);
+	return workdir && workdir !== ownSandbox ? workdir : null;
+}
+
+/**
+ * What a clone may be told to do differently from the workflow it copies —
+ * everything the new-workflow form asks for, since the clone dialog IS that
+ * form (see CreateWorkflowModal, opened in clone mode).
+ *
+ * Three-valued on purpose, because "leave it alone" and "make it the default"
+ * are different answers and the form can produce either:
+ *
+ * - **absent** — inherit the source's, which is what an API caller that sends
+ *   nothing but a name gets.
+ * - **`null`** — explicitly the default: its own sandbox, awb's own permission
+ *   mode, claude, host, the default image. This is what clearing the field in
+ *   the dialog means, and it's why these aren't plain optionals.
+ * - **a value** — use it.
+ *
+ * Steps and context are deliberately not overridable: copying them is the
+ * whole point of a clone.
+ */
+export interface CloneOverrides {
+	name?: string;
+	workdir?: string | null;
+	permissionMode?: PublishablePermissionMode | null;
+	runner?: PublishableRunner | null;
+	sandbox?: PublishableSandbox | null;
+	image?: string | null;
+}
+
+/**
+ * Copies one attachment onto another owner. Best-effort by design: an image
+ * whose file has gone missing (or which the store now refuses) must cost the
+ * clone that image, not its steps.
+ */
+function copyAttachment(attachment: Attachment, workflowId: string, stepId: string | null): void {
+	try {
+		saveAttachment({
+			workflowId,
+			stepId,
+			field: attachment.field,
+			filename: attachment.filename,
+			mime: attachment.mime,
+			data: fs.readFileSync(attachment.path),
+		});
+	} catch {
+		// Nothing to do about it here, and nothing worth failing the clone over.
+	}
+}
+
+/**
+ * Clones a workflow: a second workflow, with its own agent, that is the
+ * original's DEFINITION and none of its history.
+ *
+ * Copied (what the operator wrote): every task step, in order, with its
+ * acceptance criteria, manual-review gate, subagent toggle and retry budget;
+ * the conversation context; the images pinned to any of those fields; and the
+ * runtime the original runs under (runner, sandbox/image, permission mode),
+ * which lives in the awb hook rather than on the row and is read back from it.
+ *
+ * Not copied (what a RUN produced): status, session id, step results, errors,
+ * retry counters, timestamps, compaction markers and the "context injected"
+ * flag. The clone comes out of `createWorkflow`/`addStep` exactly as a
+ * hand-typed workflow does — `draft`, every step `pending` — because it is built
+ * through them rather than by duplicating rows. That is the whole reason this
+ * is written as a re-creation and not as an `INSERT ... SELECT`: run state has
+ * no way in.
+ *
+ * The clone gets a brand-new agent + hook (its own secret, its own session) from
+ * `createWorkflow`. Its workdir is the original's only when that was a directory
+ * the operator chose — the work itself, a repo checkout, where a copy that ran
+ * anywhere else would be a copy of nothing. A workflow left on the default
+ * per-agent sandbox gets its own instead: that directory belongs to the agent
+ * whose name it carries, and pointing a second agent at it would put two
+ * independent runs in one place.
+ *
+ * All of that is only the PROPOSAL. `overrides` — what the clone dialog collects
+ * on the new-workflow form — replaces any of it field by field, so a clone can
+ * be renamed, pointed at another checkout, moved into a container or given
+ * different permissions on its way out. What is never overridable is the steps
+ * and the context: copying those is what makes this a clone.
+ */
+export function cloneWorkflow(workflowId: string, overrides: CloneOverrides = {}): Workflow {
+	const source = getWorkflow(workflowId);
+	if (!source) throw new WorkflowError("unknown workflow");
+	const runtime = hookRuntime(source.hookUrl);
+	// `pick` is what makes the three-valued override work: an absent key inherits,
+	// an explicit null means "the default" (undefined, which createWorkflow reads
+	// as an omitted field), and a value wins.
+	const pick = <T>(override: T | null | undefined, inherited: T | undefined): T | undefined =>
+		override === undefined ? inherited : (override ?? undefined);
+	// `harness` is whatever the hook's `spawn:` consumer says; anything this hub
+	// wouldn't publish falls back to the default, exactly like an omitted field on
+	// the create form.
+	const sourceRunner = PUBLISHABLE_RUNNERS.includes(runtime.harness as PublishableRunner)
+		? (runtime.harness as PublishableRunner)
+		: undefined;
+	const workdir = pick(overrides.workdir, operatorWorkdir(runtime.workdir, source.agentName) ?? undefined);
+	const runner = pick(overrides.runner, sourceRunner);
+	const permissionMode = pick(overrides.permissionMode, runtime.permissionMode ?? undefined);
+	const sandbox = pick(overrides.sandbox, runtime.sandbox ? ("docker" as const) : undefined);
+	// The image only means anything to a docker sandbox: a clone moved onto the
+	// host must not carry the original's image into a hook that won't use it.
+	const image = sandbox === "docker" ? pick(overrides.image, runtime.sandbox?.image) : undefined;
+	const clone = createWorkflow(overrides.name ?? cloneName(source.name), {
+		...(workdir ? { workdir } : {}),
+		...(runner ? { runner } : {}),
+		...(permissionMode ? { permissionMode } : {}),
+		...(sandbox ? { sandbox } : {}),
+		...(image ? { image } : {}),
+		conversationContext: source.conversationContext,
+	});
+	// The context's images come across before the steps so the hub-owned context
+	// step is reconciled once, with everything it delivers already in place — an
+	// images-only context has no text for `createWorkflow` to have seen.
+	for (const attachment of listFieldAttachments(workflowId, null, "context")) {
+		copyAttachment(attachment, clone.id, null);
+	}
+	reconcileContextStep(clone.id);
+	// `listSteps` is ordered, and `addStep` appends, so the clone's steps come out
+	// in the original's order. The context step is skipped: it is hub-owned and
+	// was just re-materialised from the copied context above.
+	for (const step of listSteps(workflowId)) {
+		if (step.kind === "context") continue;
+		const copy = addStep(clone.id, step.description, {
+			acceptanceCriteria: step.acceptanceCriteria,
+			manualReview: step.manualReview,
+			useSubagent: step.useSubagent,
+			maxRetries: step.maxRetries,
+			retryIntervalSeconds: step.retryIntervalSeconds,
+		});
+		for (const attachment of listStepAttachments(step.id)) copyAttachment(attachment, clone.id, copy.id);
+	}
+	writeStatusMd(clone.id);
+	// Re-read: `addStep` moved `updated_at` (and nothing else) on since the insert.
+	return getWorkflow(clone.id) ?? clone;
 }
 
 /**

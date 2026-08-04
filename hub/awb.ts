@@ -109,6 +109,14 @@ export interface HookRuntime {
 	 * WHICH CLI runs, this says WHERE.
 	 */
 	sandbox: HookSandbox | null;
+	/**
+	 * Permission mode the hook spawns its runs with, or null when it doesn't set
+	 * one (awb's own default applies). Read back so a workflow can be recreated
+	 * with the permissions it was created with — see `cloneWorkflow`
+	 * (workflow.ts), which has no other record of them: the hub stores the choice
+	 * in the hook, never on the workflow row.
+	 */
+	permissionMode: PublishablePermissionMode | null;
 }
 
 /**
@@ -118,7 +126,7 @@ export interface HookRuntime {
  */
 export function hookRuntime(hookUrl: string): HookRuntime {
 	const info = inspectLocalHook(hookUrl);
-	if (!info.local || !info.found || !info.name) return { harness: null, workdir: null, sandbox: null };
+	if (!info.local || !info.found || !info.name) return { harness: null, workdir: null, sandbox: null, permissionMode: null };
 	const hook = loadAwbConfig().hooks[info.name];
 	const consumers = Array.isArray(hook?.consumers) ? (hook.consumers as unknown[]) : [];
 	let harness: string | null = null;
@@ -134,7 +142,15 @@ export function hookRuntime(hookUrl: string): HookRuntime {
 		block?.kind === "docker" && typeof block.image === "string" && block.image !== ""
 			? { kind: "docker" as const, image: block.image }
 			: null;
-	return { harness, workdir, sandbox };
+	// Only the modes the hub is allowed to publish come back as themselves; a
+	// hook carrying anything else reads as "not set", so a clone of it falls back
+	// to the default rather than replaying a mode this hub would refuse to create.
+	const mode = hook?.permissionMode;
+	const permissionMode =
+		typeof mode === "string" && PUBLISHABLE_PERMISSION_MODES.includes(mode as PublishablePermissionMode)
+			? (mode as PublishablePermissionMode)
+			: null;
+	return { harness, workdir, sandbox, permissionMode };
 }
 
 /**

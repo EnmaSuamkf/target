@@ -1,14 +1,17 @@
 import { useEffect, useState } from "react";
 import { ApiError, listConversations, listHostCapabilities, openConversationTerminal, previewConversation } from "../api/client.ts";
-import type {
-	Conversation,
-	CreateWorkflowInput,
-	PermissionMode,
-	Runner,
-	RunnerAvailability,
-	Sandbox,
-	SandboxAvailability,
-	Template,
+import {
+	PERMISSION_MODES,
+	type CloneWorkflowInput,
+	type Conversation,
+	type CreateWorkflowInput,
+	type PermissionMode,
+	type Runner,
+	type RunnerAvailability,
+	type Sandbox,
+	type SandboxAvailability,
+	type Template,
+	type Workflow,
 } from "../api/types.ts";
 import { DirectoryBrowser } from "../components/DirectoryBrowser.tsx";
 import { Field } from "../components/Field.tsx";
@@ -43,6 +46,21 @@ import styles from "./CreateWorkflowModal.module.css";
  * selected one in a real terminal window, because the titles alone are not
  * enough to be sure it's the right conversation, and the import is not something
  * you want to discover was wrong two steps in.
+ *
+ * ## Clone mode
+ *
+ * Given a `source` workflow the same form becomes the CLONE dialog, seeded from
+ * that workflow: the proposed name, and the runtime it actually runs under. It
+ * is the same form on purpose — a clone is a new workflow, and everything you
+ * may decide when creating one you may decide when copying one, rather than
+ * being handed a fixed copy to go and edit afterwards.
+ *
+ * Two fields are dropped in clone mode, because the clone already answers what
+ * they ask: "create from a conversation" (the copy inherits the original's
+ * context) and "start from template" (it inherits the original's steps).
+ * Leaving them in would offer to seed a second set of steps on top of the
+ * copied ones, and a second context to fight the copied one. What they'd have
+ * decided is stated instead, above the form, as what is about to be copied.
  */
 
 const PERMISSION_OPTIONS: { value: "" | PermissionMode; label: string; description: string }[] = [
@@ -92,17 +110,29 @@ const DEFAULT_IMAGES: Record<Runner, string> = {
 	"free-code": "target-agent-freecode:latest",
 };
 
+/** What a clone is proposed as — mirrors the hub's `cloneName` (hub/workflow.ts). */
+function cloneName(name: string): string {
+	return `Clone - ${name}`;
+}
+
 export function CreateWorkflowModal({
 	open,
 	templates,
+	source,
 	onClose,
 	onCreate,
+	onClone,
 }: {
 	open: boolean;
 	templates: Template[];
+	/** Set to turn this into the clone dialog for that workflow — see "Clone mode". */
+	source?: Workflow | null;
 	onClose: () => void;
 	onCreate: (input: CreateWorkflowInput) => Promise<void>;
+	/** Called instead of `onCreate` in clone mode. */
+	onClone: (input: CloneWorkflowInput) => Promise<void>;
 }): React.JSX.Element {
+	const cloning = !!source;
 	const [name, setName] = useState("");
 	const [workdir, setWorkdir] = useState("");
 	const [runner, setRunner] = useState<Runner>("claude");
@@ -137,19 +167,29 @@ export function CreateWorkflowModal({
 	const [opening, setOpening] = useState(false);
 	const [terminalNote, setTerminalNote] = useState<string | null>(null);
 
-	// Fresh form on every open. Also fetch which agent CLIs are installed on
-	// the host so the runtime selector below only offers ones the operator can
-	// actually run, and default-selects the first installed runner. A failed
-	// probe (hub unreachable) is surfaced as an explicit error and disables
-	// submission — it never silently degrades to offering both runners, since
-	// an uninstalled agent must not be selectable.
+	// Fresh form on every open — or, in clone mode, one seeded from the workflow
+	// being copied, so the dialog opens showing what the clone WOULD be and every
+	// field is a change to that rather than something to re-enter. Also fetch
+	// which agent CLIs are installed on the host so the runtime selector below
+	// only offers ones the operator can actually run, and default-selects the
+	// first installed runner. A failed probe (hub unreachable) is surfaced as an
+	// explicit error and disables submission — it never silently degrades to
+	// offering both runners, since an uninstalled agent must not be selectable.
 	useEffect(() => {
 		if (!open) return;
-		setName("");
-		setWorkdir("");
-		setSandbox("host");
-		setImage("");
-		setPermissionMode("");
+		setName(source ? cloneName(source.name) : "");
+		// `chosenWorkdir`, never `workdir`: a source on its own per-agent sandbox
+		// must not hand that directory to the clone's agent.
+		setWorkdir(source?.chosenWorkdir ?? "");
+		setSandbox(source?.sandbox ?? "host");
+		setImage(source?.image ?? "");
+		// A mode this form can't offer (awb publishes more than the UI does) reads
+		// as the default rather than seeding a value with no matching option.
+		setPermissionMode(
+			source && PERMISSION_MODES.includes(source.permissionMode as PermissionMode)
+				? (source.permissionMode as PermissionMode)
+				: "",
+		);
 		setTemplateId("");
 		setAcceptRisk(false);
 		setBrowsing(false);
@@ -181,20 +221,33 @@ export function CreateWorkflowModal({
 			setSandboxes(boxes);
 			setProbeFailed(failed);
 			setLoadingRunners(false);
-			setRunner(avail.find((r) => r.installed)?.id ?? "claude");
+			// The source's own runtime, when this host still has it installed —
+			// a clone of a free-code workflow on a machine that has since lost the
+			// binary falls back to what can actually run, since offering it would
+			// only buy a workflow that dies at its first step.
+			const inherited = avail.find((r) => r.id === source?.harness && r.installed)?.id;
+			setRunner(inherited ?? avail.find((r) => r.installed)?.id ?? "claude");
 		})();
 		return () => {
 			cancelled = true;
 		};
-	}, [open]);
+		// Seeded per open and per workflow, NOT per render: the app re-renders this
+		// every 2s (the poll) with a fresh `source` object, and depending on the
+		// object itself would re-seed the form every two seconds, on top of
+		// whatever was being typed into it.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [open, source?.id]);
 
 	// The conversation list is per runtime — that IS the agent filter — so it is
 	// refetched whenever the selected runtime changes, and any conversation
 	// already picked is dropped with it (a claude session id means nothing to
 	// free-code). Waits for the runner probe, since before it lands `runner` is
-	// only the provisional default.
+	// only the provisional default. Skipped entirely in clone mode, where the
+	// picker isn't rendered: reading every session on the machine to populate a
+	// control nobody can see is work, and an unauthorised read there would raise
+	// an error about a field that isn't on the form.
 	useEffect(() => {
-		if (!open || loadingRunners || probeFailed) return;
+		if (!open || cloning || loadingRunners || probeFailed) return;
 		setConversationId("");
 		setPreview(null);
 		setTerminalNote(null);
@@ -227,7 +280,7 @@ export function CreateWorkflowModal({
 		return () => {
 			cancelled = true;
 		};
-	}, [open, runner, loadingRunners, probeFailed, conversationNonce]);
+	}, [open, cloning, runner, loadingRunners, probeFailed, conversationNonce]);
 
 	const conversation = conversations.find((c) => c.sessionId === conversationId) ?? null;
 	// Free-text narrowing over title and directory. With hundreds of sessions on
@@ -327,6 +380,22 @@ export function CreateWorkflowModal({
 		if (!canSubmit) return;
 		setSaving(true);
 		try {
+			if (source) {
+				// Every field, empty ones included: to the clone endpoint an absent key
+				// means "keep the source's", so a field the operator CLEARED has to be
+				// sent as empty or the clearing is silently undone.
+				const input: CloneWorkflowInput = {
+					name: name.trim(),
+					workdir: workdir.trim(),
+					runner,
+					sandbox,
+					image: sandbox === "docker" ? image.trim() : "",
+					permissionMode,
+					...(bypass ? { acceptBypassRisk: true } : {}),
+				};
+				await onClone(input);
+				return;
+			}
 			const input: CreateWorkflowInput = { name: name.trim() };
 			if (workdir.trim()) input.workdir = workdir.trim();
 			if (runner !== "claude") input.runner = runner;
@@ -347,8 +416,12 @@ export function CreateWorkflowModal({
 	return (
 		<Modal
 			open={open}
-			title="New workflow"
-			description="Creates a dedicated agent and hook. Its steps then run in order on one shared session."
+			title={source ? "Clone workflow" : "New workflow"}
+			description={
+				source
+					? `Creates a second workflow from “${source.name}”, with a dedicated agent and hook of its own. Everything below starts as that workflow's and can be changed here.`
+					: "Creates a dedicated agent and hook. Its steps then run in order on one shared session."
+			}
 			onClose={onClose}
 			footer={
 				<>
@@ -356,12 +429,24 @@ export function CreateWorkflowModal({
 						Cancel
 					</button>
 					<button type="submit" form="create-workflow" className="btn btn--primary" disabled={!canSubmit}>
-						{saving ? "Creating…" : "Create workflow"}
+						{source ? (saving ? "Cloning…" : "Clone workflow") : saving ? "Creating…" : "Create workflow"}
 					</button>
 				</>
 			}
 		>
 			<form id="create-workflow" className={styles.form} onSubmit={submit}>
+				{/* What the clone gets for free, said where the two fields that would
+				    otherwise ask for it used to be. The steps are the copy's reason to
+				    exist, so the count is stated rather than implied. */}
+				{source && (
+					<p className={styles.copied}>
+						Copies <strong>{source.progress.total} step{source.progress.total === 1 ? "" : "s"}</strong>, in order,
+						with their acceptance criteria and review settings
+						{source.conversationContext ? ", and this workflow's conversation context" : ""}. Nothing from its runs
+						comes across: the clone starts as a draft with every step pending.
+					</p>
+				)}
+
 				<Field label="Name" required>
 					{(props) => (
 						<input
@@ -452,7 +537,10 @@ export function CreateWorkflowModal({
 					)}
 				</Field>
 
-				<Field
+				{/* Not in clone mode: the copy's context is the original's, and a second
+				    one imported here would only fight it. */}
+				{!cloning && (
+					<Field
 					label="Create from a conversation"
 					hint={
 						loadingConversations
@@ -520,9 +608,10 @@ export function CreateWorkflowModal({
 							</div>
 						</div>
 					)}
-				</Field>
+					</Field>
+				)}
 
-				{conversation && (
+				{!cloning && conversation && (
 					<div className={styles.conversation}>
 						<p className={styles.conversationMeta}>
 							{conversation.runner} · {prettyPath(conversation.workdir) || "unknown directory"} ·{" "}
@@ -617,7 +706,9 @@ export function CreateWorkflowModal({
 					</label>
 				)}
 
-				{templates.length > 0 && (
+				{/* Also not in clone mode: the copy's steps are the original's, and a
+				    template would seed a second set on top of them. */}
+				{!cloning && templates.length > 0 && (
 					<Field label="Start from template" hint="Optional — seeds the workflow with the template's steps.">
 						{(props) => (
 							<select

@@ -3,6 +3,7 @@ import * as api from "./api/client.ts";
 import { ApiError } from "./api/client.ts";
 import type {
 	AttachmentField,
+	CloneWorkflowInput,
 	CreateWorkflowInput,
 	NotificationSettings,
 	NotificationSettingsInput,
@@ -75,6 +76,10 @@ export function App(): React.JSX.Element {
 	const [steps, setSteps] = useState<Step[]>([]);
 	const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
 	const [createOpen, setCreateOpen] = useState(false);
+	// Which workflow the create dialog is CLONING, if any — it doubles as the
+	// clone dialog, seeded from this one (see CreateWorkflowModal). Held by id
+	// rather than by object so the note in that dialog keeps up with the poll.
+	const [cloneSourceId, setCloneSourceId] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
 	const [loaded, setLoaded] = useState(false);
 
@@ -93,6 +98,25 @@ export function App(): React.JSX.Element {
 		() => workflows.find((w) => w.id === selectedId) ?? null,
 		[workflows, selectedId],
 	);
+
+	const cloneSource = useMemo(
+		() => workflows.find((w) => w.id === cloneSourceId) ?? null,
+		[workflows, cloneSourceId],
+	);
+
+	// The two ways the create dialog opens. Clearing the clone source on the plain
+	// "New workflow" path matters: without it, the dialog opened from New right
+	// after a Clone would come up still seeded from — and still cloning — that
+	// workflow.
+	const openCreate = (): void => {
+		setCloneSourceId(null);
+		setCreateOpen(true);
+	};
+
+	const closeCreate = (): void => {
+		setCreateOpen(false);
+		setCloneSourceId(null);
+	};
 
 	/**
 	 * Turns any handler failure into a toast. A 401 is called out specifically
@@ -212,7 +236,7 @@ export function App(): React.JSX.Element {
 	useKeyboardShortcuts({
 		view,
 		dictation,
-		onCreateWorkflow: () => setCreateOpen(true),
+		onCreateWorkflow: () => openCreate(),
 		bindings: shortcutBindings,
 	});
 
@@ -248,7 +272,7 @@ export function App(): React.JSX.Element {
 			setSelectedId(workflow.id);
 			toast.success(`Workflow "${workflow.name}" created.`);
 		}, refreshCurrent);
-		if (ok) setCreateOpen(false);
+		if (ok) closeCreate();
 	};
 
 	const handleStart = (stepIds: string[]): void => {
@@ -270,6 +294,55 @@ export function App(): React.JSX.Element {
 	const handleStop = (): void => {
 		if (!selectedId) return;
 		void act("Could not stop the workflow", () => api.runWorkflowAction(selectedId, "pause"), refreshCurrent);
+	};
+
+	/**
+	 * Clone opens the create dialog seeded from this workflow rather than copying
+	 * it on the spot: a clone is a new workflow, and the things you decide when
+	 * creating one — its name, where it works, which agent, what it may do — are
+	 * exactly the things you want to decide when copying one. The copy itself
+	 * happens on that dialog's submit, in `handleCloneSubmit`.
+	 */
+	const handleClone = (): void => {
+		if (!selectedWorkflow) return;
+		setCloneSourceId(selectedWorkflow.id);
+		setCreateOpen(true);
+	};
+
+	/**
+	 * Performs the clone with whatever the dialog was left showing, and SELECTS
+	 * the copy — it's what you're about to edit or run, and leaving the original
+	 * open would make a successful clone look like nothing happened. Not
+	 * confirmed: it creates something, changes nothing, and is undone by deleting
+	 * the copy.
+	 */
+	const handleCloneSubmit = async (input: CloneWorkflowInput): Promise<void> => {
+		if (!cloneSourceId) return;
+		const ok = await act(
+			"Could not clone the workflow",
+			async () => {
+				const clone = await api.cloneWorkflow(cloneSourceId, input);
+				setSelectedId(clone.id);
+				toast.success(`Workflow cloned as "${clone.name}".`);
+			},
+			refreshCurrent,
+		);
+		if (ok) closeCreate();
+	};
+
+	// Returns whether the rename reached the server, so the dialog only closes on
+	// a real success and a rejected name isn't silently lost.
+	const handleRename = async (name: string): Promise<boolean> => {
+		const workflow = selectedWorkflow;
+		if (!workflow) return false;
+		return await act(
+			"Could not rename the workflow",
+			async () => {
+				const renamed = await api.renameWorkflow(workflow.id, name);
+				toast.success(`Workflow renamed to "${renamed.name}".`);
+			},
+			refreshCurrent,
+		);
 	};
 
 	const handleDelete = async (): Promise<void> => {
@@ -619,7 +692,7 @@ export function App(): React.JSX.Element {
 								workflows={workflows}
 								selectedId={selectedId}
 								onSelect={setSelectedId}
-								onCreate={() => setCreateOpen(true)}
+								onCreate={openCreate}
 							/>
 						)}
 
@@ -633,6 +706,8 @@ export function App(): React.JSX.Element {
 								{...(isMobile ? { onBack: () => setSelectedId(null) } : {})}
 								onStart={handleStart}
 								onStop={handleStop}
+								onClone={handleClone}
+								onRename={handleRename}
 								onDelete={() => void handleDelete()}
 								onSetStatus={(status) => void handleSetWorkflowStatus(status)}
 								onSaveContext={handleSaveContext}
@@ -662,7 +737,7 @@ export function App(): React.JSX.Element {
 												: "Pick a workflow from the list to see its steps and controls."
 										}
 										action={
-											<button type="button" className="btn btn--primary btn--sm" onClick={() => setCreateOpen(true)}>
+											<button type="button" className="btn btn--primary btn--sm" onClick={openCreate}>
 												New workflow
 											</button>
 										}
@@ -707,8 +782,10 @@ export function App(): React.JSX.Element {
 			<CreateWorkflowModal
 				open={createOpen}
 				templates={templates}
-				onClose={() => setCreateOpen(false)}
+				source={cloneSource}
+				onClose={closeCreate}
 				onCreate={handleCreate}
+				onClone={handleCloneSubmit}
 			/>
 
 			<VoiceDock dictation={dictation} />

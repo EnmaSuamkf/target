@@ -20,6 +20,7 @@ import { useStagedImages } from "../hooks/useStagedImages.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
 import { selectionAfterPoll, stepStatuses } from "../lib/stepSelection.ts";
 import { ContextPanel } from "./ContextPanel.tsx";
+import { RenameWorkflowModal } from "./RenameWorkflowModal.tsx";
 import { SessionPanel } from "./SessionPanel.tsx";
 import { StepItem } from "./StepItem.tsx";
 import styles from "./WorkflowDetail.module.css";
@@ -63,6 +64,8 @@ export function WorkflowDetail({
 	onBack,
 	onStart,
 	onStop,
+	onClone,
+	onRename,
 	onDelete,
 	onSetStatus,
 	onSaveContext,
@@ -88,6 +91,10 @@ export function WorkflowDetail({
 	onBack?: () => void;
 	onStart: (stepIds: string[]) => void;
 	onStop: () => void;
+	/** Opens the clone dialog for this workflow — the new-workflow form, seeded from it. */
+	onClone: () => void;
+	/** Saves a new name; resolves true only when the server stored it. */
+	onRename: (name: string) => Promise<boolean>;
 	onDelete: () => void;
 	/** Forces the workflow's status by hand; never runs anything. */
 	onSetStatus: (status: OverridableWorkflowStatus) => void;
@@ -117,6 +124,8 @@ export function WorkflowDetail({
 	// `selected` flag and re-seeded when switching workflows.
 	const [selection, setSelection] = useState<Set<string>>(new Set());
 	const [opening, setOpening] = useState(false);
+	// The rename dialog opened by "Change", next to the title.
+	const [renaming, setRenaming] = useState(false);
 	// Each step's status as of the previous poll, so a step that FINISHES can be
 	// told apart from one that was already finished when we got here — the whole
 	// difference between "untick it now" and "untick it forever". A ref, not
@@ -136,6 +145,9 @@ export function WorkflowDetail({
 
 	useEffect(() => {
 		setSelection(new Set(taskSteps.filter((s) => s.selected).map((s) => s.id)));
+		// A rename dialog left open belongs to the workflow it was opened from —
+		// carrying it into another one would offer that name for this workflow.
+		setRenaming(false);
 		// The steps of the workflow being left tell us nothing about the one being
 		// opened: start the transition history empty so every step of the new
 		// workflow counts as a first sighting and the seed above stands as it is.
@@ -226,6 +238,17 @@ export function WorkflowDetail({
 
 				<div className={styles.titleRow}>
 					<h2 className={styles.title}>{workflow.name}</h2>
+					{/* Next to the name, because it edits the name and nothing else —
+					    it is not a run control and doesn't belong in that row. */}
+					<button
+						type="button"
+						className={`btn btn--sm btn--ghost ${styles.rename}`}
+						onClick={() => setRenaming(true)}
+						disabled={busy}
+						title="Change this workflow's name."
+					>
+						Change
+					</button>
 					<Badge status={workflow.status} manual={workflow.statusManual} manualAt={workflow.statusManualAt} />
 				</div>
 
@@ -293,6 +316,21 @@ export function WorkflowDetail({
 
 					<button type="button" className="btn" onClick={onStop} disabled={!running || busy} title="Stops dispatching further steps. The step already in flight finishes on its own.">
 						Stop
+					</button>
+
+					{/* Beside the run controls, because it's how you get a second run of
+					    this same work without retyping it — but it dispatches nothing,
+					    and it doesn't even copy on click: it opens the new-workflow form
+					    seeded from this workflow, so the copy is configured before it
+					    exists rather than fixed up afterwards. */}
+					<button
+						type="button"
+						className={`btn ${styles.clone}`}
+						onClick={onClone}
+						disabled={busy}
+						title="Copy this workflow — all of its steps, in order, and its context — into a new one. Opens the new-workflow form seeded from this workflow, so the copy's name, directory, agent and permissions can be changed before it is created."
+					>
+						Clone
 					</button>
 
 					{/* Says what really happened when the engine's verdict is wrong.
@@ -416,6 +454,13 @@ export function WorkflowDetail({
 					opening={opening}
 				/>
 			</div>
+
+			<RenameWorkflowModal
+				open={renaming}
+				name={workflow.name}
+				onClose={() => setRenaming(false)}
+				onSave={onRename}
+			/>
 		</section>
 	);
 }

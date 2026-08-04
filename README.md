@@ -140,6 +140,32 @@ Notes on behaviour worth knowing:
   since that's the one to pick up. Tick a finished step again to re-run it.
 - **One Start button.** It maps to the action that fits the status — `start`
   when draft, `resume` when paused, `restart` when completed or failed.
+- **Clone.** Beside the run controls: copies the open workflow into a new one
+  with **all of its steps** in the same order (criteria, review gates, subagent
+  toggles and retry budgets included), its conversation context, its pinned
+  images and the runtime its agent runs under — under an **agent and hook of its
+  own**. Nothing a run produced is copied: the clone is a `draft` with every step
+  `pending`, no session and no results. The original is left untouched, and the
+  UI opens the copy.
+
+  Clicking it opens the **new-workflow form**, seeded from the workflow being
+  copied — proposed name `Clone - <name>`, and its directory, agent runtime,
+  sandbox and permissions — so all of that can be changed before the copy is
+  created rather than fixed up afterwards. Clearing a field means "the default"
+  (its own sandbox, read-only permissions), not "keep the original's". The two
+  fields the clone already answers are dropped from that form: the copy's
+  context and steps come from the original, so there is nothing for the
+  conversation picker or the template picker to decide.
+
+  Over the API this is `POST /api/workflows/:id/clone`, whose body is optional
+  and takes the same runtime fields as `POST /api/workflows` (`name`, `workdir`,
+  `runner`, `sandbox`, `image`, `permissionMode`). A field left out of the body
+  is inherited from the source; sent empty it means the default. No body at all
+  clones as-is, as `Clone - <name>`.
+- **Change.** Next to the workflow's name: opens a dialog to edit it, with
+  **Cancel** (discards) and **Save** (`PATCH /api/workflows/:id/name`). Only the
+  label changes — the agent name, the hook URL and the `.md` status file keep the
+  slug they were created with, so renaming is safe even mid-run.
 - **Set status…** A picker beside the run controls, and one per step, that sets
   a status by hand when the engine got it wrong. It runs nothing; see
   "Correcting a status by hand" below. Statuses set this way carry a pencil on
