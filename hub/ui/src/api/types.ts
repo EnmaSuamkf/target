@@ -158,11 +158,19 @@ export interface Workflow {
 	mdPath: string;
 	/** Resolved from the awb hook, so it can be absent if the hook is gone. */
 	workdir: string | null;
+	/**
+	 * The directory an operator chose, or null when this workflow runs in its
+	 * agent's own sandbox under ~/.target/sandboxes/. What the clone dialog seeds
+	 * its workdir field from — `workdir` above belongs to this agent alone.
+	 */
+	chosenWorkdir: string | null;
 	harness: string | null;
 	/** "host" for an uncontained agent (the default), "docker" when its steps run in a container. */
 	sandbox: Sandbox;
 	/** Image backing a docker sandbox; null on the host. */
 	image: string | null;
+	/** Permission mode its hook spawns with; null means awb's own default (read-only). */
+	permissionMode: string | null;
 	progress: Progress;
 	conversationContext: string | null;
 	contextInjected: boolean;
@@ -380,6 +388,31 @@ export interface CreateWorkflowInput {
 	 * created with a free-text context (that's PATCH /api/workflows/:id/context).
 	 */
 	conversationNote?: string;
+	/** Required confirmation when permissionMode is "bypassPermissions". */
+	acceptBypassRisk?: boolean;
+}
+
+/**
+ * What POST /api/workflows/:id/clone accepts: the new-workflow form's runtime
+ * fields, minus the two that decide where a workflow's steps and context come
+ * from. A clone's come from the workflow it copies, which is what a clone is —
+ * so `templateId` and `conversation` have no meaning here.
+ *
+ * The clone dialog sends every one of these keys, empty string included,
+ * because absent and empty mean different things to that endpoint: absent
+ * inherits the source's value, empty is an explicit "make it the default".
+ * That's what lets a field be CLEARED in the dialog.
+ */
+export interface CloneWorkflowInput {
+	name: string;
+	/** Empty means "give the clone its own sandbox" rather than the source's directory. */
+	workdir: string;
+	runner: Runner;
+	sandbox: Sandbox;
+	/** Empty means the runner's default image. Only read for a docker sandbox. */
+	image: string;
+	/** Empty means read-only — awb's own default — not "whatever the source had". */
+	permissionMode: "" | PermissionMode;
 	/** Required confirmation when permissionMode is "bypassPermissions". */
 	acceptBypassRisk?: boolean;
 }

@@ -15,6 +15,7 @@
 import type {
 	Attachment,
 	AttachmentField,
+	CloneWorkflowInput,
 	Conversation,
 	ConversationDigest,
 	CreateWorkflowInput,
@@ -186,6 +187,36 @@ export async function createWorkflow(input: CreateWorkflowInput): Promise<Workfl
 
 export function deleteWorkflow(id: string): Promise<{ ok: true }> {
 	return request<{ ok: true }>(`/api/workflows/${id}`, { method: "DELETE", admin: true });
+}
+
+/**
+ * Copies the workflow — every step in order, its context, its images — into a
+ * new workflow with an agent of its own. Nothing a run produced comes across:
+ * the clone is a draft with every step pending. Returns the clone, so the
+ * caller can open it.
+ *
+ * `input` is what the clone dialog collected on the new-workflow form; it is
+ * sent whole, empty fields included, because the endpoint reads an absent key
+ * as "inherit the source's" and an empty one as "make it the default". Omit it
+ * entirely to clone as-is, under "Clone - <name>".
+ */
+export async function cloneWorkflow(id: string, input?: CloneWorkflowInput): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow; steps: Step[] }>(`/api/workflows/${id}/clone`, {
+		method: "POST",
+		admin: true,
+		...(input ? { body: json(input) } : {}),
+	});
+	return data.workflow;
+}
+
+/** Renames the workflow. Its agent, hook and status file keep the name they were created with. */
+export async function renameWorkflow(id: string, name: string): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/name`, {
+		method: "PATCH",
+		admin: true,
+		body: json({ name }),
+	});
+	return data.workflow;
 }
 
 /**

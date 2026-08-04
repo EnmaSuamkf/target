@@ -592,6 +592,17 @@ export function takeStatusBeforeReview(id: string): WorkflowStatus | null {
 	return stashed;
 }
 
+/**
+ * Renames a workflow. Only the display name moves: `agent_name`, `hook_url` and
+ * `md_path` are the workflow's identity on this machine (an awb hook keyed by
+ * name, a live URL its secret is bound to, a file the agent may already have
+ * been told about), so they keep the slug they were born with. Called only via
+ * `renameWorkflow`, which validates the name and rewrites the status file.
+ */
+export function setWorkflowName(id: string, name: string): void {
+	open().prepare("UPDATE workflows SET name = ?, updated_at = ? WHERE id = ?").run(name, new Date().toISOString(), id);
+}
+
 export function setWorkflowSessionId(id: string, sessionId: string | null): void {
 	open()
 		.prepare("UPDATE workflows SET last_session_id = ?, updated_at = ? WHERE id = ?")

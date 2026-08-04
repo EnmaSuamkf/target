@@ -79,6 +79,20 @@
 	overflow-wrap: anywhere;
 }
 
+/* Clone mode: what the copy carries over regardless of the fields below. A
+   sunken note rather than a field, because it is the one thing here that is
+   stated instead of asked. */
+.copied {
+	margin: 0;
+	padding: var(--space-3);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--surface-sunken);
+	font-size: var(--text-xs);
+	line-height: 1.55;
+	color: var(--text-muted);
+}
+
 /* The bypassPermissions confirmation. Styled as a warning because it's the one
    choice in this form that hands the agent unrestricted command execution. */
 .risk {
