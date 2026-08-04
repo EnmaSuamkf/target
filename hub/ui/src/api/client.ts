@@ -335,12 +335,12 @@ export async function abortStep(workflowId: string, stepId: string): Promise<Wor
 	return data.workflow;
 }
 
-/** Appends a template's steps, skipping descriptions the workflow already has. */
+/** Appends all of a template's steps, whether or not the workflow already has steps worded the same way. */
 export function addStepsFromTemplate(
 	workflowId: string,
 	templateId: string,
-): Promise<{ workflow: Workflow; steps: Step[]; added: number; skipped: number }> {
-	return request<{ workflow: Workflow; steps: Step[]; added: number; skipped: number }>(
+): Promise<{ workflow: Workflow; steps: Step[]; added: number }> {
+	return request<{ workflow: Workflow; steps: Step[]; added: number }>(
 		`/api/workflows/${workflowId}/steps/from-template`,
 		{ method: "POST", admin: true, body: json({ templateId }) },
 	);

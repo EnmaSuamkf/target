@@ -525,11 +525,7 @@ export function App(): React.JSX.Element {
 			"Could not add the template's steps",
 			async () => {
 				const result = await api.addStepsFromTemplate(selectedId, templateId);
-				toast.success(
-					result.skipped > 0
-						? `Added ${result.added} step(s); skipped ${result.skipped} already present.`
-						: `Added ${result.added} step(s).`,
-				);
+				toast.success(`Added ${result.added} step(s).`);
 			},
 			refreshCurrent,
 		);

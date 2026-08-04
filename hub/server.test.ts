@@ -5,7 +5,8 @@
  *    seeds the new workflow with that template's steps (same order, same
  *    judge config) right after creating it.
  *  - POST /api/workflows/:id/steps/from-template does the same thing for an
- *    already-existing workflow, appending after whatever steps it already has.
+ *    already-existing workflow, appending after whatever steps it already has —
+ *    the full template every time, duplicate descriptions included.
  *
  * …plus the HTTP surface of the per-step manual-review gate: the `manualReview`
  * flag through create/edit/publicStep, and POST .../steps/:stepId/continue.
@@ -170,17 +171,17 @@ test("POST /api/workflows/:id/steps/from-template appends the template's steps a
 	assert.equal(byOrder[2].retryIntervalSeconds, 15);
 });
 
-test("POST /api/workflows/:id/steps/from-template is idempotent: calling it twice with the same template only adds the steps once", async () => {
+test("POST /api/workflows/:id/steps/from-template appends the whole template again when it was already applied", async () => {
 	const template = insertTemplate({
-		name: "idempotent checklist",
-		tags: ["idempotent"],
+		name: "repeatable checklist",
+		tags: ["repeatable"],
 		steps: [{ description: "step a" }, { description: "step b" }],
 	});
 
 	const createRes = await fetch(`${baseUrl}/api/workflows`, {
 		method: "POST",
 		headers: adminHeaders(),
-		body: JSON.stringify({ name: "idempotent workflow" }),
+		body: JSON.stringify({ name: "repeatable workflow" }),
 	});
 	const created = (await createRes.json()) as { workflow: { id: string } };
 	const workflowId = created.workflow.id;
@@ -191,9 +192,8 @@ test("POST /api/workflows/:id/steps/from-template is idempotent: calling it twic
 		body: JSON.stringify({ templateId: template.id }),
 	});
 	assert.equal(firstRes.status, 200);
-	const first = (await firstRes.json()) as { added: number; skipped: number };
+	const first = (await firstRes.json()) as { added: number };
 	assert.equal(first.added, 2);
-	assert.equal(first.skipped, 0);
 
 	const secondRes = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/from-template`, {
 		method: "POST",
@@ -201,20 +201,25 @@ test("POST /api/workflows/:id/steps/from-template is idempotent: calling it twic
 		body: JSON.stringify({ templateId: template.id }),
 	});
 	assert.equal(secondRes.status, 200);
-	const second = (await secondRes.json()) as { added: number; skipped: number };
-	assert.equal(second.added, 0);
-	assert.equal(second.skipped, 2);
+	const second = (await secondRes.json()) as { added: number };
+	assert.equal(second.added, 2);
 
+	// The second round lands after the first, in template order — a repeat run of
+	// the same checklist, not a no-op.
 	const detailRes = await fetch(`${baseUrl}/api/workflows/${workflowId}`);
-	const detail = (await detailRes.json()) as { steps: { description: string }[] };
-	assert.equal(detail.steps.length, 2);
+	const detail = (await detailRes.json()) as { steps: { description: string; orderIndex: number }[] };
+	assert.equal(detail.steps.length, 4);
+	const byOrder = [...detail.steps].sort((a, b) => a.orderIndex - b.orderIndex);
 	assert.deepEqual(
-		detail.steps.map((s) => s.description),
-		["step a", "step b"],
+		byOrder.map((s) => s.description),
+		["step a", "step b", "step a", "step b"],
 	);
+	// Duplicated descriptions must still be separately addressable steps.
+	const ids = new Set((detail.steps as { id?: string }[]).map((s) => s.id));
+	assert.equal(ids.size, 4);
 });
 
-test("POST /api/workflows/:id/steps/from-template with partial overlap only adds the missing steps", async () => {
+test("POST /api/workflows/:id/steps/from-template adds steps that duplicate ones added by hand", async () => {
 	const template = insertTemplate({
 		name: "partial overlap checklist",
 		tags: ["partial"],
@@ -242,17 +247,16 @@ test("POST /api/workflows/:id/steps/from-template with partial overlap only adds
 		body: JSON.stringify({ templateId: template.id }),
 	});
 	assert.equal(fromTplRes.status, 200);
-	const body = (await fromTplRes.json()) as { added: number; skipped: number };
-	assert.equal(body.added, 1);
-	assert.equal(body.skipped, 1);
+	const body = (await fromTplRes.json()) as { added: number };
+	assert.equal(body.added, 2);
 
 	const detailRes = await fetch(`${baseUrl}/api/workflows/${workflowId}`);
 	const detail = (await detailRes.json()) as { steps: { description: string; orderIndex: number }[] };
-	assert.equal(detail.steps.length, 2);
+	assert.equal(detail.steps.length, 3);
 	const byOrder = [...detail.steps].sort((a, b) => a.orderIndex - b.orderIndex);
 	assert.deepEqual(
 		byOrder.map((s) => s.description),
-		["shared step", "new step"],
+		["shared step", "shared step", "new step"],
 	);
 });
 

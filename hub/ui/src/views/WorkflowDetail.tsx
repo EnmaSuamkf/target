@@ -423,8 +423,8 @@ export function WorkflowDetail({
 /**
  * Adding steps, either by hand or by appending a template's. Collapsed by
  * default so it doesn't compete with the step list; the template path reports
- * how many were added versus skipped (the server skips descriptions the
- * workflow already has).
+ * how many steps were added — always the template's full list, since appending
+ * the same template twice is a legitimate way to queue a second round.
  */
 function AddStepForm({
 	templates,
@@ -655,7 +655,7 @@ function AddStepForm({
 							Append
 						</button>
 					</div>
-					<p className="hint">Steps whose description already exists in this workflow are skipped.</p>
+					<p className="hint">All of the template's steps are appended, even ones already in this workflow.</p>
 				</div>
 			)}
 		</div>
