@@ -1431,22 +1431,13 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return;
 			}
 			try {
-				// Task steps only. The context step's description holds the workflow's
-				// conversation-context text, which could coincide with a template step's
-				// wording — and a template step silently skipped as a "duplicate" of the
-				// background would never run.
-				const existingDescriptions = new Set(
-					listSteps(workflowId)
-						.filter((step) => step.kind === "task")
-						.map((step) => step.description),
-				);
+				// Every template step is appended, every time. Repeating a template is a
+				// normal thing to want — the same review-and-fix checklist run for a
+				// second round, a deploy template applied per environment — and a step
+				// dropped because its wording matched one already in the list left the
+				// workflow quietly missing work the operator asked for.
 				let added = 0;
-				let skipped = 0;
 				for (const step of template.steps) {
-					if (existingDescriptions.has(step.description)) {
-						skipped++;
-						continue;
-					}
 					addStep(workflowId, step.description, {
 						acceptanceCriteria: step.acceptanceCriteria,
 						manualReview: step.manualReview,
@@ -1454,14 +1445,12 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						maxRetries: step.maxRetries,
 						retryIntervalSeconds: step.retryIntervalSeconds,
 					});
-					existingDescriptions.add(step.description);
 					added++;
 				}
 				sendJson(res, 200, {
 					workflow: publicWorkflow(getWorkflow(workflowId) as Workflow),
 					steps: listSteps(workflowId).map((s) => publicStep(s, cfg)),
 					added,
-					skipped,
 				});
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
