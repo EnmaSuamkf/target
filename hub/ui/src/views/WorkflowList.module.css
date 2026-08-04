@@ -1,7 +1,16 @@
-.panel {
+/* The workflows rail: a horizontal strip of cards across the top of the
+ * workflows view, plus an "All workflows" page that shows the same set as a
+ * paginated grid. Replaces the tall left sidebar (see WorkflowList.tsx). */
+
+.strip {
 	display: flex;
 	flex-direction: column;
-	min-height: 0;
+	gap: var(--space-3);
+	min-width: 0;
+	/* A positioning context so absolutely-positioned descendants (a badge's
+	   `sr-only` is `position: absolute`) are clipped by the `overflow: hidden`
+	   below instead of escaping to the page and forcing a horizontal scrollbar. */
+	position: relative;
 	background: var(--surface);
 	border: 1px solid var(--border);
 	border-radius: var(--radius-md);
@@ -9,18 +18,19 @@
 	overflow: hidden;
 }
 
-.head {
-	display: grid;
-	gap: var(--space-3);
-	padding: var(--space-4);
-	border-bottom: 1px solid var(--border);
-}
+/* --- toolbar --- */
 
-.headRow {
+.toolbar {
 	display: flex;
 	align-items: center;
-	justify-content: space-between;
 	gap: var(--space-3);
+	flex-wrap: wrap;
+	/* Matches the rail's horizontal inset so the "Workflows" heading lines up
+	   with the first card. The rail's own leading/trailing gap is held by its
+	   `scroll-padding-inline` (see below), which the toolbar doesn't need. */
+	padding: var(--space-3) var(--space-8);
+	border-bottom: 1px solid var(--border);
+	row-gap: var(--space-2);
 }
 
 .heading {
@@ -40,6 +50,14 @@
 	font-weight: 500;
 }
 
+.toolbarTools {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	flex-wrap: wrap;
+	margin-left: auto;
+}
+
 .search {
 	position: relative;
 	display: flex;
@@ -54,7 +72,8 @@
 }
 
 .searchInput {
-	width: 100%;
+	width: 12rem;
+	max-width: 100%;
 	padding: 0.375rem var(--space-3) 0.375rem 2rem;
 	border: 1px solid var(--border-strong);
 	border-radius: var(--radius-sm);
@@ -111,33 +130,83 @@
 	color: var(--accent-700);
 }
 
-.list {
-	display: grid;
-	gap: var(--space-2);
-	align-content: start;
-	padding: var(--space-3);
-	overflow-y: auto;
-	flex: 1;
-	min-height: 0;
+/* "All workflows" reads as a view-switch, so it sits beside the run of
+   controls but is outlined rather than primary — the primary affordance here
+   is "New". */
+.allBtn {
+	border-color: var(--accent-200);
+	background: var(--accent-50);
+	color: var(--accent-700);
 }
+
+.allBtn:hover:not(:disabled) {
+	background: var(--accent-100);
+	border-color: var(--accent-200);
+}
+
+/* --- rail --- */
+
+.rail {
+	display: flex;
+	gap: var(--space-3);
+	/* The inset is deliberately wider than the `gap` between cards: a card that
+	   sits one card-gap away from the panel's border reads as clipped rather
+	   than as the start of a row, which is exactly what the first card looked
+	   like. `--space-8` on the sides (2.7× the gap) and `--space-5` top/bottom
+	   frame the row as a band inside the panel instead. The toolbar carries the
+	   same horizontal inset, so the heading still lines up with the first card. */
+	padding: var(--space-5) var(--space-8);
+	overflow-x: auto;
+	/* `safe center` is the fix for "I filtered to one card and it's stuck on the
+	   left": when the cards fit, they sit in the middle of the rail; when there
+	   are too many, `safe` falls back to start so the leftmost card is still
+	   reachable and the horizontal scroll works. Plain `center` would clip the
+	   first card off the left edge once the row overflows. */
+	justify-content: safe center;
+	/* `safe center` has one cost on overflow: it clamps the scroll position to
+	   the leading inset, which eats the rail's own padding and parks the first
+	   card flush against the border. Matching `scroll-padding-inline` to the
+	   padding hands that inset back as a real leading/trailing gap (and snaps
+	   cards to it), without touching the single-filtered-card centering above. */
+	scroll-padding-inline: var(--space-8);
+	/* `min-width: 0` so the flex item can shrink to the strip's width and the
+	   `overflow-x: auto` actually contains the horizontal scroll, instead of the
+	   cards' combined width pushing the page wide. `position: relative` makes the
+	   rail the containing block for absolute descendants (the badge's `sr-only`)
+	   so they're clipped here too and never reach the page. */
+	min-width: 0;
+	position: relative;
+	/* Snap card-by-card so a flick through sixty lands on a card edge rather
+	   than straddling two. `proximity` (not `mandatory`) so a small scroll still
+	   rests where the thumb let go instead of yanking the nearest card over. */
+	scroll-snap-type: x proximity;
+}
+
+.railEmpty {
+	width: 100%;
+}
+
+/* --- card --- */
 
 .card {
 	display: grid;
-	gap: var(--space-2);
+	gap: var(--space-3);
 	width: 100%;
-	padding: var(--space-3);
+	padding: var(--space-4);
 	border: 1px solid var(--border);
-	border-radius: var(--radius);
+	border-radius: var(--radius-md);
 	background: var(--surface);
 	font-family: inherit;
 	text-align: left;
 	cursor: pointer;
-	transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
+	scroll-snap-align: start;
+	transition: border-color var(--transition), background var(--transition), box-shadow var(--transition), transform var(--transition);
 }
 
 .card:hover {
 	border-color: var(--border-strong);
-	box-shadow: var(--shadow-xs);
+	box-shadow: var(--shadow-sm);
+	transform: translateY(-1px);
 }
 
 .cardSelected,
@@ -145,11 +214,17 @@
 	border-color: var(--accent-500);
 	background: var(--accent-50);
 	box-shadow: var(--ring);
+	transform: none;
 }
 
-.cardHead {
+/* A fixed-width tile in the horizontal rail; a full-width cell in the grid/page. */
+.rail > .card {
+	flex: 0 0 18rem;
+}
+
+.cardTop {
 	display: flex;
-	align-items: center;
+	align-items: flex-start;
 	justify-content: space-between;
 	gap: var(--space-2);
 	/* Without this the name's intrinsic width wins the flex negotiation and
@@ -160,19 +235,72 @@
 .cardName {
 	flex: 1;
 	min-width: 0;
-	font-size: var(--text-sm);
-	font-weight: 550;
+	font-size: var(--text-md);
+	font-weight: 600;
 	color: var(--text);
+	line-height: 1.35;
+	/* Two lines, then an ellipsis — a long name gets to read as words instead
+	   of being chopped to the first one. */
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
 	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
 }
 
 /* The badge states the run status — it must never be the thing that gets
    truncated when the name is long. `:global` because Badge renders the shared
    `.badge` class from global.css, which CSS Modules would otherwise hash. */
-.cardHead > :global(.badge) {
+.cardTop > :global(.badge) {
 	flex: none;
+}
+
+/* The loading bar is the headline of the card, so it's bigger and rounder than
+   the thin 6px global `.progress` used elsewhere (e.g. the detail header):
+   a 10px pill that reads as a fill gauge at a glance. Scoped to the card so
+   the detail pane's bar is untouched. */
+.card :global(.progress) {
+	height: 10px;
+	background: var(--gray-100);
+}
+
+/* The step count on the left, the percentage pulled out bold on the right — a
+   progress bar with its number next to it is what makes the bar worth the
+   space it now takes up. */
+.cardMeta {
+	display: flex;
+	align-items: center;
+	gap: var(--space-1);
+	font-size: var(--text-xs);
+	color: var(--text-muted);
+}
+
+.dot {
+	color: var(--text-subtle);
+}
+
+.cardPct {
+	margin-left: auto;
+	font-size: var(--text-sm);
+	font-weight: 600;
+	color: var(--text);
+	font-variant-numeric: tabular-nums;
+}
+
+.cardFoot {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	min-width: 0;
+}
+
+.cardAgent {
+	flex: 1;
+	min-width: 0;
+	font-size: var(--text-xs);
+	color: var(--text-muted);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 /* Containment marker, deliberately quieter than the status badge: it's a
@@ -189,16 +317,153 @@
 	letter-spacing: 0.01em;
 }
 
-.cardMeta {
+/* The directory is what tells sixty completed workflows apart, so it earns its
+   own line — muted, monospace, truncated, with the full path on hover. */
+.cardPath {
+	font-size: var(--text-xs);
+	color: var(--text-subtle);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* --- "All workflows" page --- */
+
+.page {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-md);
+	box-shadow: var(--shadow-xs);
+	overflow: hidden;
+}
+
+/* The page frames its grid with the same generous horizontal inset the rail
+   gives its first card (`--space-8`), so the two surfaces sit their cards the
+   same distance from the panel border instead of one looking tighter. */
+.pageHeader {
+	display: flex;
+	align-items: center;
+	gap: var(--space-3);
+	padding: var(--space-4) var(--space-8);
+	border-bottom: 1px solid var(--border);
+}
+
+.pageTitle {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	margin: 0;
+	font-size: var(--text-lg);
+	color: var(--text);
+}
+
+.pageHeader .count {
+	font-size: var(--text-sm);
+}
+
+.pageSpacer {
+	flex: 1;
+}
+
+.pageToolbar {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	flex-wrap: wrap;
+	padding: var(--space-3) var(--space-8);
+	border-bottom: 1px solid var(--border);
+	row-gap: var(--space-2);
+}
+
+.pageToolbar .searchInput {
+	width: 16rem;
+}
+
+.pageBody {
+	padding: var(--space-5) var(--space-8);
+	/* Keep a short list from collapsing the pagination up against the toolbar,
+	   and a long one from growing the page unboundedly (it paginates, so ten
+	   cards is the most this ever holds). */
+	min-height: 16rem;
+}
+
+.pageGrid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+	gap: var(--space-3);
+}
+
+.pageEmpty {
+	width: 100%;
+	padding: var(--space-8) 0;
+}
+
+.pagination {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-3);
+	flex-wrap: wrap;
+	padding: var(--space-3) var(--space-8);
+	border-top: 1px solid var(--border);
+}
+
+.pageInfo {
+	font-size: var(--text-sm);
+	color: var(--text-muted);
+	font-variant-numeric: tabular-nums;
+}
+
+.pageNav {
 	display: flex;
 	align-items: center;
 	gap: var(--space-1);
-	font-size: var(--text-xs);
-	color: var(--text-muted);
 }
 
-.dot {
+/* Numbered page buttons + Prev/Next. `min-height` reaches the touch target so
+   they're tappable on a touch laptop without each one being huge. */
+.pageBtn {
+	min-width: 2rem;
+	min-height: 2rem;
+	padding: 0 var(--space-2);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	background: var(--surface);
+	color: var(--text-muted);
+	font-family: inherit;
+	font-size: var(--text-sm);
+	font-variant-numeric: tabular-nums;
+	cursor: pointer;
+	transition: background var(--transition), border-color var(--transition), color var(--transition);
+}
+
+.pageBtn:hover:not(:disabled):not(.pageBtnActive) {
+	background: var(--surface-sunken);
+	border-color: var(--border-strong);
+	color: var(--text);
+}
+
+.pageBtn:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+.pageBtnActive,
+.pageBtnActive:hover {
+	background: var(--accent-500);
+	border-color: var(--accent-500);
+	color: #fff;
+}
+
+/* The ellipsis isn't a button — it's a gap marker. */
+.pageEllipsis {
+	min-width: 1.5rem;
+	text-align: center;
 	color: var(--text-subtle);
+	user-select: none;
 }
 
 /* --- phone ---
@@ -206,20 +471,51 @@
  * Keep in sync with MOBILE_QUERY in hooks/useIsMobile.ts.
  */
 @media (max-width: 768px) {
-	/* The panel is the page, not a sidebar: it scrolls with the document. */
-	.panel {
+	.strip {
 		overflow: visible;
 	}
 
-	.list {
-		overflow: visible;
-		padding: var(--space-3);
-		gap: var(--space-3);
+	/* The phone reads the panel as one continuous card — heading, search,
+	   filters and then the workflows themselves, on a single 8px rhythm. No
+	   rule under the toolbar: with the list stacked directly below it there is
+	   no second region for a divider to separate. */
+	.toolbar {
+		padding: var(--space-3) var(--space-4) var(--space-2);
+		border-bottom: none;
+	}
+
+	/* THE mobile list. A horizontal rail is a desktop affordance — on a phone a
+	   sideways strip of 17rem tiles hides everything past the second card
+	   behind a swipe, so here the same cards stack as a full-width vertical
+	   list you scroll with the page (the layout this view had before the rail,
+	   and what the phone screenshot asks for). No sideways scroll, so the
+	   scroll-padding/snap the desktop rail needs are switched off. */
+	.rail {
+		flex-direction: column;
+		align-items: stretch;
+		justify-content: flex-start;
+		padding: 0 var(--space-4) var(--space-4);
+		overflow-x: visible;
+		scroll-padding-inline: 0;
+		scroll-snap-type: none;
+	}
+
+	.toolbarTools {
+		width: 100%;
+		margin-left: 0;
+	}
+
+	/* The wrapper has to take the row for the input's `width: 100%` to have a
+	   definite containing block — otherwise the flex item sizes to the input's
+	   intrinsic width and the search box stops half-way across the panel. */
+	.search {
+		width: 100%;
 	}
 
 	.searchInput {
 		min-height: var(--tap-target);
 		padding-left: 2.5rem;
+		width: 100%;
 	}
 
 	.searchIcon {
@@ -227,14 +523,26 @@
 	}
 
 	/* One scrollable row rather than three wrapped ones — the filters must not
-	   push the workflows themselves below the fold. */
+	   push the workflows themselves below the fold. `flex: 1 0 100%` gives that
+	   row the whole line: when it shared the line with "New" the last chip ran
+	   under the button and read as two controls overlapping, and a chip strip
+	   that scrolls sideways can't sit beside anything without doing that. */
 	.filters {
+		flex: 1 0 100%;
+		min-width: 0;
 		flex-wrap: nowrap;
 		overflow-x: auto;
 		gap: var(--space-2);
 		padding-bottom: var(--space-1);
 		scrollbar-width: none;
 		-webkit-overflow-scrolling: touch;
+	}
+
+	/* Its own full-width row under the chips: it's the primary action on this
+	   screen, nothing can slide beneath it there, and the full width is the
+	   easiest possible thumb target. */
+	.newBtn {
+		width: 100%;
 	}
 
 	.filters::-webkit-scrollbar {
@@ -249,10 +557,24 @@
 	}
 
 	/* The card is the primary target on this screen and it's what a thumb aims
-	   at, so it gets room and a visible press state (there is no hover). */
-	.card {
+	   at, so it takes the full width of the stack, with room and a visible
+	   press state (there is no hover). */
+	.rail > .card {
+		flex: 0 0 auto;
+		width: 100%;
 		gap: var(--space-3);
 		padding: var(--space-4);
+	}
+
+	/* Nothing to reach for: the stack below already lists every workflow, so
+	   "All workflows" would only lead to the same set behind an extra tap. It
+	   stays a desktop control, where the rail shows a handful at a time.
+	   Qualified by `.toolbarTools` purely for weight: the button also carries
+	   the global `.btn`, whose `display: inline-flex` is a single class in a
+	   stylesheet that lands after this module, so a bare `.allBtn` here ties on
+	   specificity and loses on order — the button stayed visible on the phone. */
+	.toolbarTools .allBtn {
+		display: none;
 	}
 
 	.card:active {
@@ -264,6 +586,7 @@
 	.card:hover {
 		border-color: var(--border);
 		box-shadow: none;
+		transform: none;
 	}
 
 	.filter:hover {
@@ -277,5 +600,41 @@
 
 	.cardMeta {
 		font-size: var(--text-sm);
+	}
+
+	/* The "All workflows" page is the picker on every screen now (no separate
+	   mobile dialog), so it has to read at 390px: the search fills the toolbar,
+	   the grid is one full-width card per row, and the pagination stacks its
+	   count above the nav so neither wraps awkwardly. The horizontal insets
+	   tighten to the phone's `--space-4` to match the rail. */
+	.pageHeader,
+	.pageToolbar,
+	.pageBody,
+	.pagination {
+		padding-left: var(--space-4);
+		padding-right: var(--space-4);
+	}
+
+	/* The wrapper takes the full row so the input's `width: 100%` has a definite
+	   containing block to fill — otherwise the flex item sizes to the input's
+	   intrinsic width and leaves the row half-empty (the rail avoids this by
+	   sharing the row with the New/All-workflows buttons; the page toolbar has
+	   only search + filters). */
+	.pageToolbar .search {
+		width: 100%;
+	}
+
+	.pageToolbar .searchInput {
+		width: 100%;
+	}
+
+	.pageGrid {
+		grid-template-columns: 1fr;
+	}
+
+	.pagination {
+		flex-direction: column;
+		align-items: center;
+		gap: var(--space-2);
 	}
 }

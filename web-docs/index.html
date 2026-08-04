@@ -342,14 +342,23 @@
           it starts; the UI remembers it for next time).
         </p>
         <figure class="screenshot">
-          <img src="ui-workflows.png" alt="The Workflows tab: a searchable, filterable list of workflows on the left, and the selected workflow's detail on the right with its status, progress bar, conversation context, and steps." />
-          <figcaption><b>The Workflows tab.</b> Left: the list, with search and status filters. Right: the selected workflow &mdash; its badge, progress bar, the conversation context block, and its steps. The brand reads &ldquo;The Target Project&rdquo;.</figcaption>
+          <img src="ui-workflows.png" alt="The Workflows tab: a horizontal rail of workflow cards across the top — each with its status badge, a rounded progress bar, the step count and percentage — and the selected workflow's detail underneath. A toolbar above the rail offers search, status filters, a New button, and an All workflows button." />
+          <figcaption><b>The Workflows tab.</b> Top: a rail of cards &mdash; search and status filters narrow it, <em>All workflows</em> opens every workflow as a paginated grid. Below: the selected workflow &mdash; its badge, progress bar, the conversation context block, and its steps. The brand reads &ldquo;The Target Project&rdquo;.</figcaption>
         </figure>
         <p>
-          The list is sorted to put the work that needs you first: a workflow
-          <strong>waiting</strong> on a human sits above even a <strong>running</strong> one,
-          so the thing you most need to act on is at the top. Search filters by name or agent,
-          and the status chips let you narrow to just <em>running</em>, <em>failed</em>, and so on.
+          The workflows sit as a row of cards across the top &mdash; richer than the old
+          left-hand list, because at sixty-odd workflows the name alone is rarely enough to
+          tell them apart, so each card carries the agent, the working directory and a
+          rounded progress bar with its step count and percentage. The row is sorted to put the
+          work that needs you first: a workflow <strong>waiting</strong> on a human sits before
+          even a <strong>running</strong> one. Search filters by name or agent, the status chips
+          narrow to just <em>running</em>, <em>failed</em>, and so on, and a lone filtered card
+          centres rather than hugging the left edge. <strong>All workflows</strong> opens the
+          full set as a paginated page &mdash; ten cards at a time &mdash; so finding one among
+          dozens is a scan, not screen-widths of sideways scrolling. On a phone there is no
+          sideways rail and no pop-up picker at all: the same cards stack as one full-width
+          list you scroll with the page, so every workflow is already there and
+          <em>All workflows</em> is a desktop control.
         </p>
         <p>
           Pick a workflow and the detail pane opens with everything in the order the work

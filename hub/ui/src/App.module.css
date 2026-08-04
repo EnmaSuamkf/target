@@ -34,22 +34,28 @@
 	background: rgba(180, 83, 9, 0.1);
 }
 
+/* The workflows view is a vertical stack: the workflow rail across the top
+   (a horizontal strip of cards — see WorkflowList) and the selected
+   workflow's detail underneath it at the full content width. It used to be a
+   two-column master/detail with the list as a left sidebar, which stopped
+   being navigable past a dozen or so workflows; the list moved to the top so
+   it reads left-to-right and the detail gets the whole width. */
 .workflowLayout {
 	display: grid;
-	grid-template-columns: var(--sidebar-width) 1fr;
-	gap: var(--space-5);
+	grid-template-columns: minmax(0, 1fr);
+	gap: var(--space-4);
 	align-items: start;
 	min-height: 0;
+	/* `minmax(0, 1fr)` above + this `min-width: 0` let the rail shrink inside
+	   this track and scroll horizontally on its own, instead of the cards'
+	   non-wrapping width overflowing the page. */
+	min-width: 0;
 }
 
-/* The list pane is capped to the viewport and scrolls internally, so it stays
-   put while the detail grows. The detail pane is left uncapped on purpose: its
-   context/steps/session section grows with its content and the page scrolls
-   instead of an inner region (see WorkflowDetail.module.css `.body`). */
-.workflowLayout > * {
-	max-height: calc(100vh - var(--header-height) - var(--space-12));
-}
-
+/* The detail grows with its content and the page scrolls, rather than an
+   inner capped region (see WorkflowDetail.module.css `.body`). The rail is a
+   short horizontal band that scrolls inside itself, so it is never capped to
+   the viewport either. */
 .workflowLayout > :global([data-workflow-detail]) {
 	max-height: none;
 }
@@ -64,14 +70,8 @@
 	min-height: 24rem;
 }
 
-@media (max-width: 1000px) {
-	.workflowLayout {
-		grid-template-columns: 1fr;
-	}
-	.workflowLayout > * {
-		max-height: none;
-	}
-}
+/* The stack is already a single column at every width; this breakpoint only
+   existed to collapse the old two-column sidebar layout. */
 
 /* --- phone ---
  *
@@ -88,7 +88,7 @@
 	}
 
 	/* Only one of the two panes is mounted at a time here (see App.tsx), so the
-	   grid is a single column carrying whichever it is. */
+	   stack is a single column carrying whichever it is. */
 	.workflowLayout {
 		gap: var(--space-4);
 	}

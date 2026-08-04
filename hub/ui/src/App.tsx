@@ -35,7 +35,7 @@ import { CreateWorkflowModal } from "./views/CreateWorkflowModal.tsx";
 import { SettingsView } from "./views/SettingsView.tsx";
 import { TemplatesView } from "./views/TemplatesView.tsx";
 import { WorkflowDetail } from "./views/WorkflowDetail.tsx";
-import { WorkflowList } from "./views/WorkflowList.tsx";
+import { AllWorkflowsPage, WorkflowList } from "./views/WorkflowList.tsx";
 import styles from "./App.module.css";
 
 /**
@@ -76,6 +76,13 @@ export function App(): React.JSX.Element {
 	const [steps, setSteps] = useState<Step[]>([]);
 	const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
 	const [createOpen, setCreateOpen] = useState(false);
+	// The "All workflows" page. It replaces the workflows view while open, so
+	// it's a page-level state rather than a dialog flag. Reset whenever the
+	// operator leaves the workflows view, so coming back to Workflows lands on
+	// the rail rather than stranded on the page. The page is used on every
+	// screen — on a phone it adapts to the narrow width, so there's no separate
+	// mobile picker.
+	const [allWorkflowsOpen, setAllWorkflowsOpen] = useState(false);
 	// Which workflow the create dialog is CLONING, if any — it doubles as the
 	// clone dialog, seeded from this one (see CreateWorkflowModal). Held by id
 	// rather than by object so the note in that dialog keeps up with the poll.
@@ -151,6 +158,12 @@ export function App(): React.JSX.Element {
 	const refreshShortcutSettings = useCallback(async (): Promise<void> => {
 		setShortcutSettings(await api.getShortcutSettings());
 	}, []);
+
+	// Leaving the workflows view closes the "All workflows" page so a return to
+	// the Workflows tab starts on the rail, not stranded on the page.
+	useEffect(() => {
+		if (view !== "workflows") setAllWorkflowsOpen(false);
+	}, [view]);
 
 	const refreshDetail = useCallback(async (id: string): Promise<void> => {
 		const [detail, session] = await Promise.all([
@@ -682,7 +695,17 @@ export function App(): React.JSX.Element {
 					</div>
 				)}
 
-				{view === "workflows" ? (
+				{view === "workflows" && allWorkflowsOpen ? (
+					<AllWorkflowsPage
+						workflows={workflows}
+						selectedId={selectedId}
+						onSelect={(id) => {
+							setSelectedId(id);
+							setAllWorkflowsOpen(false);
+						}}
+						onBack={() => setAllWorkflowsOpen(false)}
+					/>
+				) : view === "workflows" ? (
 					<div className={styles.workflowLayout}>
 						{/* On a phone the list steps aside while a workflow is open — two
 						    stacked panes would mean scrolling past the whole list to reach
@@ -693,6 +716,7 @@ export function App(): React.JSX.Element {
 								selectedId={selectedId}
 								onSelect={setSelectedId}
 								onCreate={openCreate}
+								onShowAll={() => setAllWorkflowsOpen(true)}
 							/>
 						)}
 
