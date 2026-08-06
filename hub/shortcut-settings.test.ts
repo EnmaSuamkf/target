@@ -112,7 +112,7 @@ test("GET /api/settings/shortcuts needs no admin token and returns the stored bi
 		bindings: { focusWorkflow: { key: "f" }, toggleDictation: { key: "t" }, createWorkflow: { key: "o" }, continueStep: { key: "c" }, startWorkflow: { key: "s" } },
 	});
 
-	const res = await fetch(`${baseUrl}/api/settings/shortcuts`);
+	const res = await fetch(`${baseUrl}/api/settings/shortcuts`, { headers: adminHeaders() });
 	assert.equal(res.status, 200);
 	const body = (await res.json()) as ShortcutSettingsBody;
 	assert.equal(body.settings.bindings.focusWorkflow.key, "f");
@@ -132,7 +132,8 @@ test("PUT /api/settings/shortcuts requires an admin token", async () => {
 	});
 	assert.equal(res.status, 401);
 	const body = (await res.json()) as { error: string };
-	assert.equal(body.error, "unauthorized");
+	// No session and no token → the access gate answers before the route does.
+	assert.equal(body.error, "login_required");
 });
 
 test("PUT /api/settings/shortcuts saves the bindings and a later GET reads them back", async () => {
@@ -150,7 +151,7 @@ test("PUT /api/settings/shortcuts saves the bindings and a later GET reads them 
 	assert.equal(put.settings.bindings.continueStep.key, "i");
 	assert.equal(put.settings.bindings.startWorkflow.key, "k");
 
-	const getRes = await fetch(`${baseUrl}/api/settings/shortcuts`);
+	const getRes = await fetch(`${baseUrl}/api/settings/shortcuts`, { headers: adminHeaders() });
 	const got = (await getRes.json()) as ShortcutSettingsBody;
 	assert.deepEqual(got.settings, put.settings);
 });
@@ -176,7 +177,7 @@ test("PUT /api/settings/shortcuts rejects two actions sharing the same key", asy
 	assert.match(body.error, /share the key/);
 
 	// Nothing was stored: the previous state is intact.
-	const got = (await (await fetch(`${baseUrl}/api/settings/shortcuts`)).json()) as ShortcutSettingsBody;
+	const got = (await (await fetch(`${baseUrl}/api/settings/shortcuts`, { headers: adminHeaders() })).json()) as ShortcutSettingsBody;
 	assert.notEqual(got.settings.bindings.focusWorkflow.key, "p");
 });
 
@@ -285,7 +286,7 @@ test("PUT /api/settings/shortcuts round-trips a rebound startWorkflow key", asyn
 	const put = (await putRes.json()) as ShortcutSettingsBody;
 	assert.equal(put.settings.bindings.startWorkflow.key, "b");
 
-	const got = (await (await fetch(`${baseUrl}/api/settings/shortcuts`)).json()) as ShortcutSettingsBody;
+	const got = (await (await fetch(`${baseUrl}/api/settings/shortcuts`, { headers: adminHeaders() })).json()) as ShortcutSettingsBody;
 	assert.equal(got.settings.bindings.startWorkflow.key, "b", "a later GET reads the rebound key back");
 });
 
@@ -308,7 +309,7 @@ test("PUT /api/settings/shortcuts rejects startWorkflow sharing a key with anoth
 	assert.match(body.error, /share the key "c"/);
 
 	// Nothing was stored: the previous binding is intact.
-	const got = (await (await fetch(`${baseUrl}/api/settings/shortcuts`)).json()) as ShortcutSettingsBody;
+	const got = (await (await fetch(`${baseUrl}/api/settings/shortcuts`, { headers: adminHeaders() })).json()) as ShortcutSettingsBody;
 	assert.equal(got.settings.bindings.startWorkflow.key, "b");
 });
 

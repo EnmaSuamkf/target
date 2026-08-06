@@ -158,7 +158,7 @@ test("availableSandboxes always offers the host, and gates only docker", (t) => 
 
 test("GET /api/runners reports sandboxes alongside runners — one round trip for the whole create form", async (t) => {
 	forceDocker(t, true);
-	const res = await fetch(`${baseUrl}/api/runners`);
+	const res = await fetch(`${baseUrl}/api/runners`, { headers: adminHeaders() });
 	assert.equal(res.status, 200);
 	const body = (await res.json()) as {
 		runners: { id: string; installed: boolean }[];
@@ -171,7 +171,7 @@ test("GET /api/runners reports sandboxes alongside runners — one round trip fo
 
 test("GET /api/runners reports docker as unavailable when it is — this is what stops the UI offering it", async (t) => {
 	forceDocker(t, false);
-	const res = await fetch(`${baseUrl}/api/runners`);
+	const res = await fetch(`${baseUrl}/api/runners`, { headers: adminHeaders() });
 	const body = (await res.json()) as { sandboxes: { id: string; available: boolean }[] };
 	assert.equal(body.sandboxes.find((s) => s.id === "docker")?.available, false);
 	assert.equal(body.sandboxes.find((s) => s.id === "host")?.available, true, "the host option never disappears");
@@ -196,7 +196,7 @@ test("POST /api/workflows with sandbox docker is refused with a clear 400 when d
 
 	// And it created nothing: the UI is not the only gate, but it must not be
 	// half a gate either.
-	const listRes = await fetch(`${baseUrl}/api/workflows`);
+	const listRes = await fetch(`${baseUrl}/api/workflows`, { headers: adminHeaders() });
 	const list = (await listRes.json()) as { workflows: { name: string }[] };
 	assert.ok(!list.workflows.some((w) => w.name === "docker without docker"));
 });

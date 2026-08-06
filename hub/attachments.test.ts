@@ -221,7 +221,7 @@ test("GET /api/workflows/:id returns the context attachments on the workflow and
 	const acc = (await upload(workflow.id, { field: "acceptance", stepId: step.id, filename: "acc.png" })).json
 		.attachment;
 
-	const res = await fetch(`${baseUrl}/api/workflows/${workflow.id}`);
+	const res = await fetch(`${baseUrl}/api/workflows/${workflow.id}`, { headers: adminHeaders() });
 	assert.equal(res.status, 200);
 	const body = (await res.json()) as { workflow: Record<string, any>; steps: Record<string, any>[] };
 
@@ -254,7 +254,7 @@ test("GET /api/workflows/:id/attachments lists every attachment of the workflow 
 	const { workflow, step } = makeWorkflow();
 	const ctx = (await upload(workflow.id, { field: "context" })).json.attachment;
 	const desc = (await upload(workflow.id, { field: "description", stepId: step.id })).json.attachment;
-	const res = await fetch(`${baseUrl}/api/workflows/${workflow.id}/attachments`);
+	const res = await fetch(`${baseUrl}/api/workflows/${workflow.id}/attachments`, { headers: adminHeaders() });
 	assert.equal(res.status, 200);
 	const body = (await res.json()) as { attachments: { id: string }[] };
 	assert.deepEqual(body.attachments.map((a) => a.id).sort(), [ctx.id, desc.id].sort());
@@ -264,7 +264,7 @@ test("GET /api/attachments/:id/content serves the exact bytes with the right con
 	const { workflow } = makeWorkflow();
 	const a = (await upload(workflow.id, { field: "context" })).json.attachment;
 	// Ungated on purpose: an <img> tag can't send an Authorization header.
-	const res = await fetch(`${baseUrl}/api/attachments/${a.id}/content`);
+	const res = await fetch(`${baseUrl}/api/attachments/${a.id}/content`, { headers: adminHeaders() });
 	assert.equal(res.status, 200);
 	assert.equal(res.headers.get("content-type"), "image/png");
 	assert.deepEqual(Buffer.from(await res.arrayBuffer()), PNG_BYTES);
@@ -272,10 +272,10 @@ test("GET /api/attachments/:id/content serves the exact bytes with the right con
 
 test("GET /api/attachments/:id/content 404s for an unknown id and 410s when the file is gone", async () => {
 	const { workflow } = makeWorkflow();
-	assert.equal((await fetch(`${baseUrl}/api/attachments/nope/content`)).status, 404);
+	assert.equal((await fetch(`${baseUrl}/api/attachments/nope/content`, { headers: adminHeaders() })).status, 404);
 	const a = (await upload(workflow.id, { field: "context" })).json.attachment;
 	fs.rmSync(a.path);
-	const res = await fetch(`${baseUrl}/api/attachments/${a.id}/content`);
+	const res = await fetch(`${baseUrl}/api/attachments/${a.id}/content`, { headers: adminHeaders() });
 	assert.equal(res.status, 410);
 });
 
@@ -291,9 +291,9 @@ test("DELETE /api/attachments/:id removes the row and the file, and is admin-gat
 	const res = await fetch(`${baseUrl}/api/attachments/${a.id}`, { method: "DELETE", headers: adminHeaders() });
 	assert.equal(res.status, 200);
 	assert.equal(fs.existsSync(a.path), false, "the file is gone from disk");
-	assert.equal((await fetch(`${baseUrl}/api/attachments/${a.id}/content`)).status, 404);
+	assert.equal((await fetch(`${baseUrl}/api/attachments/${a.id}/content`, { headers: adminHeaders() })).status, 404);
 	// And it's no longer reported by the workflow read.
-	const detail = (await (await fetch(`${baseUrl}/api/workflows/${workflow.id}`)).json()) as {
+	const detail = (await (await fetch(`${baseUrl}/api/workflows/${workflow.id}`, { headers: adminHeaders() })).json()) as {
 		workflow: { attachments: unknown[] };
 	};
 	assert.deepEqual(detail.workflow.attachments, []);

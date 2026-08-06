@@ -13,8 +13,10 @@
  *   injected", "no_session_yet") instead of a bare status code.
  */
 import type {
+	Account,
 	Attachment,
 	AttachmentField,
+	AuthStatus,
 	CloneWorkflowInput,
 	Conversation,
 	ConversationDigest,
@@ -40,15 +42,36 @@ const TOKEN_KEY = "targetAdminToken";
 
 export class ApiError extends Error {
 	readonly status: number;
-	constructor(status: number, message: string) {
+	/** The server's parsed body, when there was one — some errors carry more than the `error` string (e.g. `retryAfterSec` on a 429). */
+	readonly payload: unknown;
+	constructor(status: number, message: string, payload?: unknown) {
 		super(message);
 		this.name = "ApiError";
 		this.status = status;
+		this.payload = payload;
 	}
 	/** True when the call failed only because the admin token is missing/wrong. */
 	get isAuth(): boolean {
 		return this.status === 401;
 	}
+	/** Seconds the server asked us to wait before retrying (429 answers). */
+	get retryAfterSec(): number | null {
+		if (this.status !== 429 || !this.payload || typeof this.payload !== "object") return null;
+		const value = (this.payload as { retryAfterSec?: unknown }).retryAfterSec;
+		return typeof value === "number" && Number.isFinite(value) ? value : null;
+	}
+}
+
+/**
+ * Called when any request is answered `401 login_required` — the session
+ * expired (or was killed by a password reset in another browser) while the app
+ * was open. App.tsx registers its "back to the login screen" transition here;
+ * without it, an expired session would just look like every action failing.
+ */
+let authLostHandler: (() => void) | null = null;
+
+export function setAuthLostHandler(handler: () => void): void {
+	authLostHandler = handler;
 }
 
 export function getAdminToken(): string {
@@ -91,7 +114,14 @@ async function request<T>(path: string, init: RequestInit & { admin?: boolean } 
 
 	let res: Response;
 	try {
-		res = await fetch(path, { ...rest, headers: finalHeaders, ...(body !== undefined ? { body } : {}) });
+		// credentials made explicit: the login session rides a cookie, and the
+		// default (same-origin) is exactly right — stated so it survives refactors.
+		res = await fetch(path, {
+			...rest,
+			headers: finalHeaders,
+			credentials: "same-origin",
+			...(body !== undefined ? { body } : {}),
+		});
 	} catch (err) {
 		// Network-level failure (hub down, connection reset) never has a status.
 		throw new ApiError(0, err instanceof Error ? err.message : String(err));
@@ -105,7 +135,8 @@ async function request<T>(path: string, init: RequestInit & { admin?: boolean } 
 			payload && typeof payload === "object" && "error" in payload
 				? String((payload as { error: unknown }).error)
 				: `request failed (${res.status})`;
-		throw new ApiError(res.status, message);
+		if (res.status === 401 && message === "login_required" && authLostHandler) authLostHandler();
+		throw new ApiError(res.status, message, payload);
 	}
 	return payload as T;
 }
@@ -518,4 +549,60 @@ export async function saveShortcutSettings(input: ShortcutSettingsInput): Promis
 		body: json(input),
 	});
 	return data.settings;
+}
+
+// --- auth (the single-user access layer) ---
+//
+// None of these take `admin: true`: setup/login/reset are open by design (they
+// are how a session comes to exist), and me/logout authenticate with the
+// session cookie itself, which `request` already sends (same-origin default).
+
+/** Whether the one account exists yet — drives landing-vs-login on load. */
+export async function getAuthStatus(): Promise<AuthStatus> {
+	return await request<AuthStatus>("/api/auth/status");
+}
+
+/**
+ * First-run setup. The response carries the recovery token IN THE CLEAR — the
+ * only time it ever crosses the wire — so the caller must hand it to the
+ * save-your-token screen and then drop it. Answers 409 once the account exists.
+ */
+export async function setupAccount(input: {
+	password: string;
+	displayName?: string;
+}): Promise<{ account: Account; recoveryToken: string }> {
+	return await request<{ account: Account; recoveryToken: string }>("/api/auth/setup", {
+		method: "POST",
+		body: json(input),
+	});
+}
+
+/** Password-only login (single-user: there is nothing a username could select). */
+export async function login(password: string): Promise<{ account: Account }> {
+	return await request<{ account: Account }>("/api/auth/login", { method: "POST", body: json({ password }) });
+}
+
+export async function logout(): Promise<{ ok: true }> {
+	return await request<{ ok: true }>("/api/auth/logout", { method: "POST" });
+}
+
+/** The account behind the current session cookie; 401 login_required when there isn't one. */
+export async function getAccount(): Promise<{ account: Account }> {
+	return await request<{ account: Account }>("/api/auth/me");
+}
+
+/**
+ * The forgot-password path: the saved recovery token stands in for an e-mail
+ * channel. On success the response carries the ROTATED token in the clear (the
+ * old one is dead) and the user is already signed in (every other session was
+ * killed by the reset).
+ */
+export async function resetPassword(input: {
+	recoveryToken: string;
+	newPassword: string;
+}): Promise<{ account: Account; recoveryToken: string }> {
+	return await request<{ account: Account; recoveryToken: string }>("/api/auth/password/reset", {
+		method: "POST",
+		body: json(input),
+	});
 }

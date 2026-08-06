@@ -484,7 +484,7 @@ test("POST /api/workflows/:id/status sets the status, and the detail route keeps
 
 	// The GET runs the read-path heal, which is exactly where an unpinned
 	// override would be undone — the UI polls this route every 2 seconds.
-	const detail = await fetch(`${baseUrl}/api/workflows/${workflow.id}`);
+	const detail = await fetch(`${baseUrl}/api/workflows/${workflow.id}`, { headers: adminHeaders() });
 	const detailBody = (await detail.json()) as { workflow: { status: string; statusManual: boolean } };
 	assert.equal(detailBody.workflow.status, "completed");
 	assert.equal(detailBody.workflow.statusManual, true);

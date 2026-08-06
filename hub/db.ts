@@ -274,7 +274,11 @@ export interface Template {
 
 let db: DatabaseSync | null = null;
 
-function open(): DatabaseSync {
+/**
+ * Exported for `account.ts`, which owns the auth/sessions tables the same way
+ * this module owns workflows/steps/templates. Nothing else should reach for it.
+ */
+export function open(): DatabaseSync {
 	if (db) return db;
 	const file = dbFile();
 	fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -356,6 +360,30 @@ function open(): DatabaseSync {
 			created_at TEXT NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS idx_attachments_owner ON attachments(workflow_id, step_id, field);
+		-- The single-user access layer (see account.ts / plan in usershandler.html).
+		-- auth is a SINGLETON: the CHECK (id = 1) constraint makes a second row
+		-- impossible, so the row's existence doubles as the "setup completed" flag
+		-- and a raced double-setup loses to a constraint violation (mapped to 409).
+		-- sessions stores only SHA-256 hashes of the opaque cookie tokens — a DB
+		-- read cannot mint a session.
+		CREATE TABLE IF NOT EXISTS auth (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			display_name TEXT,
+			password_hash TEXT NOT NULL,
+			password_salt TEXT NOT NULL,
+			recovery_token_hash TEXT NOT NULL,
+			recovery_token_set_at TEXT NOT NULL,
+			failed_logins INTEGER NOT NULL DEFAULT 0,
+			locked_until TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS sessions (
+			token_hash TEXT PRIMARY KEY,
+			created_at TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			last_seen_at TEXT NOT NULL
+		);
 	`);
 	// `CREATE TABLE IF NOT EXISTS` above is a no-op on a `steps` table that
 	// already existed before these columns were added — add any that are missing

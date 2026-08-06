@@ -15,6 +15,20 @@
 export type WorkflowStatus = "draft" | "running" | "paused" | "waiting" | "completed" | "failed";
 export type StepStatus = "pending" | "queued" | "running" | "waiting" | "done" | "failed";
 
+// --- single-user access layer (mirrors hub/account.ts's PublicAccount) ---
+
+/** What GET /api/auth/status returns — open, and the only thing the landing page needs to choose its call to action. */
+export interface AuthStatus {
+	setupCompleted: boolean;
+}
+
+/** The one account on this machine, as the API returns it. No hashes ever cross the wire. */
+export interface Account {
+	displayName: string | null;
+	recoveryTokenSetAt: string;
+	createdAt: string;
+}
+
 /**
  * The statuses a human may force by hand, mirroring the server's
  * `OVERRIDABLE_*_STATUSES` (hub/db.ts). Only the settled ones: `running` and

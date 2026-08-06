@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { Account } from "../api/types.ts";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { Field } from "./Field.tsx";
 import { Modal } from "./Modal.tsx";
@@ -68,11 +69,16 @@ export function Header({
 	onViewChange,
 	hasToken,
 	onSaveToken,
+	account,
+	onLogout,
 }: {
 	view: View;
 	onViewChange: (view: View) => void;
 	hasToken: boolean;
 	onSaveToken: (token: string) => void;
+	/** The signed-in account (single-user model: one per machine). */
+	account: Account;
+	onLogout: () => void;
 }): React.JSX.Element {
 	const [dialogOpen, setDialogOpen] = useState(false);
 	const [draft, setDraft] = useState("");
@@ -122,19 +128,29 @@ export function Header({
 						</nav>
 					)}
 
-					<button
-						type="button"
-						className={`${styles.token} ${hasToken ? styles.tokenSet : styles.tokenMissing}`}
-						onClick={() => setDialogOpen(true)}
-						title={
-							hasToken
-								? "An admin token is saved in this browser. Click to replace it."
-								: "No admin token saved — mutating actions will fail. Click to add it."
-						}
-					>
-						<span className={styles.tokenDot} aria-hidden="true" />
-						{hasToken ? "Token set" : "Set token"}
-					</button>
+					<div className={styles.accountArea}>
+						<button
+							type="button"
+							className={`${styles.token} ${hasToken ? styles.tokenSet : styles.tokenMissing}`}
+							onClick={() => setDialogOpen(true)}
+							title={
+								hasToken
+									? "An admin token is saved in this browser. Click to replace it."
+									: "Optional: the legacy admin token, for scripts and automation. You don't need it while signed in."
+							}
+						>
+							<span className={styles.tokenDot} aria-hidden="true" />
+							{hasToken ? "Token set" : "Set token"}
+						</button>
+						{account.displayName && (
+							<span className={styles.accountName} title="The account signed in on this machine">
+								{account.displayName}
+							</span>
+						)}
+						<button type="button" className={`btn btn--sm ${styles.logout}`} onClick={onLogout} title="Sign out of this browser">
+							Sign out
+						</button>
+					</div>
 				</div>
 
 				<Modal

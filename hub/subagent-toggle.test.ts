@@ -332,7 +332,7 @@ test("POST /api/workflows/:id/steps round-trips the toggle, defaulting to on", a
 	assert.equal(inline.useSubagent, false);
 
 	// And it's in the detail read the UI polls, not just the create response.
-	const detail = await fetch(`${baseUrl}/api/workflows/${workflowId}`);
+	const detail = await fetch(`${baseUrl}/api/workflows/${workflowId}`, { headers: adminHeaders() });
 	const { steps } = (await detail.json()) as { steps: { id: string; useSubagent: boolean }[] };
 	assert.deepEqual(
 		steps.map((s) => s.useSubagent),

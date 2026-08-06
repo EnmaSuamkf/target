@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plan — Single-User Access Subsystem for The Target Project</title>
+<style>
+  :root {
+    --ink: #1e2235;
+    --ink-soft: #4a5068;
+    --muted: #6b7194;
+    --bg: #f5f6fb;
+    --card: #ffffff;
+    --line: #e3e6f0;
+    --accent: #4f46e5;
+    --accent-soft: #eef0fe;
+    --ok: #0f766e;
+    --warn: #b45309;
+    --code-bg: #f0f1f8;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.6;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 32px 24px 96px; }
+
+  header.hero {
+    background: linear-gradient(135deg, #4f46e5 0%, #6d5df0 60%, #7c74f5 100%);
+    color: #fff;
+    border-radius: 14px;
+    padding: 36px 36px 30px;
+    margin-bottom: 28px;
+    box-shadow: 0 6px 24px rgba(79, 70, 229, .18);
+  }
+  header.hero h1 { margin: 0 0 6px; font-size: 1.7rem; letter-spacing: -0.01em; }
+  header.hero p { margin: 4px 0; opacity: .92; }
+  header.hero .meta { font-size: .85rem; opacity: .8; margin-top: 12px; }
+  header.hero .meta span { display: inline-block; margin-right: 18px; }
+  header.hero code { background: rgba(255,255,255,.16); color: #fff; }
+
+  nav.toc {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 20px 26px;
+    margin-bottom: 32px;
+  }
+  nav.toc h2 { margin: 0 0 10px; font-size: 1rem; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  nav.toc ol { margin: 0; padding-left: 22px; columns: 2; column-gap: 40px; }
+  nav.toc li { margin: 3px 0; break-inside: avoid; }
+  nav.toc a { color: var(--accent); text-decoration: none; }
+  nav.toc a:hover { text-decoration: underline; }
+
+  section {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 28px 32px;
+    margin-bottom: 24px;
+  }
+  section > h2 {
+    margin: 0 0 14px;
+    font-size: 1.3rem;
+    padding-bottom: 10px;
+    border-bottom: 2px solid var(--accent-soft);
+  }
+  section > h2 .num { color: var(--accent); margin-right: 10px; }
+  h3 { margin: 22px 0 8px; font-size: 1.05rem; color: var(--ink); }
+  h4 { margin: 16px 0 6px; font-size: .95rem; color: var(--ink-soft); }
+  p { margin: 8px 0; }
+  ul, ol { margin: 8px 0; padding-left: 24px; }
+  li { margin: 4px 0; }
+
+  code {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: .86em;
+    color: #3730a3;
+  }
+  pre {
+    background: #23263b;
+    color: #e6e8f5;
+    border-radius: 10px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    font-size: .82rem;
+    line-height: 1.5;
+  }
+  pre code { background: none; border: none; color: inherit; padding: 0; font-size: inherit; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-size: .9rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  th {
+    background: var(--accent-soft);
+    color: #3730a3;
+    font-weight: 600;
+    border-bottom: 1px solid #d4d8f5;
+  }
+  tr:last-child td { border-bottom: none; }
+  td code { font-size: .82em; }
+
+  .callout {
+    border-left: 4px solid var(--accent);
+    background: var(--accent-soft);
+    border-radius: 0 8px 8px 0;
+    padding: 12px 16px;
+    margin: 14px 0;
+  }
+  .callout.warn { border-color: var(--warn); background: #fdf3e7; }
+  .callout.ok { border-color: var(--ok); background: #ecfdf5; }
+  .callout .label {
+    font-weight: 700;
+    font-size: .78rem;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    display: block;
+    margin-bottom: 4px;
+  }
+  .callout.warn .label { color: var(--warn); }
+  .callout.ok .label { color: var(--ok); }
+  .callout:not(.warn):not(.ok) .label { color: var(--accent); }
+
+  .badge {
+    display: inline-block;
+    font-size: .72rem;
+    font-weight: 600;
+    padding: 2px 9px;
+    border-radius: 999px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .badge.new { background: #ecfdf5; color: var(--ok); border: 1px solid #a7f3d0; }
+  .badge.mod { background: #fff7ed; color: var(--warn); border: 1px solid #fed7aa; }
+  .badge.get { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+  .badge.post { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
+  .badge.decision { background: var(--accent-soft); color: var(--accent); border: 1px solid #c7d2fe; }
+
+  .flow {
+    counter-reset: step;
+    margin: 14px 0;
+    padding: 0;
+    list-style: none;
+  }
+  .flow > li {
+    counter-increment: step;
+    position: relative;
+    padding: 10px 14px 10px 52px;
+    margin: 8px 0;
+    background: #fafbff;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+  .flow > li::before {
+    content: counter(step);
+    position: absolute;
+    left: 14px; top: 11px;
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: .8rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .flow .actor { font-weight: 600; color: var(--accent); }
+
+  .checklist { list-style: none; padding-left: 4px; }
+  .checklist li { padding-left: 28px; position: relative; margin: 6px 0; }
+  .checklist li::before {
+    content: "";
+    position: absolute;
+    left: 2px; top: 4px;
+    width: 14px; height: 14px;
+    border: 2px solid var(--accent);
+    border-radius: 4px;
+    background: #fff;
+  }
+
+  .phase {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    margin: 14px 0;
+    overflow: hidden;
+  }
+  .phase > header {
+    background: var(--accent-soft);
+    padding: 10px 16px;
+    font-weight: 700;
+    color: #3730a3;
+  }
+  .phase > .body { padding: 6px 18px 14px; }
+
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: .82rem;
+    margin-top: 32px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>Single-User Access Subsystem — Implementation Plan</h1>
+  <p>First-run setup, login, and token-based password recovery for The Target Project hub — exactly one user per machine, 100% local, no remote server.</p>
+  <div class="meta">
+    <span><strong>Type:</strong> Plan (no implementation in this document)</span>
+    <span><strong>Scope:</strong> <code>hub/</code> backend + <code>hub/ui/</code> React SPA</span>
+    <span><strong>Storage:</strong> local SQLite at <code>~/.target/target.db</code></span>
+    <span><strong>Model:</strong> single user per machine</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#s1">Overview &amp; Goals</a></li>
+    <li><a href="#s2">Current Architecture Snapshot</a></li>
+    <li><a href="#s3">Data Model</a></li>
+    <li><a href="#s4">First-Run Setup (Signup)</a></li>
+    <li><a href="#s5">Login Flow &amp; Session Management</a></li>
+    <li><a href="#s6">Password Reset &amp; Full Local Reset</a></li>
+    <li><a href="#s7">Data Access After Login</a></li>
+    <li><a href="#s8">Migration Plan for Existing Data</a></li>
+    <li><a href="#s9">Security Considerations</a></li>
+    <li><a href="#s10">Implementation Phases / Task Breakdown</a></li>
+    <li><a href="#s11">Open Questions &amp; Risks</a></li>
+  </ol>
+</nav>
+
+<!-- ============================ 1. OVERVIEW ============================ -->
+<section id="s1">
+  <h2><span class="num">1.</span>Overview &amp; Goals</h2>
+  <p>
+    The Target Project is a fully local web app (Node.js hub + React SPA) for defining and running agentic
+    workflows. Today it has a single implicit operator: anyone who can open <code>http://127.0.0.1:8893</code>
+    sees every workflow, and a single shared <code>adminToken</code> gates mutations. This plan adds a
+    <strong>single-user access layer</strong> — one account per machine, nothing more:
+  </p>
+  <ul>
+    <li><strong>First-run setup (signup)</strong> — on a fresh install the UI offers a one-time setup screen: the user
+      picks a password and receives a one-time <strong>recovery token</strong>, displayed exactly once with explicit
+      "you must save this" instructions. Once the account exists, signup is <strong>disabled server-side and hidden
+      in the UI</strong>; only the login screen is ever offered again.</li>
+    <li><strong>Login</strong> — after authenticating, the user lands on the workflows screen and sees
+      <strong>all local workflows</strong>. There is no per-user scoping: the login gate <em>is</em> the boundary.</li>
+    <li><strong>Forgot password</strong> — the user enters their saved recovery token; if it matches, they set a new
+      password and the token rotates (old token dies).</li>
+    <li><strong>Lost password <em>and</em> lost token</strong> — there is deliberately <strong>no recovery path</strong>.
+      The documented answer is a full local reset: stop the hub, wipe <code>~/.target/</code>, restart, re-run
+      first-run setup (§6.3). All workflow data is lost unless backed up first. Accepted risk (§11, R1).</li>
+  </ul>
+  <h3>Non-goals / constraints</h3>
+  <ul>
+    <li>Everything stays <strong>local</strong>: no remote server, no email, no external identity provider. Password recovery therefore cannot rely on e-mail — the saved token is the only recovery channel.</li>
+    <li><strong>No multi-user anything</strong>: one account per machine; no owner columns, no per-user query filtering, no username registry, no per-user settings, no claim/assignment flows.</li>
+    <li>No new runtime dependencies (the hub deliberately uses zero native deps, SQLite via <code>node:sqlite</code>). All crypto uses Node's built-in <code>node:crypto</code>.</li>
+    <li>The existing agent/dispatch engine (<code>hub/workflow.ts</code>), awb callbacks and the CLI's direct-DB behaviour keep working during and after the change.</li>
+  </ul>
+  <div class="callout ok">
+    <span class="label">What got simpler vs. the previous multi-user draft</span>
+    Compared to the earlier multi-user version of this plan, the following was <strong>removed entirely</strong>:
+    <code>owner_id</code> columns on <code>workflows</code>/<code>templates</code> and the index; all per-user
+    <code>WHERE owner_id = ?</code> query scoping and 404-on-foreign-id checks; the username registry with
+    case-insensitive uniqueness; the "claim legacy (un-owned) workflows" flow and its endpoint; per-user template
+    visibility rules; and the out-of-band admin reset command. What remains is one singleton auth row, a small
+    sessions table, a one-time setup screen, a password-only login, and the recovery-token mechanism — the
+    user-facing behaviour (token shown once, rotation on reset) is unchanged.
+  </div>
+  <div class="callout">
+    <span class="label">Design principles</span>
+    Reuse the project's own patterns: additive SQLite migrations in <code>hub/db.ts</code>'s <code>open()</code>,
+    timing-safe comparisons as in <code>hub/server.ts</code>'s <code>isAdmin()</code>, a thin typed API client in
+    <code>hub/ui/src/api/client.ts</code>, and React views with CSS modules under <code>hub/ui/src/views/</code>.
+  </div>
+</section>
+
+<!-- ==================== 2. CURRENT ARCHITECTURE ==================== -->
+<section id="s2">
+  <h2><span class="num">2.</span>Current Architecture Snapshot</h2>
+  <p>Findings from a focused inspection of the repository — these are the facts the plan is built on.</p>
+
+  <h3>2.1 Runtime &amp; serving</h3>
+  <table>
+    <tr><th>Fact</th><th>Where</th></tr>
+    <tr><td>Node &ge; 24, ESM, TypeScript run directly by Node (no build step for the hub)</td><td>root <code>package.json</code>, <code>hub/package.json</code></td></tr>
+    <tr><td>Entry point <code>node daemon.ts</code> (root <code>npm start</code> → <code>node scripts/start.ts</code>)</td><td><code>hub/daemon.ts</code>, <code>scripts/start.ts</code></td></tr>
+    <tr><td>HTTP server on <code>127.0.0.1:8893</code>, plain <code>node:http</code>, hand-routed <code>/api/*</code> endpoints (route catalogue in the header comment, ~40 routes)</td><td><code>hub/server.ts</code></td></tr>
+    <tr><td>React 19 + Vite 7 SPA built to <code>hub/ui/dist</code> and served as static files by the hub itself (<code>serveStatic</code>, path-traversal guarded, immutable <code>/assets/</code> caching)</td><td><code>hub/server.ts</code> (UI_DIR), <code>hub/ui/</code></td></tr>
+    <tr><td>A legacy static page is kept alongside the SPA</td><td><code>hub/ui/legacy-index.html</code></td></tr>
+  </table>
+
+  <h3>2.2 Authentication today</h3>
+  <ul>
+    <li>A single <strong>admin bearer token</strong> is generated on first run and persisted in <code>~/.target/config.json</code>
+      (<code>adminToken</code>). Every <em>mutating</em> <code>/api</code> route checks it via <code>isAdmin()</code>
+      using <code>crypto.timingSafeEqual</code> (<code>hub/server.ts</code>).</li>
+    <li>Most <strong>GET routes are unauthenticated</strong> (localhost-trust model): <code>GET /api/workflows</code>,
+      workflow detail, attachments content, etc.</li>
+    <li>awb (agent-webhook-bridge) callbacks authenticate with a <strong>per-step token</strong>
+      (<code>?token=</code> on <code>/api/steps/:id/started|result</code>) — independent of the admin token.</li>
+    <li>The UI stores the admin token in <code>localStorage["targetAdminToken"]</code> and sends
+      <code>Authorization: Bearer &lt;token&gt;</code> from <code>hub/ui/src/api/client.ts</code> (hook <code>useAdminToken</code>).</li>
+    <li>The <code>target</code> CLI (<code>hub/cli.ts</code>) talks to the SQLite DB <em>directly</em>, no HTTP auth at all.</li>
+  </ul>
+
+  <h3>2.3 Local persistence layout</h3>
+  <table>
+    <tr><th>Path</th><th>Content</th><th>Managed by</th></tr>
+    <tr><td><code>~/.target/</code> (override: <code>TARGET_HOME</code>)</td><td>Hub state root</td><td><code>hub/config.ts</code> → <code>targetDir()</code></td></tr>
+    <tr><td><code>~/.target/config.json</code></td><td>host/port, timeouts, <code>adminToken</code></td><td><code>hub/config.ts</code></td></tr>
+    <tr><td><code>~/.target/target.db</code></td><td>SQLite (WAL), <code>node:sqlite</code> <code>DatabaseSync</code>, zero native deps</td><td><code>hub/db.ts</code></td></tr>
+    <tr><td><code>~/.target/&lt;workflow-slug&gt;-&lt;id&gt;.md</code></td><td>Per-workflow operator progress file (<code>md_path</code> column)</td><td><code>hub/step-results.ts</code>, <code>hub/workflow.ts</code></td></tr>
+    <tr><td><code>~/.target/attachments/&lt;workflowId&gt;/…</code></td><td>Uploaded attachment binaries</td><td><code>hub/attachments.ts</code></td></tr>
+    <tr><td><code>&lt;workdir&gt;/.target/steps/&lt;NN&gt;-&lt;slug&gt;.md</code></td><td>Per-step result markdown inside each workflow agent's workdir (the repo's own <code>.target/steps/</code> is one such directory)</td><td><code>hub/step-results.ts</code> (<code>STEP_RESULTS_SUBDIR</code>)</td></tr>
+  </table>
+
+  <h3>2.4 Database schema today (<code>hub/db.ts</code>)</h3>
+  <ul>
+    <li>Tables: <code>workflows</code>, <code>steps</code> (FK by <code>workflow_id</code>, ordered by <code>order_index</code>),
+      <code>templates</code>, <code>settings</code> (key/value), <code>attachments</code>.</li>
+    <li>No user concept anywhere: rows have no owner column — and under this plan they never will.</li>
+    <li><strong>Migration pattern (important):</strong> <code>open()</code> runs <code>CREATE TABLE IF NOT EXISTS …</code> plus
+      <code>PRAGMA table_info(&lt;table&gt;)</code>-guarded additive <code>ALTER TABLE … ADD COLUMN</code> statements, each with a
+      default chosen so pre-existing rows keep their meaning (e.g. <code>kind TEXT NOT NULL DEFAULT 'task'</code>).
+      This work only needs the <code>CREATE TABLE IF NOT EXISTS</code> half of that pattern — no existing table is altered.</li>
+  </ul>
+
+  <h3>2.5 UI structure (<code>hub/ui/src/</code>)</h3>
+  <ul>
+    <li><code>App.tsx</code> — top-level view switching (list / detail / templates / settings).</li>
+    <li><code>api/client.ts</code> + <code>api/types.ts</code> — typed fetch wrapper, <code>ApiError</code>, admin-token helpers.</li>
+    <li>Views: <code>WorkflowList.tsx</code>, <code>WorkflowDetail.tsx</code>, <code>TemplatesView.tsx</code>, <code>SettingsView.tsx</code>,
+      modals (<code>CreateWorkflowModal</code>, <code>AddStepModal</code>, <code>RenameWorkflowModal</code>) — one <code>.module.css</code> per view.</li>
+    <li>Shared components: <code>Modal</code>, <code>ConfirmDialog</code>, <code>Toast</code>, <code>Field</code>, <code>Header</code>, <code>EmptyState</code>…</li>
+  </ul>
+
+  <h3>2.6 Tests</h3>
+  <ul>
+    <li>Node's built-in runner: <code>node --test --import ./test-setup.ts</code> with colocated <code>*.test.ts</code> files in <code>hub/</code> (e.g. <code>server.test.ts</code>, <code>workflow.test.ts</code>, <code>config.test.ts</code>).</li>
+    <li><code>TARGET_HOME</code> is already the isolation lever tests use for a throwaway state dir.</li>
+  </ul>
+</section>
+
+<!-- ============================ 3. DATA MODEL ============================ -->
+<section id="s3">
+  <h2><span class="num">3.</span>Data Model</h2>
+  <p>
+    Exactly two new tables — a singleton <code>auth</code> row and a small <code>sessions</code> table — and
+    <strong>zero changes to existing tables</strong>. Everything lands in <code>hub/db.ts</code>'s
+    <code>open()</code> as plain <code>CREATE TABLE IF NOT EXISTS</code> statements. No query that lists or fetches
+    workflows/templates changes at all.
+  </p>
+
+  <h3>3.1 New table: <code>auth</code> (singleton)</h3>
+  <p>
+    A single-row table guarded by a <code>CHECK</code> constraint instead of a full <code>users</code> table with a
+    uniqueness machinery: there is exactly one account, so the row <em>is</em> the account, and the row's existence
+    doubles as the <strong>"setup completed" flag</strong> (<code>SELECT 1 FROM auth</code> — no separate flag to
+    keep in sync). <span class="badge decision">Decision D4</span>
+  </p>
+  <table>
+    <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+    <tr><td><code>id</code></td><td>INTEGER PRIMARY KEY CHECK (id = 1)</td><td><strong>Singleton guard</strong>: any attempt to insert a second row violates the constraint. Setup inserts <code>id = 1</code> and treats the constraint error as "setup already completed" (409).</td></tr>
+    <tr><td><code>display_name</code></td><td>TEXT</td><td>Optional friendly name shown in the header; <strong>not a credential</strong> — login is password-only (§5, D6).</td></tr>
+    <tr><td><code>password_hash</code></td><td>TEXT NOT NULL</td><td><code>scrypt</code> output, hex</td></tr>
+    <tr><td><code>password_salt</code></td><td>TEXT NOT NULL</td><td>16 random bytes, hex</td></tr>
+    <tr><td><code>recovery_token_hash</code></td><td>TEXT NOT NULL</td><td>SHA-256 of the recovery token (see §4.2); the plaintext token is <em>never</em> stored</td></tr>
+    <tr><td><code>recovery_token_set_at</code></td><td>TEXT NOT NULL</td><td>ISO timestamp; rotation bookkeeping</td></tr>
+    <tr><td><code>failed_logins</code></td><td>INTEGER NOT NULL DEFAULT 0</td><td>Rate-limit / lockout counter (single counter for the whole machine — there is only one account)</td></tr>
+    <tr><td><code>locked_until</code></td><td>TEXT</td><td>Temporary lockout after repeated failures</td></tr>
+    <tr><td><code>created_at</code> / <code>updated_at</code></td><td>TEXT NOT NULL</td><td>ISO timestamps, same convention as other tables</td></tr>
+  </table>
+
+  <h3>3.2 New table: <code>sessions</code></h3>
+  <p>
+    A small sessions table (not a single active session) so the user can be logged in from two browsers or a
+    browser plus a restored tab without kicking themselves out. No <code>user_id</code> column — every row belongs
+    to the one account. <span class="badge decision">Decision D5</span>
+  </p>
+  <table>
+    <tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+    <tr><td><code>token_hash</code></td><td>TEXT PRIMARY KEY</td><td>SHA-256 of the opaque session token; the cookie carries the plaintext token, the DB only its hash — a DB dump cannot mint sessions</td></tr>
+    <tr><td><code>created_at</code></td><td>TEXT NOT NULL</td><td></td></tr>
+    <tr><td><code>expires_at</code></td><td>TEXT NOT NULL</td><td>Fixed cap: 30 days</td></tr>
+    <tr><td><code>last_seen_at</code></td><td>TEXT NOT NULL</td><td>Sliding renewal: sessions idle &gt; 14 days are treated as expired</td></tr>
+  </table>
+
+  <h3>3.3 Existing tables: no change (explicit simplification)</h3>
+  <table>
+    <tr><th>Table</th><th>Change</th><th>Rationale</th></tr>
+    <tr>
+      <td><code>workflows</code>, <code>templates</code>, <code>steps</code>, <code>attachments</code>, <code>settings</code></td>
+      <td><em>none — no <code>owner_id</code> columns, no new indexes, no query changes</em></td>
+      <td><strong>Decision:</strong> with exactly one user, per-user data isolation is meaningless. After login the
+      user sees every local workflow; before login the API simply doesn't serve data. The login gate replaces the
+      entire owner-scoping layer from the previous draft (decision documented in §7).</td>
+    </tr>
+  </table>
+
+  <h3>3.4 On-disk layout (under <code>~/.target/</code>)</h3>
+  <ul>
+    <li>Auth and session state live <strong>inside <code>target.db</code></strong> — no new files needed. This keeps the single-file backup story (<code>target.db</code> + <code>config.json</code>) intact, and makes the full reset in §6.3 a single <code>rm -rf ~/.target</code>.</li>
+    <li>Existing per-workflow files (<code>~/.target/&lt;slug&gt;-&lt;id&gt;.md</code>, <code>~/.target/attachments/&lt;workflowId&gt;/</code>, step results in each workdir) stay exactly where they are, untouched by this change. <span class="badge decision">Decision D3</span></li>
+  </ul>
+
+  <h3>3.5 New data-layer module</h3>
+  <p>
+    A new <code>hub/account.ts</code> holds every auth/session function (mirroring how <code>db.ts</code> owns workflows):
+    <code>isSetupComplete</code>, <code>createAccount</code>, <code>getAccount</code>, <code>verifyAccountPassword</code>,
+    <code>setAccountPassword</code>, <code>rotateRecoveryToken</code>, <code>verifyRecoveryToken</code>,
+    <code>createSession</code>, <code>resolveSession</code>, <code>touchSession</code>, <code>deleteSession</code>,
+    <code>deleteAllSessions</code>. Password/token/session crypto helpers live in a sibling
+    <code>hub/auth.ts</code> so the server and tests share them. Notably absent vs. the previous draft: no
+    <code>getUserByUsername</code>, no <code>listUsers</code>, no <code>claimUnownedWorkflows</code>.
+  </p>
+</section>
+
+<!-- ============================ 4. FIRST-RUN SETUP ============================ -->
+<section id="s4">
+  <h2><span class="num">4.</span>First-Run Setup (Signup)</h2>
+  <p>
+    Signup is a <strong>one-time setup step</strong>, not a standing endpoint. The moment the singleton auth row
+    exists, the door closes permanently: the server rejects further setup attempts and the UI never renders the
+    setup screen again.
+  </p>
+
+  <h3>4.1 Endpoints</h3>
+  <table>
+    <tr><th>Method</th><th>Route</th><th>Auth</th><th>Purpose</th></tr>
+    <tr><td><span class="badge get">GET</span></td><td><code>/api/auth/status</code></td><td>open</td><td>Returns <code>{ setupCompleted: boolean }</code> — drives the UI's choice between setup screen and login screen</td></tr>
+    <tr><td><span class="badge post">POST</span></td><td><code>/api/auth/setup</code></td><td>open <em>only while no account exists</em></td><td>Body <code>{ password, displayName? }</code> → creates the singleton auth row, returns the one-time recovery token. Once the row exists: <code>409 {"error":"setup_already_completed"}</code>, forever.</td></tr>
+  </table>
+  <ul>
+    <li>Validation: password &ge; 10 characters (local tool, but the DB holds the keys to every workflow — keep a real floor). <code>displayName</code> optional, &le; 64 chars, display only. <strong>No username field</strong> — there is nothing to distinguish. Clear 400 errors per field.</li>
+    <li>Password hashing: <code>crypto.scrypt(password, salt, 64)</code> with a fresh 16-byte salt — memory-hard KDF built into Node, strictly better than the SHA-256+salt minimum and zero new dependencies. <span class="badge decision">Decision D1</span></li>
+    <li>Atomicity: the insert relies on the <code>CHECK (id = 1)</code> singleton guard (§3.1), so even two simultaneous setup requests cannot create two accounts — the loser gets a constraint error mapped to 409.</li>
+  </ul>
+
+  <h3>4.2 Recovery-token generation &amp; display (the core product requirement — unchanged)</h3>
+  <ol class="flow">
+    <li><span class="actor">Server</span> generates 128 bits of entropy: <code>crypto.randomBytes(16)</code>, formatted for humans as four groups: <code>XXXX-XXXX-XXXX-XXXX</code> (Crockford base32, no ambiguous characters like <code>0/O</code>, <code>1/l</code>).</li>
+    <li><span class="actor">Server</span> stores only <code>SHA-256(token)</code> in <code>auth.recovery_token_hash</code> (a fast hash is correct here — the token has 128 bits of entropy, so brute force is infeasible; hashing prevents a DB read from becoming an account takeover). The plaintext leaves the server <em>only</em> in the setup HTTP response. <span class="badge decision">Decision D2</span></li>
+    <li><span class="actor">UI</span> moves to a dedicated <strong>"Save your recovery token"</strong> step — a full modal screen that cannot be dismissed accidentally:
+      <ul>
+        <li>The token rendered large, monospace, with a copy-to-clipboard button and a "Download as .txt" button.</li>
+        <li>Prominent warning copy: <em>"This token is shown once and never stored in readable form. It is the ONLY way to reset your password. If you lose both your password and this token, the only recovery is wiping all Target data on this machine and reinstalling (see docs). Save it somewhere safe (password manager or printed)."</em></li>
+        <li>A mandatory checkbox <em>"I have saved my recovery token"</em> gating the Continue button.</li>
+      </ul>
+    </li>
+    <li><span class="actor">UI</span> confirms (Continue) → the token is wiped from component state; the user is signed in automatically (a session is issued as in login) and lands on the workflows screen — where all pre-existing local workflows are already visible (§8).</li>
+    <li><span class="actor">Server</span> never returns the token again. <code>GET /api/auth/me</code> exposes only <code>recoveryTokenSetAt</code> so the UI can show "recovery token created on …" without revealing it.</li>
+  </ol>
+  <div class="callout warn">
+    <span class="label">Edge case</span>
+    If the setup response is lost (browser crash between steps 2 and 3), the account exists but the user never saw
+    the token. Mitigation: if the user never confirms the token step, the account's first login triggers a one-time
+    "regenerate recovery token" prompt (old hash is replaced, new token shown once). Regeneration always requires a
+    valid password or a valid old token.
+  </div>
+  <div class="callout">
+    <span class="label">After setup completes</span>
+    <code>GET /api/auth/status</code> returns <code>{ setupCompleted: true }</code> and the UI routes to the login
+    screen on every subsequent load. The setup screen is unreachable — there is no "create another account" path
+    anywhere in the product.
+  </div>
+</section>
+
+<!-- ============================ 5. LOGIN & SESSIONS ============================ -->
+<section id="s5">
+  <h2><span class="num">5.</span>Login Flow &amp; Session Management</h2>
+
+  <h3>5.1 Endpoints</h3>
+  <table>
+    <tr><th>Method</th><th>Route</th><th>Auth</th><th>Purpose</th></tr>
+    <tr><td><span class="badge post">POST</span></td><td><code>/api/auth/login</code></td><td>open</td><td>Verify password, issue session cookie, return the public account object</td></tr>
+    <tr><td><span class="badge post">POST</span></td><td><code>/api/auth/logout</code></td><td>session</td><td>Delete the session row, clear the cookie</td></tr>
+    <tr><td><span class="badge get">GET</span></td><td><code>/api/auth/me</code></td><td>session</td><td><code>{ displayName, recoveryTokenSetAt }</code>; drives the UI's route guard</td></tr>
+  </table>
+
+  <h3>5.2 Login sequence</h3>
+  <p>
+    <strong>Password-only login</strong>: the login form is a single password field. With exactly one account, a
+    username adds friction but zero selectivity — the optional <code>display_name</code> is shown in the header
+    after login, never asked for as a credential. <span class="badge decision">Decision D6</span>
+  </p>
+  <ol class="flow">
+    <li><span class="actor">UI</span> posts <code>{ password }</code> to <code>/api/auth/login</code>.</li>
+    <li><span class="actor">Server</span> loads the singleton auth row, checks <code>locked_until</code>, then <code>scrypt</code>-verifies the password with <code>crypto.timingSafeEqual</code>. Failure → increment <code>failed_logins</code>; after 5 consecutive failures, lock for 5 minutes (exponential on repeat). Uniform <code>401 {"error":"invalid_credentials"}</code> for every failure mode.</li>
+    <li><span class="actor">Server</span> on success: reset counters, create a session — 32 random bytes as the token, store only <code>SHA-256(token)</code> in <code>sessions</code>, set <code>expires_at = now + 30d</code>.</li>
+    <li><span class="actor">Server</span> responds with <code>Set-Cookie: target_session=&lt;token&gt;; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000</code> and the public account JSON. <code>HttpOnly</code> keeps the token out of JS reach (XSS exfiltration); <code>SameSite=Strict</code> blocks CSRF; <code>Secure</code> is omitted <em>only</em> because the hub serves plain HTTP on <code>127.0.0.1</code> — noted in §9.</li>
+    <li><span class="actor">UI</span> receives the account object, switches <code>App.tsx</code> to the authenticated shell and renders the workflows screen with <strong>all local workflows</strong> — the same unfiltered list the hub serves today.</li>
+  </ol>
+
+  <h3>5.3 Session resolution on every request</h3>
+  <ul>
+    <li>A small resolver in <code>hub/server.ts</code> (replacing/extending <code>isAdmin()</code>): read the <code>target_session</code> cookie → hash → <code>resolveSession(hash)</code> → check expiry + idle window (<code>last_seen_at</code> older than 14 days ⇒ expired) → <code>touchSession</code> (throttled to one write per minute per session) → request is authenticated.</li>
+    <li>All existing <code>/api/workflows*</code>, <code>/api/templates*</code>, <code>/api/settings*</code>, <code>/api/conversations*</code>, <code>/api/fs/*</code>, <code>/api/attachments*</code> routes require a resolved session <em>or</em> a valid admin <code>Authorization: Bearer</code> (transition period for scripts/automation, §11 Q1). Unauthenticated ⇒ <code>401 {"error":"login_required"}</code>.</li>
+    <li>awb callbacks (<code>/api/steps/:id/started|result</code>) keep their per-step token — they are machine-internal and unaffected.</li>
+    <li>The UI's <code>client.ts</code> adds <code>credentials: "same-origin"</code> and stops needing the admin token for day-to-day use; the existing Bearer path stays for scripts/legacy flow during transition.</li>
+  </ul>
+
+  <h3>5.4 Logout &amp; lifecycle</h3>
+  <ul>
+    <li>Logout deletes the session row (server-side invalidation, not just cookie clearing) and sets an expired cookie. Other concurrent sessions (second browser) stay valid — "log out everywhere" happens automatically on password reset via <code>deleteAllSessions</code>.</li>
+    <li>Lazy cleanup: expired sessions are deleted opportunistically on <code>resolveSession</code> — same "lazy expiry" philosophy the codebase already uses for step timeouts (no timers, survives restarts).</li>
+  </ul>
+</section>
+
+<!-- ============================ 6. PASSWORD RESET ============================ -->
+<section id="s6">
+  <h2><span class="num">6.</span>Password Reset &amp; Full Local Reset</h2>
+  <p>No e-mail exists in this system — the recovery token saved at setup <em>is</em> the only recovery channel. When it is gone too, the only remaining procedure is a full wipe (§6.3).</p>
+
+  <h3>6.1 Endpoint</h3>
+  <table>
+    <tr><th>Method</th><th>Route</th><th>Auth</th><th>Purpose</th></tr>
+    <tr><td><span class="badge post">POST</span></td><td><code>/api/auth/password/reset</code></td><td>open, rate-limited</td><td>Body <code>{ recoveryToken, newPassword }</code> → verify token, set new password, rotate token, kill all sessions</td></tr>
+  </table>
+  <p>No username field — the token is checked against the singleton auth row.</p>
+
+  <h3>6.2 Sequence</h3>
+  <ol class="flow">
+    <li><span class="actor">UI</span> — "Forgot password" link on the login screen opens <code>ResetPasswordView</code>: recovery token + new password ×2.</li>
+    <li><span class="actor">Server</span> normalizes the token input (strip spaces/dashes, uppercase) and computes <code>SHA-256</code>; compares against <code>recovery_token_hash</code> with <code>crypto.timingSafeEqual</code>.</li>
+    <li><span class="actor">Server</span> on match, in one transaction:
+      <ul>
+        <li>re-hash <code>newPassword</code> with a fresh salt → <code>password_hash</code>/<code>password_salt</code>;</li>
+        <li><strong>rotate the recovery token</strong>: generate a new one, store its hash — the old token is dead (a used token that leaked can't be replayed);</li>
+        <li>delete <em>all</em> sessions (<code>deleteAllSessions</code>) — force re-login in every browser;</li>
+        <li>reset <code>failed_logins</code>/<code>locked_until</code>.</li>
+      </ul>
+    </li>
+    <li><span class="actor">Server</span> responds with the <strong>new recovery token, shown exactly once</strong> — same display treatment as setup §4.2 (copy/download + "I saved it" checkbox).</li>
+    <li><span class="actor">UI</span> then routes to login (or logs the user in directly with a fresh session — product decision, default: fresh session for less friction).</li>
+  </ol>
+  <div class="callout warn">
+    <span class="label">Abuse control</span>
+    The reset endpoint is open by design, so it gets the strictest rate limiting in the app: a per-IP counter,
+    5 attempts ⇒ 15-minute hold, exponential thereafter. With 128-bit tokens this is defense-in-depth.
+  </div>
+
+  <h3>6.3 Lost password <em>and</em> lost token — full local reset (no recovery by design)</h3>
+  <p>
+    If the user loses both credentials there is <strong>intentionally no recovery mechanism</strong> — no admin
+    reset command, no backdoor, no support flow. The documented procedure is a full local reset:
+  </p>
+  <ol class="flow">
+    <li><span class="actor">Operator</span> stops the hub: <code>Ctrl+C</code> the daemon, or <code>lsof -ti :8893 | xargs kill</code> (equivalently <code>pkill -f "node daemon.ts"</code>).</li>
+    <li><span class="actor">Operator</span> optionally backs up what can be saved: <code>cp -a ~/.target ~/.target-backup-$(date +%F)</code>. (Also <code>$TARGET_HOME</code> if the install overrides the default location.)</li>
+    <li><span class="actor">Operator</span> deletes the state directory: <code>rm -rf ~/.target</code>.</li>
+    <li><span class="actor">Operator</span> restarts: <code>npm start</code>. The hub recreates an empty <code>~/.target/</code> (fresh <code>config.json</code> with a new <code>adminToken</code>, empty <code>target.db</code>).</li>
+    <li><span class="actor">UI</span> shows first-run setup again (<code>setupCompleted: false</code>) — the operator picks a new password and saves a new recovery token, as in §4.</li>
+  </ol>
+  <div class="callout warn">
+    <span class="label">Data loss warning</span>
+    Wiping <code>~/.target/</code> destroys <strong>everything</strong>: the workflows/steps/templates database,
+    attachments, per-workflow progress files, settings, and the account itself. Step-result files under each
+    workdir's <code>.target/steps/</code> survive, but the hub no longer knows the workflows they belonged to.
+    Back up before wiping if any of it matters. This is an <strong>accepted product risk</strong> (§11, R1).
+  </div>
+  <div class="callout">
+    <span class="label">Why no admin reset command</span>
+    The previous draft included an out-of-band <code>node hub/users.ts reset</code> maintenance command. It is
+    removed: a standing command that re-issues credentials without the old password or token is a permanent
+    backdoor, and anyone with shell access can already wipe <code>~/.target/</code> anyway. Keeping exactly one
+    documented escape hatch — the wipe — makes the security story honest and the code smaller.
+  </div>
+</section>
+
+<!-- ====================== 7. DATA ACCESS ====================== -->
+<section id="s7">
+  <h2><span class="num">7.</span>Data Access After Login</h2>
+  <p>
+    There is <strong>no per-user data isolation</strong> — this section exists to document that as an explicit
+    decision, replacing the entire owner-scoping design of the previous draft.
+  </p>
+  <div class="callout ok">
+    <span class="label">Decision</span>
+    Access control is a single binary gate at the request layer: unauthenticated ⇒ <code>401 login_required</code>;
+    authenticated ⇒ full read/write access to every workflow, template, attachment, conversation and setting on
+    the machine. No <code>owner_id</code> columns, no <code>WHERE owner_id = ?</code>, no 404-on-foreign-id checks,
+    no "legacy/unclaimed" state. The data layer's existing queries are byte-for-byte unchanged.
+  </div>
+  <h3>7.1 Query layer (<code>hub/db.ts</code>)</h3>
+  <ul>
+    <li><code>listWorkflows</code>, <code>getWorkflow</code>, <code>listTemplates</code>, step/attachment lookups: <strong>no signature or SQL changes</strong>.</li>
+    <li>Route handlers in <code>hub/server.ts</code> gain exactly one line of behaviour: run the session resolver (§5.3) before touching the DB. Nothing else.</li>
+    <li><code>settings</code> stays machine-global — trivially correct when there is one user.</li>
+  </ul>
+  <h3>7.2 Engine behaviour (<code>hub/workflow.ts</code>, <code>hub/runner.ts</code>)</h3>
+  <ul>
+    <li>The dispatch engine is <strong>completely untouched</strong>: it never participated in auth and still doesn't.</li>
+    <li>A running workflow keeps running if the user logs out — sessions gate <em>API access</em>, not process lifetime. Documented behaviour.</li>
+  </ul>
+  <h3>7.3 UI changes</h3>
+  <ul>
+    <li><code>App.tsx</code>: on load, call <code>GET /api/auth/status</code>. <code>setupCompleted: false</code> ⇒ render <code>SetupView</code> (§4). Otherwise call <code>GET /api/auth/me</code>: 401 ⇒ render the login/reset stack; 200 ⇒ render the existing shell unchanged.</li>
+    <li><code>Header.tsx</code>: show the display name (if set), and a Logout button. That is the entire header diff — no claim affordances, no legacy sections.</li>
+    <li>No per-view changes: list/detail/templates already render server data, and the server data is the same as today.</li>
+  </ul>
+</section>
+
+<!-- ============================ 8. MIGRATION ============================ -->
+<section id="s8">
+  <h2><span class="num">8.</span>Migration Plan for Existing Data</h2>
+  <p>
+    Existing installs have workflows, steps, templates and attachments — and after upgrade they simply belong to
+    the machine's single user. There is <strong>no claiming, no assignment, no NULL-owner limbo</strong>: the data
+    migration is a no-op.
+  </p>
+  <h3>8.1 Schema migration (automatic, on hub start)</h3>
+  <ul>
+    <li><code>open()</code> gains two <code>CREATE TABLE IF NOT EXISTS</code> statements (<code>auth</code>, <code>sessions</code>). No <code>ALTER TABLE</code> on any existing table — the simplest possible migration under the project's own additive pattern. Rollback-safe by construction: older code ignores the two new tables entirely.</li>
+  </ul>
+  <h3>8.2 Data migration (none — and what upgrade day looks like)</h3>
+  <ol class="flow">
+    <li><span class="actor">Hub</span> starts after upgrade; <code>auth</code> is empty ⇒ <code>GET /api/auth/status</code> returns <code>{ setupCompleted: false }</code>.</li>
+    <li><span class="actor">UI</span> shows the first-run setup screen (§4). The user sets a password, saves the recovery token, and is logged in automatically.</li>
+    <li><span class="actor">Rule</span> — the moment setup completes, <em>every</em> pre-existing workflow, step, template and attachment is simply visible and usable after login. Existing local data belongs to the single user by definition; there is nothing to assign and no UI for assigning it.</li>
+    <li><span class="actor">On-disk files</span> — nothing moves and nothing is renamed: <code>~/.target/*.md</code>, <code>~/.target/attachments/</code> and workdir <code>.target/steps/</code> are keyed by workflow id/slug, which this change never touches. <span class="badge decision">Decision D3</span></li>
+  </ol>
+  <div class="callout warn">
+    <span class="label">Mid-run safety</span>
+    A workflow that is <code>running</code> during the upgrade keeps running: the engine never consults the
+    <code>auth</code>/<code>sessions</code> tables mid-dispatch, and no existing row is modified by the migration.
+    The only new behaviour on upgrade day is that <code>/api</code> routes start answering 401 until setup + login
+    are completed once.
+  </div>
+</section>
+
+<!-- ============================ 9. SECURITY ============================ -->
+<section id="s9">
+  <h2><span class="num">9.</span>Security Considerations</h2>
+  <table>
+    <tr><th>Area</th><th>Measure</th></tr>
+    <tr><td>Password storage</td><td><code>scrypt</code> (N=16384, r=8, p=1 — Node defaults) with a 16-byte salt; hex-encoded. Never logged, never returned by any endpoint. Plaintext passwords exist only in request memory.</td></tr>
+    <tr><td>Recovery token</td><td>128-bit entropy, SHA-256-hashed at rest, shown exactly once, rotated on every successful reset and on regeneration. Timing-safe comparison. Losing it together with the password ⇒ full wipe (§6.3), accepted risk R1.</td></tr>
+    <tr><td>Session tokens</td><td>256-bit opaque tokens; DB stores SHA-256(token) only. <code>HttpOnly</code> + <code>SameSite=Strict</code> cookie; 30-day cap, 14-day idle expiry; server-side deletion on logout (single session) and on password reset (all sessions).</td></tr>
+    <tr><td>Comparisons</td><td><code>crypto.timingSafeEqual</code> everywhere a secret is compared (extends the pattern already used by <code>isAdmin()</code>).</td></tr>
+    <tr><td>Brute force</td><td>One counter on the singleton auth row (<code>failed_logins</code>/<code>locked_until</code>) for <code>login</code>, plus a per-IP counter for <code>password/reset</code>: 5 failures ⇒ 5–15 min lockout, exponential. Uniform <code>invalid_credentials</code> errors. Simpler than the previous draft: no per-username tracking, because there is only one account.</td></tr>
+    <tr><td>Setup endpoint</td><td><code>POST /api/auth/setup</code> is open only while <code>auth</code> is empty; the singleton <code>CHECK (id = 1)</code> constraint makes double-setup impossible even under a race. Afterwards it is a permanent 409.</td></tr>
+    <tr><td>Network posture</td><td>Hub already binds <code>127.0.0.1</code> only — keep it. Document that exposing the port (SSH tunnel, reverse proxy) requires adding TLS + the <code>Secure</code> cookie flag before sessions are safe there.</td></tr>
+    <tr><td>XSS / injection</td><td>React escapes by default; all SQL stays parameterized (<code>node:sqlite</code> prepared statements, as today). Token rendered as text, never interpolated into HTML.</td></tr>
+    <tr><td>Authorization</td><td>One session gate in front of all <code>/api</code> routes except <code>/api/auth/*</code> and the awb per-step-token callbacks (unchanged). No object-level checks — there is only one user.</td></tr>
+    <tr><td>Local threat model</td><td>Honest boundary: anyone with read access to <code>~/.target/target.db</code> or the machine's shell can bypass app-level auth (and could already today — including wiping the state directory, §6.3). The subsystem protects the app from casual local snooping and unauthorized browser access, not against a hostile local admin. Stated plainly in docs (§11, R3).</td></tr>
+    <tr><td>Admin token</td><td><code>adminToken</code> remains as a bootstrap/automation credential during transition (§11 Q1); config file permissions (<code>chmod 600</code> recommendation) documented. A wipe regenerates it.</td></tr>
+  </table>
+</section>
+
+<!-- ====================== 10. PHASES / TASKS ====================== -->
+<section id="s10">
+  <h2><span class="num">10.</span>Implementation Phases / Task Breakdown</h2>
+  <p>Ordered checklist. Every item references the real path it touches. <span class="badge new">NEW</span> = create, <span class="badge mod">MOD</span> = modify.</p>
+
+  <div class="phase">
+    <header>Phase 1 — Data layer &amp; crypto (backend foundation)</header>
+    <div class="body">
+      <ul class="checklist">
+        <li><span class="badge mod">MOD</span> <code>hub/db.ts</code> — add <code>auth</code> (with <code>CHECK (id = 1)</code> singleton guard) + <code>sessions</code> tables to <code>open()</code> via <code>CREATE TABLE IF NOT EXISTS</code>. <strong>No other schema change</strong> — no <code>ALTER TABLE</code>, no owner columns, no new indexes, no changes to <code>Workflow</code>/<code>Template</code> interfaces or existing queries.</li>
+        <li><span class="badge new">NEW</span> <code>hub/auth.ts</code> — <code>hashPassword</code>/<code>verifyPassword</code> (scrypt), <code>generateRecoveryToken</code> (format + hash), <code>newSessionToken</code>, <code>sha256Hex</code>, timing-safe helpers.</li>
+        <li><span class="badge new">NEW</span> <code>hub/account.ts</code> — singleton account + session operations listed in §3.5 (<code>isSetupComplete</code>, <code>createAccount</code> mapping the constraint violation to "already set up", <code>verifyAccountPassword</code>, <code>setAccountPassword</code>, <code>rotateRecoveryToken</code>, <code>verifyRecoveryToken</code>, session CRUD, <code>deleteAllSessions</code>), incl. lockout counters and lazy session cleanup.</li>
+        <li><span class="badge new">NEW</span> <code>hub/account.test.ts</code> — singleton guard (second <code>createAccount</code> fails), hashing round-trip, token verify/rotate, session expiry/idle window, lockout behaviour (uses <code>TARGET_HOME</code> isolation).</li>
+        <li>Verify untouched: <code>workflow.test.ts</code>, <code>clone-rename.test.ts</code> — they must pass <em>unmodified</em>, since no workflow/template function signature changes.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="phase">
+    <header>Phase 2 — HTTP API: auth routes, session gate</header>
+    <div class="body">
+      <ul class="checklist">
+        <li><span class="badge mod">MOD</span> <code>hub/server.ts</code> — cookie parsing helper; session resolver (session OR admin bearer during transition); new routes: <code>GET /api/auth/status</code>, <code>POST /api/auth/setup</code> (409 once complete), <code>POST /api/auth/login</code>, <code>POST /api/auth/logout</code>, <code>GET /api/auth/me</code>, <code>POST /api/auth/password/reset</code>; rate limiting on auth endpoints.</li>
+        <li><span class="badge mod">MOD</span> <code>hub/server.ts</code> — put the resolver in front of every existing workflow/template/attachment/conversation/fs route; unauthenticated ⇒ <code>401 login_required</code>. No handler body changes (no ownership checks — §7).</li>
+        <li><span class="badge mod">MOD</span> <code>hub/server.test.ts</code> (+ new <code>hub/auth-routes.test.ts</code>) — status/setup/login/logout/reset happy paths, setup-already-completed 409, 401s on gated routes, lockout, token rotation on reset, session purge on reset.</li>
+        <li>Verify untouched: <code>hub/cli.ts</code> — it talks to the DB directly; with a single user there is no owner to resolve, so the CLI needs <strong>no changes at all</strong> (resolves the previous draft's Q1).</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="phase">
+    <header>Phase 3 — UI: auth screens + session plumbing</header>
+    <div class="body">
+      <ul class="checklist">
+        <li><span class="badge mod">MOD</span> <code>hub/ui/src/api/client.ts</code> + <code>hub/ui/src/api/types.ts</code> — <code>credentials: "same-origin"</code>; new <code>auth</code> API group (status/setup/login/logout/me/reset); <code>Account</code> type; keep admin-token helpers for transition.</li>
+        <li><span class="badge new">NEW</span> <code>hub/ui/src/views/SetupView.tsx</code> (+ <code>.module.css</code>) — password ×2 + optional display name, then the <strong>token reveal step</strong> (copy + download + mandatory "I saved it" checkbox with the wipe warning copy from §4.2).</li>
+        <li><span class="badge new">NEW</span> <code>hub/ui/src/views/LoginView.tsx</code> — single password field, error display, "Forgot password" link. No username field, no link to signup (setup is unreachable once complete).</li>
+        <li><span class="badge new">NEW</span> <code>hub/ui/src/views/ResetPasswordView.tsx</code> — recovery token + new password, then one-time display of the rotated token.</li>
+        <li><span class="badge mod">MOD</span> <code>hub/ui/src/App.tsx</code> — auth gate via <code>GET /api/auth/status</code> + <code>GET /api/auth/me</code>; route between setup / login / reset and the existing shell.</li>
+        <li><span class="badge mod">MOD</span> <code>hub/ui/src/components/Header.tsx</code> — display name (if set) + Logout button. Nothing else.</li>
+        <li>Rebuild: <code>npm --prefix hub/ui run build</code> (server serves <code>hub/ui/dist</code>); decide fate of <code>hub/ui/legacy-index.html</code> (§11 Q2).</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="phase">
+    <header>Phase 4 — Rollout &amp; hardening</header>
+    <div class="body">
+      <ul class="checklist">
+        <li>Verify upgrade path on a copy of a real <code>~/.target/</code>: status flips to setup-completed after first-run setup, all pre-existing workflows visible after login, mid-run workflow unaffected.</li>
+        <li>Verify the wipe-and-reinstall procedure end-to-end (§6.3) on a throwaway <code>TARGET_HOME</code>: stop → <code>rm -rf</code> → restart → setup screen returns.</li>
+        <li>Security pass: cookie flags, rate-limit counters surviving restart (they live in the DB row), uniform errors, token rotation on reset, session purge on logout/reset, setup race ⇒ 409.</li>
+        <li><span class="badge mod">MOD</span> <code>docs/</code> — new "Access &amp; authentication" doc (first-run setup, login, recovery token, full local reset incl. data-loss warning, threat model); update architecture notes mentioning <code>adminToken</code>-only auth.</li>
+        <li><span class="badge mod">MOD</span> <code>README.md</code> — first-run experience now starts at the setup screen.</li>
+        <li>Full suite green: <code>npm test</code> + <code>npm run typecheck</code>.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== 11. OPEN QUESTIONS ====================== -->
+<section id="s11">
+  <h2><span class="num">11.</span>Open Questions &amp; Risks</h2>
+  <h3>Questions for the product owner</h3>
+  <ol>
+    <li><strong>Q1 — Admin token endgame.</strong> Keep <code>adminToken</code> indefinitely as an automation credential alongside sessions, or retire it once sessions stabilize (breaking existing scripts that use Bearer)?</li>
+    <li><strong>Q2 — Legacy UI.</strong> <code>hub/ui/legacy-index.html</code> predates the React SPA. Retire it, or also add a login gate there?</li>
+    <li><strong>Q3 — Password-only login confirmation.</strong> Plan assumes a single password field (D6) with an optional display name that is never a credential. Confirm, or keep a cosmetic username field for habit/familiarity?</li>
+    <li><strong>Q4 — Headless installs.</strong> Should the CLI offer a non-interactive first-run setup (env var / flag) for machines where a browser isn't practical, or is the web setup screen the only path?</li>
+    <li><strong>Q5 — Concurrent sessions.</strong> Plan allows a small sessions table so two browsers stay logged in (D5). Acceptable, or should a new login invalidate the previous session (single active session)?</li>
+  </ol>
+  <h3>Risks</h3>
+  <ol>
+    <li><strong>R1 — ACCEPTED: lost token + lost password ⇒ full reinstall with data loss.</strong> There is deliberately no recovery path beyond the token. The user must stop the hub, wipe <code>~/.target/</code>, and re-run first-run setup; all workflows, templates, attachments and settings are lost unless backed up beforehand (§6.3). The one-time-display flow (copy + download + mandatory checkbox, with this consequence stated in the warning copy) is the mitigation.</li>
+    <li><strong>R2 — GET routes become authenticated.</strong> Any external script polling <code>GET /api/workflows</code> anonymously breaks on upgrade. Mitigation: admin Bearer keeps working during transition; note in changelog/docs.</li>
+    <li><strong>R3 — Local threat model.</strong> App-level auth does not stop someone with shell/filesystem access (DB is readable, workdirs are shared machine paths, "open terminal" spawns real shells, and the §6.3 wipe is itself unauthenticated by necessity). Docs must state this plainly; the app gate protects against casual browser-level access only.</li>
+    <li><strong>R4 — Recovery-token UX.</strong> Users will lose tokens. With no e-mail channel, the only softer landings are the signup/reset display treatment and the regeneration prompt after a lost setup response (§4.2 edge case). Beyond that, R1 applies — that trade-off is the product decision.</li>
+  </ol>
+</section>
+
+<footer>
+  Plan document only — no implementation included. Grounded in the repository as of inspection:
+  <code>hub/server.ts</code> · <code>hub/db.ts</code> · <code>hub/config.ts</code> · <code>hub/ui/src/api/client.ts</code> · <code>hub/ui/src/App.tsx</code>
+</footer>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,102 @@
+/**
+ * Shared styles for the unauthenticated screens (Setup / Login / Reset
+ * password): a quiet centred card on the page background. The landing page has
+ * its own, richer stylesheet (LandingView.module.css) — these three are forms,
+ * not marketing, so they stay plain.
+ */
+
+.page {
+	min-height: 100%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: var(--space-6);
+	background:
+		radial-gradient(60rem 30rem at 80% -10%, var(--accent-50), transparent 60%),
+		var(--bg);
+}
+
+.card {
+	width: 100%;
+	max-width: 26rem;
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	box-shadow: var(--shadow-md);
+	padding: var(--space-8);
+	display: grid;
+	gap: var(--space-4);
+}
+
+.brand {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	color: var(--accent-600);
+}
+
+.brand svg {
+	width: 1.5rem;
+	height: 1.5rem;
+}
+
+.brandName {
+	font-weight: 600;
+	color: var(--text);
+}
+
+.title {
+	font-size: var(--text-xl);
+}
+
+.subtitle {
+	color: var(--text-muted);
+	font-size: var(--text-sm);
+}
+
+.form {
+	display: grid;
+	gap: var(--space-4);
+}
+
+.actions {
+	display: flex;
+	gap: var(--space-2);
+	justify-content: flex-end;
+	margin-top: var(--space-2);
+}
+
+/* The full-width primary button these forms submit with. */
+.submit {
+	width: 100%;
+}
+
+.linkRow {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	font-size: var(--text-sm);
+}
+
+.linkButton {
+	background: none;
+	border: none;
+	padding: 0;
+	color: var(--accent-600);
+	font: inherit;
+	font-size: var(--text-sm);
+	cursor: pointer;
+}
+
+.linkButton:hover {
+	text-decoration: underline;
+}
+
+.error {
+	background: var(--danger-50);
+	border: 1px solid var(--danger-200);
+	color: var(--danger-700);
+	border-radius: var(--radius-sm);
+	padding: var(--space-2) var(--space-3);
+	font-size: var(--text-sm);
+}
