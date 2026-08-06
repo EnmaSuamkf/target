@@ -67,7 +67,7 @@ test("availableRunners reports a runner as not installed when its --version prob
 
 test("GET /api/runners reflects the host probe — the create form's source of truth for which agents are selectable", async (t) => {
 	forceUninstalled(t, "free-code");
-	const res = await fetch(`${baseUrl}/api/runners`);
+	const res = await fetch(`${baseUrl}/api/runners`, { headers: adminHeaders() });
 	assert.equal(res.status, 200);
 	const body = (await res.json()) as { runners: { id: string; installed: boolean }[] };
 	assert.equal(body.runners.find((r) => r.id === "free-code")?.installed, false);
@@ -89,7 +89,7 @@ test("POST /api/workflows with a host sandbox and an uninstalled runner returns 
 	assert.match(body.error, /sandbox: docker/);
 
 	// And it created nothing.
-	const listRes = await fetch(`${baseUrl}/api/workflows`);
+	const listRes = await fetch(`${baseUrl}/api/workflows`, { headers: adminHeaders() });
 	const list = (await listRes.json()) as { workflows: { name: string }[] };
 	assert.ok(!list.workflows.some((w) => w.name === "host free-code missing"));
 });

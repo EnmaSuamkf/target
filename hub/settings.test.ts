@@ -72,7 +72,7 @@ test("saveNotificationSettings replaces the previous row instead of adding a sec
 test("GET /api/settings/notifications needs no admin token and returns the stored preferences", async () => {
 	saveNotificationSettings({ enabled: true, channels: { slack: { username: "grace" } } });
 
-	const res = await fetch(`${baseUrl}/api/settings/notifications`);
+	const res = await fetch(`${baseUrl}/api/settings/notifications`, { headers: adminHeaders() });
 	assert.equal(res.status, 200);
 	const body = (await res.json()) as SettingsBody;
 	assert.equal(body.settings.enabled, true);
@@ -87,7 +87,8 @@ test("PUT /api/settings/notifications requires an admin token", async () => {
 	});
 	assert.equal(res.status, 401);
 	const body = (await res.json()) as { error: string };
-	assert.equal(body.error, "unauthorized");
+	// No session and no token → the access gate answers before the route does.
+	assert.equal(body.error, "login_required");
 });
 
 test("PUT /api/settings/notifications saves the preferences and a later GET reads them back", async () => {
@@ -101,7 +102,7 @@ test("PUT /api/settings/notifications saves the preferences and a later GET read
 	assert.equal(put.settings.enabled, true);
 	assert.equal(put.settings.channels.slack.username, "alan.turing");
 
-	const getRes = await fetch(`${baseUrl}/api/settings/notifications`);
+	const getRes = await fetch(`${baseUrl}/api/settings/notifications`, { headers: adminHeaders() });
 	const got = (await getRes.json()) as SettingsBody;
 	assert.deepEqual(got.settings, put.settings);
 });
@@ -123,7 +124,7 @@ test("PUT /api/settings/notifications rejects enabling notifications with an emp
 	assert.match(body.error, /slack username is required/);
 
 	// Nothing was stored: the previous state is intact.
-	const got = (await (await fetch(`${baseUrl}/api/settings/notifications`)).json()) as SettingsBody;
+	const got = (await (await fetch(`${baseUrl}/api/settings/notifications`, { headers: adminHeaders() })).json()) as SettingsBody;
 	assert.equal(got.settings.enabled, false);
 	assert.equal(got.settings.channels.slack.username, "kept");
 });

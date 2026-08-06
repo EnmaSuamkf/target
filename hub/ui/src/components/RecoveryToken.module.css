@@ -1,0 +1,56 @@
+/* The recovery-token reveal — the one screen standing between the user and
+   losing their account. Deliberately loud for this quiet UI: the token is
+   huge, and the warning is amber, because "shown once, never again" has to
+   land before Continue becomes clickable. */
+
+.token {
+	font-family: var(--font-mono);
+	font-size: var(--text-lg);
+	letter-spacing: 0.06em;
+	text-align: center;
+	background: var(--surface-sunken);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
+	padding: var(--space-4) var(--space-3);
+	word-break: break-all;
+	user-select: all;
+}
+
+.tokenActions {
+	display: flex;
+	gap: var(--space-2);
+}
+
+.tokenActions > button {
+	flex: 1;
+}
+
+.warning {
+	background: var(--warn-50);
+	border: 1px solid var(--warn-200);
+	color: var(--warn-700);
+	border-radius: var(--radius-sm);
+	padding: var(--space-3);
+	font-size: var(--text-sm);
+}
+
+.warning strong {
+	display: block;
+	margin-bottom: var(--space-1);
+}
+
+.confirm {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--space-2);
+	font-size: var(--text-sm);
+	cursor: pointer;
+}
+
+.confirm input {
+	margin-top: 0.2rem;
+	width: 1rem;
+	height: 1rem;
+	accent-color: var(--accent-600);
+	flex-shrink: 0;
+}

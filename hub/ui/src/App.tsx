@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "./api/client.ts";
 import { ApiError } from "./api/client.ts";
 import type {
+	Account,
 	AttachmentField,
 	CloneWorkflowInput,
 	CreateWorkflowInput,
@@ -32,7 +33,11 @@ import { useIsMobile } from "./hooks/useIsMobile.ts";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts.ts";
 import { usePolling } from "./hooks/usePolling.ts";
 import { CreateWorkflowModal } from "./views/CreateWorkflowModal.tsx";
+import { LandingView } from "./views/LandingView.tsx";
+import { LoginView } from "./views/LoginView.tsx";
+import { ResetPasswordView } from "./views/ResetPasswordView.tsx";
 import { SettingsView } from "./views/SettingsView.tsx";
+import { SetupView } from "./views/SetupView.tsx";
 import { TemplatesView } from "./views/TemplatesView.tsx";
 import { WorkflowDetail } from "./views/WorkflowDetail.tsx";
 import { AllWorkflowsPage, WorkflowList } from "./views/WorkflowList.tsx";
@@ -66,7 +71,121 @@ function readHashSelection(): string | null {
 	return match?.[1] ?? null;
 }
 
+/**
+ * The access gate: decides what an unauthenticated visitor sees and owns the
+ * transition into the app.
+ *
+ * On load it asks the hub how far this machine is: no account yet → the
+ * landing page offers "Get started" (the one-time setup); account exists →
+ * probe the session cookie (`GET /api/auth/me`): live → straight into the
+ * workflows screen; dead → the landing page with "Sign in". Setup, login and
+ * the recovery-token reset are full-screen views in front of the shell, never
+ * beside it.
+ *
+ * Everything authenticated lives in `Shell`, which only MOUNTS after login —
+ * so its hooks (the 2s poll included) never fire a request a logged-out
+ * visitor would just get a 401 from. Likewise, logging out unmounts it and
+ * every in-flight poll dies with it.
+ */
+type GatePhase = "loading" | "landing" | "setup" | "login" | "reset" | "authed";
+
 export function App(): React.JSX.Element {
+	const [phase, setPhase] = useState<GatePhase>("loading");
+	const [setupCompleted, setSetupCompleted] = useState(false);
+	const [account, setAccount] = useState<Account | null>(null);
+	const [hubUnreachable, setHubUnreachable] = useState(false);
+
+	// Any API answer of `401 login_required` while the app is open means the
+	// session died under us (expiry, or a password reset in another browser):
+	// drop back to the login screen instead of letting every action fail.
+	useEffect(() => {
+		api.setAuthLostHandler(() => {
+			setAccount(null);
+			setPhase((current) => (current === "authed" ? "login" : current));
+		});
+	}, []);
+
+	useEffect(() => {
+		void (async () => {
+			try {
+				const status = await api.getAuthStatus();
+				setSetupCompleted(status.setupCompleted);
+				if (!status.setupCompleted) {
+					setPhase("landing");
+					return;
+				}
+				try {
+					const { account: current } = await api.getAccount();
+					setAccount(current);
+					setPhase("authed");
+				} catch {
+					setPhase("landing");
+				}
+			} catch {
+				// The hub itself didn't answer — nothing to set up or sign into.
+				setHubUnreachable(true);
+			}
+		})();
+	}, []);
+
+	const finishAuth = useCallback((authed: Account): void => {
+		setSetupCompleted(true);
+		setAccount(authed);
+		setPhase("authed");
+	}, []);
+
+	const handleLogout = useCallback((): void => {
+		void api.logout().catch(() => {
+			// Even if the call fails (hub restarting), the cookie is expiring
+			// client-side intent — drop to the landing page regardless.
+		});
+		setAccount(null);
+		setPhase("landing");
+	}, []);
+
+	if (hubUnreachable) {
+		return (
+			<div className={styles.gateCenter}>
+				<EmptyState
+					title="Can't reach the hub"
+					description="The Target hub didn't answer. Check that it's running (npm start) and reload."
+					action={
+						<button type="button" className="btn btn--primary btn--sm" onClick={() => window.location.reload()}>
+							Reload
+						</button>
+					}
+				/>
+			</div>
+		);
+	}
+
+	switch (phase) {
+		case "loading":
+			return (
+				<div className={styles.gateCenter}>
+					<EmptyState title="Loading…" description="Checking this machine's setup." />
+				</div>
+			);
+		case "landing":
+			return (
+				<LandingView
+					setupCompleted={setupCompleted}
+					onGetStarted={() => setPhase("setup")}
+					onSignIn={() => setPhase("login")}
+				/>
+			);
+		case "setup":
+			return <SetupView onDone={finishAuth} onBack={() => setPhase("landing")} />;
+		case "login":
+			return <LoginView onDone={finishAuth} onForgot={() => setPhase("reset")} onBack={() => setPhase("landing")} />;
+		case "reset":
+			return <ResetPasswordView onDone={finishAuth} onBack={() => setPhase("login")} />;
+		case "authed":
+			return <Shell account={account as Account} onLogout={handleLogout} />;
+	}
+}
+
+function Shell({ account, onLogout }: { account: Account; onLogout: () => void }): React.JSX.Element {
 	const [view, setView] = useState<View>("workflows");
 	const [workflows, setWorkflows] = useState<Workflow[]>([]);
 	const [templates, setTemplates] = useState<Template[]>([]);
@@ -685,16 +804,16 @@ export function App(): React.JSX.Element {
 
 	return (
 		<div className={styles.app}>
-			<Header view={view} onViewChange={setView} hasToken={hasToken} onSaveToken={saveToken} />
+			<Header
+				view={view}
+				onViewChange={setView}
+				hasToken={hasToken}
+				onSaveToken={saveToken}
+				account={account}
+				onLogout={onLogout}
+			/>
 
 			<main className={styles.main}>
-				{!hasToken && (
-					<div className={styles.tokenNotice} role="status">
-						<strong>No admin token set.</strong> Reading works, but creating or running anything needs the token the
-						hub printed on startup (also in <code>~/.target/config.json</code>).
-					</div>
-				)}
-
 				{view === "workflows" && allWorkflowsOpen ? (
 					<AllWorkflowsPage
 						workflows={workflows}

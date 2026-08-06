@@ -82,9 +82,18 @@ answer, then opens the UI in your default browser. It stays in the foreground
 holding both; press **Ctrl-C** to stop them together. If either is already
 running it's reused rather than started twice.
 
-The hub prints its **admin token** on startup, and `npm start` also shows it
-in its `Ready.` block (it always lives in `~/.target/config.json`) — the UI
-asks for it and the CLI uses it automatically.
+The first browser visit lands on the **landing page**; from there, a one-time
+**setup** creates this machine's single account (one password — plus a
+**recovery token**, shown exactly once, that is the only way to reset a
+forgotten password). After that, the UI is behind a sign-in and every `/api`
+route answers `401 login_required` without the session cookie. See
+[`docs/authentication.md`](docs/authentication.md) for the full story,
+including the wipe-and-reinstall procedure for a lost password **and** token.
+
+The hub also prints its **admin token** on startup, and `npm start` shows it
+in its `Ready.` block (it always lives in `~/.target/config.json`) — it keeps
+working as a Bearer credential for scripts and automation, and the CLI talks
+to the database directly.
 
 ```bash
 node hub/cli.ts create "release-notes" [--workdir <dir>] [--permission-mode acceptEdits] [--runner free-code] [--sandbox docker] [--image <name>]

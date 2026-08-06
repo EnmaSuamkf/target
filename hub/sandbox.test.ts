@@ -330,7 +330,7 @@ test("POST /api/workflows rejects an unknown sandbox and creates nothing", async
 	assert.match(body.error, /invalid sandbox/);
 	assert.match(body.error, new RegExp(PUBLISHABLE_SANDBOXES.join(", ")));
 
-	const listRes = await fetch(`${baseUrl}/api/workflows`);
+	const listRes = await fetch(`${baseUrl}/api/workflows`, { headers: adminHeaders() });
 	const list = (await listRes.json()) as { workflows: { name: string }[] };
 	assert.ok(!list.workflows.some((w) => w.name === "bad sandbox workflow"));
 });
@@ -344,7 +344,7 @@ test("GET /api/workflows/:id/session-info reports the sandbox and its image", as
 	const { workflow } = (await createRes.json()) as { workflow: { id: string } };
 	setWorkflowSessionId(workflow.id, "sess-info-1");
 
-	const res = await fetch(`${baseUrl}/api/workflows/${workflow.id}/session-info`);
+	const res = await fetch(`${baseUrl}/api/workflows/${workflow.id}/session-info`, { headers: adminHeaders() });
 	assert.equal(res.status, 200);
 	const body = (await res.json()) as { sandbox: string; image: string | null; harness: string };
 	assert.equal(body.sandbox, "docker");

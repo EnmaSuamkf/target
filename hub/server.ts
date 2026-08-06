@@ -3,6 +3,12 @@
  *
  * Routes:
  *   GET    /health                                   → liveness
+ *   GET    /api/auth/status                           → { setupCompleted } — open
+ *   POST   /api/auth/setup                            → first-run account creation (open ONLY while no account exists; 409 after)
+ *   POST   /api/auth/login                            → password-only login → session cookie
+ *   POST   /api/auth/logout                           → kill the session (cookie + row)
+ *   GET    /api/auth/me                               → the account, session-gated
+ *   POST   /api/auth/password/reset                   → recovery-token password reset (open, per-IP throttled)
  *   GET    /api/workflows                             → list (with progress %)
  *   GET    /api/runners                               → which agent CLIs (claude/free-code) are installed on this host, for the create form
  *   POST   /api/workflows                             → create (admin token) — makes the awb hook too; optional templateId seeds its steps
@@ -39,6 +45,11 @@
  *   GET    /api/settings/shortcuts                        → keyboard-shortcut bindings (key per action)
  *   PUT    /api/settings/shortcuts                        → replace the shortcut bindings (admin token)
  *   GET    /                                           → ui/index.html
+ *
+ * Every route except /health, the /api/auth stack and the awb per-step-token
+ * callbacks requires the operator: a login-session cookie or the admin bearer
+ * token (single-user model — see usershandler.html). Without one they all
+ * answer 401 {"error":"login_required"}.
  */
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
@@ -71,6 +82,19 @@ import {
 import { needsContextReinjection, observeCompaction } from "./compaction.ts";
 import type { HubConfig } from "./config.ts";
 import { findConversation, listConversations, readConversationDigest } from "./conversations.ts";
+import {
+	AccountError,
+	createAccount,
+	createSession,
+	deleteAllSessions,
+	deleteSession,
+	getAccount,
+	isSetupComplete,
+	MIN_PASSWORD_LENGTH,
+	resetPasswordWithToken,
+	resolveSession,
+	verifyAccountPassword,
+} from "./account.ts";
 import {
 	promoteQueuedToRunning,
 	deleteTemplate,
@@ -221,9 +245,84 @@ function bearerToken(headers: http.IncomingHttpHeaders): string {
 	return String(headers.authorization ?? "").replace(/^Bearer\s+/i, "");
 }
 
+/** The cookie carrying the opaque login-session token (see account.ts). */
+const SESSION_COOKIE = "target_session";
+const SESSION_COOKIE_MAX_AGE_SEC = 30 * 24 * 60 * 60;
+
+function cookieValue(headers: http.IncomingHttpHeaders, name: string): string {
+	const header = headers.cookie;
+	if (!header) return "";
+	for (const part of header.split(";")) {
+		const [key, ...rest] = part.trim().split("=");
+		if (key === name) return rest.join("=");
+	}
+	return "";
+}
+
+/** Answers whether the request carries a live login session (lazy expiry runs inside resolveSession). */
+function hasSession(headers: http.IncomingHttpHeaders): boolean {
+	const token = cookieValue(headers, SESSION_COOKIE);
+	return token !== "" && resolveSession(token);
+}
+
+function sessionCookieHeader(token: string): string {
+	// HttpOnly keeps the token out of JS reach (XSS exfiltration); SameSite=Strict
+	// blocks CSRF. `Secure` is omitted deliberately: the hub serves plain HTTP on
+	// 127.0.0.1, where the flag would stop the cookie being set at all.
+	return `${SESSION_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_COOKIE_MAX_AGE_SEC}`;
+}
+
+function clearSessionCookieHeader(): string {
+	return `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`;
+}
+
+// --- password-reset throttle (per IP, in-memory) ---
+//
+// The reset endpoint is open by design, so this is its abuse control: 5 failed
+// token attempts from one address hold it for 15 minutes, doubling on repeat,
+// capped at 6h. In-memory is enough — an attacker who can restart the hub to
+// reset a counter already owns the machine; and the token itself is 100 bits,
+// so the throttle is defence-in-depth, not the barrier.
+const resetAttempts = new Map<string, { failures: number; lockedUntil: number }>();
+const RESET_MAX_FAILURES = 5;
+const RESET_BASE_LOCK_MS = 15 * 60 * 1000;
+const RESET_MAX_LOCK_MS = 6 * 60 * 60 * 1000;
+
+/** Seconds the caller must wait before another reset attempt; 0 = allowed. */
+function checkResetThrottle(key: string): number {
+	const rec = resetAttempts.get(key);
+	if (!rec) return 0;
+	const waitMs = rec.lockedUntil - Date.now();
+	return waitMs > 0 ? Math.ceil(waitMs / 1000) : 0;
+}
+
+/** Counts one failed reset attempt; returns the lock it just triggered (seconds), or 0 while still only counting. */
+function registerResetFailure(key: string): number {
+	const rec = resetAttempts.get(key) ?? { failures: 0, lockedUntil: 0 };
+	rec.failures += 1;
+	if (rec.failures >= RESET_MAX_FAILURES) {
+		const lockCount = Math.floor(rec.failures / RESET_MAX_FAILURES);
+		const lockMs = Math.min(RESET_BASE_LOCK_MS * 2 ** (lockCount - 1), RESET_MAX_LOCK_MS);
+		rec.lockedUntil = Date.now() + lockMs;
+	}
+	resetAttempts.set(key, rec);
+	return Math.max(0, Math.ceil((rec.lockedUntil - Date.now()) / 1000));
+}
+
+function resetThrottleClear(key: string): void {
+	resetAttempts.delete(key);
+}
+
+/**
+ * Whether the request may touch the machine's data. Two credentials count,
+ * and under the single-user model they're the same operator either way:
+ * the legacy admin bearer token (automation/scripts, the transition path) or
+ * a valid login-session cookie (what the UI uses after setup + login).
+ */
 function isAdmin(cfg: HubConfig, headers: http.IncomingHttpHeaders): boolean {
 	const provided = bearerToken(headers);
-	return provided.length > 0 && timingSafeEqualStr(provided, cfg.adminToken);
+	if (provided.length > 0 && timingSafeEqualStr(provided, cfg.adminToken)) return true;
+	return hasSession(headers);
 }
 
 /**
@@ -629,6 +728,150 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			log(`step ${step.id} ${ok ? "done" : `failed (${error})`}`);
 			sendJson(res, 200, { ok: true });
 		});
+		return;
+	}
+
+	// --- /api/auth/* — the single-user access layer (plan: usershandler.html) ---
+	//
+	// Status/setup/login/reset are OPEN routes — they're how a session comes to
+	// exist at all — but setup closes permanently once the singleton account row
+	// exists, and login/reset carry their own brute-force limits (lockout
+	// counters on the auth row for login, a per-IP throttle here for reset).
+	// `me`/`logout` need a session and check for it themselves. Everything NOT
+	// under /api/auth (and not an awb per-step-token callback) falls under the
+	// gate that follows this block.
+
+	if (parts[1] === "auth" && parts[2] === "status" && !parts[3] && req.method === "GET") {
+		sendJson(res, 200, { setupCompleted: isSetupComplete() });
+		return;
+	}
+
+	if (parts[1] === "auth" && parts[2] === "setup" && !parts[3] && req.method === "POST") {
+		// The door closes the moment the account exists — checked before even
+		// reading the body, and enforced again by the singleton CHECK constraint
+		// inside createAccount, so a raced double setup loses to a 409 either way.
+		if (isSetupComplete()) {
+			sendJson(res, 409, { error: "setup_already_completed" });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const password = typeof body.password === "string" ? body.password : "";
+			if (password.length < MIN_PASSWORD_LENGTH) {
+				sendJson(res, 400, { error: `password must be at least ${MIN_PASSWORD_LENGTH} characters` });
+				return;
+			}
+			const displayName =
+				typeof body.displayName === "string" && body.displayName.trim() !== "" ? body.displayName.trim() : null;
+			if (displayName !== null && displayName.length > 64) {
+				sendJson(res, 400, { error: "displayName must be at most 64 characters" });
+				return;
+			}
+			try {
+				const { account, recoveryToken } = createAccount({ password, displayName });
+				// Set up = signed in: issue the session now so the user lands on the
+				// workflows screen after saving their recovery token.
+				const session = createSession();
+				res.setHeader("set-cookie", sessionCookieHeader(session.token));
+				log("account created (first-run setup completed)");
+				sendJson(res, 200, { account, recoveryToken });
+			} catch (err) {
+				if (err instanceof AccountError) {
+					sendJson(res, 409, { error: err.code });
+					return;
+				}
+				sendJson(res, 500, { error: String((err as Error).message ?? err) });
+			}
+		});
+		return;
+	}
+
+	if (parts[1] === "auth" && parts[2] === "login" && !parts[3] && req.method === "POST") {
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const password = typeof body.password === "string" ? body.password : "";
+			const verdict = verifyAccountPassword(password);
+			if (!verdict.ok) {
+				// Uniform failure for every wrong-password case; a lockout is
+				// distinguishable only by the 429 + retryAfterSec, never by wording.
+				if (verdict.retryAfterSec !== null) {
+					sendJson(res, 429, { error: "too_many_attempts", retryAfterSec: verdict.retryAfterSec });
+					return;
+				}
+				sendJson(res, 401, { error: "invalid_credentials" });
+				return;
+			}
+			const session = createSession();
+			res.setHeader("set-cookie", sessionCookieHeader(session.token));
+			log("login successful");
+			sendJson(res, 200, { account: getAccount() });
+		});
+		return;
+	}
+
+	if (parts[1] === "auth" && parts[2] === "logout" && !parts[3] && req.method === "POST") {
+		// Server-side invalidation, not just cookie clearing — the row dies here.
+		const token = cookieValue(req.headers, SESSION_COOKIE);
+		if (token) deleteSession(token);
+		res.setHeader("set-cookie", clearSessionCookieHeader());
+		sendJson(res, 200, { ok: true });
+		return;
+	}
+
+	if (parts[1] === "auth" && parts[2] === "me" && !parts[3] && req.method === "GET") {
+		if (!hasSession(req.headers)) {
+			sendJson(res, 401, { error: "login_required" });
+			return;
+		}
+		sendJson(res, 200, { account: getAccount() });
+		return;
+	}
+
+	// The forgot-password route: open by design (it's the recovery channel), so
+	// it carries the strictest throttle in the app — per-IP, 5 failures then a
+	// 15-minute hold, doubling on repeat (in-memory; a restart resetting it is
+	// acceptable for a 128-bit-token target).
+	if (parts[1] === "auth" && parts[2] === "password" && parts[3] === "reset" && !parts[4] && req.method === "POST") {
+		const throttleKey = req.socket.remoteAddress ?? "unknown";
+		const retryAfterSec = checkResetThrottle(throttleKey);
+		if (retryAfterSec > 0) {
+			sendJson(res, 429, { error: "too_many_attempts", retryAfterSec });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const recoveryToken = typeof body.recoveryToken === "string" ? body.recoveryToken : "";
+			const newPassword = typeof body.newPassword === "string" ? body.newPassword : "";
+			if (newPassword.length < MIN_PASSWORD_LENGTH) {
+				sendJson(res, 400, { error: `newPassword must be at least ${MIN_PASSWORD_LENGTH} characters` });
+				return;
+			}
+			const outcome = resetPasswordWithToken(recoveryToken, newPassword);
+			if (!outcome) {
+				const lockedForSec = registerResetFailure(throttleKey);
+				if (lockedForSec > 0) {
+					sendJson(res, 429, { error: "too_many_attempts", retryAfterSec: lockedForSec });
+					return;
+				}
+				sendJson(res, 401, { error: "invalid_token" });
+				return;
+			}
+			resetThrottleClear(throttleKey);
+			// Less friction after a reset: the user is logged straight in (every
+			// OTHER session was just killed by the reset itself).
+			const session = createSession();
+			res.setHeader("set-cookie", sessionCookieHeader(session.token));
+			log("password reset via recovery token");
+			sendJson(res, 200, { account: outcome.account, recoveryToken: outcome.recoveryToken });
+		});
+		return;
+	}
+
+	// --- the access gate ---
+	//
+	// Everything below serves or mutates this machine's data, so it requires the
+	// operator: a valid login session OR the admin bearer token (isAdmin covers
+	// both). The only routes above this line are the auth stack and the awb
+	// per-step-token callbacks, which authenticate on their own.
+	if (!isAdmin(cfg, req.headers)) {
+		sendJson(res, 401, { error: "login_required" });
 		return;
 	}
 

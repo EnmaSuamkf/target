@@ -336,10 +336,19 @@
       <section id="ui">
         <h2>The web UI</h2>
         <p>
-          The UI is a React app served by the hub. It has three tabs across the top &mdash;
+          The UI is a React app served by the hub. Before any of it, a <strong>landing
+          page</strong> introduces the project &mdash; and the first visit on a machine walks
+          through a one-time <strong>setup</strong>: one password, and a <strong>recovery
+          token</strong> shown exactly once (save it &mdash; it&rsquo;s the only way to reset a
+          forgotten password). After that, the app sits behind a <strong>sign-in</strong>;
+          one account per machine, everything still 100% local.
+        </p>
+        <p>
+          Signed in, it has three tabs across the top &mdash;
           <strong>Workflows</strong>, <strong>Templates</strong> and <strong>Settings</strong>
-          &mdash; and a small admin-token button on the right (the hub prints that token when
-          it starts; the UI remembers it for next time).
+          &mdash; with your display name and a <strong>Sign out</strong> button on the right,
+          plus a small admin-token button kept for scripts and automation (you don&rsquo;t need
+          it while signed in).
         </p>
         <figure class="screenshot">
           <img src="ui-workflows.png" alt="The Workflows tab: a horizontal rail of workflow cards across the top — each with its status badge, a rounded progress bar, the step count and percentage — and the selected workflow's detail underneath. A toolbar above the rail offers search, status filters, a New button, and an All workflows button." />
@@ -805,7 +814,7 @@ docker build -t target-agent:latest \
         </p>
         <div class="callout warn">
           <span class="tag">local only</span>
-          <p>The hub binds to <code>127.0.0.1</code> &mdash; nothing listens on the network. Every mutating route needs the admin token (a Bearer header, checked with a timing-safe comparison), and the agent&rsquo;s result callbacks are authenticated with a random per-step token instead.</p>
+          <p>The hub binds to <code>127.0.0.1</code> &mdash; nothing listens on the network. Every <code>/api</code> route needs the operator&rsquo;s credential &mdash; the sign-in session cookie or, for scripts, the admin token (a Bearer header, checked with a timing-safe comparison) &mdash; and the agent&rsquo;s result callbacks are authenticated with a random per-step token instead.</p>
         </div>
       </section>
 
@@ -827,9 +836,16 @@ npm run target:install</code></pre>
         <p>
           Brings up <strong>both</strong> the awb broker (<code>127.0.0.1:8890</code>) and the
           hub (<code>127.0.0.1:8893</code>), waits for both ports, and opens the UI in your
-          browser. It holds the foreground; <strong>Ctrl-C</strong> stops them together. The
-          hub prints its admin token on startup &mdash; the UI asks for it once, the CLI reads
-          it from config automatically.
+          browser. It holds the foreground; <strong>Ctrl-C</strong> stops them together.
+        </p>
+        <p>
+          The browser lands on the <strong>landing page</strong>. First run: <em>Get
+          started</em> sets up this machine&rsquo;s single account (one password; keep the
+          <strong>recovery token</strong> it shows you &mdash; it&rsquo;s displayed once and is
+          the only way to reset a forgotten password; lose both and the documented recovery
+          is wiping <code>~/.target/</code> and reinstalling). Later visits: <em>Sign
+          in</em>. For scripts, the hub still prints its <strong>admin token</strong> on
+          startup &mdash; the CLI reads it from config automatically.
         </p>
         <div class="callout">
           <span class="tag">where state lives</span>
@@ -891,7 +907,7 @@ hub    →  next selected step dispatched              until none remain, then t
             <thead><tr><th>Field</th><th>Default</th><th>Meaning</th></tr></thead>
             <tbody>
               <tr><td><code>host</code> / <code>port</code></td><td><code>127.0.0.1</code> / <code>8893</code></td><td>Bind address and port (kept away from awb&rsquo;s <code>8890</code>).</td></tr>
-              <tr><td><code>adminToken</code></td><td>random, on first run</td><td>Bearer token for every mutating route. Printed at startup.</td></tr>
+              <tr><td><code>adminToken</code></td><td>random, on first run</td><td>Bearer credential for scripts/automation, alongside the sign-in session cookie. Printed at startup.</td></tr>
               <tr><td><code>stepIdleTimeoutMs</code></td><td><code>600000</code> (10 min)</td><td>No sign of progress for this long &rarr; stalled. <em>This</em> is the timeout that matters.</td></tr>
               <tr><td><code>stepIdleWarnMs</code></td><td><code>180000</code> (3 min)</td><td>When the UI starts showing a step as idle. Display only.</td></tr>
               <tr><td><code>stepHardTimeoutMs</code></td><td><code>21600000</code> (6 h)</td><td>Absolute ceiling from <code>started_at</code>, however active.</td></tr>
@@ -906,6 +922,11 @@ hub    →  next selected step dispatched              until none remain, then t
           <table>
             <thead><tr><th>Endpoint</th><th>What it does</th></tr></thead>
             <tbody>
+              <tr><td><code>GET /api/auth/status</code></td><td>Open: whether this machine&rsquo;s account exists yet (drives landing vs. sign-in).</td></tr>
+              <tr><td><code>POST /api/auth/setup</code></td><td>First-run account creation; returns the one-time recovery token and signs you in. Permanent <code>409</code> afterwards.</td></tr>
+              <tr><td><code>POST /api/auth/login</code> / <code>logout</code></td><td>Password-only sign-in (sets the <code>target_session</code> cookie) / sign out (kills the session server-side).</td></tr>
+              <tr><td><code>GET /api/auth/me</code></td><td>The account behind the session cookie (<code>401</code> without one).</td></tr>
+              <tr><td><code>POST /api/auth/password/reset</code></td><td>Forgot password: recovery token + new password &rarr; rotated token, all other sessions killed, signed in. Per-IP throttled.</td></tr>
               <tr><td><code>GET /api/workflows</code></td><td>List workflows with progress % (expires stale steps first).</td></tr>
               <tr><td><code>POST /api/workflows</code></td><td>Create a workflow (+ its hook). Body: <code>{name, workdir?, permissionMode?, runner?, sandbox?, image?, acceptBypassRisk?, templateId?}</code>. <code>sandbox</code> is <code>"host"</code> (default) or <code>"docker"</code> and is validated server-side; <code>image</code> only means anything alongside <code>"docker"</code>, and falls back to <code>target-agent:latest</code>.</td></tr>
               <tr><td><code>GET /api/workflows/:id</code></td><td>Workflow detail + its steps.</td></tr>
@@ -923,6 +944,7 @@ hub    →  next selected step dispatched              until none remain, then t
             </tbody>
           </table>
         </div>
+        <p>Everything except <code>/api/auth/*</code> and the awb callbacks needs the session cookie or the admin Bearer token &mdash; reads included (<code>401 login_required</code> without one).</p>
       </section>
 
       <footer>

@@ -264,9 +264,12 @@ test("GET /api/conversations filters by agent, and refuses an unknown one", asyn
 	assert.equal(bad.status, 400);
 });
 
-test("GET /api/conversations needs the admin token — it returns the operator's own conversations", async () => {
+test("GET /api/conversations needs the operator's credentials — it returns the operator's own conversations", async () => {
+	// Deliberately NO admin token and no session: the access gate answers 401
+	// login_required before the route is even reached.
 	const res = await fetch(`${baseUrl}/api/conversations?runner=claude`);
 	assert.equal(res.status, 401);
+	assert.equal(((await res.json()) as { error: string }).error, "login_required");
 });
 
 test("every conversation is listed, not just a fixed first page, and the total is reported", async () => {
@@ -404,7 +407,7 @@ test("a workflow can be created FROM a conversation: it arrives with that conver
 	//    every step the operator will add — the same delivery a context typed into
 	//    the panel afterwards would get, so it runs once, first, on the shared
 	//    session. Without this the context would sit in a column nobody dispatches.
-	const detail = (await (await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`)).json()) as {
+	const detail = (await (await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`, { headers: adminHeaders() })).json()) as {
 		steps: { kind: string; orderIndex: number; status: string; description: string }[];
 	};
 	const contextSteps = detail.steps.filter((step) => step.kind === "context");
@@ -478,7 +481,7 @@ test("a workflow created without a conversation still has no context step (uncha
 	assert.equal(res.status, 200);
 	const created = (await res.json()) as { workflow: { id: string; conversationContext: string | null } };
 	assert.equal(created.workflow.conversationContext, null);
-	const detail = (await (await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`)).json()) as {
+	const detail = (await (await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`, { headers: adminHeaders() })).json()) as {
 		steps: { kind: string }[];
 	};
 	assert.equal(detail.steps.filter((step) => step.kind === "context").length, 0);

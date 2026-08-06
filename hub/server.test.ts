@@ -56,11 +56,11 @@ test.after(() => {
 });
 
 test("GET /api/runners reports which agent CLIs are installed on this host", async () => {
-	// Read-only and ungated (no admin token): the create form needs it before
-	// any admin action is possible. The exact installed booleans depend on the
-	// machine, so only the shape is pinned: both known runners, each carrying
-	// a boolean.
-	const res = await fetch(`${baseUrl}/api/runners`);
+	// Read-only but gated like every other data route since the single-user
+	// access layer (the create form only exists after login anyway). The exact
+	// installed booleans depend on the machine, so only the shape is pinned:
+	// both known runners, each carrying a boolean.
+	const res = await fetch(`${baseUrl}/api/runners`, { headers: adminHeaders() });
 	assert.equal(res.status, 200);
 	const body = (await res.json()) as { runners: { id: string; installed: boolean }[] };
 	const ids = body.runners.map((r) => r.id).sort();
@@ -92,7 +92,7 @@ test("POST /api/workflows with a templateId seeds the new workflow with the temp
 	const created = (await createRes.json()) as { workflow: { id: string; name: string } };
 	assert.equal(created.workflow.name, "from template");
 
-	const detailRes = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`);
+	const detailRes = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`, { headers: adminHeaders() });
 	assert.equal(detailRes.status, 200);
 	const detail = (await detailRes.json()) as {
 		steps: { description: string; orderIndex: number; acceptanceCriteria: string | null; maxRetries: number; retryIntervalSeconds: number }[];
@@ -119,7 +119,7 @@ test("POST /api/workflows with an unknown templateId is rejected and creates not
 	const body = (await res.json()) as { error: string };
 	assert.equal(body.error, "unknown_template");
 
-	const listRes = await fetch(`${baseUrl}/api/workflows`);
+	const listRes = await fetch(`${baseUrl}/api/workflows`, { headers: adminHeaders() });
 	const list = (await listRes.json()) as { workflows: { name: string }[] };
 	assert.ok(!list.workflows.some((w) => w.name === "should not exist"));
 });
@@ -156,7 +156,7 @@ test("POST /api/workflows/:id/steps/from-template appends the template's steps a
 	});
 	assert.equal(fromTplRes.status, 200);
 
-	const detailRes = await fetch(`${baseUrl}/api/workflows/${workflowId}`);
+	const detailRes = await fetch(`${baseUrl}/api/workflows/${workflowId}`, { headers: adminHeaders() });
 	const detail = (await detailRes.json()) as {
 		steps: { description: string; orderIndex: number; acceptanceCriteria: string | null; maxRetries: number; retryIntervalSeconds: number }[];
 	};
@@ -206,7 +206,7 @@ test("POST /api/workflows/:id/steps/from-template appends the whole template aga
 
 	// The second round lands after the first, in template order — a repeat run of
 	// the same checklist, not a no-op.
-	const detailRes = await fetch(`${baseUrl}/api/workflows/${workflowId}`);
+	const detailRes = await fetch(`${baseUrl}/api/workflows/${workflowId}`, { headers: adminHeaders() });
 	const detail = (await detailRes.json()) as { steps: { description: string; orderIndex: number }[] };
 	assert.equal(detail.steps.length, 4);
 	const byOrder = [...detail.steps].sort((a, b) => a.orderIndex - b.orderIndex);
@@ -250,7 +250,7 @@ test("POST /api/workflows/:id/steps/from-template adds steps that duplicate ones
 	const body = (await fromTplRes.json()) as { added: number };
 	assert.equal(body.added, 2);
 
-	const detailRes = await fetch(`${baseUrl}/api/workflows/${workflowId}`);
+	const detailRes = await fetch(`${baseUrl}/api/workflows/${workflowId}`, { headers: adminHeaders() });
 	const detail = (await detailRes.json()) as { steps: { description: string; orderIndex: number }[] };
 	assert.equal(detail.steps.length, 3);
 	const byOrder = [...detail.steps].sort((a, b) => a.orderIndex - b.orderIndex);
@@ -278,7 +278,7 @@ test("POST /api/workflows/:id/steps/from-template with an unknown templateId is 
 	const body = (await res.json()) as { error: string };
 	assert.equal(body.error, "unknown_template");
 
-	const detailRes = await fetch(`${baseUrl}/api/workflows/${workflowId}`);
+	const detailRes = await fetch(`${baseUrl}/api/workflows/${workflowId}`, { headers: adminHeaders() });
 	const detail = (await detailRes.json()) as { steps: unknown[] };
 	assert.equal(detail.steps.length, 0);
 });
@@ -305,7 +305,7 @@ test("POST /api/workflows without a templateId still creates an empty workflow (
 	assert.equal(res.status, 200);
 	const created = (await res.json()) as { workflow: { id: string } };
 
-	const detailRes = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`);
+	const detailRes = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`, { headers: adminHeaders() });
 	const detail = (await detailRes.json()) as { steps: unknown[] };
 	assert.equal(detail.steps.length, 0);
 });
@@ -395,7 +395,7 @@ test("POST /api/workflows/:id/open-terminal with a resolvable session spawns a t
 	const created = (await createRes.json()) as { workflow: { id: string } };
 	setWorkflowSessionId(created.workflow.id, "sess-abc");
 
-	const detailRes = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`);
+	const detailRes = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`, { headers: adminHeaders() });
 	const detail = (await detailRes.json()) as { workflow: { workdir: string } };
 
 	const calls: { bin: string; args: string[] }[] = [];
@@ -432,7 +432,7 @@ test("POST /api/workflows/:id/open-terminal with a resolvable session spawns a t
  */
 
 test("GET /api/workflows/:id/session-info on an unknown workflow returns unknown_workflow", async () => {
-	const res = await fetch(`${baseUrl}/api/workflows/does-not-exist/session-info`);
+	const res = await fetch(`${baseUrl}/api/workflows/does-not-exist/session-info`, { headers: adminHeaders() });
 	assert.equal(res.status, 404);
 	const body = (await res.json()) as { error: string };
 	assert.equal(body.error, "unknown_workflow");
@@ -446,7 +446,7 @@ test("GET /api/workflows/:id/session-info before any step has reported a session
 	});
 	const created = (await createRes.json()) as { workflow: { id: string } };
 
-	const res = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}/session-info`);
+	const res = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}/session-info`, { headers: adminHeaders() });
 	assert.equal(res.status, 200);
 	const body = (await res.json()) as { sessionId: string | null; harness: string | null; usage: unknown };
 	assert.equal(body.sessionId, null);
@@ -462,7 +462,7 @@ test("GET /api/workflows/:id/session-info with a resolvable session returns the 
 	const created = (await createRes.json()) as { workflow: { id: string } };
 	setWorkflowSessionId(created.workflow.id, "sess-usage");
 
-	const detailRes = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`);
+	const detailRes = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`, { headers: adminHeaders() });
 	const detail = (await detailRes.json()) as { workflow: { workdir: string; harness: string } };
 
 	// Writes the exact transcript file `claude --resume` itself would read, so
@@ -479,7 +479,7 @@ test("GET /api/workflows/:id/session-info with a resolvable session returns the 
 	});
 	fs.writeFileSync(file, `${line}\n`);
 
-	const res = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}/session-info`);
+	const res = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}/session-info`, { headers: adminHeaders() });
 	assert.equal(res.status, 200);
 	const body = (await res.json()) as {
 		sessionId: string;
@@ -543,7 +543,7 @@ test("POST /api/workflows/:id/steps with manualReview: true round-trips through 
 	assert.equal(step.manualReview, true);
 
 	// And on the read path, not just the create response.
-	const detailRes = await fetch(`${baseUrl}/api/workflows/${workflowId}`);
+	const detailRes = await fetch(`${baseUrl}/api/workflows/${workflowId}`, { headers: adminHeaders() });
 	const detail = (await detailRes.json()) as { steps: { manualReview: boolean }[] };
 	assert.equal(detail.steps[0].manualReview, true);
 });
@@ -596,13 +596,15 @@ test("POST .../continue requires an admin token", async () => {
 
 	const noToken = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/${step.id}/continue`, { method: "POST" });
 	assert.equal(noToken.status, 401);
-	assert.equal(((await noToken.json()) as { error: string }).error, "unauthorized");
+	// The access gate answers first (no session, no token): login_required.
+	assert.equal(((await noToken.json()) as { error: string }).error, "login_required");
 
 	const badToken = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps/${step.id}/continue`, {
 		method: "POST",
 		headers: { "content-type": "application/json", authorization: "Bearer not-the-admin-token" },
 	});
 	assert.equal(badToken.status, 401);
+	assert.equal(((await badToken.json()) as { error: string }).error, "login_required");
 
 	// The hold is untouched by either attempt.
 	assert.equal(getStep(step.id)?.status, "waiting");
@@ -626,7 +628,7 @@ test("POST .../continue on a waiting step returns the step, now done", async () 
 	assert.equal(getStep(step.id)?.status, "done");
 
 	// It was the only step, so the workflow finished on the release.
-	const detailRes = await fetch(`${baseUrl}/api/workflows/${workflowId}`);
+	const detailRes = await fetch(`${baseUrl}/api/workflows/${workflowId}`, { headers: adminHeaders() });
 	const detail = (await detailRes.json()) as { workflow: { status: string } };
 	assert.equal(detail.workflow.status, "completed");
 });
@@ -705,7 +707,7 @@ test("a template's manualReview flag is carried onto the steps it seeds, both wa
 		body: JSON.stringify({ name: "from gated template", templateId: template.id }),
 	});
 	const created = (await createRes.json()) as { workflow: { id: string } };
-	const seeded = (await (await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`)).json()) as {
+	const seeded = (await (await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`, { headers: adminHeaders() })).json()) as {
 		steps: { orderIndex: number; manualReview: boolean }[];
 	};
 	const seededByOrder = [...seeded.steps].sort((a, b) => a.orderIndex - b.orderIndex);
@@ -783,7 +785,7 @@ test("POST .../steps/:stepId/open-terminal resumes THAT step's session, not the 
 	// one, which is exactly the confusion the per-step route exists to avoid.
 	setWorkflowSessionId(workflowId, "sess-newer");
 
-	const detail = (await (await fetch(`${baseUrl}/api/workflows/${workflowId}`)).json()) as {
+	const detail = (await (await fetch(`${baseUrl}/api/workflows/${workflowId}`, { headers: adminHeaders() })).json()) as {
 		workflow: { workdir: string };
 	};
 
@@ -874,7 +876,7 @@ test("POST /api/workflows/:id/steps with afterStepId inserts the step right afte
 	const inserted = (await res.json()) as StepBody;
 	assert.equal(inserted.step.manualReview, true);
 
-	const detail = (await (await fetch(`${baseUrl}/api/workflows/${workflowId}`)).json()) as {
+	const detail = (await (await fetch(`${baseUrl}/api/workflows/${workflowId}`, { headers: adminHeaders() })).json()) as {
 		steps: { description: string; orderIndex: number }[];
 	};
 	const byOrder = [...detail.steps].sort((a, b) => a.orderIndex - b.orderIndex);
@@ -900,6 +902,6 @@ test("POST /api/workflows/:id/steps with an afterStepId from another workflow re
 	assert.equal(res.status, 400);
 	assert.equal(((await res.json()) as { error: string }).error, "unknown step");
 
-	const detail = (await (await fetch(`${baseUrl}/api/workflows/${workflowId}`)).json()) as { steps: unknown[] };
+	const detail = (await (await fetch(`${baseUrl}/api/workflows/${workflowId}`, { headers: adminHeaders() })).json()) as { steps: unknown[] };
 	assert.equal(detail.steps.length, 1);
 });

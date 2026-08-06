@@ -111,7 +111,7 @@ test("POST /api/workflows rejects an unknown runner and creates nothing", async 
 	const body = (await res.json()) as { error: string };
 	assert.match(body.error, /invalid runner/);
 
-	const listRes = await fetch(`${baseUrl}/api/workflows`);
+	const listRes = await fetch(`${baseUrl}/api/workflows`, { headers: adminHeaders() });
 	const list = (await listRes.json()) as { workflows: { name: string }[] };
 	assert.ok(!list.workflows.some((w) => w.name === "bad runner workflow"));
 });
@@ -171,7 +171,7 @@ test("GET /api/workflows/:id/session-info reads usage off a free-code .jsonl ses
 	);
 	setWorkflowSessionId(workflow.id, file);
 
-	const res = await fetch(`${baseUrl}/api/workflows/${workflow.id}/session-info`);
+	const res = await fetch(`${baseUrl}/api/workflows/${workflow.id}/session-info`, { headers: adminHeaders() });
 	assert.equal(res.status, 200);
 	const body = (await res.json()) as {
 		sessionId: string;

@@ -508,7 +508,11 @@ test("GET /api/workflows/:id exposes the step kind so the UI can pin it", async 
 	const { workflow } = makeWorkflow({ steps: 2 });
 	setConversationContext(workflow.id, "API-BG");
 
-	const res = await fetch(`http://127.0.0.1:${addr.port}/api/workflows/${workflow.id}`);
+	// Data routes sit behind the access gate now — the admin token stands in
+	// for the logged-in operator here.
+	const res = await fetch(`http://127.0.0.1:${addr.port}/api/workflows/${workflow.id}`, {
+		headers: { authorization: `Bearer ${cfg.adminToken}` },
+	});
 	const body = (await res.json()) as { workflow: { progress: { total: number } }; steps: { kind: string }[] };
 	assert.deepEqual(
 		body.steps.map((s) => s.kind),

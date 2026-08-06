@@ -410,7 +410,7 @@ test("a workflow reports what the clone dialog needs to seed itself", async () =
 	const own = createWorkflow("has no checkout");
 
 	const read = async (id: string) =>
-		(await (await fetch(`${baseUrl}/api/workflows/${id}`)).json()) as {
+		(await (await fetch(`${baseUrl}/api/workflows/${id}`, { headers: adminHeaders() })).json()) as {
 			workflow: { chosenWorkdir: string | null; permissionMode: string | null; workdir: string };
 		};
 

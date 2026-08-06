@@ -16,22 +16,14 @@
 	min-height: 0;
 }
 
-/* Standing warning while no admin token is stored: everything mutating will
-   401, and that's worth knowing before the first click rather than after. */
-.tokenNotice {
-	padding: var(--space-3) var(--space-4);
-	border: 1px solid var(--warn-200);
-	border-radius: var(--radius);
-	background: var(--warn-50);
-	color: var(--warn-700);
-	font-size: var(--text-sm);
-	line-height: 1.55;
-}
-
-.tokenNotice code {
-	padding: 0 var(--space-1);
-	border-radius: var(--radius-sm);
-	background: rgba(180, 83, 9, 0.1);
+/* Full-screen centring for the gate's loading / hub-unreachable states (the
+   landing, setup, login and reset views paint their own pages). */
+.gateCenter {
+	min-height: 100%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: var(--space-6);
 }
 
 /* The workflows view is a vertical stack: the workflow rail across the top
