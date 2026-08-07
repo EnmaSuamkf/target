@@ -22,6 +22,7 @@ process.env.TARGET_HOME = tmpHome;
 process.env.AWB_HOME = tmpHome;
 
 const {
+	beginRetry,
 	completeStep,
 	getStep,
 	getWorkflow,
@@ -283,22 +284,26 @@ test("resume after a partial run with steps 1,3,5,7,9 selected finishes only tho
 });
 
 /**
- * The completed-status guard (advance(), workflow.ts): nextPendingStep
- * returning null must NOT be read as "workflow done" when there are
- * pending-but-unselected steps left. These drive the real Start/Resume/Restart
- * path with an empty selection — safe to call for real here because 0
- * selected steps means nextPendingStep is null immediately, so advance()
- * returns before ever reaching dispatchStep (no network call is made).
+ * The drained-run settle (advance(), workflow.ts): nextPendingStep returning
+ * null must NOT be read as "workflow done" when there are pending-but-
+ * unselected steps left — and the workflow must not stay `running` either
+ * (nothing is in flight, no callback is coming, and a `running` badge
+ * disables Start). It settles to the status the steps add up to: draft while
+ * real pending work remains, completed only when there is truly none. These
+ * drive the real Start/Resume/Restart path with an empty selection — safe to
+ * call for real here because 0 selected steps means nextPendingStep is null
+ * immediately, so advance() returns before ever reaching dispatchStep (no
+ * network call is made).
  */
-test("0-selected Start leaves the workflow running, not falsely completed", async () => {
+test("0-selected Start settles the workflow to draft, not running, not falsely completed", async () => {
 	const { workflow, steps } = makeWorkflow(5);
 	await startWorkflow(workflow.id, cfg, silent, []);
-	assert.equal(getWorkflow(workflow.id)?.status, "running");
+	assert.equal(getWorkflow(workflow.id)?.status, "draft");
 	assert.ok(listSteps(workflow.id).every((s) => s.status === "pending"));
 	assert.equal(nextPendingStep(workflow.id), null); // nothing selected
 });
 
-test("0-selected Resume leaves the workflow running, not falsely completed", async () => {
+test("0-selected Resume settles the workflow to draft, not running, not falsely completed", async () => {
 	const { workflow, steps } = makeWorkflow(5);
 	// One step already finished (set directly — no dispatch involved), workflow
 	// paused, exactly the state a real pause mid-run would leave behind.
@@ -307,12 +312,12 @@ test("0-selected Resume leaves the workflow running, not falsely completed", asy
 	pauseWorkflow(workflow.id);
 
 	await resumeWorkflow(workflow.id, cfg, silent, []);
-	assert.equal(getWorkflow(workflow.id)?.status, "running");
+	assert.equal(getWorkflow(workflow.id)?.status, "draft");
 	// 4 steps remain pending and unselected — resume must not touch or complete them.
 	assert.equal(listSteps(workflow.id).filter((s) => s.status === "pending").length, 4);
 });
 
-test("0-selected Restart leaves the workflow running, not falsely completed, and resets nothing", async () => {
+test("0-selected Restart settles the workflow to draft, not running, not falsely completed, and resets nothing", async () => {
 	const { workflow, steps } = makeWorkflow(5);
 	// Only some steps done — 2 remain pending, so there IS real pending work
 	// left; a 0-selected restart must not paper over that with "completed".
@@ -323,7 +328,7 @@ test("0-selected Restart leaves the workflow running, not falsely completed, and
 	// default after insertWorkflow) already qualifies, no pause needed.
 
 	await restartWorkflow(workflow.id, cfg, silent, []);
-	assert.equal(getWorkflow(workflow.id)?.status, "running");
+	assert.equal(getWorkflow(workflow.id)?.status, "draft");
 	// Nothing selected → resetSteps touches nothing; the 3 done steps stay done,
 	// the 2 pending steps are left alone (still pending, never dispatched).
 	assert.equal(getStep(steps[0].id)?.status, "done");
@@ -378,8 +383,10 @@ test("removing the last pending steps of a running workflow settles it to comple
 	setWorkflowStatus(workflow.id, "running"); // engine idle: nothing in flight
 
 	removeStep(workflow.id, steps[1].id);
-	// One pending step remains — the engine may still act, so hands off.
-	assert.equal(getWorkflow(workflow.id)?.status, "running");
+	// One pending step remains with the engine idle and nothing in flight —
+	// the run is stranded (no callback is coming for it), so the heal settles
+	// it to draft: Start owns what happens to the remaining step now.
+	assert.equal(getWorkflow(workflow.id)?.status, "draft");
 
 	removeStep(workflow.id, steps[2].id);
 	// Now every remaining step is done and nothing can ever call back: settled.
@@ -427,6 +434,48 @@ test("the read-path heal fixes a workflow marked completed while a step is still
 	expireStale(cfg, silent);
 
 	assert.equal(getWorkflow(workflow.id)?.status, "failed");
+});
+
+test("the read-path heal settles a stranded running workflow (idle, pending steps, no retry wait) to draft", () => {
+	// The state rows written by the pre-settle engine are stuck in: running,
+	// nothing in flight, pending steps (selected or not) nobody is coming for.
+	// It must heal to draft on the next read, not sit running with Start
+	// disabled forever.
+	const { workflow, steps } = makeWorkflow(3);
+	completeStep(steps[0].id, { ok: true });
+	setWorkflowStatus(workflow.id, "running"); // stranded: engine idle
+
+	expireStale(cfg, silent); // runs on every workflow GET
+
+	assert.equal(getWorkflow(workflow.id)?.status, "draft");
+	assert.equal(getStep(steps[1].id)?.status, "pending"); // untouched, Start owns it now
+	assert.equal(getStep(steps[2].id)?.status, "pending");
+});
+
+test("the read-path heal settles a stranded running workflow with a failed step to failed", () => {
+	const { workflow, steps } = makeWorkflow(3);
+	completeStep(steps[0].id, { ok: false, error: "boom" });
+	setWorkflowStatus(workflow.id, "running"); // stranded with a red bar
+
+	expireStale(cfg, silent);
+
+	assert.equal(getWorkflow(workflow.id)?.status, "failed");
+});
+
+test("the read-path heal leaves a live retry wait running", () => {
+	// beginRetry parks the step back at pending with retry_count bumped and the
+	// re-dispatch already scheduled (the retry path dispatches directly, never
+	// through advance()). Healing THAT to draft would pull the rug from under a
+	// retry that is about to fire — the badge is telling the truth there.
+	const { workflow, steps } = makeWorkflow(2);
+	completeStep(steps[0].id, { ok: true });
+	setWorkflowStatus(workflow.id, "running");
+	beginRetry(steps[1].id); // -> pending, retryCount 1: mid-retry-wait
+
+	expireStale(cfg, silent);
+
+	assert.equal(getWorkflow(workflow.id)?.status, "running");
+	assert.equal(getStep(steps[1].id)?.status, "pending");
 });
 
 test("the read-path heal leaves workflows with pending steps strictly alone", () => {

@@ -225,7 +225,10 @@ export interface Step {
 	 * Whether this step is part of the current run selection. The sequential
 	 * engine only ever dispatches selected steps, so Start/Resume/Restart run
 	 * exactly the chosen subset. New steps default to selected (so workflows
-	 * that never use this feature keep running everything), but an explicit
+	 * that never use this feature keep running everything), with one exception:
+	 * a step appended while the workflow is mid-run lands UNSELECTED (see
+	 * `addStep` in workflow.ts), because nobody ticked it and the engine must
+	 * not dispatch it the moment the in-flight step finishes. An explicit
 	 * empty selection via `setStepSelection` marks every step unselected —
 	 * "select nothing" means nothing runs, not "run everything".
 	 *
@@ -780,6 +783,14 @@ export function insertStep(
 		 * `afterOrderIndex` when both are given.
 		 */
 		orderIndex?: number;
+		/**
+		 * Whether the step joins the run selection. Omitted = true, the
+		 * historical column default (a workflow whose steps were all just
+		 * created runs everything on Start). `addStep` passes false when the
+		 * workflow is mid-run: the operator never ticked that box, so the
+		 * engine must not pick the step up on the next dispatch decision.
+		 */
+		selected?: boolean;
 	} = {},
 ): Step {
 	const database = open();
@@ -834,14 +845,14 @@ export function insertStep(
 		lastProgressKind: null,
 		lastProgressToken: null,
 		phase: "exec",
-		selected: true,
+		selected: options.selected !== false,
 		statusManual: false,
 		statusManualAt: null,
 	};
 	database
 		.prepare(
-			`INSERT INTO steps (id, workflow_id, kind, order_index, description, status, callback_token, created_at, acceptance_criteria, manual_review, use_subagent, max_retries, retry_interval_seconds)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO steps (id, workflow_id, kind, order_index, description, status, callback_token, created_at, acceptance_criteria, manual_review, use_subagent, max_retries, retry_interval_seconds, selected)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			step.id,
@@ -857,6 +868,7 @@ export function insertStep(
 			step.useSubagent ? 1 : 0,
 			step.maxRetries,
 			step.retryIntervalSeconds,
+			step.selected ? 1 : 0,
 		);
 	return step;
 }

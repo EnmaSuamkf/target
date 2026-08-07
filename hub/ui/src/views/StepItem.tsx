@@ -90,8 +90,8 @@ export function StepItem({
 	onContinue: (id: string) => void;
 	/** Opens a terminal on this step's own session, not the workflow's newest. */
 	onOpenConversation: (id: string) => void;
-	/** Adds a step immediately after this one, so it runs next. Resolves false when the server refused it, which keeps the dialog open on its typed-in text. */
-	onAddStepAfter: (id: string, input: StepConfigInput, staged?: StagedStepImages) => Promise<boolean>;
+	/** Adds a step immediately after this one, so it runs next. Resolves null when the server refused it, which keeps the dialog open on its typed-in text. */
+	onAddStepAfter: (id: string, input: StepConfigInput, staged?: StagedStepImages) => Promise<Step | null>;
 	/** Forces the step's status by hand; never runs the step. */
 	onSetStatus: (id: string, status: OverridableStepStatus) => void;
 	/** Swaps this step with its neighbour, so it runs one place earlier or later. */

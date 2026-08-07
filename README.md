@@ -147,6 +147,17 @@ Notes on behaviour worth knowing:
   no-op. A step unticks itself the moment it finishes **Done**, so the boxes keep
   meaning "what the next run should do"; a step that **failed** stays ticked,
   since that's the one to pick up. Tick a finished step again to re-run it.
+  The boxes are synced to the hub on every toggle, not only at Start — so a step
+  unticked mid-run really is skipped when the in-flight step finishes, and a
+  pending one ticked mid-run really is picked up. For the same reason a step
+  added while the workflow is running (or waiting at a review gate) lands
+  **unticked**: nobody selected it, so it won't run until you tick it. The one
+  exception is the correction step added from a step held at its review gate —
+  it lands ticked, because the whole point is that Continue runs it next. And
+  when the ticked steps have all finished while unticked pending steps remain,
+  the run is over: the workflow settles back to **draft** (or **failed** if a
+  step failed) instead of sitting **running** with nothing in flight — so you
+  can tick the remaining steps and Start again.
 - **One Start button.** It maps to the action that fits the status — `start`
   when draft, `resume` when paused, `restart` when completed or failed.
 - **Clone.** Beside the run controls: copies the open workflow into a new one

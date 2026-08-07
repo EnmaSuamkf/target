@@ -683,26 +683,44 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		});
 	};
 
-	// Returns whether the step really landed, so the dialog stays open (holding
-	// what was typed) when the server refuses it.
+	// Returns the step that really landed (null when the server refused it), so
+	// the dialog stays open (holding what was typed) on failure and the detail
+	// pane can tick the new step's box on success — the gate-inserted step is
+	// dispatched next on Continue, and the checkbox must say so.
 	const handleAddStepAfter = async (
 		afterStepId: string,
 		input: StepConfigInput,
 		staged?: StagedStepImages,
-	): Promise<boolean> => {
-		if (!selectedId) return false;
-		return await act(
+	): Promise<Step | null> => {
+		if (!selectedId) return null;
+		let created: Step | null = null;
+		const ok = await act(
 			"Could not add the step",
 			async () => {
-				const step = await api.addStep(selectedId, input, afterStepId);
+				created = await api.addStep(selectedId, input, afterStepId);
 				if (staged) {
-					await uploadImages(selectedId, "description", step.id, staged.description);
-					await uploadImages(selectedId, "acceptance", step.id, staged.acceptance);
+					await uploadImages(selectedId, "description", created.id, staged.description);
+					await uploadImages(selectedId, "acceptance", created.id, staged.acceptance);
 				}
 				toast.success("Step added — it runs next.");
 			},
 			refreshCurrent,
 		);
+		return ok ? created : null;
+	};
+
+	/**
+	 * Pushes the checkboxes to the hub on every toggle, so the selection the
+	 * engine dispatches from is the one on screen — not the one Start was
+	 * pressed with. Fire-and-forget rather than `act`: ticking a box must not
+	 * lock the controls behind `busy` (least of all mid-run, which is exactly
+	 * when this matters), and a failure is reported without reverting the box —
+	 * the next toggle or Start resends the set.
+	 */
+	const handleSelectionChange = (stepIds: string[]): void => {
+		const id = selectedRef.current;
+		if (!id) return;
+		api.setStepSelection(id, stepIds).catch((err) => reportError(err, "Could not save the step selection"));
 	};
 
 	// Releasing a manual-review gate is not destructive (it approves work that
@@ -903,6 +921,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								onSetStepStatus={(id, status) => void handleSetStepStatus(id, status)}
 								onMoveStep={(id, direction) => void handleMoveStep(id, direction)}
 								onAddStepsFromTemplate={handleAddStepsFromTemplate}
+								onSelectionChange={handleSelectionChange}
 							/>
 						) : (
 							// The "pick something" placeholder is a two-pane idea: with only
