@@ -2,11 +2,72 @@ import styles from "./LandingView.module.css";
 
 /**
  * The public landing page — what anyone opening the hub sees before signing
- * in. It's the project's storefront: what Target is, what you can do with it,
- * and why it's built the way it is, pitched the way you'd show it to a user or
- * an investor. The only doors forward are Sign in (always) and Get started
- * (only while this machine has never been set up).
+ * in. It's the project's storefront, and it argues one idea rather than listing
+ * features: **Workflow Driven Development**. The unit of work is not the
+ * prompt, it's the workflow — ordered steps, an acceptance criterion on each,
+ * one agent running them autonomously (in Docker if you want), and numbers at
+ * the end. Everything on the page is a consequence of that claim.
+ *
+ * The only doors forward are Sign in (always) and Get started (only while this
+ * machine has never been set up).
  */
+
+/** The four pillars, in the order the argument needs them: determinism, judgement, autonomy, measurement. */
+const PILLARS = [
+	{
+		title: "Deterministic by construction",
+		body: "A workflow is an explicit, ordered list of steps you can read, reorder, re-run and save as a template. The same workflow takes the same path every time — the agent chooses how to do a step, never which step comes next.",
+	},
+	{
+		title: "A judge on every step",
+		body: "Give a step an acceptance criterion and it is graded against it before the workflow may advance. A rejected step retries with the judge's reason attached, so the second attempt fixes the actual gap instead of rolling the dice again.",
+	},
+	{
+		title: "Human gates where they matter",
+		body: "Mark the steps a person must sign off — a migration, a deploy, a public PR. The run stops there and waits for you, and only there. Everything else keeps moving without you.",
+	},
+	{
+		title: "Autonomous, sandboxed runs",
+		body: "Start a workflow and walk away. Steps run unattended on your harness of choice, on the host or isolated in a Docker container, with a watchdog that tells a hung agent apart from one that's simply thinking.",
+	},
+	{
+		title: "Metrics on every run",
+		body: "Live progress, per-step timings, pass/fail history, token and context usage, and the reason a step stalled — kept per step, so \"is this actually making us faster?\" is a question with an answer.",
+	},
+	{
+		title: "Local-first, no cloud",
+		body: "No account, no telemetry, no remote server. Workflows, steps, results and attachments live in one folder on this machine — yours to back up, inspect or delete.",
+	},
+] as const;
+
+/** The four beats of a run, matching the engine's real lifecycle. */
+const HOW = [
+	{
+		title: "Shape the workflow",
+		body: "Break the goal into steps and write what each one has to achieve. Attach references, mark the steps a human must approve, or stamp the whole thing from a saved template.",
+	},
+	{
+		title: "Set the bar per step",
+		body: "Add the acceptance criterion the step will be graded on. It's given to the agent up front — so it aims at the target — and to the judge afterwards.",
+	},
+	{
+		title: "Let it run",
+		body: "One dedicated agent takes the steps in order on a single continuous conversation, on your machine or inside Docker, while you do something else.",
+	},
+	{
+		title: "Read the result",
+		body: "Every step lands with a verdict, a duration and a written result. Re-run one step, resume the run, or open the live conversation and talk to the agent yourself.",
+	},
+] as const;
+
+/** The mock workflow in the hero: what the product looks like mid-run, without a screenshot to keep in sync. */
+const MOCK_STEPS = [
+	{ label: "Research the payments API", state: "passed" as const },
+	{ label: "Implement the webhook handler", state: "passed" as const },
+	{ label: "Write tests · judge running", state: "running" as const },
+	{ label: "Open the pull request", state: "queued" as const },
+];
+
 export function LandingView({
 	setupCompleted,
 	onGetStarted,
@@ -29,6 +90,11 @@ export function LandingView({
 					</span>
 					<span className={styles.brandName}>The Target Project</span>
 				</div>
+				<div className={styles.navLinks}>
+					<a href="#method">The method</a>
+					<a href="#pillars">How it holds up</a>
+					<a href="#speed">Why it's faster</a>
+				</div>
 				<div className={styles.navActions}>
 					<button type="button" className="btn" onClick={onSignIn}>
 						Sign in
@@ -42,14 +108,184 @@ export function LandingView({
 			</nav>
 
 			<header className={styles.hero}>
-				<p className={styles.kicker}>Local-first agent orchestration</p>
-				<h1 className={styles.headline}>
-					Put your coding agents on rails.
-				</h1>
-				<p className={styles.tagline}>
-					Target turns a goal into a queue of steps and drives one dedicated agent through them — each step
-					checked against your acceptance criteria, each run resuming the same conversation, everything stored
-					on your machine.
+				<div className={styles.heroInner}>
+					<div className={styles.heroCopy}>
+						<p className={styles.kicker}>Workflow Driven Development</p>
+						<h1 className={styles.headline}>Your next feature is a workflow, not a prompt.</h1>
+						<p className={styles.tagline}>
+							WDD is a simple discipline: stop handing an agent one big prompt and hoping. Break the goal into
+							ordered steps, put an acceptance criterion on each one, and let a dedicated agent run the whole
+							thing — autonomously, sandboxed in Docker, judged at every step, measured end to end.
+						</p>
+						<div className={styles.heroActions}>
+							{!setupCompleted && (
+								<button type="button" className="btn btn--primary btn--lg" onClick={onGetStarted}>
+									Set up this machine →
+								</button>
+							)}
+							<button
+								type="button"
+								className={`btn ${setupCompleted ? "btn--primary" : ""} btn--lg`}
+								onClick={onSignIn}
+							>
+								Sign in
+							</button>
+						</div>
+						<p className={styles.heroNote}>
+							{setupCompleted
+								? "This machine already has its account — sign in to reach your workflows."
+								: "First time here? Setup takes a minute: one password, one recovery token. Nothing leaves the machine."}
+						</p>
+					</div>
+
+					<div className={styles.mock} aria-hidden="true">
+						<div className={styles.mockBar}>
+							<span className={styles.mockName}>add-payment-webhook</span>
+							<span className={styles.mockBadge}>running in docker</span>
+						</div>
+						<ol className={styles.mockSteps}>
+							{MOCK_STEPS.map((step, index) => (
+								<li key={step.label} className={styles[step.state]}>
+									<span className={styles.mockDot} />
+									<span className={styles.mockIndex}>{index + 1}</span>
+									<span className={styles.mockLabel}>{step.label}</span>
+									<span className={styles.mockState}>{step.state}</span>
+								</li>
+							))}
+						</ol>
+						<div className={styles.mockFoot}>
+							<div className={styles.mockTrack}>
+								<div className={styles.mockFill} />
+							</div>
+							<span>2 of 4 passed · 11m 42s · 0 human interrupts</span>
+						</div>
+					</div>
+				</div>
+
+				<dl className={styles.stats}>
+					<div className={styles.stat}>
+						<dt>~50%</dt>
+						<dd>more throughput per developer, once the babysitting and the rework are gone</dd>
+					</div>
+					<div className={styles.stat}>
+						<dt>100%</dt>
+						<dd>of steps graded against their criterion before the next one starts</dd>
+					</div>
+					<div className={styles.stat}>
+						<dt>0</dt>
+						<dd>context re-explained — one workflow, one agent, one continuous conversation</dd>
+					</div>
+				</dl>
+			</header>
+
+			<section className={styles.section} id="method" aria-labelledby="method-title">
+				<p className={styles.eyebrow}>The method</p>
+				<h2 className={styles.sectionTitle} id="method-title">
+					The unit of work is the workflow, not the prompt
+				</h2>
+				<p className={styles.sectionLede}>
+					Agents got good enough to do the work and stayed bad at deciding what the work is. WDD moves that
+					decision back to you — once, up front — and leaves the agent the part it's actually good at.
+				</p>
+				<div className={styles.compare}>
+					<article className={`${styles.compareCol} ${styles.before}`}>
+						<h3>Prompt driven</h3>
+						<ul>
+							<li>One long prompt carries the whole goal, and the agent decides where to start.</li>
+							<li>Context is re-explained every session, and quietly lost when the thread compacts.</li>
+							<li>"Looks right" is the only quality gate there is.</li>
+							<li>You sit in front of a terminal to know whether it's still alive.</li>
+							<li>One bad turn poisons the rest, and you restart from zero.</li>
+							<li>Nothing is measured, so nothing improves on purpose.</li>
+						</ul>
+					</article>
+					<article className={`${styles.compareCol} ${styles.after}`}>
+						<h3>Workflow driven</h3>
+						<ul>
+							<li>The goal is decomposed once into ordered steps you can read, reorder and re-run.</li>
+							<li>One agent, one continuous conversation — step twenty still remembers step one.</li>
+							<li>Every step is graded against a written criterion before the next one begins.</li>
+							<li>The run is autonomous: it carries on in Docker while you do something else.</li>
+							<li>A failed step retries alone, with the judge's reason attached.</li>
+							<li>Every run leaves timings, verdicts and results behind.</li>
+						</ul>
+					</article>
+				</div>
+			</section>
+
+			<section className={styles.section} id="pillars" aria-labelledby="pillars-title">
+				<p className={styles.eyebrow}>How it holds up</p>
+				<h2 className={styles.sectionTitle} id="pillars-title">
+					Determinism you can inspect, autonomy you can leave alone
+				</h2>
+				<div className={styles.grid}>
+					{PILLARS.map((pillar) => (
+						<article key={pillar.title} className={styles.card}>
+							<h3>{pillar.title}</h3>
+							<p>{pillar.body}</p>
+						</article>
+					))}
+				</div>
+			</section>
+
+			<section className={styles.section} aria-labelledby="how-title">
+				<p className={styles.eyebrow}>The loop</p>
+				<h2 className={styles.sectionTitle} id="how-title">
+					How a run actually goes
+				</h2>
+				<ol className={styles.steps}>
+					{HOW.map((item, index) => (
+						<li key={item.title}>
+							<span className={styles.stepNum}>{index + 1}</span>
+							<div>
+								<h3>{item.title}</h3>
+								<p>{item.body}</p>
+							</div>
+						</li>
+					))}
+				</ol>
+			</section>
+
+			<section className={styles.band} id="speed" aria-labelledby="speed-title">
+				<div className={styles.bandInner}>
+					<p className={styles.eyebrow}>Why it's faster</p>
+					<h2 className={styles.sectionTitle} id="speed-title">
+						Where the ~50% comes from
+					</h2>
+					<p className={styles.sectionLede}>
+						Not from a faster model. From three costs that workflows delete outright.
+					</p>
+					<div className={styles.reasons}>
+						<article>
+							<h3>You stop babysitting</h3>
+							<p>
+								A prompt-driven session needs you present at every turn. A workflow needs you at the gates you
+								chose — the rest of the run happens while you're in another repo, another meeting, or asleep.
+							</p>
+						</article>
+						<article>
+							<h3>Rework stops compounding</h3>
+							<p>
+								Most lost time is work built on a step that was already wrong. Judging each step catches that at
+								step three instead of step eleven, when it costs one retry rather than a rewrite.
+							</p>
+						</article>
+						<article>
+							<h3>The context tax disappears</h3>
+							<p>
+								No re-describing the codebase, the conventions or the last decision. The workflow's agent has
+								carried them since step one, and every result stays on disk.
+							</p>
+						</article>
+					</div>
+				</div>
+			</section>
+
+			<section className={styles.cta} aria-labelledby="cta-title">
+				<h2 id="cta-title">Run your first workflow today</h2>
+				<p>
+					Bring the harness you already use — Claude Code or free-code — point it at a repo, and give it three
+					steps. Everything stays on this machine.
 				</p>
 				<div className={styles.heroActions}>
 					{!setupCompleted && (
@@ -65,96 +301,12 @@ export function LandingView({
 						Sign in
 					</button>
 				</div>
-				<p className={styles.heroNote}>
-					{setupCompleted
-						? "This machine already has its account — sign in to reach your workflows."
-						: "First time here? Set up takes a minute: one password, one recovery token."}
-				</p>
-			</header>
-
-			<section className={styles.section} aria-label="Features">
-				<h2 className={styles.sectionTitle}>What you can do with Target</h2>
-				<div className={styles.grid}>
-					<article className={styles.card}>
-						<h3>Workflows, not prompts</h3>
-						<p>
-							Break a goal into ordered steps — "research", "implement", "verify" — and let the engine run them
-							one after another while you watch progress live.
-						</p>
-					</article>
-					<article className={styles.card}>
-						<h3>One agent per workflow</h3>
-						<p>
-							Every workflow owns a dedicated agent with a single continuous conversation, so context from step
-							one is still there at step twenty.
-						</p>
-					</article>
-					<article className={styles.card}>
-						<h3>Built-in quality gates</h3>
-						<p>
-							Give a step acceptance criteria and the agent judges its own work against them — rejected steps
-							retry with feedback. Add a manual review gate where a human should sign off.
-						</p>
-					</article>
-					<article className={styles.card}>
-						<h3>Templates</h3>
-						<p>
-							Save a proven step sequence once — a release checklist, a PR review pass — and stamp it onto any
-							new workflow in one click.
-						</p>
-					</article>
-					<article className={styles.card}>
-						<h3>Bring your own agent</h3>
-						<p>
-							Runs on the harness you already use — Claude Code or free-code — on the host or sandboxed in
-							Docker. Import an existing conversation as a workflow's starting context.
-						</p>
-					</article>
-					<article className={styles.card}>
-						<h3>100% local</h3>
-						<p>
-							No cloud account, no telemetry, no remote server. Workflows, steps, attachments and your account
-							live in one folder on this machine — yours to back up or delete.
-						</p>
-					</article>
-				</div>
-			</section>
-
-			<section className={styles.section} aria-label="How it works">
-				<h2 className={styles.sectionTitle}>How it works</h2>
-				<ol className={styles.steps}>
-					<li>
-						<span className={styles.stepNum}>1</span>
-						<div>
-							<h3>Define the path</h3>
-							<p>Write the steps, set acceptance criteria and review gates, attach reference images.</p>
-						</div>
-					</li>
-					<li>
-						<span className={styles.stepNum}>2</span>
-						<div>
-							<h3>Agents run it</h3>
-							<p>
-								The engine dispatches each step to the workflow's agent and verifies the result before moving
-								on — stalled runs are detected and retried, not left hanging.
-							</p>
-						</div>
-					</li>
-					<li>
-						<span className={styles.stepNum}>3</span>
-						<div>
-							<h3>You stay in control</h3>
-							<p>
-								Pause, resume, restart, re-run a single step, or open the live conversation in a terminal and
-								talk to the agent yourself.
-							</p>
-						</div>
-					</li>
-				</ol>
 			</section>
 
 			<footer className={styles.footer}>
-				<p>The Target Project — agentic workflows that run on your machine, and stay on your machine.</p>
+				<p>
+					The Target Project — Workflow Driven Development, running on your machine and staying on your machine.
+				</p>
 			</footer>
 		</div>
 	);
