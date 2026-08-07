@@ -28,6 +28,8 @@ Commands:
                                          Force a workflow's status by hand
   set-step-status <workflowId> <stepId> <pending|done|failed>
                                          Force one step's status by hand
+  move-step <workflowId> <stepId> <up|down>
+                                         Move a pending step one place earlier/later
   run <workflowId>                      Start (or continue) sequential dispatch
   pause <workflowId>                    Stop dispatching further steps
   resume <workflowId>                   Undo pause
@@ -370,6 +372,29 @@ async function main(): Promise<void> {
 		if (!res.ok) await fail(res);
 		const { step } = (await res.json()) as { step: StepJson };
 		console.log(`Step ${step.orderIndex + 1} is now ${step.status} (set manually).`);
+		return;
+	}
+
+	if (cmd === "move-step") {
+		const [workflowId, stepId, direction] = rest;
+		if (!workflowId || !stepId || (direction !== "up" && direction !== "down")) {
+			console.error("Usage: target move-step <workflowId> <stepId> <up|down>");
+			console.error("  (`target show <workflowId>` lists the step ids)");
+			process.exitCode = 1;
+			return;
+		}
+		const res = await fetch(`${apiBase}/workflows/${workflowId}/steps/${stepId}/move`, {
+			method: "POST",
+			headers: { "content-type": "application/json", ...authHeaders },
+			body: JSON.stringify({ direction }),
+		});
+		if (!res.ok) await fail(res);
+		// The whole list back, because a swap changes two rows and the point of the
+		// command is the resulting order.
+		const { steps } = (await res.json()) as { steps: StepJson[] };
+		for (const step of steps.filter((s) => s.kind !== "context")) {
+			console.log(`${String(step.orderIndex + 1).padStart(2, " ")}. ${step.description}`);
+		}
 		return;
 	}
 

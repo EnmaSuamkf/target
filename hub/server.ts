@@ -28,6 +28,7 @@
  *   POST   /api/workflows/:id/steps/:stepId/open-terminal  → spawn a local terminal resuming THIS step's session (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/continue      → release a step waiting for its manual review (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/status        → force a step's status by hand (admin token)
+ *   POST   /api/workflows/:id/steps/:stepId/move          → move a pending step one place up/down (admin token)
  *   POST   /api/workflows/:id/status                    → force the workflow's status by hand (admin token)
  *   POST   /api/workflows/:id/start                    → begin/continue sequential dispatch (admin token)
  *   POST   /api/workflows/:id/pause                    → stop dispatching further steps (admin token)
@@ -139,6 +140,7 @@ import {
 	expireStale,
 	forceStepStatus,
 	forceWorkflowStatus,
+	moveStep,
 	onStepResult,
 	operatorWorkdir,
 	pauseWorkflow,
@@ -2070,6 +2072,36 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			try {
 				const step = forceStepStatus(workflowId, stepId, status, log);
 				sendJson(res, 200, { step: publicStep(step, cfg) });
+			} catch (err) {
+				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		});
+		return;
+	}
+
+	// --- /api/workflows/:id/steps/:stepId/move (reorder a step by one place) ---
+	//
+	// Body: {"direction": "up" | "down"}. Swaps the step with its neighbouring
+	// task step, so a step no longer has to live where it was created. Only
+	// pending steps move, and only past other pending ones — see `moveStep` in
+	// workflow.ts. Returns the whole step list, because a swap changes two rows
+	// and the UI renders them by order.
+
+	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "move" && !parts[6] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		const stepId = parts[4];
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const direction = String(body.direction ?? "");
+			if (direction !== "up" && direction !== "down") {
+				sendJson(res, 400, { error: 'direction must be "up" or "down"' });
+				return;
+			}
+			try {
+				moveStep(workflowId, stepId, direction);
+				sendJson(res, 200, { steps: listSteps(workflowId).map((s) => publicStep(s, cfg)) });
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
 			}

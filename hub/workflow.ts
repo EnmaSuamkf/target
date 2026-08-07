@@ -69,6 +69,7 @@ import {
 	slugify,
 	startManualRun,
 	stepProgress,
+	swapStepOrder,
 	takeStatusBeforeReview,
 	updateStepConfig,
 	updateStepDescription,
@@ -1159,6 +1160,55 @@ export function removeStep(workflowId: string, stepId: string): void {
 	deleteStep(stepId);
 	reconcileStatus(workflowId);
 	writeStatusMd(workflowId);
+}
+
+/** Which way a step is moved by `moveStep`: earlier in the run, or later. */
+export type StepMoveDirection = "up" | "down";
+
+/**
+ * Moves a step one place earlier (`up`) or later (`down`) in the workflow.
+ *
+ * A step used to land wherever it was created — appended at the end, or (from a
+ * manual-review gate) directly after the step being reviewed — and nothing could
+ * change its mind afterwards. This is the "actually, that runs before this one"
+ * edit, done as a SWAP with the neighbouring step rather than a drag-and-drop
+ * reorder: one press, one place, and the number in the row is the whole
+ * feedback.
+ *
+ * Two rules, both about not rewriting history:
+ *
+ * - Only a `pending` step moves, and only past another `pending` one. A step
+ *   that has already run owns its position in the record — its result was
+ *   written to `.target/steps/<NN>-<slug>.md` under the index it had, and the
+ *   sequential run reached it in that order — so renumbering it would make the
+ *   list disagree with what happened. In practice this is also exactly the
+ *   restriction that matters: only work that hasn't run yet can still be
+ *   reordered in any meaningful sense.
+ * - The context step is not in the ordering at all (it's pinned at
+ *   `CONTEXT_STEP_ORDER_INDEX`, before everything), so it neither moves nor is
+ *   moved past. Only `task` steps are considered as neighbours.
+ */
+export function moveStep(workflowId: string, stepId: string, direction: StepMoveDirection): Step {
+	const step = getStep(stepId);
+	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
+	refuseContextStep(step);
+	if (step.status !== "pending") throw new WorkflowError("only a pending step can be moved");
+	const tasks = listSteps(workflowId).filter((s) => s.kind !== "context");
+	const at = tasks.findIndex((s) => s.id === stepId);
+	const neighbour = tasks[direction === "up" ? at - 1 : at + 1];
+	if (!neighbour) {
+		throw new WorkflowError(direction === "up" ? "this step is already first" : "this step is already last");
+	}
+	if (neighbour.status !== "pending") {
+		throw new WorkflowError(
+			`cannot move this step past a step that is ${neighbour.status} — only pending steps can be reordered`,
+		);
+	}
+	swapStepOrder(step.id, neighbour.id);
+	writeStatusMd(workflowId);
+	const moved = getStep(stepId);
+	if (!moved) throw new WorkflowError("step disappeared");
+	return moved;
 }
 
 // --- the "workflow finished" notification -------------------------------

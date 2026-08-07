@@ -55,6 +55,13 @@ import styles from "./StepItem.module.css";
  *
  * The result body is collapsed by default and expandable, replacing the old
  * hard truncation at 240 characters that made longer output unreadable.
+ *
+ * The two arrows beside the step number are the answer to "this has to run
+ * before that one": a step used to be stuck wherever it was created (appended at
+ * the end, or threaded in after the step being reviewed), and moving it meant
+ * deleting and retyping it. They sit next to the number rather than in the
+ * action row below because the number is the thing they change — press ↑ and the
+ * "3" becomes a "2".
  */
 export function StepItem({
 	step,
@@ -67,6 +74,9 @@ export function StepItem({
 	onOpenConversation,
 	onAddStepAfter,
 	onSetStatus,
+	onMove,
+	canMoveUp,
+	canMoveDown,
 	onAttachImages,
 	onRemoveAttachment,
 	busy,
@@ -84,6 +94,12 @@ export function StepItem({
 	onAddStepAfter: (id: string, input: StepConfigInput, staged?: StagedStepImages) => Promise<boolean>;
 	/** Forces the step's status by hand; never runs the step. */
 	onSetStatus: (id: string, status: OverridableStepStatus) => void;
+	/** Swaps this step with its neighbour, so it runs one place earlier or later. */
+	onMove: (id: string, direction: "up" | "down") => void;
+	/** Whether the swap the ↑ would make is one the server will accept (see `moveStep`). */
+	canMoveUp: boolean;
+	/** Same for the ↓. */
+	canMoveDown: boolean;
 	/** Pins images to one of this step's two text inputs. */
 	onAttachImages: (field: AttachmentField, stepId: string | null, files: File[]) => Promise<boolean>;
 	onRemoveAttachment: (id: string) => void;
@@ -156,6 +172,47 @@ export function StepItem({
 					</label>
 				)}
 				<span className={styles.index}>{isContext ? "ctx" : step.orderIndex + 1}</span>
+				{/* Reordering, next to the number it reorders. Disabled rather than
+				    hidden when a move isn't allowed, so the control doesn't appear and
+				    disappear as steps run — the tooltip says why it's off. */}
+				{!isContext && (
+					<span className={styles.move}>
+						<button
+							type="button"
+							className={styles.moveBtn}
+							onClick={() => onMove(step.id, "up")}
+							disabled={!canMoveUp || busy}
+							aria-label={`Move step ${step.orderIndex + 1} up, so it runs earlier`}
+							title={
+								canMoveUp
+									? "Move up — this step runs one place earlier."
+									: "Can't move up: this step is already first, or it (or the step above) has already run. Only pending steps can be reordered."
+							}
+							data-move-step="up"
+						>
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+								<path d="M12 19V5M5 12l7-7 7 7" />
+							</svg>
+						</button>
+						<button
+							type="button"
+							className={styles.moveBtn}
+							onClick={() => onMove(step.id, "down")}
+							disabled={!canMoveDown || busy}
+							aria-label={`Move step ${step.orderIndex + 1} down, so it runs later`}
+							title={
+								canMoveDown
+									? "Move down — this step runs one place later."
+									: "Can't move down: this step is already last, or it (or the step below) has already run. Only pending steps can be reordered."
+							}
+							data-move-step="down"
+						>
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+								<path d="M12 5v14M19 12l-7 7-7-7" />
+							</svg>
+						</button>
+					</span>
+				)}
 				<p className={styles.description}>{step.description}</p>
 				<Badge status={step.status} label={statusLabel} manual={step.statusManual} manualAt={step.statusManualAt} />
 			</div>

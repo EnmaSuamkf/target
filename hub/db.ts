@@ -955,6 +955,37 @@ export function deleteStep(id: string): boolean {
 	return open().prepare("DELETE FROM steps WHERE id = ?").run(id).changes > 0;
 }
 
+/**
+ * Exchanges the `order_index` of two steps — the storage half of "move this step
+ * up/down one place" (see `moveStep` in workflow.ts, which decides WHICH two).
+ *
+ * A swap rather than a renumber of the whole list, because that is the smallest
+ * write that reorders anything: every other row keeps the index it had, so the
+ * `<NN>-<slug>.md` result files of the steps that DIDN'T move keep matching
+ * their step. `order_index` is an ordering, not an identity (steps are keyed by
+ * id), and there is no uniqueness constraint on it, so the two UPDATEs can run
+ * as they are — but they run in one transaction anyway: a crash between them
+ * would leave both steps sharing an index, which `ORDER BY order_index` would
+ * then break ties on arbitrarily.
+ */
+export function swapStepOrder(aId: string, bId: string): void {
+	const database = open();
+	const read = database.prepare("SELECT order_index FROM steps WHERE id = ?");
+	const a = read.get(aId) as Record<string, unknown> | undefined;
+	const b = read.get(bId) as Record<string, unknown> | undefined;
+	if (!a || !b) return;
+	const update = database.prepare("UPDATE steps SET order_index = ? WHERE id = ?");
+	database.exec("BEGIN");
+	try {
+		update.run(Number(b.order_index), aId);
+		update.run(Number(a.order_index), bId);
+		database.exec("COMMIT");
+	} catch (err) {
+		database.exec("ROLLBACK");
+		throw err;
+	}
+}
+
 export function markStepRunning(id: string, manual = false): void {
 	// `manual` is set on a re-dispatch of an on-demand ▶ run's retry: it comes
 	// through here as a `pending` step (beginRetry put it there) and must stay
