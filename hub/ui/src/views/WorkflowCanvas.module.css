@@ -72,6 +72,12 @@
 
 .stage {
 	position: relative;
+	/* The stage is exactly as wide as the drawing and the viewport is usually
+	   much wider: without auto margins the graph hugs the left edge and the
+	   canvas reads as empty. Auto margins compute to 0 the moment the drawing
+	   is wider than the viewport, so nothing is lost to centring it can't
+	   reach by scrolling. */
+	margin-inline: auto;
 	transform-origin: 0 0;
 	transition: transform var(--transition);
 }

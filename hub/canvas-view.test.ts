@@ -439,3 +439,13 @@ test("the canvas is styled from the same status hues the badges use", () => {
 	// And it spins only while it is actually deciding.
 	assert.match(css, /\.judgeState_judging \.judgeRing[\s\S]{0,200}animation: spin/);
 });
+
+test("the drawing is centred in the viewport when the viewport is wider", () => {
+	const css = read("views/WorkflowCanvas.module.css");
+
+	// The stage is exactly as wide as the graph, so without auto margins the
+	// drawing hugs the left edge of a wide viewport and the canvas reads as
+	// empty. Auto margins centre it and compute to 0 when the graph is wider
+	// than the viewport, so scrolling loses nothing.
+	assert.match(css, /\.stage \{[\s\S]{0,400}margin-inline: auto/);
+});
