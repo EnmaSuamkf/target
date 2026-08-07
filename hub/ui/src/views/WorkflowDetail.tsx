@@ -24,6 +24,7 @@ import { ContextPanel } from "./ContextPanel.tsx";
 import { RenameWorkflowModal } from "./RenameWorkflowModal.tsx";
 import { SessionPanel } from "./SessionPanel.tsx";
 import { StepItem } from "./StepItem.tsx";
+import { WorkflowCanvas } from "./WorkflowCanvas.tsx";
 import styles from "./WorkflowDetail.module.css";
 
 /**
@@ -55,7 +56,17 @@ import styles from "./WorkflowDetail.module.css";
  * `onBack` is passed only when this pane is the whole screen (a phone, where
  * the workflow list is not next to it) — it's what turns "the detail half of a
  * split view" into "a screen you can leave".
+ *
+ * The steps themselves are shown in one of two ways, chosen by the toggle above
+ * them: as the **list** (every control the workflow has), or as the **canvas**
+ * (`WorkflowCanvas` — the same steps as cards, wired by arrows, with a circle on
+ * each judged step). The canvas edits nothing; clicking a card there switches
+ * back to the list and scrolls to that step, so there is exactly one place a
+ * workflow can be changed.
  */
+/** Which of the two renderings of the same steps is on screen. */
+type StepsView = "list" | "canvas";
+
 export function WorkflowDetail({
 	workflow,
 	steps,
@@ -130,6 +141,10 @@ export function WorkflowDetail({
 	const [opening, setOpening] = useState(false);
 	// The rename dialog opened by "Change", next to the title.
 	const [renaming, setRenaming] = useState(false);
+	// How the steps are drawn: the list, or the canvas. A way of LOOKING at the
+	// workflow, not a property of it — so it deliberately survives switching
+	// workflows (unlike `renaming` below, which belongs to one workflow).
+	const [stepsView, setStepsView] = useState<StepsView>("list");
 	// Each step's status as of the previous poll, so a step that FINISHES can be
 	// told apart from one that was already finished when we got here — the whole
 	// difference between "untick it now" and "untick it forever". A ref, not
@@ -222,6 +237,21 @@ export function WorkflowDetail({
 
 	const toggleAll = (): void => {
 		setSelection(allSelected ? new Set() : new Set(taskSteps.map((s) => s.id)));
+	};
+
+	/**
+	 * What a click on a canvas card does. The canvas has no controls of its own by
+	 * design, so the one thing a card can offer is to take you to where the
+	 * controls are: switch back to the list and put that step in the middle of the
+	 * screen. The scroll is deferred a frame because the row it targets does not
+	 * exist until the list has rendered.
+	 */
+	const openStepInList = (stepId: string): void => {
+		setStepsView("list");
+		requestAnimationFrame(() => {
+			const row = sectionRef.current?.querySelector<HTMLElement>(`[data-step-id="${CSS.escape(stepId)}"]`);
+			row?.scrollIntoView({ behavior: "smooth", block: "center" });
+		});
 	};
 
 	const handleOpenTerminal = async (): Promise<void> => {
@@ -395,57 +425,59 @@ export function WorkflowDetail({
 							Steps
 							{taskSteps.length > 0 && <span className={styles.count}>{taskSteps.length}</span>}
 						</h3>
-						{taskSteps.length > 0 && (
-							<button type="button" className="btn btn--sm btn--ghost" onClick={toggleAll}>
-								{allSelected ? "Deselect all" : "Select all"}
-							</button>
-						)}
+
+						<div className={styles.stepsHeadActions}>
+							{/* Two renderings of the same steps, so the toggle is a segmented
+							    control rather than two buttons: it's one choice with one
+							    answer, and the pressed half says which. "Select all" belongs
+							    to the list alone — the canvas has no checkboxes to tick. */}
+							<div className={styles.viewToggle} role="group" aria-label="How to show the steps">
+								{(["list", "canvas"] as const).map((mode) => (
+									<button
+										key={mode}
+										type="button"
+										className={`${styles.viewToggleBtn} ${stepsView === mode ? styles.viewToggleBtnOn : ""}`}
+										onClick={() => setStepsView(mode)}
+										aria-pressed={stepsView === mode}
+										data-steps-view={mode}
+										title={
+											mode === "list"
+												? "The step list — everything about a workflow is edited here."
+												: "The canvas: the same steps as cards wired by arrows, with a circle on each judged step. A view only; nothing is edited here."
+										}
+									>
+										{mode === "list" ? "List" : "Canvas"}
+									</button>
+								))}
+							</div>
+
+							{taskSteps.length > 0 && stepsView === "list" && (
+								<button type="button" className="btn btn--sm btn--ghost" onClick={toggleAll}>
+									{allSelected ? "Deselect all" : "Select all"}
+								</button>
+							)}
+						</div>
 					</div>
 
-					{/* Pinned above the numbered list, not inside it: it runs before step 1
-					    but it isn't step 0, and putting it in the <ol> would number it. */}
-					{/* The context step is outside the ordering — it never moves and nothing
-					    moves past it — so its arrows are rendered dead (canMove* false), and
-					    StepItem drops them entirely for a `context` step anyway. */}
-					{contextStep && (
-						<ul className={styles.steps}>
-							<StepItem
-								key={contextStep.id}
-								step={contextStep}
-								selected={false}
-								onToggleSelected={toggleStep}
-								onSave={onSaveStep}
-								onRemove={onRemoveStep}
-								onAbort={onAbortStep}
-								onContinue={onContinueStep}
-								onOpenConversation={onOpenStepConversation}
-								onAddStepAfter={onAddStepAfter}
-								onSetStatus={onSetStepStatus}
-								onMove={onMoveStep}
-								canMoveUp={false}
-								canMoveDown={false}
-								onAttachImages={onAttachImages}
-								onRemoveAttachment={onRemoveAttachment}
-								busy={busy}
-							/>
-						</ul>
-					)}
-
-					{taskSteps.length === 0 ? (
-						<EmptyState
-							title="No steps yet"
-							description="Add the first task for this workflow's agent, or seed it from a template."
-						/>
+					{/* The canvas replaces the list rather than sitting beside it: they are
+					    the same steps, and two copies on one page would leave "which one do
+					    I act on?" to be worked out every time. Only the list is an editor,
+					    which is why the add-step form goes with it. */}
+					{stepsView === "canvas" ? (
+						<WorkflowCanvas steps={steps} onOpenStep={openStepInList} />
 					) : (
-						<ol className={styles.steps}>
-							{/* `taskSteps`, not `steps`: the context step isn't in the ordering,
-							    so it must not count as step 1's neighbour when deciding whether
-							    the ↑ is live — see canMoveStep. */}
-							{taskSteps.map((step, i) => (
+						<>
+						{/* Pinned above the numbered list, not inside it: it runs before step 1
+						    but it isn't step 0, and putting it in the <ol> would number it. */}
+						{/* The context step is outside the ordering — it never moves and nothing
+						    moves past it — so its arrows are rendered dead (canMove* false), and
+						    StepItem drops them entirely for a `context` step anyway. */}
+						{contextStep && (
+							<ul className={styles.steps}>
 								<StepItem
-									key={step.id}
-									step={step}
-									selected={selection.has(step.id)}
+									key={contextStep.id}
+									step={contextStep}
+									selected={false}
 									onToggleSelected={toggleStep}
 									onSave={onSaveStep}
 									onRemove={onRemoveStep}
@@ -455,17 +487,52 @@ export function WorkflowDetail({
 									onAddStepAfter={onAddStepAfter}
 									onSetStatus={onSetStepStatus}
 									onMove={onMoveStep}
-									canMoveUp={canMoveStep(taskSteps, i, "up")}
-									canMoveDown={canMoveStep(taskSteps, i, "down")}
+									canMoveUp={false}
+									canMoveDown={false}
 									onAttachImages={onAttachImages}
 									onRemoveAttachment={onRemoveAttachment}
 									busy={busy}
 								/>
-							))}
-						</ol>
-					)}
+							</ul>
+						)}
 
-					<AddStepForm templates={templates} onAdd={onAddStep} onAddFromTemplate={onAddStepsFromTemplate} />
+						{taskSteps.length === 0 ? (
+							<EmptyState
+								title="No steps yet"
+								description="Add the first task for this workflow's agent, or seed it from a template."
+							/>
+						) : (
+							<ol className={styles.steps}>
+								{/* `taskSteps`, not `steps`: the context step isn't in the ordering,
+								    so it must not count as step 1's neighbour when deciding whether
+								    the ↑ is live — see canMoveStep. */}
+								{taskSteps.map((step, i) => (
+									<StepItem
+										key={step.id}
+										step={step}
+										selected={selection.has(step.id)}
+										onToggleSelected={toggleStep}
+										onSave={onSaveStep}
+										onRemove={onRemoveStep}
+										onAbort={onAbortStep}
+										onContinue={onContinueStep}
+										onOpenConversation={onOpenStepConversation}
+										onAddStepAfter={onAddStepAfter}
+										onSetStatus={onSetStepStatus}
+										onMove={onMoveStep}
+										canMoveUp={canMoveStep(taskSteps, i, "up")}
+										canMoveDown={canMoveStep(taskSteps, i, "down")}
+										onAttachImages={onAttachImages}
+										onRemoveAttachment={onRemoveAttachment}
+										busy={busy}
+									/>
+								))}
+							</ol>
+						)}
+
+						<AddStepForm templates={templates} onAdd={onAddStep} onAddFromTemplate={onAddStepsFromTemplate} />
+						</>
+					)}
 				</div>
 
 				<SessionPanel

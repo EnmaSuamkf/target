@@ -188,6 +188,29 @@ Notes on behaviour worth knowing:
   conversation-context step has none: it is pinned before everything and isn't
   part of the ordering. Over the API this is
   `POST /api/workflows/:id/steps/:stepId/move` with `{"direction": "up"|"down"}`.
+- **List / Canvas.** A toggle above the steps switches between the **list** and
+  the **canvas** — the same steps drawn as a graph: a card each, arrows for what
+  runs after what, and a **circle** on every step that has acceptance criteria,
+  which is the step's judge. The circle spins while the judge is deciding (the
+  card reads `judging` rather than `running`), settles green when the step
+  passed and red when it didn't, and carries the retry count. A step with a
+  retry budget also gets a **dashed loop back into itself** — the one arrow on
+  the canvas that doesn't mean "and then" — because a reject re-runs the step
+  rather than moving on. A step with no budget has no loop: there, a reject
+  fails it outright.
+
+  It is **read-only, by design**: there is no dragging, no connecting, no
+  per-node menu. Everything about a workflow is still edited in the list, so
+  there is one place to change it and one place to see its shape. Clicking any
+  card or circle switches back to the list and scrolls to that step.
+
+  While a workflow **runs**, the canvas is where the run is visible: it repaints
+  on the same 2s poll, the in-flight card and the arrow feeding it animate, and
+  the viewport follows the run — a running step first, then one held for review,
+  then the next step that hasn't run — so a long workflow doesn't leave you
+  scrolled to something that finished ten minutes ago. Cards carry the same
+  status colours as the badges in the list, plus the flags that change how a
+  step runs (`selected`, `manual review`, `inline`).
 - **A held step's four actions.** A step `waiting` for a manual review offers
   Continue, Abort, Open conversation and Add step — approve, refuse, ask, or
   insert a correction that runs next. See "A step waiting for your review".

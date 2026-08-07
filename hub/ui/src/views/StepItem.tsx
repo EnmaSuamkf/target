@@ -131,7 +131,7 @@ export function StepItem({
 
 	if (editing) {
 		return (
-			<li className={`${styles.step} ${styles.editing}`}>
+			<li className={`${styles.step} ${styles.editing}`} data-step-id={step.id}>
 				<StepEditor
 					step={step}
 					onCancel={() => setEditing(false)}
@@ -152,8 +152,14 @@ export function StepItem({
 	// so it's shown before the step is done, not only after.
 	const hasResult = (step.status === "done" || waiting) && step.result;
 
+	// `data-step-id` on the row is the stable hook the canvas scrolls to when one
+	// of its cards is clicked — CSS Module class names are hashed, so they can't
+	// be querySelector'd. See `openStepInList` in WorkflowDetail.
 	return (
-		<li className={`${styles.step} ${running ? styles.stepRunning : ""} ${waiting ? styles.stepWaiting : ""}`}>
+		<li
+			className={`${styles.step} ${running ? styles.stepRunning : ""} ${waiting ? styles.stepWaiting : ""}`}
+			data-step-id={step.id}
+		>
 			<div className={styles.head}>
 				{/* The checkbox is wrapped so its tappable area can be grown to a
 				    thumb's size on a phone without drawing a giant checkbox. */}
