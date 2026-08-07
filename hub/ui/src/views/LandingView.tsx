@@ -68,6 +68,48 @@ const MOCK_STEPS = [
 	{ label: "Open the pull request", state: "queued" as const },
 ];
 
+/** The two claims that close the hero: where a run happens, and how it stays predictable. */
+const HERO_CARDS = [
+	{
+		title: "Every run, sandboxed in Docker",
+		body: "Point a workflow at a container and the whole run happens inside it — your harness, your repo, none of your machine. Prefer the host? Flip it back. The workflow is identical either way.",
+		icon: "M4 8h16v11H4z M8 8V5h8v3 M4 12.5h16",
+	},
+	{
+		title: "A deterministic agent orchestrator",
+		body: "The workflow fixes the route: ordered steps, one agent carrying the whole conversation, a judge at every gate. The agent decides how to do a step — never which step comes next — so the same workflow takes the same path every time.",
+		icon: "M3 19h4v-4h4v-4h4V7h4",
+	},
+] as const;
+
+/** The six things you actually touch in the hub, in the order you meet them. */
+const FEATURES = [
+	{
+		title: "Templates",
+		body: "A named, tagged library of step lists you can search and edit, where every step keeps its acceptance criterion, retry budget and review gate. Templates never execute themselves — they seed the workflows that do.",
+	},
+	{
+		title: "Start from a template, not a blank page",
+		body: "Stamp a whole workflow out of a template in one click, or append one to a workflow you already have — including a run that is already in flight.",
+	},
+	{
+		title: "Clone a workflow",
+		body: "A run worth repeating is one click from a second one. Cloning opens the create form already seeded with the original's steps, so you change the one thing that differs and leave the rest alone.",
+	},
+	{
+		title: "Canvas view",
+		body: "The workflow as a picture: a card per step, arrows for what runs after what, a mark on every step a judge has to clear, and — while a run is in flight — where the agent is right now.",
+	},
+	{
+		title: "Request human intervention",
+		body: "A toggle on any step. Turn it on and the run stops there and waits for you to read the result and approve it; everything else keeps moving unattended. Turn it off and nothing ever blocks.",
+	},
+	{
+		title: "Run only the steps you tick",
+		body: "Every step has a checkbox, and Start runs exactly what's ticked — one retry, the last three steps, or the whole list. The selection syncs the moment you change it, mid-run included.",
+	},
+] as const;
+
 export function LandingView({
 	setupCompleted,
 	onGetStarted,
@@ -93,7 +135,7 @@ export function LandingView({
 				<div className={styles.navLinks}>
 					<a href="#method">The method</a>
 					<a href="#pillars">How it holds up</a>
-					<a href="#speed">Why it's faster</a>
+					<a href="#features">Features</a>
 				</div>
 				<div className={styles.navActions}>
 					<button type="button" className="btn" onClick={onSignIn}>
@@ -162,20 +204,21 @@ export function LandingView({
 					</div>
 				</div>
 
-				<dl className={styles.stats}>
-					<div className={styles.stat}>
-						<dt>~50%</dt>
-						<dd>more throughput per developer, once the babysitting and the rework are gone</dd>
-					</div>
-					<div className={styles.stat}>
-						<dt>100%</dt>
-						<dd>of steps graded against their criterion before the next one starts</dd>
-					</div>
-					<div className={styles.stat}>
-						<dt>0</dt>
-						<dd>context re-explained — one workflow, one agent, one continuous conversation</dd>
-					</div>
-				</dl>
+				<div className={styles.heroCards}>
+					{HERO_CARDS.map((card) => (
+						<article key={card.title} className={styles.heroCard}>
+							<span className={styles.heroCardIcon} aria-hidden="true">
+								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+									<path d={card.icon} strokeLinecap="round" strokeLinejoin="round" />
+								</svg>
+							</span>
+							<div>
+								<h2>{card.title}</h2>
+								<p>{card.body}</p>
+							</div>
+						</article>
+					))}
+				</div>
 			</header>
 
 			<section className={styles.section} id="method" aria-labelledby="method-title">
@@ -246,37 +289,22 @@ export function LandingView({
 				</ol>
 			</section>
 
-			<section className={styles.band} id="speed" aria-labelledby="speed-title">
+			<section className={styles.band} id="features" aria-labelledby="features-title">
 				<div className={styles.bandInner}>
-					<p className={styles.eyebrow}>Why it's faster</p>
-					<h2 className={styles.sectionTitle} id="speed-title">
-						Where the ~50% comes from
+					<p className={styles.eyebrow}>In the hub</p>
+					<h2 className={styles.sectionTitle} id="features-title">
+						Six things you'll use on every run
 					</h2>
 					<p className={styles.sectionLede}>
-						Not from a faster model. From three costs that workflows delete outright.
+						The method is the point; these are the parts of it you actually click.
 					</p>
-					<div className={styles.reasons}>
-						<article>
-							<h3>You stop babysitting</h3>
-							<p>
-								A prompt-driven session needs you present at every turn. A workflow needs you at the gates you
-								chose — the rest of the run happens while you're in another repo, another meeting, or asleep.
-							</p>
-						</article>
-						<article>
-							<h3>Rework stops compounding</h3>
-							<p>
-								Most lost time is work built on a step that was already wrong. Judging each step catches that at
-								step three instead of step eleven, when it costs one retry rather than a rewrite.
-							</p>
-						</article>
-						<article>
-							<h3>The context tax disappears</h3>
-							<p>
-								No re-describing the codebase, the conventions or the last decision. The workflow's agent has
-								carried them since step one, and every result stays on disk.
-							</p>
-						</article>
+					<div className={styles.grid}>
+						{FEATURES.map((feature) => (
+							<article key={feature.title} className={styles.card}>
+								<h3>{feature.title}</h3>
+								<p>{feature.body}</p>
+							</article>
+						))}
 					</div>
 				</div>
 			</section>
