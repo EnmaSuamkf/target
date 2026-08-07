@@ -6,6 +6,9 @@
 	border-radius: var(--radius);
 	background: var(--surface);
 	transition: border-color var(--transition), box-shadow var(--transition);
+	/* A click on a canvas card scrolls this row into view; the sticky app bar
+	   would otherwise cover the top of whichever row that is. */
+	scroll-margin-top: calc(var(--header-height) + var(--space-4));
 }
 
 .step:hover {
