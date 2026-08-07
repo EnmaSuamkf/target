@@ -102,10 +102,11 @@ test("Start with only the first of two steps selected never dispatches the secon
 	await finishOk(steps[0].id);
 
 	assert.equal(getStep(steps[0].id)?.status, "done");
-	// Unselected means untouched: still pending, and the workflow stays
-	// running rather than reading "nothing selected to do" as "done".
+	// Unselected means untouched: still pending, and the workflow is NOT left
+	// running — the selected run has drained, so the badge settles to draft
+	// (neither "running" with nothing in flight, nor a false "done").
 	assert.equal(getStep(steps[1].id)?.status, "pending");
-	assert.equal(getWorkflow(workflow.id)?.status, "running");
+	assert.equal(getWorkflow(workflow.id)?.status, "draft");
 });
 
 test("a step unticked MID-RUN is not dispatched when the in-flight step finishes", async (t) => {
@@ -124,7 +125,9 @@ test("a step unticked MID-RUN is not dispatched when the in-flight step finishes
 
 	assert.equal(getStep(steps[0].id)?.status, "done");
 	assert.equal(getStep(steps[1].id)?.status, "pending"); // skipped, not dispatched
-	assert.equal(getWorkflow(workflow.id)?.status, "running");
+	// Nothing selected remains → the run is over, and the badge says so:
+	// draft, with Start ready to pick the step up if it's ticked again.
+	assert.equal(getWorkflow(workflow.id)?.status, "draft");
 });
 
 test("a pending step ticked MID-RUN is picked up when the in-flight step finishes", async (t) => {
@@ -164,9 +167,10 @@ test("a step added mid-run is unselected and is NOT dispatched when the in-fligh
 
 	assert.equal(getStep(steps[0].id)?.status, "done");
 	// The reported bug dispatched it here. Untouched now — and the workflow
-	// stays running instead of completing over a step it never ran.
+	// settles to draft instead of completing over a step it never ran (or
+	// sitting running forever with nothing in flight).
 	assert.equal(getStep(added.id)?.status, "pending");
-	assert.equal(getWorkflow(workflow.id)?.status, "running");
+	assert.equal(getWorkflow(workflow.id)?.status, "draft");
 });
 
 test("a step appended while the workflow waits at a review gate is unselected and survives Continue", async (t) => {
@@ -187,7 +191,8 @@ test("a step appended while the workflow waits at a review gate is unselected an
 
 	assert.equal(getStep(steps[0].id)?.status, "done");
 	assert.equal(getStep(added.id)?.status, "pending");
-	assert.equal(getWorkflow(workflow.id)?.status, "running");
+	// Nothing selected past the gate → the run is over → draft, not running.
+	assert.equal(getWorkflow(workflow.id)?.status, "draft");
 });
 
 test("the insert-after-the-gate step stays selected, so Continue dispatches it next", async (t) => {
@@ -209,6 +214,47 @@ test("the insert-after-the-gate step stays selected, so Continue dispatches it n
 	assert.equal(getStep(steps[0].id)?.status, "done");
 	assert.equal(getStep(correction.id)?.status, "queued"); // dispatched, exactly as the feature promises
 	assert.equal(getWorkflow(workflow.id)?.status, "running");
+});
+
+test("when the selected steps finish with unselected ones left, the workflow leaves running and can be launched again", async (t) => {
+	// The exact reported flow: two steps started selected; mid-run the second
+	// is unticked and a third is added; when the first finishes the workflow
+	// must not sit `running` (Start disabled) — it settles to draft, and the
+	// operator can tick the second step and launch again.
+	const url = await hook(t);
+	const { workflow, steps } = makeWorkflow(url, 2);
+
+	await startWorkflow(workflow.id, cfg, silent, [steps[0].id, steps[1].id]);
+	assert.equal(getStep(steps[0].id)?.status, "queued"); // step 1 in flight
+
+	// Mid-run: untick step 2, add step 3 (lands unselected).
+	setWorkflowStepSelection(workflow.id, [steps[0].id]);
+	const added = addStep(workflow.id, "added mid-run");
+	assert.equal(added.selected, false);
+
+	await finishOk(steps[0].id);
+
+	// The selected run is over: step 1 done, step 2 and the new step pending,
+	// and the badge settles to draft — the state where Start exists.
+	assert.equal(getStep(steps[0].id)?.status, "done");
+	assert.equal(getStep(steps[1].id)?.status, "pending");
+	assert.equal(getStep(added.id)?.status, "pending");
+	assert.equal(getWorkflow(workflow.id)?.status, "draft");
+
+	// Re-tick step 2 and launch again: Start must work from here.
+	await startWorkflow(workflow.id, cfg, silent, [steps[1].id]);
+	assert.equal(getWorkflow(workflow.id)?.status, "running");
+	assert.equal(getStep(steps[1].id)?.status, "queued"); // dispatched
+	assert.equal(getStep(added.id)?.status, "pending"); // still nobody's selection
+
+	await finishOk(steps[1].id);
+	assert.equal(getWorkflow(workflow.id)?.status, "draft"); // drained again
+
+	// And ticking the added step launches it too, to a real completion.
+	await startWorkflow(workflow.id, cfg, silent, [added.id]);
+	assert.equal(getStep(added.id)?.status, "queued");
+	await finishOk(added.id);
+	assert.equal(getWorkflow(workflow.id)?.status, "completed"); // no pending left at all
 });
 
 // --- the states where the historical default is kept ---------------------

@@ -468,19 +468,28 @@ export function forceWorkflowStatus(workflowId: string, status: OverridableWorkf
  * (deleting the remaining pending steps of a `running` workflow, DB states
  * written by older buggy versions), so stale rows like "running at 100%" or
  * "completed with a red bar" fix themselves on the next read instead of
- * sticking forever. Workflows with pending/running steps are left strictly
+ * sticking forever.
+ *
+ * One pending case is healed too: a `running` workflow with NOTHING in flight
+ * and no live retry wait is stranded — the engine is idle and no callback will
+ * ever arrive (rows written by the pre-settle engine, or a ▶ run's settle,
+ * which never advances). Left alone it would show `running` forever with Start
+ * disabled. Every OTHER workflow with pending/running steps is left strictly
  * alone: the engine (or the operator's next Start) owns those, and addStep's
  * deliberate terminal→draft reset must survive a read.
  */
 function healSettledStatuses(log: Logger): void {
 	for (const workflow of listWorkflows()) {
 		const steps = listSteps(workflow.id);
-		if (
-			steps.some(
-				(s) => s.status === "pending" || s.status === "running" || s.status === "queued" || s.status === "waiting",
-			)
-		) {
-			continue;
+		if (steps.some((s) => s.status === "running" || s.status === "queued" || s.status === "waiting")) continue;
+		const pending = steps.filter((s) => s.status === "pending");
+		if (pending.length > 0) {
+			// A pending step that has consumed retries is mid-retry-wait: its
+			// re-dispatch is already scheduled (the retry path dispatches
+			// directly, never through advance()), so the engine IS about to
+			// act. Only a genuinely idle `running` workflow may be healed.
+			const liveRetryWait = pending.some((s) => s.retryCount > 0);
+			if (workflow.status !== "running" || liveRetryWait) continue;
 		}
 		if (reconcileStatus(workflow.id, log)) writeStatusMd(workflow.id);
 	}
@@ -1311,11 +1320,20 @@ async function notifyWorkflowCompleted(workflowId: string, log?: Logger): Promis
  * idle: no step in flight and no pending step left at all (e.g. the pending
  * steps were removed after the others finished). No callback will ever arrive
  * to settle that, so it IS reconciled here instead of sitting stuck at 100%
- * `running` forever. A `running` workflow that still has ANY pending or
- * running step is left strictly alone — that covers a step in flight, a
- * pending retry mid-wait, and the deliberate "0 selected steps stay running"
- * behavior. Never downgrades a deliberate `paused` to `draft`. Returns whether
- * it actually changed the status, so read-path callers know to rewrite the .md.
+ * `running` forever. A `running` workflow is also reconciled when its engine
+ * is permanently idle WITH pending steps left — rows written by the pre-2026
+ * engine (which never settled a drained selection), or a ▶ run's settle on a
+ * `running` workflow (manual runs never advance). Those would otherwise show
+ * `running` forever with Start disabled. The only pending case left strictly
+ * alone is a LIVE retry wait: a pending step that has consumed retries
+ * (`retryCount > 0`, set by `beginRetry`) has its re-dispatch already
+ * scheduled — the retry path waits out its interval and dispatches directly,
+ * never through `advance()` — so the engine is about to act and the badge is
+ * telling the truth. In the normal engine flow the drain is settled by
+ * `advance()` itself the moment the in-flight callback arrives; this heal is
+ * the backstop for rows that callback never came for. Never downgrades a
+ * deliberate `paused` to `draft`. Returns whether it actually changed the
+ * status, so read-path callers know to rewrite the .md.
  */
 function reconcileStatus(workflowId: string, log?: Logger): boolean {
 	const workflow = getWorkflow(workflowId);
@@ -1332,8 +1350,13 @@ function reconcileStatus(workflowId: string, log?: Logger): boolean {
 	if (listSteps(workflowId).some((s) => s.status === "waiting")) return false;
 	if (workflow.status === "running") {
 		const steps = listSteps(workflowId);
-		// Any step still pending or in flight — the engine may yet act; hands off.
-		if (steps.some((s) => s.status === "running" || s.status === "pending" || s.status === "queued")) return false;
+		// A step in flight — its callback will settle things; hands off.
+		if (steps.some((s) => s.status === "running" || s.status === "queued")) return false;
+		// A pending step that has consumed retries is mid-retry-wait: its
+		// re-dispatch is already scheduled outside advance(), so the engine is
+		// about to act — hands off. Any OTHER pending step with nothing in
+		// flight means the run is stranded: fall through and derive.
+		if (steps.some((s) => s.status === "pending" && s.retryCount > 0)) return false;
 	}
 	const progress = stepProgress(workflowId);
 	if (progress.total === 0) {
@@ -1370,11 +1393,17 @@ function reconcileStatus(workflowId: string, log?: Logger): boolean {
  * it's the only place that decides "what runs next", so pause is just
  * refusing to call this until resume.
  *
- * `nextPendingStep` only ever returns a *selected* step, so a run started with
- * nothing selected returns null here immediately — that must NOT be read as
- * "the workflow is done". We only mark `completed` when there is truly no
- * pending work left at all (selected or not); if pending-but-unselected steps
- * remain, this is a no-op — nothing dispatches, nothing is marked completed.
+ * `nextPendingStep` only ever returns a *selected* step, so a run whose
+ * selected steps have all finished returns null here while unselected pending
+ * steps remain — that must NOT be read as "the workflow is done", and it must
+ * NOT stay `running` either: nothing is in flight, no callback will ever
+ * arrive, and a `running` badge disables Start (a mid-run untick that drained
+ * the selection used to strand the workflow exactly like that — ticking steps
+ * again couldn't relaunch it). The run is over, so the badge settles to what
+ * the steps add up to, same derivation as `reconcileStatus`: any failed step →
+ * `failed`, otherwise `draft` — "anything left to run → back to draft so Start
+ * picks up where it left off". We only mark `completed` when there is truly
+ * no pending work left at all (selected or not).
  */
 async function advance(workflowId: string, cfg: HubConfig, log: Logger): Promise<void> {
 	const workflow = getWorkflow(workflowId);
@@ -1388,7 +1417,22 @@ async function advance(workflowId: string, cfg: HubConfig, log: Logger): Promise
 	if (steps.some((s) => s.status === "waiting")) return;
 	const next = nextPendingStep(workflowId);
 	if (!next) {
-		if (steps.some((s) => s.status === "pending")) return; // unselected steps still pending — not actually done
+		if (steps.some((s) => s.status === "pending")) {
+			// Only UNSELECTED steps are pending (nextPendingStep would have
+			// returned a selected one). The selected run has drained: settle
+			// instead of sitting `running` forever with nothing in flight.
+			// `stepProgress` counts the real (task) steps only, like every
+			// other badge decision; pending remain, so it's failed-or-draft.
+			const progress = stepProgress(workflowId);
+			const settled: WorkflowStatus = progress.failed > 0 ? "failed" : "draft";
+			setWorkflowStatus(workflowId, settled);
+			writeStatusMd(workflowId);
+			log(
+				`workflow ${workflowId} ${settled} (run selection drained, ${progress.total - progress.done - progress.failed} unselected step(s) left)`,
+				settled === "failed" ? "error" : "info",
+			);
+			return;
+		}
 		// Every step has run. The terminal badge must agree with the progress
 		// bar: a step still `failed` (e.g. an old failure left outside a re-run
 		// selection) makes the workflow `failed`, not `completed` — only
@@ -1489,11 +1533,12 @@ export async function resumeWorkflow(
  *
  * Semantics are `setStepSelection`'s own, unchanged: the listed steps (plus the
  * hub-owned context step) are selected, the rest are not, and an empty list
- * selects NOTHING — the engine idles with the workflow left `running` rather
- * than reading it as "run everything" or as "done". No status is written and
+ * selects NOTHING — never read as "run everything". No status is written and
  * nothing is dispatched or reconciled here: the selection only governs what a
  * FUTURE dispatch decision picks up, and a step already in flight always
- * finishes on its own.
+ * finishes on its own. When it does and nothing selected is left, `advance()`
+ * settles the badge to draft/failed — so unticking everything mid-run ends
+ * the run cleanly instead of stranding the workflow `running`.
  */
 export function setWorkflowStepSelection(workflowId: string, stepIds: string[]): Step[] {
 	const workflow = getWorkflow(workflowId);
