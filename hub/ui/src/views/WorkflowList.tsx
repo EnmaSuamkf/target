@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Workflow, WorkflowStatus } from "../api/types.ts";
 import { Badge } from "../components/Badge.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
@@ -16,8 +16,8 @@ import styles from "./WorkflowList.module.css";
  * list moved to the top so a row of cards reads left-to-right and the detail
  * pane gets the full width underneath it.
  *
- * "All workflows" opens a full **page** (`AllWorkflowsPage`, paginated ten at a
- * time) on every screen — the only way to find one among sixty without
+ * "All workflows" opens a full **page** (`AllWorkflowsPage`, paginated twelve at
+ * a time) on every screen — the only way to find one among sixty without
  * scrolling sideways for screen-widths. The page replaces the workflows view,
  * so it gets the whole content area and its own back button, and on a phone it
  * adapts to the narrow width (one card per row, a full-width search, the
@@ -42,7 +42,7 @@ const STATUS_ORDER: Record<WorkflowStatus, number> = {
 type Filter = "all" | WorkflowStatus;
 
 /** How many cards the "All workflows" page shows per page. */
-const PAGE_SIZE = 10;
+const PAGE_SIZE = 12;
 
 /**
  * Narrows and orders the workflows the same way in every surface — the rail,
@@ -76,6 +76,7 @@ export function WorkflowList({
 	onSelect,
 	onCreate,
 	onShowAll,
+	railResetKey,
 }: {
 	workflows: Workflow[];
 	selectedId: string | null;
@@ -85,14 +86,30 @@ export function WorkflowList({
 	 * button on every screen — the page adapts to a phone width itself, so
 	 * there is no separate mobile picker. */
 	onShowAll?: () => void;
+	/** Bumped by the owner whenever a workflow has just been created; every
+	 * change scrolls the rail fully back to the left so the newly created
+	 * workflow is on screen instead of hidden behind however far the operator
+	 * had scrolled sideways. */
+	railResetKey?: number;
 }): React.JSX.Element {
 	// The rail's own search + status filter. Independent of the "All workflows"
 	// surfaces' state, so narrowing one doesn't silently narrow the other.
 	const [query, setQuery] = useState("");
 	const [filter, setFilter] = useState<Filter>("all");
+	const railRef = useRef<HTMLDivElement | null>(null);
 
 	const visible = useMemo(() => filterAndSort(workflows, query, filter), [workflows, query, filter]);
 	const statuses = useMemo(() => presentStatuses(workflows), [workflows]);
+
+	// A new workflow: put the rail back at its left edge. `scrollLeft` (not
+	// `scrollIntoView`) on purpose — this must never move the *page*, which
+	// stays at the top (see the App-level scroll reset).
+	useEffect(() => {
+		if (railResetKey === undefined) return;
+		const rail = railRef.current;
+		if (!rail) return;
+		rail.scrollLeft = 0;
+	}, [railResetKey]);
 
 	return (
 		<section className={styles.strip} aria-label="Workflows">
@@ -183,7 +200,7 @@ export function WorkflowList({
 			{/* `data-workflow-list` is the keyboard-shortcut hook's anchor (Alt+W
 			    focuses the first card in here, falling back to the search box), so it
 			    stays on the scroll container that holds the cards. */}
-			<div className={styles.rail} data-workflow-list>
+			<div className={styles.rail} data-workflow-list data-workflow-rail ref={railRef}>
 				{visible.length === 0 ? (
 					<div className={styles.railEmpty}>
 						{workflows.length === 0 ? (
@@ -373,11 +390,11 @@ function pageWindow(current: number, total: number): (number | "…")[] {
 
 /**
  * The "All workflows" page: the same scannable grid as the rail, but as a full
- * page that paginates ten cards at a time — the answer to "I have sixty-plus
+ * page that paginates twelve cards at a time — the answer to "I have sixty-plus
  * and need to find one", because a single grid of sixty is a wall and a
  * horizontal rail of sixty is screen-widths of sideways scrolling. Its own
  * search and status filter narrow before pagination, so a filter that leaves
- * twelve results is two pages, not one page of ten plus a clipped remainder.
+ * twenty results is two pages, not one page of twelve plus a clipped remainder.
  * Picking a card selects that workflow and returns to the workflows view (the
  * rail + the detail). On a phone the grid is one card per row and the toolbar
  * and pagination stack to the narrow width (see the media query).
