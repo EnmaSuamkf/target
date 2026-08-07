@@ -208,6 +208,11 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	const [cloneSourceId, setCloneSourceId] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
 	const [loaded, setLoaded] = useState(false);
+	// Bumped every time a workflow is created (including via Clone, which is the
+	// same create dialog). The rail watches it and scrolls itself fully back to
+	// the left, so the workflow that was just created is where the operator is
+	// looking rather than off the left edge of however far they had scrolled.
+	const [railResetKey, setRailResetKey] = useState(0);
 
 	const toast = useToast();
 	const dictation = useDictation();
@@ -336,6 +341,19 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		return () => window.removeEventListener("hashchange", onHashChange);
 	}, []);
 
+	// The workflows view always renders from the top of the page. Picking a card
+	// in the rail swaps the pane underneath it, and a taller pane used to leave
+	// the window scrolled wherever the browser decided to put it (focus moving
+	// into the new pane, or the restored scroll of the previous one) — which read
+	// as "clicking a card scrolls the page down to the workflow". Selecting is a
+	// deliberate act with a deliberate result: the top of the workflow. Keyed on
+	// the things that change what the view *is*, never on the 2s poll, so it
+	// cannot yank the page while the operator is reading further down.
+	useEffect(() => {
+		if (view !== "workflows") return;
+		window.scrollTo({ top: 0, left: 0 });
+	}, [view, selectedId, allWorkflowsOpen]);
+
 	// Drop a selection whose workflow no longer exists.
 	useEffect(() => {
 		if (loaded && selectedId && !workflows.some((w) => w.id === selectedId)) setSelectedId(null);
@@ -404,7 +422,13 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 			setSelectedId(workflow.id);
 			toast.success(`Workflow "${workflow.name}" created.`);
 		}, refreshCurrent);
-		if (ok) closeCreate();
+		if (ok) {
+			// Send the rail back to its left edge for the new card (see
+			// `railResetKey`). Only on success: a failed create added nothing, so
+			// yanking the rail sideways would be noise.
+			setRailResetKey((n) => n + 1);
+			closeCreate();
+		}
 	};
 
 	const handleStart = (stepIds: string[]): void => {
@@ -836,6 +860,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								onSelect={setSelectedId}
 								onCreate={openCreate}
 								onShowAll={() => setAllWorkflowsOpen(true)}
+								railResetKey={railResetKey}
 							/>
 						)}
 

@@ -69,6 +69,26 @@ const WORKFLOW_LIST_SELECTOR = "[data-workflow-list]";
 const WORKFLOW_CARD_SELECTOR = "[data-workflow-card]";
 const WORKFLOW_SEARCH_SELECTOR = "[data-workflow-search]";
 
+const WORKFLOW_RAIL_SELECTOR = "[data-workflow-rail]";
+
+/**
+ * Bring a card into view **sideways only**, by moving its scroll container's
+ * `scrollLeft`. `scrollIntoView` would do this too, but it also scrolls every
+ * ancestor — including the document — and the workflows view is meant to sit at
+ * the top of the page at all times. On the "All workflows" page (a grid, no
+ * rail) there is nothing to scroll, so this is a no-op there.
+ */
+function scrollRailToCard(card: HTMLElement): void {
+	const rail = card.closest<HTMLElement>(WORKFLOW_RAIL_SELECTOR);
+	if (!rail) return;
+	// Rects rather than `offsetLeft`, which is measured against whichever
+	// ancestor happens to be positioned and so isn't reliably rail-relative.
+	const left = card.getBoundingClientRect().left - rail.getBoundingClientRect().left + rail.scrollLeft;
+	const right = left + card.getBoundingClientRect().width;
+	if (left < rail.scrollLeft) rail.scrollLeft = left;
+	else if (right > rail.scrollLeft + rail.clientWidth) rail.scrollLeft = right - rail.clientWidth;
+}
+
 /** A modal dialog (create/confirm) is currently on screen. */
 function modalOpen(): boolean {
 	return document.querySelector('[role="dialog"][aria-modal="true"]') !== null;
@@ -170,8 +190,16 @@ export function useKeyboardShortcuts({ view, dictation, onCreateWorkflow, bindin
 					if (!list) return;
 					const first = list.querySelector<HTMLElement>(WORKFLOW_CARD_SELECTOR);
 					if (first) {
-						first.focus();
-						first.scrollIntoView({ block: "nearest" });
+						// `preventScroll` + a horizontal-only nudge of the rail: the page
+						// itself must stay at the top (the workflows view is rendered from
+						// the top and never scrolls itself), while the rail — which scrolls
+						// sideways — still brings the focused card into view. The list
+						// lives at the top of the view, so putting the window back there
+						// is what makes the card visible; `scrollIntoView` would instead
+						// scroll the page to wherever the card happened to be.
+						first.focus({ preventScroll: true });
+						window.scrollTo({ top: 0, left: 0 });
+						scrollRailToCard(first);
 						return;
 					}
 					list.querySelector<HTMLInputElement>(WORKFLOW_SEARCH_SELECTOR)?.focus();

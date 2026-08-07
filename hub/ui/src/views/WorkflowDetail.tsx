@@ -175,8 +175,13 @@ export function WorkflowDetail({
 	// staying on the list item that was clicked. Runs only when the workflow
 	// changes — the id is stable across the 2s poll, so this never steals focus
 	// back while the operator is working in the open workflow.
+	//
+	// `preventScroll` matters: the pane sits *below* the workflows rail, so a
+	// plain `.focus()` scrolled the window down to it — clicking a card appeared
+	// to scroll the page to the workflow. Focus still moves (the accessibility
+	// point of this effect); the page stays where App put it, at the top.
 	useEffect(() => {
-		sectionRef.current?.focus();
+		sectionRef.current?.focus({ preventScroll: true });
 	}, [workflow.id]);
 
 	// Drop ids of steps that no longer exist so a stale selection can't be sent.
