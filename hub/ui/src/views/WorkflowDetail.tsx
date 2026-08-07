@@ -18,6 +18,7 @@ import { ProgressBar } from "../components/Progress.tsx";
 import { Switch } from "../components/Switch.tsx";
 import { useStagedImages } from "../hooks/useStagedImages.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
+import { canMoveStep } from "../lib/stepMove.ts";
 import { selectionAfterPoll, stepStatuses } from "../lib/stepSelection.ts";
 import { ContextPanel } from "./ContextPanel.tsx";
 import { RenameWorkflowModal } from "./RenameWorkflowModal.tsx";
@@ -80,6 +81,7 @@ export function WorkflowDetail({
 	onOpenStepConversation,
 	onAddStepAfter,
 	onSetStepStatus,
+	onMoveStep,
 	onAddStepsFromTemplate,
 }: {
 	workflow: Workflow;
@@ -118,6 +120,8 @@ export function WorkflowDetail({
 	onAddStepAfter: (afterStepId: string, input: StepConfigInput, staged?: StagedStepImages) => Promise<boolean>;
 	/** Forces one step's status by hand; never runs the step. */
 	onSetStepStatus: (id: string, status: OverridableStepStatus) => void;
+	/** Swaps a step with its neighbour, so it runs one place earlier or later. */
+	onMoveStep: (id: string, direction: "up" | "down") => void;
 	onAddStepsFromTemplate: (templateId: string) => Promise<void>;
 }): React.JSX.Element {
 	// Which steps the next run should dispatch. Seeded from the server's
@@ -400,6 +404,9 @@ export function WorkflowDetail({
 
 					{/* Pinned above the numbered list, not inside it: it runs before step 1
 					    but it isn't step 0, and putting it in the <ol> would number it. */}
+					{/* The context step is outside the ordering — it never moves and nothing
+					    moves past it — so its arrows are rendered dead (canMove* false), and
+					    StepItem drops them entirely for a `context` step anyway. */}
 					{contextStep && (
 						<ul className={styles.steps}>
 							<StepItem
@@ -414,6 +421,9 @@ export function WorkflowDetail({
 								onOpenConversation={onOpenStepConversation}
 								onAddStepAfter={onAddStepAfter}
 								onSetStatus={onSetStepStatus}
+								onMove={onMoveStep}
+								canMoveUp={false}
+								canMoveDown={false}
 								onAttachImages={onAttachImages}
 								onRemoveAttachment={onRemoveAttachment}
 								busy={busy}
@@ -428,7 +438,10 @@ export function WorkflowDetail({
 						/>
 					) : (
 						<ol className={styles.steps}>
-							{taskSteps.map((step) => (
+							{/* `taskSteps`, not `steps`: the context step isn't in the ordering,
+							    so it must not count as step 1's neighbour when deciding whether
+							    the ↑ is live — see canMoveStep. */}
+							{taskSteps.map((step, i) => (
 								<StepItem
 									key={step.id}
 									step={step}
@@ -441,6 +454,9 @@ export function WorkflowDetail({
 									onOpenConversation={onOpenStepConversation}
 									onAddStepAfter={onAddStepAfter}
 									onSetStatus={onSetStepStatus}
+									onMove={onMoveStep}
+									canMoveUp={canMoveStep(taskSteps, i, "up")}
+									canMoveDown={canMoveStep(taskSteps, i, "down")}
 									onAttachImages={onAttachImages}
 									onRemoveAttachment={onRemoveAttachment}
 									busy={busy}

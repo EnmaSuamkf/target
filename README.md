@@ -179,6 +179,15 @@ Notes on behaviour worth knowing:
   a status by hand when the engine got it wrong. It runs nothing; see
   "Correcting a status by hand" below. Statuses set this way carry a pencil on
   their badge.
+- **Reordering steps (↑ ↓).** Two arrows beside each step's number swap it with
+  the step above or below, so a step is no longer stuck where it was created.
+  One press is one place, and the other arrow undoes it. Only **pending** steps
+  move, and only past other pending ones — a step that has run owns its position
+  (its result was written to `.target/steps/<NN>-<slug>.md` under that index),
+  so its arrows are greyed with a tooltip saying why rather than hidden. The
+  conversation-context step has none: it is pinned before everything and isn't
+  part of the ordering. Over the API this is
+  `POST /api/workflows/:id/steps/:stepId/move` with `{"direction": "up"|"down"}`.
 - **A held step's four actions.** A step `waiting` for a manual review offers
   Continue, Abort, Open conversation and Add step — approve, refuse, ask, or
   insert a correction that runs next. See "A step waiting for your review".

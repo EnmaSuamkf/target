@@ -333,6 +333,22 @@ export function removeStep(workflowId: string, stepId: string): Promise<{ ok: tr
 	return request<{ ok: true }>(`/api/workflows/${workflowId}/steps/${stepId}`, { method: "DELETE", admin: true });
 }
 
+/**
+ * Moves a step one place earlier (`up`) or later (`down`), swapping it with its
+ * neighbour. Only a pending step can move, and only past another pending one —
+ * anything else answers 400, which is why the arrows are disabled rather than
+ * hidden on a step that has already run. Returns the whole reordered list,
+ * since a swap changes two rows.
+ */
+export async function moveStep(workflowId: string, stepId: string, direction: "up" | "down"): Promise<Step[]> {
+	const data = await request<{ steps: Step[] }>(`/api/workflows/${workflowId}/steps/${stepId}/move`, {
+		method: "POST",
+		admin: true,
+		body: json({ direction }),
+	});
+	return data.steps;
+}
+
 // No wrapper for POST /steps/:stepId/run: the endpoint still exists as an admin
 // HTTP surface, but nothing in this UI dispatches a single step out of order any
 // more — running is the workflow's Start acting on the checked steps.

@@ -68,6 +68,44 @@
 	font-weight: 600;
 }
 
+/* The two reorder arrows, pinned to the step number they move. A pair rather
+   than a drag handle: one press is one place, which is both the whole gesture
+   and the whole undo. */
+.move {
+	flex: none;
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	margin-top: 0.0625rem;
+}
+
+.moveBtn {
+	display: grid;
+	place-items: center;
+	width: 1.25rem;
+	height: 1.25rem;
+	padding: 0;
+	border: 1px solid transparent;
+	border-radius: var(--radius-sm);
+	background: none;
+	color: var(--text-muted);
+	cursor: pointer;
+	transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+
+.moveBtn:hover:not(:disabled) {
+	border-color: var(--border-strong);
+	background: var(--surface-sunken);
+	color: var(--accent-600);
+}
+
+/* Kept in the layout, not hidden: a step that has run still shows where its
+   arrows are, greyed, instead of the row changing shape as the workflow moves. */
+.moveBtn:disabled {
+	opacity: 0.3;
+	cursor: not-allowed;
+}
+
 .description {
 	flex: 1;
 	min-width: 0;
@@ -300,6 +338,21 @@
 		min-width: 1.75rem;
 		height: 1.75rem;
 		font-size: var(--text-sm);
+	}
+
+	/* Thumb-sized on a phone. They stay side by side rather than stacking, so the
+	   controls row keeps its height — a vertical pair at 44px each would make
+	   every step half a screen taller. The visible box is drawn small; only the
+	   hit area grows. */
+	.moveBtn {
+		width: var(--tap-target);
+		height: var(--tap-target);
+		border-color: var(--border);
+	}
+
+	.move {
+		gap: var(--space-1);
+		margin-top: 0;
 	}
 
 	/* The description no longer sits in a column beside the checkbox, so the

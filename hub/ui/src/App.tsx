@@ -748,6 +748,17 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		);
 	};
 
+	/**
+	 * Moves a step one place up or down. No confirmation: it changes nothing that
+	 * has already happened (only pending steps move, and only past other pending
+	 * ones), and it undoes itself by pressing the other arrow — the cheapest
+	 * possible mistake to make and to fix.
+	 */
+	const handleMoveStep = async (stepId: string, direction: "up" | "down"): Promise<void> => {
+		if (!selectedId) return;
+		await act("Could not move the step", () => api.moveStep(selectedId, stepId, direction), refreshCurrent);
+	};
+
 	const handleAddStepsFromTemplate = async (templateId: string): Promise<void> => {
 		if (!selectedId) return;
 		await act(
@@ -890,6 +901,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								onOpenStepConversation={(id) => void handleOpenStepConversation(id)}
 								onAddStepAfter={handleAddStepAfter}
 								onSetStepStatus={(id, status) => void handleSetStepStatus(id, status)}
+								onMoveStep={(id, direction) => void handleMoveStep(id, direction)}
 								onAddStepsFromTemplate={handleAddStepsFromTemplate}
 							/>
 						) : (
