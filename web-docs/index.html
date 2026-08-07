@@ -413,7 +413,7 @@
         <h2>Steps and their statuses</h2>
         <p>
           A step is one task written in plain language. Each step has a checkbox (to choose
-          whether it runs on the next Start), a status badge, and a row of actions:
+          whether it runs), a status badge, and a row of actions:
           <strong>&#9654; Run</strong> (run just this step, out of order, on a fresh session),
           <strong>Abort</strong> (force-fail a stuck step), <strong>Edit</strong> and
           <strong>Remove</strong>.
@@ -429,7 +429,11 @@
           <span class="pill" data-s="failed">failed</span>
         </div>
         <ul>
-          <li><strong>pending</strong> &mdash; sitting in the list, not yet run.</li>
+          <li><strong>pending</strong> &mdash; sitting in the list, not yet run. Only ticked pending steps are ever
+          dispatched: the checkboxes are synced to the hub the moment you change them, so unticking a step
+          <em>while the workflow is running</em> really skips it when the in-flight step finishes (and ticking one
+          really picks it up). A step added mid-run lands unticked for the same reason &mdash; it won&rsquo;t run
+          until you tick it.</li>
           <li><strong>queued</strong> &mdash; sent to the agent, waiting its turn. Runs are serialized per working directory, so a second step on the same repo waits behind the first. Its timeout clock doesn&rsquo;t start until it actually begins.</li>
           <li><strong>running</strong> &mdash; the agent is working on it. Next to the elapsed time you&rsquo;ll see how lively it is: <em>&ldquo;active 8s ago&rdquo;</em> or <em>&ldquo;no activity 6m&rdquo;</em>.</li>
           <li><strong>judging</strong> &mdash; the step had acceptance criteria, finished its work, and is now self-evaluating the result.</li>

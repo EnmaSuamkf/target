@@ -268,6 +268,21 @@ export async function runWorkflowAction(
 	return data.workflow;
 }
 
+/**
+ * Syncs the run selection with the checkboxes as they stand right now — called
+ * on every toggle, so a step unticked mid-run is really skipped by the engine
+ * (and a pending one ticked mid-run is really picked up). Writes the flags and
+ * nothing else: it never starts, stops or re-derives anything.
+ */
+export async function setStepSelection(id: string, stepIds: string[]): Promise<Step[]> {
+	const data = await request<{ steps: Step[] }>(`/api/workflows/${id}/selection`, {
+		method: "PUT",
+		admin: true,
+		body: json({ stepIds }),
+	});
+	return data.steps;
+}
+
 /** Editable only until it's been injected; the server answers 400 after that. */
 export async function setConversationContext(id: string, conversationContext: string): Promise<Workflow> {
 	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/context`, {

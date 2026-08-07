@@ -1049,6 +1049,19 @@ export function removeWorkflow(workflowId: string): void {
  * isn't something the UI can do, so the position is chosen here. The new step is
  * `pending` and selected by default, so the Continue that releases the gate
  * dispatches it as the next step of the run — which is the whole point.
+ *
+ * Selection, in full: the engine dispatches only selected steps
+ * (`nextPendingStep`), and the checkboxes are the operator's statement of what
+ * that set is. A step appended WHILE the workflow is mid-run (`running`, or
+ * `waiting` at a review gate — both states where the engine can dispatch
+ * without a fresh selection being sent) therefore lands UNSELECTED: nobody
+ * ticked it, the UI renders its box unchecked, and selected-by-default here was
+ * exactly the reported bug — "I added a step while it was running and it
+ * executed even though it wasn't selected". The insert-after-the-gate step is
+ * the deliberate exception above. In every other status the next
+ * Start/Resume/Restart rewrites every flag from the checkboxes anyway
+ * (`setStepSelection`), so the historical selected-by-default is kept there for
+ * the workflows that never open the selection.
  */
 export function addStep(
 	workflowId: string,
@@ -1083,6 +1096,10 @@ export function addStep(
 		refuseContextStep(anchor);
 		afterOrderIndex = anchor.orderIndex;
 	}
+	// See the docblock: a mid-run append is nobody's selection; the
+	// insert-after-the-gate step is the one deliberate exception.
+	const selected =
+		afterOrderIndex != null ? true : workflow.status !== "running" && workflow.status !== "waiting";
 	const step = insertStep(workflowId, trimmed, {
 		acceptanceCriteria: options.acceptanceCriteria ?? null,
 		manualReview: options.manualReview === true,
@@ -1090,6 +1107,7 @@ export function addStep(
 		maxRetries: options.maxRetries ?? 0,
 		retryIntervalSeconds: options.retryIntervalSeconds ?? 0,
 		afterOrderIndex,
+		selected,
 	});
 	// A workflow that had already reached a terminal state gets a fresh
 	// pending step here — back to draft so the badge/progress stay honest and
@@ -1457,6 +1475,31 @@ export async function resumeWorkflow(
 	const updated = getWorkflow(workflowId);
 	if (!updated) throw new WorkflowError("workflow disappeared");
 	return updated;
+}
+
+/**
+ * Syncs the run selection with the checkboxes exactly as they stand RIGHT NOW
+ * — the UI calls this on every toggle, so a step unticked (or ticked) while a
+ * run is in flight takes effect at the next dispatch decision instead of
+ * waiting for the next Start/Resume/Restart. Before this existed the flags
+ * only ever changed at those three entry points, so a mid-run untick stayed
+ * browser-local and the engine dispatched the step anyway — the other half of
+ * "the step ran even though it wasn't selected" (the first half is `addStep`'s
+ * mid-run default).
+ *
+ * Semantics are `setStepSelection`'s own, unchanged: the listed steps (plus the
+ * hub-owned context step) are selected, the rest are not, and an empty list
+ * selects NOTHING — the engine idles with the workflow left `running` rather
+ * than reading it as "run everything" or as "done". No status is written and
+ * nothing is dispatched or reconciled here: the selection only governs what a
+ * FUTURE dispatch decision picks up, and a step already in flight always
+ * finishes on its own.
+ */
+export function setWorkflowStepSelection(workflowId: string, stepIds: string[]): Step[] {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	setStepSelection(workflowId, stepIds);
+	return listSteps(workflowId);
 }
 
 /**

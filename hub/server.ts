@@ -30,6 +30,7 @@
  *   POST   /api/workflows/:id/steps/:stepId/status        → force a step's status by hand (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/move          → move a pending step one place up/down (admin token)
  *   POST   /api/workflows/:id/status                    → force the workflow's status by hand (admin token)
+ *   PUT    /api/workflows/:id/selection                 → sync the run selection with the checkboxes as they stand now (admin token)
  *   POST   /api/workflows/:id/start                    → begin/continue sequential dispatch (admin token)
  *   POST   /api/workflows/:id/pause                    → stop dispatching further steps (admin token)
  *   POST   /api/workflows/:id/resume                   → undo pause (admin token)
@@ -152,6 +153,7 @@ import {
 	resumeWorkflow,
 	runStep,
 	setConversationContext,
+	setWorkflowStepSelection,
 	startWorkflow,
 	WorkflowError,
 	type CloneOverrides,
@@ -2131,6 +2133,34 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			try {
 				const workflow = forceWorkflowStatus(workflowId, status, log);
 				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
+			} catch (err) {
+				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		});
+		return;
+	}
+
+	// --- /api/workflows/:id/selection (sync the checkboxes mid-run) ---
+	//
+	// The checkboxes' answer to "what should run" is no longer something the
+	// server learns only at Start/Resume/Restart: every toggle lands here, so
+	// unticking a step while the run is in flight really keeps the engine from
+	// dispatching it (and ticking a pending step really picks it up). It writes
+	// the flags and nothing else — it never dispatches, aborts or re-derives a
+	// status.
+
+	if (workflowId && parts[3] === "selection" && !parts[4] && (req.method === "PUT" || req.method === "PATCH")) {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const stepIds = Array.isArray(body.stepIds)
+				? body.stepIds.filter((id): id is string => typeof id === "string")
+				: [];
+			try {
+				const steps = setWorkflowStepSelection(workflowId, stepIds);
+				sendJson(res, 200, { steps: steps.map((s) => publicStep(s, cfg)) });
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
 			}

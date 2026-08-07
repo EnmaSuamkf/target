@@ -42,7 +42,10 @@ import styles from "./WorkflowDetail.module.css";
  *   unticks itself when it finishes `done` (`selectionAfterPoll`), so the boxes
  *   keep meaning "what the next run should do" instead of drifting back to
  *   "everything"; after a whole run that leaves nothing ticked, and Start over
- *   asks for a choice — "Select all" is one click.
+ *   asks for a choice — "Select all" is one click. And every toggle is also
+ *   pushed to the hub the moment it happens (`onSelectionChange`), so a box
+ *   unticked MID-RUN really is skipped when the in-flight step finishes — the
+ *   engine never dispatches a step whose checkbox says no.
  * - **A `waiting` workflow has no Start at all.** It's held at a step's
  *   manual-review gate, and the only ways out are on that step: Continue to
  *   approve it and carry on, or Abort to refuse it and stop (the server refuses
@@ -94,6 +97,7 @@ export function WorkflowDetail({
 	onSetStepStatus,
 	onMoveStep,
 	onAddStepsFromTemplate,
+	onSelectionChange,
 }: {
 	workflow: Workflow;
 	steps: Step[];
@@ -127,8 +131,15 @@ export function WorkflowDetail({
 	onContinueStep: (id: string) => void;
 	/** Opens a terminal on one step's own session (the held step's "Open conversation"). */
 	onOpenStepConversation: (id: string) => void;
-	/** Inserts a step right after the given one, so it runs next. */
-	onAddStepAfter: (afterStepId: string, input: StepConfigInput, staged?: StagedStepImages) => Promise<boolean>;
+	/** Inserts a step right after the given one, so it runs next. Resolves to the created step, or null when the server refused it. */
+	onAddStepAfter: (afterStepId: string, input: StepConfigInput, staged?: StagedStepImages) => Promise<Step | null>;
+	/**
+	 * Pushes the run selection to the hub as it stands after a toggle. Without
+	 * this the server only learned the selection at Start/Resume/Restart, so a
+	 * box unticked mid-run never reached the engine — which then dispatched the
+	 * step anyway.
+	 */
+	onSelectionChange: (stepIds: string[]) => void;
 	/** Forces one step's status by hand; never runs the step. */
 	onSetStepStatus: (id: string, status: OverridableStepStatus) => void;
 	/** Swaps a step with its neighbour, so it runs one place earlier or later. */
@@ -226,17 +237,44 @@ export function WorkflowDetail({
 		return "Start";
 	}, [startAction]);
 
+	// Both toggles push the resulting selection straight to the hub
+	// (`onSelectionChange`), so the engine's idea of what to run is the boxes as
+	// they stand NOW — not as they stood at Start. Without the sync, unticking a
+	// step mid-run only changed this page, and the engine dispatched the step
+	// anyway when the in-flight one finished.
 	const toggleStep = (id: string, checked: boolean): void => {
-		setSelection((current) => {
-			const next = new Set(current);
-			if (checked) next.add(id);
-			else next.delete(id);
-			return next;
-		});
+		const next = new Set(selection);
+		if (checked) next.add(id);
+		else next.delete(id);
+		setSelection(next);
+		onSelectionChange([...next]);
 	};
 
 	const toggleAll = (): void => {
-		setSelection(allSelected ? new Set() : new Set(taskSteps.map((s) => s.id)));
+		const next: Set<string> = allSelected ? new Set() : new Set(taskSteps.map((s) => s.id));
+		setSelection(next);
+		onSelectionChange([...next]);
+	};
+
+	/**
+	 * The insert-after-the-gate step stays selected server-side on purpose — its
+	 * whole point is that the Continue releasing the gate dispatches it next —
+	 * so its box is ticked here to match (and that selection is synced like any
+	 * other toggle). Otherwise the first unrelated toggle would push a selection
+	 * without it and silently strip the "runs next" the add just promised.
+	 */
+	const addStepAfter = async (
+		afterStepId: string,
+		input: StepConfigInput,
+		staged?: StagedStepImages,
+	): Promise<Step | null> => {
+		const created = await onAddStepAfter(afterStepId, input, staged);
+		if (created) {
+			const next = new Set(selection).add(created.id);
+			setSelection(next);
+			onSelectionChange([...next]);
+		}
+		return created;
 	};
 
 	/**
@@ -484,7 +522,7 @@ export function WorkflowDetail({
 									onAbort={onAbortStep}
 									onContinue={onContinueStep}
 									onOpenConversation={onOpenStepConversation}
-									onAddStepAfter={onAddStepAfter}
+									onAddStepAfter={addStepAfter}
 									onSetStatus={onSetStepStatus}
 									onMove={onMoveStep}
 									canMoveUp={false}
@@ -517,7 +555,7 @@ export function WorkflowDetail({
 										onAbort={onAbortStep}
 										onContinue={onContinueStep}
 										onOpenConversation={onOpenStepConversation}
-										onAddStepAfter={onAddStepAfter}
+										onAddStepAfter={addStepAfter}
 										onSetStatus={onSetStepStatus}
 										onMove={onMoveStep}
 										canMoveUp={canMoveStep(taskSteps, i, "up")}

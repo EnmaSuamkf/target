@@ -905,3 +905,71 @@ test("POST /api/workflows/:id/steps with an afterStepId from another workflow re
 	const detail = (await (await fetch(`${baseUrl}/api/workflows/${workflowId}`, { headers: adminHeaders() })).json()) as { steps: unknown[] };
 	assert.equal(detail.steps.length, 1);
 });
+
+/**
+ * The selection-sync route: PUT /api/workflows/:id/selection rewrites the run
+ * selection as the checkboxes stand right now, so a step unticked mid-run is
+ * really skipped. Only the wiring, the admin gate and the status codes here —
+ * what the engine does with the flags is run-selection.test.ts's.
+ */
+
+test("PUT /api/workflows/:id/selection rewrites the selected flags", async () => {
+	const { workflowId, step } = await createWorkflowWithStep("selection sync", { description: "first" });
+	const secondRes = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ description: "second" }),
+	});
+	const second = ((await secondRes.json()) as StepBody).step;
+
+	// Untick the second step: only the first is selected afterwards, and the
+	// answer carries the steps so the caller can confirm without a re-fetch.
+	const res = await fetch(`${baseUrl}/api/workflows/${workflowId}/selection`, {
+		method: "PUT",
+		headers: adminHeaders(),
+		body: JSON.stringify({ stepIds: [step.id] }),
+	});
+	assert.equal(res.status, 200);
+	const body = (await res.json()) as { steps: { id: string; selected: boolean }[] };
+	assert.equal(body.steps.find((s) => s.id === step.id)?.selected, true);
+	assert.equal(body.steps.find((s) => s.id === second.id)?.selected, false);
+
+	// And on the read path, not just in the response.
+	const detail = (await (await fetch(`${baseUrl}/api/workflows/${workflowId}`, { headers: adminHeaders() })).json()) as {
+		steps: { id: string; selected: boolean }[];
+	};
+	assert.equal(detail.steps.find((s) => s.id === step.id)?.selected, true);
+	assert.equal(detail.steps.find((s) => s.id === second.id)?.selected, false);
+
+	// Unticking EVERYTHING is a real answer too — "run nothing", not "run all".
+	const none = await fetch(`${baseUrl}/api/workflows/${workflowId}/selection`, {
+		method: "PUT",
+		headers: adminHeaders(),
+		body: JSON.stringify({ stepIds: [] }),
+	});
+	assert.equal(none.status, 200);
+	const cleared = (await none.json()) as { steps: { selected: boolean }[] };
+	assert.ok(cleared.steps.every((s) => s.selected === false));
+});
+
+test("PUT /api/workflows/:id/selection requires an admin token", async () => {
+	const { workflowId, step } = await createWorkflowWithStep("selection sync auth", { description: "first" });
+	const res = await fetch(`${baseUrl}/api/workflows/${workflowId}/selection`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ stepIds: [step.id] }),
+	});
+	assert.equal(res.status, 401);
+	// The flag is untouched by the refused call.
+	assert.equal(getStep(step.id)?.selected, true);
+});
+
+test("PUT /api/workflows/:id/selection on an unknown workflow returns 400", async () => {
+	const res = await fetch(`${baseUrl}/api/workflows/does-not-exist/selection`, {
+		method: "PUT",
+		headers: adminHeaders(),
+		body: JSON.stringify({ stepIds: [] }),
+	});
+	assert.equal(res.status, 400);
+	assert.equal(((await res.json()) as { error: string }).error, "unknown workflow");
+});
