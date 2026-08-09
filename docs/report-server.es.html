@@ -1,0 +1,826 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>The Target Project — reporte de actividad a un servidor central</title>
+    <meta name="description" content="Plan de implementación: que cada instancia de Target reporte a un servidor toda su actividad (workflows, steps, uso y conversaciones), con la URL de destino configurada en un fichero .env y la versión del cliente rastreada mediante un CHANGELOG." />
+    <style>
+      :root{
+        --bg: #0e1416;
+        --surface: #141c1f;
+        --surface-2: #182124;
+        --border: #253034;
+        --text: #e6edee;
+        --muted: #8ea1a6;
+        --faint: #5d7378;
+        --accent: #5ed6a4;
+        --accent-dim: #2f6b54;
+        --warn: #e7b563;
+        --danger: #e07b6b;
+        --mono: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      *{ box-sizing: border-box; }
+      html{ scroll-behavior: smooth; }
+      body{
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
+        line-height: 1.65;
+      }
+      a{ color: var(--accent); }
+      a:focus-visible{ outline: 2px solid var(--accent); outline-offset: 2px; }
+      code, kbd{
+        font-family: var(--mono);
+        font-size: 0.88em;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        padding: 0.05em 0.4em;
+        border-radius: 4px;
+        white-space: nowrap;
+      }
+      pre{
+        font-family: var(--mono);
+        font-size: 0.82rem;
+        line-height: 1.6;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1rem 1.15rem;
+        overflow-x: auto;
+        margin: 0 0 1rem;
+      }
+      pre code{ background: none; border: none; padding: 0; white-space: pre; }
+
+      .shell{ max-width: 900px; margin: 0 auto; padding: 3.2rem 1.5rem 5rem; }
+
+      header.hero{ margin-bottom: 2.6rem; }
+      .eyebrow{
+        font-family: var(--mono);
+        font-size: 0.74rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--accent);
+        display: flex;
+        align-items: center;
+        gap: 0.6em;
+        margin-bottom: 0.6rem;
+      }
+      .eyebrow::before{
+        content: "";
+        width: 6px; height: 6px;
+        background: var(--accent);
+        border-radius: 50%;
+        box-shadow: 0 0 0 3px var(--accent-dim);
+      }
+      h1{
+        font-family: var(--mono);
+        font-size: clamp(1.6rem, 4vw, 2.2rem);
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        margin: 0 0 0.8rem;
+        line-height: 1.25;
+      }
+      .lede{ color: var(--muted); font-size: 1.02rem; margin: 0; max-width: 68ch; }
+
+      h2{
+        font-family: var(--mono);
+        font-size: 1.08rem;
+        font-weight: 600;
+        margin: 3.2rem 0 1rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 1px solid var(--border);
+        letter-spacing: -0.01em;
+      }
+      h2 .num{ color: var(--accent); margin-right: 0.55em; }
+      h3{
+        font-family: var(--mono);
+        font-size: 0.94rem;
+        font-weight: 600;
+        margin: 2rem 0 0.7rem;
+        color: var(--text);
+      }
+      p{ margin: 0 0 1rem; }
+      ul, ol{ margin: 0 0 1rem; padding-left: 1.3rem; }
+      li{ margin-bottom: 0.45rem; }
+      strong{ color: #f2f8f9; }
+
+      figure{ margin: 1.6rem 0 1.9rem; }
+      .diagram{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.4rem 1.2rem 1rem;
+        overflow-x: auto;
+      }
+      .diagram svg{ display: block; width: 100%; height: auto; min-width: 620px; }
+      figcaption{
+        color: var(--faint);
+        font-size: 0.82rem;
+        margin-top: 0.7rem;
+        font-family: var(--mono);
+      }
+
+      /* shared SVG vocabulary */
+      .s-box{ fill: var(--surface-2); stroke: var(--border); stroke-width: 1.5; }
+      .s-box-accent{ fill: var(--surface-2); stroke: var(--accent); stroke-width: 1.5; }
+      .s-box-warn{ fill: var(--surface-2); stroke: var(--warn); stroke-width: 1.5; }
+      .s-box-danger{ fill: var(--surface-2); stroke: var(--danger); stroke-width: 1.5; }
+      .s-zone{ fill: none; stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 5 4; }
+      .s-t{ font-family: var(--mono); font-size: 12px; fill: var(--text); }
+      .s-t-sm{ font-family: var(--mono); font-size: 10.5px; fill: var(--muted); }
+      .s-t-xs{ font-family: var(--mono); font-size: 9.5px; fill: var(--faint); }
+      .s-t-accent{ font-family: var(--mono); font-size: 10.5px; fill: var(--accent); }
+      .s-t-warn{ font-family: var(--mono); font-size: 10.5px; fill: var(--warn); }
+      .s-t-danger{ font-family: var(--mono); font-size: 10.5px; fill: var(--danger); }
+      .s-label{ font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.1em; fill: var(--faint); }
+      .s-line{ stroke: var(--faint); stroke-width: 1.4; fill: none; }
+      .s-line-accent{ stroke: var(--accent); stroke-width: 1.6; fill: none; }
+      .s-line-dash{ stroke: var(--muted); stroke-width: 1.4; fill: none; stroke-dasharray: 4 3; }
+      .s-line-danger{ stroke: var(--danger); stroke-width: 1.6; fill: none; }
+      .s-lifeline{ stroke: var(--border); stroke-width: 1.4; stroke-dasharray: 3 4; }
+
+      table{
+        width: 100%;
+        border-collapse: collapse;
+        margin: 0 0 1.4rem;
+        font-size: 0.9rem;
+      }
+      th, td{
+        text-align: left;
+        padding: 0.6rem 0.7rem;
+        border-bottom: 1px solid var(--border);
+        vertical-align: top;
+      }
+      th{
+        font-family: var(--mono);
+        font-size: 0.76rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--faint);
+        font-weight: 600;
+      }
+      td code{ white-space: normal; }
+      .tbl-wrap{ overflow-x: auto; }
+
+      .callout{
+        border-left: 3px solid var(--accent);
+        background: var(--surface);
+        padding: 0.9rem 1.1rem;
+        border-radius: 0 8px 8px 0;
+        margin: 0 0 1.4rem;
+      }
+      .callout.warn{ border-left-color: var(--warn); }
+      .callout.danger{ border-left-color: var(--danger); }
+      .callout p:last-child{ margin-bottom: 0; }
+      .callout .tag{
+        display: block;
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent);
+        margin-bottom: 0.4rem;
+      }
+      .callout.warn .tag{ color: var(--warn); }
+      .callout.danger .tag{ color: var(--danger); }
+
+      .toc{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.1rem 1.3rem;
+        margin-bottom: 1rem;
+      }
+      .toc ol{ margin: 0; padding-left: 1.2rem; }
+      .toc li{ margin-bottom: 0.25rem; font-size: 0.92rem; }
+      .toc a{ text-decoration: none; }
+      .toc a:hover{ text-decoration: underline; }
+
+      footer{
+        margin-top: 4rem;
+        padding-top: 1.4rem;
+        border-top: 1px solid var(--border);
+        color: var(--faint);
+        font-size: 0.84rem;
+        font-family: var(--mono);
+      }
+      @media (max-width: 640px){
+        .shell{ padding: 2.2rem 1.1rem 3.5rem; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div class="eyebrow">Plan de implementación</div>
+        <h1>Reporte de actividad a un servidor central</h1>
+        <p class="lede">
+          Que cada instancia de Target envíe a un servidor central toda su
+          actividad —workflows, steps, uso de tokens y conversaciones por
+          workflow— para poder observar y monitorizar a los usuarios. La URL de
+          destino se configura en un fichero <code>.env</code>, y cada reporte
+          lleva la <strong>versión del cliente</strong>, que pasa a rastrearse
+          en un <code>CHANGELOG.md</code>.
+        </p>
+      </header>
+
+      <div class="toc">
+        <ol>
+          <li><a href="#today">Dónde estamos hoy</a></li>
+          <li><a href="#proposal">Qué se propone</a></li>
+          <li><a href="#env">Configuración vía <code>.env</code></a></li>
+          <li><a href="#version">Versionado y CHANGELOG</a></li>
+          <li><a href="#events">Qué se reporta: eventos y cola durable</a></li>
+          <li><a href="#seam">Por dónde engancha</a></li>
+          <li><a href="#contract">Contrato del endpoint</a></li>
+          <li><a href="#privacy">Privacidad y seguridad</a></li>
+          <li><a href="#work">Trabajo a realizar</a></li>
+          <li><a href="#tests">Plan de pruebas</a></li>
+          <li><a href="#criterion">Criterio de éxito</a></li>
+          <li><a href="#open">Preguntas abiertas</a></li>
+        </ol>
+      </div>
+
+      <!-- 1 -->
+      <h2 id="today"><span class="num">1</span>Dónde estamos hoy</h2>
+      <p>
+        El hub de Target es un proceso Node (≥24) que vive en <code>hub/</code>,
+        persiste en SQLite (<code>~/.target/target.db</code>, vía
+        <code>node:sqlite</code>) y se configura desde
+        <code>~/.target/config.json</code> (<code>hub/config.ts</code>). Es
+        <strong>mono-usuario</strong>: la tabla <code>auth</code> es un singleton
+        (<code>CHECK (id = 1)</code>) y su existencia hace de flag de "setup
+        completado".
+      </p>
+      <ul>
+        <li>
+          <strong>Modelo de datos:</strong> tablas <code>workflows</code> y
+          <code>steps</code> (más <code>templates</code>, <code>settings</code>,
+          <code>attachments</code>, <code>auth</code>, <code>sessions</code>).
+          Cada workflow tiene un agente/hook dedicado y una sesión Claude
+          encadenada (<code>last_session_id</code>); cada step avanza de
+          <code>pending → queued → running → done|failed|waiting</code>.
+        </li>
+        <li>
+          <strong>Dónde se asienta la actividad:</strong>
+          <code>onStepResult</code> (<code>hub/workflow.ts</code>) es el punto por
+          el que pasan todos los resultados de step; el fin de workflow ya emite
+          una notificación (<code>maybeNotifyWorkflowCompleted</code> →
+          <code>hub/notifier.ts</code>), y <code>writeStatusMd</code> /
+          <code>writeStepResults</code> vuelcan el markdown de progreso.
+        </li>
+        <li>
+          <strong>Uso / tokens:</strong> <code>hub/transcript.ts</code>
+          (<code>readTokenUsage</code>) y <code>hub/tokens.ts</code> ya derivan el
+          consumo de tokens leyendo el transcript de la sesión.
+        </li>
+        <li>
+          <strong>Conversaciones:</strong> <code>hub/conversations.ts</code> ya
+          sabe listar y resumir (<code>listConversations</code>,
+          <code>readConversationDigest</code>) las conversaciones de una sesión.
+        </li>
+        <li>
+          <strong>Salida HTTP:</strong> el <code>notifier</code> ya hace
+          <code>fetch()</code> saliente (a un MCP de Slack) con timeout — es el
+          patrón que reutilizaremos para postear al servidor.
+        </li>
+        <li>
+          <strong>Bucle de fondo:</strong> <code>hub/daemon.ts</code>
+          (<code>startHub</code>) ya corre un <code>setInterval</code>
+          (<code>expireStale</code>) con <code>unref()</code> — el hueco natural
+          para un <em>flusher</em> periódico.
+        </li>
+      </ul>
+      <div class="callout warn">
+        <span class="tag">Lo que falta</span>
+        <p>
+          Hoy <strong>no hay</strong> ningún reporte saliente de actividad, ni
+          soporte de <code>.env</code> (solo se leen variables sueltas como
+          <code>TARGET_HOME</code> vía <code>process.env</code>), ni versión
+          rastreada: <code>package.json</code> dice <code>0.1.0</code> en la raíz,
+          en <code>hub/</code> y en <code>hub/ui/</code>, y <strong>no existe
+          CHANGELOG</strong>.
+        </p>
+      </div>
+
+      <!-- 2 -->
+      <h2 id="proposal"><span class="num">2</span>Qué se propone</h2>
+      <p>Cuatro piezas, cada una pequeña y desacoplada:</p>
+      <ol>
+        <li>
+          <strong>Carga de <code>.env</code>:</strong> leer un fichero
+          <code>.env</code> al arrancar el hub, sin dependencias nuevas, usando
+          <code>process.loadEnvFile()</code> (nativo en Node ≥ 20.12/24). Ahí vive
+          la URL de destino y el token del reporte.
+        </li>
+        <li>
+          <strong>Versión + CHANGELOG:</strong> una única fuente de verdad para la
+          versión (<code>package.json</code>), expuesta por
+          <code>hub/version.ts</code>, y un <code>CHANGELOG.md</code> (formato
+          <em>Keep a Changelog</em>) del que la versión sale. Todo reporte la
+          incluye.
+        </li>
+        <li>
+          <strong>Cola durable de eventos:</strong> una tabla nueva
+          <code>report_events</code> donde el hub encola cada acontecimiento
+          (workflow/step/uso/conversación) como JSON. Durable = sobrevive a
+          reinicios y a cortes de red.
+        </li>
+        <li>
+          <strong>Reporter (flusher):</strong> un módulo <code>hub/reporter.ts</code>
+          que, en un intervalo del daemon, agrupa los eventos no entregados y los
+          <code>POST</code>ea en lote a la URL del <code>.env</code>. Best-effort:
+          si falla, reintenta; <strong>nunca</strong> bloquea ni tumba el motor de
+          workflows.
+        </li>
+      </ol>
+
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 860 300" role="img" aria-label="Diagrama de arquitectura del reporte">
+            <rect class="s-zone" x="12" y="12" width="520" height="276" rx="10"></rect>
+            <text class="s-label" x="28" y="34">INSTANCIA TARGET (LOCAL)</text>
+
+            <rect class="s-box" x="34" y="52" width="150" height="52" rx="8"></rect>
+            <text class="s-t" x="52" y="76">Motor de workflows</text>
+            <text class="s-t-xs" x="52" y="92">workflow.ts · onStepResult</text>
+
+            <rect class="s-box" x="34" y="128" width="150" height="46" rx="8"></rect>
+            <text class="s-t" x="52" y="150">config + .env</text>
+            <text class="s-t-xs" x="52" y="165">config.ts · loadEnvFile</text>
+
+            <rect class="s-box-accent" x="250" y="70" width="150" height="60" rx="8"></rect>
+            <text class="s-t-accent" x="268" y="94">emit(kind, payload)</text>
+            <text class="s-t-xs" x="268" y="110">reporter.ts</text>
+
+            <rect class="s-box" x="250" y="160" width="150" height="56" rx="8"></rect>
+            <text class="s-t" x="268" y="184">report_events</text>
+            <text class="s-t-xs" x="268" y="200">SQLite · cola durable</text>
+
+            <rect class="s-box-accent" x="410" y="160" width="108" height="56" rx="8"></rect>
+            <text class="s-t-accent" x="426" y="184">flusher</text>
+            <text class="s-t-xs" x="426" y="200">daemon interval</text>
+
+            <path class="s-line" d="M184 82 H250"></path>
+            <path class="s-line-dash" d="M325 130 V160"></path>
+            <path class="s-line" d="M400 188 H410"></path>
+            <path class="s-line-dash" d="M184 150 V150 Q210 150 210 120 L210 100 H250"></path>
+
+            <rect class="s-box-warn" x="600" y="120" width="228" height="70" rx="10"></rect>
+            <text class="s-t-warn" x="622" y="150">Servidor central</text>
+            <text class="s-t-xs" x="622" y="168">POST /ingest  (Bearer token)</text>
+            <text class="s-t-xs" x="622" y="182">TARGET_REPORT_URL</text>
+
+            <path class="s-line-accent" d="M518 188 C560 188 560 155 600 155"></path>
+            <text class="s-t-accent" x="536" y="140">lote JSON</text>
+            <path class="s-line-dash" d="M600 172 C560 200 540 205 518 205"></path>
+            <text class="s-t-xs" x="536" y="222">2xx → delivered</text>
+          </svg>
+        </div>
+        <figcaption>El motor solo encola; el flusher entrega. Nada en la ruta caliente depende de la red.</figcaption>
+      </figure>
+
+      <!-- 3 -->
+      <h2 id="env"><span class="num">3</span>Configuración vía <code>.env</code></h2>
+      <p>
+        Se carga un <code>.env</code> al inicio de <code>loadConfig()</code>
+        (<code>hub/config.ts</code>), buscándolo primero en
+        <code>TARGET_HOME</code> (<code>~/.target/.env</code>) y, si no, en la raíz
+        del repositorio. Con Node ≥ 24 basta lo nativo, sin añadir
+        <code>dotenv</code>:
+      </p>
+      <pre><code>// hub/config.ts — al principio de loadConfig()
+import { existsSync } from "node:fs";
+for (const f of [path.join(targetDir(), ".env"), path.join(process.cwd(), ".env")]) {
+  if (existsSync(f)) { try { process.loadEnvFile(f); } catch { /* .env inválido → se ignora */ } break; }
+}</code></pre>
+      <p>Variables reconocidas (todas opcionales — sin URL, el reporte queda desactivado):</p>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr><th>Variable</th><th>Sentido</th><th>Por defecto</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>TARGET_REPORT_URL</code></td><td>Endpoint de ingesta al que se postean los lotes. <strong>Su ausencia desactiva todo el reporte.</strong></td><td><em>(vacío)</em></td></tr>
+            <tr><td><code>TARGET_REPORT_TOKEN</code></td><td>Secreto enviado como <code>Authorization: Bearer …</code>.</td><td><em>(vacío)</em></td></tr>
+            <tr><td><code>TARGET_REPORT_ENABLED</code></td><td>Interruptor explícito para desactivar sin borrar la URL.</td><td><code>true</code></td></tr>
+            <tr><td><code>TARGET_REPORT_INTERVAL_MS</code></td><td>Cada cuánto vacía el flusher la cola.</td><td><code>30000</code></td></tr>
+            <tr><td><code>TARGET_REPORT_INCLUDE_CONVERSATIONS</code></td><td><code>off</code> = sin conversaciones · <code>digest</code> = resumen/metadatos · <code>full</code> = texto completo.</td><td><code>digest</code></td></tr>
+            <tr><td><code>TARGET_INSTANCE_ID</code></td><td>Identidad estable de la instancia. Si falta, se genera una vez y se guarda en <code>settings</code>.</td><td><em>(autogenerada)</em></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Se versiona un <code>.env.example</code> y se añade <code>.env</code> a <code>.gitignore</code>:</p>
+      <pre><code># .env.example
+TARGET_REPORT_URL=https://telemetria.midominio.com/ingest
+TARGET_REPORT_TOKEN=cambia-esto
+TARGET_REPORT_ENABLED=true
+TARGET_REPORT_INTERVAL_MS=30000
+TARGET_REPORT_INCLUDE_CONVERSATIONS=digest
+# TARGET_INSTANCE_ID=  # opcional; se autogenera si se deja vacío</code></pre>
+      <div class="callout">
+        <span class="tag">Nota de config</span>
+        <p>
+          Los campos de reporte se leen del entorno, no de
+          <code>config.json</code>, para que la URL y el secreto vivan solo en el
+          <code>.env</code> (fuera de git) tal y como pide el requisito. El resto
+          de <code>config.json</code> queda intacto.
+        </p>
+      </div>
+
+      <!-- 4 -->
+      <h2 id="version"><span class="num">4</span>Versionado y CHANGELOG</h2>
+      <p>
+        Para "empezar a tener versión dentro de Target y reportarla" hace falta
+        (a) una fuente de verdad y (b) un registro de cambios legible:
+      </p>
+      <ul>
+        <li>
+          <strong>Fuente de verdad:</strong> el <code>version</code> de
+          <code>package.json</code> de la raíz. Un módulo
+          <code>hub/version.ts</code> lo lee (<code>readFileSync</code> +
+          <code>JSON.parse</code>) y exporta <code>TARGET_VERSION</code>; así el
+          reporte, la UI y los logs comparten el mismo número.
+        </li>
+        <li>
+          <strong><code>CHANGELOG.md</code></strong> en la raíz, formato
+          <em>Keep a Changelog</em> + <em>SemVer</em>. Cada release mueve
+          <code>[Unreleased]</code> a una versión fechada y actualiza el
+          <code>package.json</code>. La feature de reporte entra como primera
+          entrada.
+        </li>
+        <li>
+          <strong>Reportar la versión:</strong> todo lote de eventos y el
+          <code>heartbeat</code> incluyen <code>version</code>. Así el servidor ve
+          qué versión corre cada usuario.
+        </li>
+      </ul>
+      <pre><code># CHANGELOG.md
+## [Unreleased]
+
+## [0.2.0] - 2026-08-09
+### Added
+- Reporte de actividad a un servidor central (workflows, steps, uso, conversaciones).
+- Configuración por `.env` (`TARGET_REPORT_URL`, token, intervalo, privacidad).
+- Versión del cliente reportada en cada lote (`hub/version.ts`).</code></pre>
+
+      <!-- 5 -->
+      <h2 id="events"><span class="num">5</span>Qué se reporta: eventos y cola durable</h2>
+      <p>Tabla nueva, creada junto al resto del esquema en <code>hub/db.ts</code>:</p>
+      <pre><code>CREATE TABLE IF NOT EXISTS report_events (
+  id           TEXT PRIMARY KEY,
+  kind         TEXT NOT NULL,          -- p.ej. "step.done"
+  workflow_id  TEXT,                    -- nulo para eventos globales (heartbeat)
+  payload      TEXT NOT NULL,           -- JSON del evento
+  created_at   TEXT NOT NULL,
+  delivered_at TEXT,                    -- nulo = pendiente de entregar
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  next_try_at  TEXT                     -- backoff exponencial en fallo
+);
+CREATE INDEX IF NOT EXISTS idx_report_pending
+  ON report_events(delivered_at, next_try_at);</code></pre>
+      <p>Cobertura de actividad exigida por el requisito → tipos de evento:</p>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Área</th><th><code>kind</code></th><th>Payload (resumen)</th></tr></thead>
+          <tbody>
+            <tr><td rowspan="2">Workflows</td><td><code>workflow.created</code> / <code>workflow.renamed</code> / <code>workflow.removed</code></td><td>id, nombre, agente, nº de steps, <code>created_at</code></td></tr>
+            <tr><td><code>workflow.status_changed</code></td><td>id, <code>from</code>→<code>to</code>, si fue manual</td></tr>
+            <tr><td rowspan="3">Steps</td><td><code>step.added</code></td><td>step id, order_index, descripción, <code>manual_review</code>, <code>has_acceptance_criteria</code> — la lista de steps planificada</td></tr>
+            <tr><td><code>step.started</code> / <code>step.done</code> / <code>step.failed</code> / <code>step.waiting</code></td><td>step id, order_index, descripción, status, phase, retries, duración</td></tr>
+            <tr><td><code>step.judged</code></td><td>veredicto del auto-eval y criterio de aceptación</td></tr>
+            <tr><td>Uso</td><td><code>usage.snapshot</code></td><td>session id, tokens in/out, cache, coste estimado (de <code>readTokenUsage</code>)</td></tr>
+            <tr><td>Conversación</td><td><code>conversation.snapshot</code></td><td>session id, nº de turnos, <code>digest</code> o texto según privacidad</td></tr>
+            <tr><td>Global</td><td><code>heartbeat</code></td><td>instance id, versión, SO, uptime, contadores agregados</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Los eventos son <strong>append-only</strong> e idempotentes: cada uno lleva
+        su <code>id</code> (uuid), de modo que el servidor puede deduplicar un lote
+        reenviado tras un fallo de red.
+      </p>
+
+      <!-- 6 -->
+      <h2 id="seam"><span class="num">6</span>Por dónde engancha</h2>
+      <p>Un solo punto de emisión, <code>emit(kind, payload)</code> en <code>hub/reporter.ts</code>, llamado desde donde ya se asienta el estado:</p>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Fichero · función</th><th>Se añade</th></tr></thead>
+          <tbody>
+            <tr><td><code>hub/config.ts · loadConfig</code></td><td>carga del <code>.env</code>; deriva <code>reportConfig</code> del entorno</td></tr>
+            <tr><td><code>hub/db.ts</code></td><td>tabla <code>report_events</code> + helpers <code>enqueueEvent</code>/<code>pendingEvents</code>/<code>markDelivered</code>/<code>markFailed</code></td></tr>
+            <tr><td><code>hub/reporter.ts</code> <em>(nuevo)</em></td><td><code>emit()</code>, <code>flush()</code> (POST en lote con timeout, patrón del <code>notifier</code>), backoff</td></tr>
+            <tr><td><code>hub/version.ts</code> <em>(nuevo)</em></td><td><code>TARGET_VERSION</code> desde <code>package.json</code></td></tr>
+            <tr><td><code>hub/workflow.ts · onStepResult</code></td><td><code>emit("step.done"/"step.failed"/…")</code> en las ramas de settle; <code>usage.snapshot</code> con <code>readTokenUsage</code></td></tr>
+            <tr><td><code>hub/workflow.ts · createWorkflow / renameWorkflow / removeWorkflow / setWorkflowStatus</code></td><td>eventos de ciclo de vida del workflow (<code>workflow.created</code>/<code>workflow.updated</code> llevan <code>agent</code>+<code>sandbox</code> vía <code>workflowRuntimeMeta</code>)</td></tr>
+            <tr><td><code>hub/daemon.ts · startHub</code></td><td><code>announceWorkflows()</code> al arrancar: un <code>workflow.updated</code> por workflow conocido</td></tr>
+            <tr><td><code>hub/workflow.ts · addStep</code></td><td><code>emit("step.added")</code> — cubre también clones y seeds de plantilla (van vía <code>addStep</code>); si el workflow estaba terminal, además <code>emit("workflow.status_changed", {to: "draft"})</code> al reabrirlo</td></tr>
+            <tr><td><code>hub/workflow.ts</code> (dispatch del step)</td><td><code>emit("step.started")</code></td></tr>
+            <tr><td><code>hub/daemon.ts · startHub</code></td><td>segundo <code>setInterval(flush, TARGET_REPORT_INTERVAL_MS)</code> con <code>unref()</code>; <code>heartbeat</code> periódico</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout">
+        <span class="tag">Regla de acoplamiento</span>
+        <p>
+          <code>emit()</code> solo hace un <code>INSERT</code> local y vuelve al
+          instante; si el reporte está desactivado (sin URL) es un no-op. La red
+          vive <strong>únicamente</strong> en el flusher del daemon. Ningún fallo
+          de reporte cambia el estado de un workflow.
+        </p>
+      </div>
+
+      <figure>
+        <div class="diagram">
+          <svg viewBox="0 0 820 210" role="img" aria-label="Secuencia de un evento de step">
+            <text class="s-label" x="40" y="24">MOTOR</text>
+            <text class="s-label" x="300" y="24">report_events</text>
+            <text class="s-label" x="560" y="24">FLUSHER</text>
+            <text class="s-label" x="720" y="24">SERVIDOR</text>
+            <line class="s-lifeline" x1="70"  y1="34" x2="70"  y2="196"></line>
+            <line class="s-lifeline" x1="345" y1="34" x2="345" y2="196"></line>
+            <line class="s-lifeline" x1="600" y1="34" x2="600" y2="196"></line>
+            <line class="s-lifeline" x1="760" y1="34" x2="760" y2="196"></line>
+
+            <path class="s-line-accent" d="M70 60 H345" marker-end="url(#ah)"></path>
+            <text class="s-t-sm" x="120" y="52">emit("step.done") → INSERT</text>
+
+            <path class="s-line-dash" d="M600 96 H345" marker-end="url(#ah)"></path>
+            <text class="s-t-sm" x="380" y="88">poll pendientes</text>
+
+            <path class="s-line-accent" d="M600 132 H760" marker-end="url(#ah)"></path>
+            <text class="s-t-sm" x="612" y="124">POST /ingest (lote)</text>
+
+            <path class="s-line-dash" d="M760 168 H600" marker-end="url(#ah)"></path>
+            <text class="s-t-sm" x="612" y="160">200 OK</text>
+            <path class="s-line-dash" d="M600 190 H345" marker-end="url(#ah)"></path>
+            <text class="s-t-xs" x="380" y="184">markDelivered</text>
+
+            <defs>
+              <marker id="ah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+                <path d="M0 0 L6 3 L0 6 z" fill="#8ea1a6"></path>
+              </marker>
+            </defs>
+          </svg>
+        </div>
+        <figcaption>Camino feliz de un evento; en fallo, <code>attempts++</code> y <code>next_try_at</code> con backoff.</figcaption>
+      </figure>
+
+      <!-- 7 -->
+      <h2 id="contract"><span class="num">7</span>Contrato del endpoint</h2>
+      <p>
+        El contrato distingue <strong>dos</strong> nociones de "error", que antes
+        se confundían:
+      </p>
+      <ol>
+        <li><strong>Errores del trabajo</strong> (un step o un workflow que falla): son <em>datos</em> que hay que reportar, viajan <strong>dentro</strong> del evento (objeto <code>error</code>). Ver §7.2 y §7.3.</li>
+        <li><strong>Errores del transporte</strong> (la ingesta rechaza o no responde): los gestiona el cliente con reintentos/backoff según el código HTTP. Ver §7.5.</li>
+      </ol>
+
+      <h3>7.1 &nbsp;Petición — envoltura del lote</h3>
+      <pre><code>POST {TARGET_REPORT_URL}
+Authorization: Bearer {TARGET_REPORT_TOKEN}
+Content-Type: application/json
+Idempotency-Key: {batch_id}          # uuid del lote; permite reintento seguro
+X-Target-Version: 0.2.0
+
+{
+  "batch_id": "b-uuid",              // == Idempotency-Key
+  "instance_id": "a1b2c3…",
+  "version": "0.2.0",
+  "schema_version": 1,               // versión de ESTE contrato, sube si cambia
+  "sent_at": "2026-08-09T12:00:00.000Z",
+  "user": { "display_name": "Ada" },  // de la tabla auth; opcional
+  "events": [ /* 1..N eventos, ver §7.2 */ ]
+}</code></pre>
+      <p>
+        <code>schema_version</code> se separa de <code>version</code> (la del
+        cliente) para que el servidor pueda evolucionar el formato sin romper
+        instancias viejas. El tamaño de lote se acota (p.ej. 100 eventos /
+        &lt; 1&nbsp;MB); si no cabe, el cliente parte el lote.
+      </p>
+
+      <h3>7.2 &nbsp;Envoltura común de un evento</h3>
+      <pre><code>{
+  "id": "e-uuid",                    // idempotencia por evento
+  "kind": "step.done",
+  "workflow_id": "wf-123",           // null en eventos globales (heartbeat)
+  "session_id": "sess-abc",          // null si aún no hay sesión
+  "created_at": "2026-08-09T11:59:58.000Z",
+  "data": { /* específico del kind, ver tabla */ }
+}</code></pre>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th><code>kind</code></th><th>Campos de <code>data</code></th></tr></thead>
+          <tbody>
+            <tr><td><code>workflow.created</code></td><td><code>name</code>, <code>agent_name</code>, <code>agent</code> (runner: <code>claude|free-code</code>), <code>sandbox</code> (<code>host|docker</code>), <code>image</code> (imagen docker o null), <code>step_count</code></td></tr>
+            <tr><td><code>workflow.updated</code></td><td><code>name</code>, <code>agent_name</code>, <code>agent</code>, <code>sandbox</code>, <code>image</code> — rename o cambio de runtime; también se emite al arrancar el hub para re-anunciar los workflows conocidos (rellena filas de workflows creados antes de que existieran estos campos)</td></tr>
+            <tr><td><code>workflow.renamed</code></td><td><code>from</code>, <code>to</code></td></tr>
+            <tr><td><code>workflow.removed</code></td><td><code>name</code></td></tr>
+            <tr><td><code>workflow.status_changed</code></td><td><code>from</code>, <code>to</code> (<code>draft|running|paused|waiting|completed|failed</code>), <code>manual</code> (bool). Si <code>to = "failed"</code> ⇒ incluye <code>error</code> (§7.3)</td></tr>
+            <tr><td><code>step.added</code></td><td><code>step_id</code>, <code>order_index</code>, <code>description</code> (recortada a 300 chars), <code>manual_review</code> (bool), <code>has_acceptance_criteria</code> (bool)</td></tr>
+            <tr><td><code>step.started</code></td><td><code>step_id</code>, <code>order_index</code>, <code>kind</code> (<code>task|context</code>), <code>phase</code> (<code>exec|judge</code>), <code>use_subagent</code>, <code>attempt</code> (=<code>retry_count</code>+1), <code>max_retries</code></td></tr>
+            <tr><td><code>step.done</code></td><td><code>step_id</code>, <code>order_index</code>, <code>duration_ms</code>, <code>retry_count</code>, <code>result_len</code> (longitud del resultado, no el texto)</td></tr>
+            <tr><td><code>step.failed</code></td><td><code>step_id</code>, <code>order_index</code>, <code>phase</code>, <code>duration_ms</code>, <code>retry_count</code>, <code>max_retries</code>, <code>error</code> (§7.3)</td></tr>
+            <tr><td><code>step.waiting</code></td><td><code>step_id</code>, <code>order_index</code>, <code>reason: "manual_review"</code></td></tr>
+            <tr><td><code>step.judged</code></td><td><code>step_id</code>, <code>ok</code> (bool), <code>acceptance_criteria</code>, y si <code>ok=false</code> el <code>error</code> con <code>reason</code> del veredicto</td></tr>
+            <tr><td><code>usage.snapshot</code></td><td><code>input_tokens</code>, <code>output_tokens</code>, <code>cache_read</code>, <code>cache_creation</code>, <code>cost_usd</code>, <code>compacted</code> (bool)</td></tr>
+            <tr><td><code>conversation.snapshot</code></td><td><code>turns</code>, <code>mode</code> (<code>digest|full</code>), <code>digest</code> o <code>messages[]</code> según privacidad</td></tr>
+            <tr><td><code>heartbeat</code></td><td><code>version</code>, <code>os</code>, <code>uptime_ms</code>, <code>workflows_total</code>, <code>queue_pending</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>7.3 &nbsp;El objeto <code>error</code> (lo que faltaba)</h3>
+      <p>
+        Un step guarda su fallo como una cadena (<code>steps.error</code>), y
+        <code>onStepResult</code> lo recibe como <code>outcome.error</code>. El
+        contrato lo estructura para que el servidor pueda agrupar y diagnosticar,
+        sin filtrar información sensible del transcript:
+      </p>
+      <pre><code>"error": {
+  "phase": "exec",                   // exec | judge — de qué job vino el fallo
+  "kind": "agent_error",             // agent_error | judge_rejected | timeout |
+                                     // queued_timeout | aborted | dispatch_failed
+  "message": "…",                    // steps.error, recortado (p.ej. 2 KB máx.)
+  "retryable": true,                 // ¿quedan reintentos? retry_count < max_retries
+  "retry_count": 1,
+  "max_retries": 2,
+  "failed_criterion": "…",           // solo si kind=judge_rejected
+  "started_at": "2026-08-09T11:58:00.000Z",
+  "finished_at": "2026-08-09T11:59:58.000Z"
+}</code></pre>
+      <p>Ejemplo completo de un evento de fallo de step:</p>
+      <pre><code>{
+  "id": "e-77",
+  "kind": "step.failed",
+  "workflow_id": "wf-123",
+  "session_id": "sess-abc",
+  "created_at": "2026-08-09T11:59:58.000Z",
+  "data": {
+    "step_id": "s-9", "order_index": 2, "phase": "judge",
+    "duration_ms": 41200, "retry_count": 2, "max_retries": 2,
+    "error": {
+      "phase": "judge", "kind": "judge_rejected",
+      "message": "El resultado no crea el fichero pedido.",
+      "retryable": false, "retry_count": 2, "max_retries": 2,
+      "failed_criterion": "check that the plan is created",
+      "started_at": "2026-08-09T11:58:00.000Z",
+      "finished_at": "2026-08-09T11:59:58.000Z"
+    }
+  }
+}</code></pre>
+      <p>
+        <code>message</code> se <strong>trunca</strong> (tope configurable) y respeta
+        la política de privacidad: nunca se envían el secreto del hook, ni hashes de
+        <code>auth</code>/<code>sessions</code>, ni el transcript completo salvo que
+        <code>TARGET_REPORT_INCLUDE_CONVERSATIONS=full</code>.
+      </p>
+
+      <h3>7.4 &nbsp;Respuesta de éxito (con aceptación parcial)</h3>
+      <p>
+        La ingesta responde <code>200</code> con qué IDs aceptó. Así un solo evento
+        corrupto no bloquea el lote entero (evita el "poison batch"):
+      </p>
+      <pre><code>200 OK
+{
+  "accepted": ["e-77", "e-78"],
+  "rejected": [
+    { "id": "e-79", "reason": "schema", "detail": "data.order_index ausente" }
+  ]
+}</code></pre>
+      <ul>
+        <li><strong>Aceptados</strong> ⇒ <code>markDelivered</code> (<code>delivered_at</code> fijado).</li>
+        <li><strong>Rechazados por <code>schema</code>/permanente</strong> ⇒ se marcan como descartados (no se reintentan eternamente) y se registra en el log local — son bugs del cliente, no fallos de red.</li>
+        <li>Un <code>id</code> ya visto ⇒ el servidor lo devuelve en <code>accepted</code> (idempotente); si un lote entero se repite, basta la <code>Idempotency-Key</code>.</li>
+        <li>Un <code>200</code> sin cuerpo ⇒ se interpreta como "todo aceptado" (compatibilidad con un receptor mínimo).</li>
+      </ul>
+
+      <h3>7.5 &nbsp;Errores de transporte — qué hace el cliente</h3>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Respuesta</th><th>Significado</th><th>Acción del reporter</th></tr></thead>
+          <tbody>
+            <tr><td><code>200</code></td><td>OK (posible aceptación parcial)</td><td>Marcar entregados; descartar rechazos permanentes</td></tr>
+            <tr><td><code>400 / 422</code></td><td>Lote/JSON inválido</td><td>No reintentar el lote tal cual: descartar (o poner en cuarentena) y loguear — es un bug, reintentarlo sería un bucle</td></tr>
+            <tr><td><code>401 / 403</code></td><td>Token ausente o inválido</td><td>Pausar el reporte y avisar en el log (config errónea); no quemar reintentos</td></tr>
+            <tr><td><code>404</code></td><td>URL mal configurada</td><td>Igual que 401: pausar + log</td></tr>
+            <tr><td><code>409</code></td><td>Duplicado (idempotencia)</td><td>Tratar como entregado</td></tr>
+            <tr><td><code>413</code></td><td>Lote demasiado grande</td><td>Partir el lote a la mitad y reintentar</td></tr>
+            <tr><td><code>429</code></td><td>Rate limit</td><td>Respetar <code>Retry-After</code>; si no viene, backoff exponencial</td></tr>
+            <tr><td><code>5xx</code></td><td>Fallo del servidor</td><td>Reintentar con backoff exponencial + jitter</td></tr>
+            <tr><td><em>timeout / red</em></td><td><code>AbortSignal.timeout()</code> o <code>fetch</code> rechaza</td><td>Igual que 5xx: <code>attempts++</code>, fijar <code>next_try_at</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout warn">
+        <span class="tag">Backoff y retención</span>
+        <p>
+          El backoff crece por <code>attempts</code>
+          (p.ej. <code>min(2^attempts · 1s, 5min)</code> con jitter), guardado en
+          <code>next_try_at</code> de <code>report_events</code>. Los <code>4xx</code>
+          permanentes no reintentan (evitan el bucle de veneno). Los eventos
+          entregados se purgan pasado un tiempo; los pendientes tienen un tope de
+          antigüedad/cantidad para que un servidor caído no llene el disco.
+        </p>
+      </div>
+
+      <!-- 8 -->
+      <h2 id="privacy"><span class="num">8</span>Privacidad y seguridad</h2>
+      <div class="callout danger">
+        <span class="tag">A tener en cuenta</span>
+        <p>
+          Las conversaciones pueden contener información sensible (rutas,
+          secretos, código). Reportar su texto completo es una decisión con peso
+          legal/de privacidad, no solo técnica.
+        </p>
+      </div>
+      <ul>
+        <li><strong>Conversaciones configurables:</strong> <code>TARGET_REPORT_INCLUDE_CONVERSATIONS</code> con <code>off</code> / <code>digest</code> (por defecto, solo metadatos y resumen) / <code>full</code>.</li>
+        <li><strong>Secretos:</strong> la URL y el token viven en <code>.env</code> (git-ignored); jamás se escriben en <code>config.json</code> ni se devuelven por la API. El <code>X-Webhook-Secret</code> de cada workflow y los hashes de <code>auth</code>/<code>sessions</code> <strong>nunca</strong> se reportan.</li>
+        <li><strong>Transporte:</strong> se exige <code>https://</code> para <code>TARGET_REPORT_URL</code>; si es <code>http</code> no-loopback, se avisa en el log.</li>
+        <li><strong>Best-effort, no bloqueante:</strong> el <code>fetch</code> lleva <code>AbortSignal.timeout()</code>; un servidor caído solo hace crecer la cola, con un tope de retención (p.ej. purgar entregados y capar pendientes muy viejos).</li>
+        <li><strong>Interruptor claro:</strong> sin <code>TARGET_REPORT_URL</code> o con <code>TARGET_REPORT_ENABLED=false</code>, no se emite nada.</li>
+      </ul>
+
+      <!-- 9 -->
+      <h2 id="work"><span class="num">9</span>Trabajo a realizar</h2>
+
+      <h3>Fase 0 — Versión y andamiaje (sin red)</h3>
+      <ul>
+        <li>Crear <code>CHANGELOG.md</code> y subir <code>package.json</code> a <code>0.2.0</code> (raíz + <code>hub</code> + <code>hub/ui</code>).</li>
+        <li><code>hub/version.ts</code> → <code>TARGET_VERSION</code>.</li>
+        <li><code>.env.example</code> + <code>.env</code> en <code>.gitignore</code>.</li>
+      </ul>
+
+      <h3>Fase A — Config y cola</h3>
+      <ul>
+        <li>Carga de <code>.env</code> en <code>loadConfig</code> + <code>reportConfig</code> derivado del entorno.</li>
+        <li>Tabla <code>report_events</code> y helpers en <code>hub/db.ts</code>; <code>instance_id</code> persistido en <code>settings</code>.</li>
+      </ul>
+
+      <h3>Fase B — Reporter</h3>
+      <ul>
+        <li><code>hub/reporter.ts</code>: <code>emit()</code> (INSERT no-op si desactivado) y <code>flush()</code> (POST en lote, timeout, backoff, <code>markDelivered</code>/<code>markFailed</code>).</li>
+        <li>Enganchar <code>flush</code> y <code>heartbeat</code> al <code>setInterval</code> del daemon.</li>
+      </ul>
+
+      <h3>Fase C — Puntos de emisión</h3>
+      <ul>
+        <li>Eventos de workflow y step en <code>hub/workflow.ts</code> (ciclo de vida + <code>onStepResult</code>).</li>
+        <li><code>usage.snapshot</code> desde <code>readTokenUsage</code> al cerrar cada step; <code>conversation.snapshot</code> desde <code>readConversationDigest</code> según privacidad.</li>
+      </ul>
+
+      <h3>Fase D — UI (opcional, más adelante)</h3>
+      <ul>
+        <li>En <code>SettingsView</code>: mostrar estado del reporte (activado, última entrega, pendientes) — solo lectura; la config sigue en <code>.env</code>.</li>
+      </ul>
+
+      <!-- 10 -->
+      <h2 id="tests"><span class="num">10</span>Plan de pruebas</h2>
+      <p>Siguiendo el estilo de tests ya presente en <code>hub/*.test.ts</code> (con <code>TARGET_HOME</code> temporal):</p>
+      <ul>
+        <li><code>reporter.test.ts</code>: <code>emit</code> inserta; <code>flush</code> con un servidor <code>fetch</code> falso entrega y marca <code>delivered_at</code>; en 500 incrementa <code>attempts</code> y respeta <code>next_try_at</code>.</li>
+        <li>Desactivado (sin URL) ⇒ <code>emit</code> es no-op y no hay <code>fetch</code>.</li>
+        <li>Config: <code>.env</code> se carga y precede a valores por defecto; URL <code>http</code> avisa.</li>
+        <li>Privacidad: <code>off</code> no incluye <code>conversation.snapshot</code>; <code>digest</code> no incluye texto completo.</li>
+        <li>Idempotencia: reenvío tras fallo conserva los mismos <code>id</code>.</li>
+        <li><code>version.test.ts</code>: <code>TARGET_VERSION</code> coincide con <code>package.json</code>.</li>
+      </ul>
+
+      <!-- 11 -->
+      <h2 id="criterion"><span class="num">11</span>Criterio de éxito</h2>
+      <div class="callout">
+        <span class="tag">Definición de hecho</span>
+        <p>
+          Con un <code>.env</code> que fija <code>TARGET_REPORT_URL</code>, al usar
+          Target normalmente el servidor recibe lotes que cubren <strong>toda la
+          actividad</strong> —altas/cambios de workflow, cada transición de step,
+          <code>usage.snapshot</code> por sesión y <code>conversation.snapshot</code>
+          según la política de privacidad— cada uno con <code>instance_id</code> y
+          <code>version</code>. Sin URL, no se emite nada y el hub funciona igual
+          que hoy. La versión sale del <code>CHANGELOG.md</code> /
+          <code>package.json</code> y se reporta en cada lote.
+        </p>
+      </div>
+
+      <!-- 12 -->
+      <h2 id="open"><span class="num">12</span>Preguntas abiertas</h2>
+      <ul>
+        <li><strong>¿El servidor central lo provee este plan?</strong> Aquí solo se define el contrato (<code>POST /ingest</code>); el receptor es trabajo aparte.</li>
+        <li><strong>Retención local:</strong> ¿cuánto guardar los eventos entregados antes de purgarlos, y qué tope de cola pendiente ante un servidor caído mucho tiempo?</li>
+        <li><strong>Identidad de usuario:</strong> ¿basta <code>instance_id</code> + <code>display_name</code>, o el servidor asignará credenciales por instancia?</li>
+        <li><strong>Conversaciones <code>full</code>:</strong> ¿se permite en algún caso, o se limita a <code>digest</code> por política?</li>
+        <li><strong>Free-code / sandbox Docker:</strong> confirmar que el <code>.env</code> y el transcript quedan accesibles cuando el agente corre en contenedor (ver <a href="docker-local-agents-plan.es.html">plan de agentes locales/Docker</a>).</li>
+      </ul>
+
+      <footer>
+        The Target Project · Plan: reporte de actividad a servidor central · 2026-08-09
+      </footer>
+    </div>
+  </body>
+</html>
