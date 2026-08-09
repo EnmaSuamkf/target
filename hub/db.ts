@@ -387,6 +387,24 @@ export function open(): DatabaseSync {
 			expires_at TEXT NOT NULL,
 			last_seen_at TEXT NOT NULL
 		);
+		-- Durable outbound queue for activity reporting (see reporter.ts /
+		-- docs/report-server.es.html section 5). Append-only: emit() INSERTs, the
+		-- daemon's flusher marks rows delivered or schedules a retry. The id column
+		-- is the event's own uuid, so the server can dedupe a re-sent batch.
+		-- Surviving restarts and offline periods is the whole point of persisting
+		-- it rather than buffering in memory.
+		CREATE TABLE IF NOT EXISTS report_events (
+			id           TEXT PRIMARY KEY,
+			kind         TEXT NOT NULL,
+			workflow_id  TEXT,
+			session_id   TEXT,
+			payload      TEXT NOT NULL,
+			created_at   TEXT NOT NULL,
+			delivered_at TEXT,
+			attempts     INTEGER NOT NULL DEFAULT 0,
+			next_try_at  TEXT
+		);
+		CREATE INDEX IF NOT EXISTS idx_report_pending ON report_events(delivered_at, next_try_at);
 	`);
 	// `CREATE TABLE IF NOT EXISTS` above is a no-op on a `steps` table that
 	// already existed before these columns were added — add any that are missing
@@ -1964,4 +1982,152 @@ export function deleteStepAttachments(stepId: string): void {
 
 export function deleteWorkflowAttachments(workflowId: string): void {
 	open().prepare("DELETE FROM attachments WHERE workflow_id = ?").run(workflowId);
+}
+
+// ---------------------------------------------------------------------------
+// Activity reporting: durable event queue + instance identity.
+// The reporter (reporter.ts) owns the semantics; these are the raw persistence
+// primitives it and the daemon build on. See docs/report-server.es.html §5–§7.
+// ---------------------------------------------------------------------------
+
+/** One queued activity event, as stored (payload still a JSON string). */
+export interface ReportEventRow {
+	id: string;
+	kind: string;
+	workflowId: string | null;
+	sessionId: string | null;
+	/** JSON string — the event's `data` object as written by emit(). */
+	payload: string;
+	createdAt: string;
+	attempts: number;
+}
+
+/** What emit() supplies to enqueue one event. */
+export interface NewReportEvent {
+	kind: string;
+	workflowId?: string | null;
+	sessionId?: string | null;
+	/** Structured, JSON-serialisable payload; stored verbatim. */
+	data: unknown;
+}
+
+const INSTANCE_ID_SETTING = "report:instance_id";
+
+/**
+ * The stable id this instance reports under. An operator-pinned
+ * `TARGET_INSTANCE_ID` always wins (and is persisted so it's stable even if the
+ * env later disappears); otherwise one is generated once and reused forever.
+ */
+export function getOrCreateInstanceId(pinned?: string | null): string {
+	const db = open();
+	if (pinned && pinned.trim().length > 0) {
+		const id = pinned.trim();
+		db.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		).run(INSTANCE_ID_SETTING, id, new Date().toISOString());
+		return id;
+	}
+	const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(INSTANCE_ID_SETTING) as
+		| { value: string }
+		| undefined;
+	if (row?.value) return row.value;
+	const id = crypto.randomUUID();
+	db.prepare("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)").run(
+		INSTANCE_ID_SETTING,
+		id,
+		new Date().toISOString(),
+	);
+	return id;
+}
+
+/** Append one event to the outbound queue. Returns its generated id. */
+export function enqueueReportEvent(event: NewReportEvent): string {
+	const id = crypto.randomUUID();
+	open()
+		.prepare(
+			`INSERT INTO report_events (id, kind, workflow_id, session_id, payload, created_at, attempts)
+			 VALUES (?, ?, ?, ?, ?, ?, 0)`,
+		)
+		.run(
+			id,
+			event.kind,
+			event.workflowId ?? null,
+			event.sessionId ?? null,
+			JSON.stringify(event.data ?? {}),
+			new Date().toISOString(),
+		);
+	return id;
+}
+
+/**
+ * Undelivered events that are due (no `next_try_at`, or it's in the past),
+ * oldest first, capped at `limit`. This is the flusher's read.
+ */
+export function pendingReportEvents(limit: number): ReportEventRow[] {
+	const rows = open()
+		.prepare(
+			`SELECT id, kind, workflow_id, session_id, payload, created_at, attempts
+			 FROM report_events
+			 WHERE delivered_at IS NULL AND (next_try_at IS NULL OR next_try_at <= ?)
+			 ORDER BY created_at, id
+			 LIMIT ?`,
+		)
+		.all(new Date().toISOString(), limit) as Record<string, unknown>[];
+	return rows.map((r) => ({
+		id: String(r.id),
+		kind: String(r.kind),
+		workflowId: r.workflow_id == null ? null : String(r.workflow_id),
+		sessionId: r.session_id == null ? null : String(r.session_id),
+		payload: String(r.payload),
+		createdAt: String(r.created_at),
+		attempts: Number(r.attempts ?? 0),
+	}));
+}
+
+/** Number of events still waiting to be delivered (for the heartbeat gauge). */
+export function pendingReportCount(): number {
+	const row = open().prepare("SELECT COUNT(*) AS n FROM report_events WHERE delivered_at IS NULL").get() as {
+		n: number;
+	};
+	return Number(row?.n ?? 0);
+}
+
+/** Mark a set of events delivered (idempotent: a re-marked row just updates its timestamp). */
+export function markReportEventsDelivered(ids: string[]): void {
+	if (ids.length === 0) return;
+	const now = new Date().toISOString();
+	const db = open();
+	const stmt = db.prepare("UPDATE report_events SET delivered_at = ? WHERE id = ?");
+	for (const id of ids) stmt.run(now, id);
+}
+
+/**
+ * A delivery attempt failed: bump the attempt counter and schedule the next try.
+ * Applied to a whole batch at once — the transport failed for all of them.
+ */
+export function markReportEventsRetry(ids: string[], nextTryAt: string): void {
+	if (ids.length === 0) return;
+	const db = open();
+	const stmt = db.prepare("UPDATE report_events SET attempts = attempts + 1, next_try_at = ? WHERE id = ?");
+	for (const id of ids) stmt.run(nextTryAt, id);
+}
+
+/**
+ * Permanently drop events the server rejected as malformed (a 4xx/schema
+ * error): retrying an event the ingest will never accept is a poison loop. We
+ * delete rather than keep them around forever.
+ */
+export function dropReportEvents(ids: string[]): void {
+	if (ids.length === 0) return;
+	const db = open();
+	const stmt = db.prepare("DELETE FROM report_events WHERE id = ?");
+	for (const id of ids) stmt.run(id);
+}
+
+/** Purge delivered events older than the cutoff, so the table can't grow without bound. */
+export function purgeDeliveredReportEvents(olderThanIso: string): number {
+	return open()
+		.prepare("DELETE FROM report_events WHERE delivered_at IS NOT NULL AND delivered_at < ?")
+		.run(olderThanIso).changes as number;
 }

@@ -28,7 +28,9 @@ import {
 	type PublishableRunner,
 	type PublishableSandbox,
 } from "./awb.ts";
-import { targetDir, type HubConfig } from "./config.ts";
+import { loadReportConfig, targetDir, type HubConfig } from "./config.ts";
+import { emit as reportEmit } from "./reporter.ts";
+import { readTokenUsage } from "./transcript.ts";
 import {
 	beginRetry,
 	claimWorkflowCompletionNotice,
@@ -77,6 +79,7 @@ import {
 	type OverridableStepStatus,
 	type OverridableWorkflowStatus,
 	type Step,
+	type StepPhase,
 	type TimeoutReason,
 	type Workflow,
 	type WorkflowStatus,
@@ -669,7 +672,38 @@ export function createWorkflow(
 	// its progress file from the first write rather than only after the next edit.
 	reconcileContextStep(workflow.id);
 	writeStatusMd(workflow.id);
+	reportEmit("workflow.created", {
+		workflowId: workflow.id,
+		data: { name: workflow.name, agent_name: workflow.agentName, ...workflowRuntimeMeta(workflow.hookUrl) },
+	});
 	return workflow;
+}
+
+/**
+ * The runtime facts the report dashboard shows per workflow: which agent CLI
+ * runs the steps and where (host or docker image). Read back from the hook
+ * (same source `publicWorkflow` uses) so defaults the hook applied are
+ * reported as they ARE, not as the caller passed them.
+ */
+function workflowRuntimeMeta(hookUrl: string): { agent: string | null; sandbox: string; image: string | null } {
+	const runtime = hookRuntime(hookUrl);
+	return { agent: runtime.harness, sandbox: runtime.sandbox?.kind ?? "host", image: runtime.sandbox?.image ?? null };
+}
+
+/**
+ * Re-announce every known workflow's metadata (name, agent, sandbox) as
+ * `workflow.updated`. Called once at hub startup: workflows created before a
+ * field was reported — or while the server was down long enough to give up on
+ * — get their dashboard rows filled in without rewriting history. No-op when
+ * reporting is disabled (emit() checks).
+ */
+export function announceWorkflows(): void {
+	for (const workflow of listWorkflows()) {
+		reportEmit("workflow.updated", {
+			workflowId: workflow.id,
+			data: { name: workflow.name, agent_name: workflow.agentName, ...workflowRuntimeMeta(workflow.hookUrl) },
+		});
+	}
 }
 
 /**
@@ -700,6 +734,12 @@ export function renameWorkflow(workflowId: string, name: string): Workflow {
 	writeStatusMd(workflowId);
 	const renamed = getWorkflow(workflowId);
 	if (!renamed) throw new WorkflowError("workflow disappeared");
+	// The dashboard resolves a workflow's display name from the LATEST event
+	// that carries one, so this doubles as the rename notification.
+	reportEmit("workflow.updated", {
+		workflowId,
+		data: { name: renamed.name, agent_name: renamed.agentName, ...workflowRuntimeMeta(renamed.hookUrl) },
+	});
 	return renamed;
 }
 
@@ -1118,11 +1158,31 @@ export function addStep(
 		afterOrderIndex,
 		selected,
 	});
+	// Report the step list itself — lifecycle events alone can't reconstruct
+	// what was PLANNED (a pending step emits nothing until it runs). Task steps
+	// only: addStep never creates the hub-owned context step, mirroring
+	// reportStepEvent's kind !== "task" guard.
+	reportEmit("step.added", {
+		workflowId,
+		data: {
+			step_id: step.id,
+			order_index: step.orderIndex,
+			description: trimmed.slice(0, 300),
+			manual_review: step.manualReview === true,
+			has_acceptance_criteria: !!step.acceptanceCriteria,
+		},
+	});
 	// A workflow that had already reached a terminal state gets a fresh
 	// pending step here — back to draft so the badge/progress stay honest and
 	// "Start" dispatches just the new step, instead of leaving it stuck
 	// "completed"/"failed" forever (advance() only ever runs while `running`).
-	if (workflow.status === "completed" || workflow.status === "failed") setWorkflowStatus(workflowId, "draft");
+	if (workflow.status === "completed" || workflow.status === "failed") {
+		setWorkflowStatus(workflowId, "draft");
+		// The report server derives workflow status from events alone; without
+		// this emit it would keep showing the old terminal badge while the hub
+		// already considers the workflow reopened.
+		reportEmit("workflow.status_changed", { workflowId, data: { to: "draft", manual: false } });
+	}
 	writeStatusMd(workflowId);
 	return step;
 }
@@ -1440,6 +1500,7 @@ async function advance(workflowId: string, cfg: HubConfig, log: Logger): Promise
 		const terminal: WorkflowStatus = steps.some((s) => s.status === "failed") ? "failed" : "completed";
 		setWorkflowStatus(workflowId, terminal);
 		writeStatusMd(workflowId);
+		reportEmit("workflow.status_changed", { workflowId, data: { to: terminal, manual: false } });
 		log(`workflow ${workflowId} ${terminal}`, terminal === "failed" ? "error" : "info");
 		// The main completion path: the engine ran out of work. Only `completed`
 		// notifies — a run that ended `failed` is a different message nobody asked
@@ -1449,6 +1510,12 @@ async function advance(workflowId: string, cfg: HubConfig, log: Logger): Promise
 		if (terminal === "completed") await notifyWorkflowCompleted(workflowId, log);
 		return;
 	}
+	reportStepEvent(next, "step.started", {
+		phase: "exec",
+		use_subagent: next.useSubagent,
+		attempt: next.retryCount + 1,
+		max_retries: next.maxRetries,
+	});
 	await dispatchStep(next, workflow, cfg, log);
 	writeStatusMd(workflowId);
 }
@@ -1671,6 +1738,91 @@ function failWorkflowIfDispatchDied(stepId: string, workflowId: string, what: st
  *    judge (if the step has acceptance criteria) or, with no criteria, behaves
  *    exactly as before — mark done and `advance()` to the next step.
  */
+
+// ---------------------------------------------------------------------------
+// Activity reporting hooks (docs/report-server.es.html §7). Every helper is a
+// best-effort no-op when reporting is disabled and never throws into the engine
+// — reporting must not change a workflow's outcome. Only `task` steps are
+// reported; the hub-owned `context` step is plumbing, not work.
+// ---------------------------------------------------------------------------
+
+/** Duration of a step, ms, if both timestamps are present. */
+function stepDurationMs(step: Step): number | null {
+	if (!step.startedAt || !step.finishedAt) return null;
+	const ms = Date.parse(step.finishedAt) - Date.parse(step.startedAt);
+	return Number.isFinite(ms) ? ms : null;
+}
+
+/** The structured §7.3 error object from an engine outcome + step. */
+function reportError(step: Step, phase: StepPhase, kind: string, message: string | undefined) {
+	const MAX = 2_048;
+	const text = (message ?? "").slice(0, MAX);
+	return {
+		phase,
+		kind,
+		message: text,
+		retryable: step.retryCount < step.maxRetries,
+		retry_count: step.retryCount,
+		max_retries: step.maxRetries,
+		started_at: step.startedAt,
+		finished_at: step.finishedAt,
+	};
+}
+
+/** Emit a step lifecycle event. `step` is re-read by the caller after settling so timestamps are fresh. */
+function reportStepEvent(step: Step, kind: string, data: Record<string, unknown>): void {
+	if (step.kind !== "task") return;
+	reportEmit(kind, {
+		workflowId: step.workflowId,
+		sessionId: step.sessionId,
+		data: { step_id: step.id, order_index: step.orderIndex, ...data },
+	});
+}
+
+/**
+ * Emit a usage snapshot for a step's session. Reads the transcript (via
+ * readTokenUsage) only when reporting is enabled, so a default install pays
+ * nothing here.
+ */
+function reportUsageSnapshot(workflow: Workflow, step: Step): void {
+	const rc = loadReportConfig();
+	if (!rc.enabled) return;
+	const sessionId = step.sessionId ?? workflow.lastSessionId;
+	if (!sessionId) return;
+	const workdir = hookRuntime(workflow.hookUrl).workdir;
+	if (!workdir) return;
+	try {
+		const u = readTokenUsage(workdir, sessionId);
+		reportEmit(
+			"usage.snapshot",
+			{
+				workflowId: workflow.id,
+				sessionId,
+				data: {
+					input_tokens: u.inputTokens,
+					output_tokens: u.outputTokens,
+					cache_read: u.cacheReadTokens,
+					cache_creation: u.cacheCreationTokens,
+					cost_usd: null,
+					compacted: u.compactions > 0,
+					turns: u.turns,
+				},
+			},
+			rc,
+		);
+		// Conversation activity (metadata only unless 'full'); honours the privacy switch.
+		if (rc.includeConversations !== "off") {
+			reportEmit(
+				"conversation.snapshot",
+				{ workflowId: workflow.id, sessionId, data: { turns: u.turns, mode: rc.includeConversations } },
+				rc,
+			);
+		}
+	} catch {
+		// Transcript unreadable (never dispatched, sandbox, etc.) — skip silently.
+	}
+}
+
 export async function onStepResult(
 	stepId: string,
 	outcome: { ok: boolean; result?: string; error?: string; sessionId?: string },
@@ -1718,6 +1870,16 @@ export async function onStepResult(
 		completeStep(stepId, outcome);
 		setWorkflowStatus(step.workflowId, "failed");
 		writeStatusMd(step.workflowId);
+		const failed = getStep(stepId) ?? step;
+		const wf = getWorkflow(step.workflowId);
+		reportStepEvent(failed, "step.failed", {
+			phase: "exec",
+			duration_ms: stepDurationMs(failed),
+			retry_count: failed.retryCount,
+			max_retries: failed.maxRetries,
+			error: reportError(failed, "exec", "agent_error", outcome.error),
+		});
+		if (wf) reportUsageSnapshot(wf, failed);
 		log(`workflow ${step.workflowId} failed at step ${stepId}: ${outcome.error}`, "error");
 		return;
 	}
@@ -1733,6 +1895,14 @@ export async function onStepResult(
 		}
 		completeStep(stepId, outcome);
 		writeStatusMd(step.workflowId);
+		const done = getStep(stepId) ?? step;
+		const wf = getWorkflow(step.workflowId);
+		reportStepEvent(done, "step.done", {
+			duration_ms: stepDurationMs(done),
+			retry_count: done.retryCount,
+			result_len: outcome.result?.length ?? 0,
+		});
+		if (wf) reportUsageSnapshot(wf, done);
 		await advance(step.workflowId, cfg, log);
 		return;
 	}
@@ -1910,6 +2080,11 @@ async function onJudgeVerdict(
 		if (step.manualReview && (await holdForManualReview(step, {}, log))) return;
 		finishStepDone(step.id);
 		writeStatusMd(step.workflowId);
+		const done = getStep(step.id) ?? step;
+		const wfDone = getWorkflow(step.workflowId);
+		reportStepEvent(done, "step.judged", { ok: true, acceptance_criteria: step.acceptanceCriteria });
+		reportStepEvent(done, "step.done", { duration_ms: stepDurationMs(done), retry_count: done.retryCount });
+		if (wfDone) reportUsageSnapshot(wfDone, done);
 		log(`step ${step.id} passed the judge`);
 		await advance(step.workflowId, cfg, log);
 		return;
@@ -1923,6 +2098,18 @@ async function onJudgeVerdict(
 			`rejected by the judge after ${step.retryCount} retry(ies): ${verdict.reason || "(no reason given)"}`,
 			log,
 		);
+		const failed = getStep(step.id) ?? step;
+		const wfFailed = getWorkflow(step.workflowId);
+		const err = reportError(failed, "judge", "judge_rejected", verdict.reason);
+		reportStepEvent(failed, "step.judged", { ok: false, acceptance_criteria: step.acceptanceCriteria, error: err });
+		reportStepEvent(failed, "step.failed", {
+			phase: "judge",
+			duration_ms: stepDurationMs(failed),
+			retry_count: failed.retryCount,
+			max_retries: failed.maxRetries,
+			error: err,
+		});
+		if (wfFailed) reportUsageSnapshot(wfFailed, failed);
 		return;
 	}
 

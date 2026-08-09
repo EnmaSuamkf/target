@@ -13,6 +13,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export interface HubConfig {
 	host: string;
@@ -84,7 +85,33 @@ export function dbFile(): string {
 	return path.join(targetDir(), "target.db");
 }
 
+/**
+ * Load a `.env` into `process.env` before anything reads it. Node ≥ 20.12/24
+ * ships `process.loadEnvFile`, so no dependency is needed. `TARGET_HOME/.env`
+ * wins over the repo-root `.env` (an operator's per-instance file overrides the
+ * checked-out template); a missing or malformed file is ignored — reporting is
+ * optional and must never block startup. Idempotent enough for repeated calls:
+ * `loadEnvFile` only sets keys, and the first file found wins.
+ */
+export function loadEnvFile(): void {
+	// The repo root, resolved from THIS file (hub/config.ts → ..), not from the
+	// cwd: `npm start` spawns the daemon with cwd=hub/, so a cwd-relative lookup
+	// never finds the checked-out repo's `.env` that the docs tell users to create.
+	const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+	const candidates = [path.join(targetDir(), ".env"), path.join(repoRoot, ".env"), path.join(process.cwd(), ".env")];
+	for (const file of candidates) {
+		if (!fs.existsSync(file)) continue;
+		try {
+			process.loadEnvFile(file);
+		} catch {
+			// Malformed .env → ignore and carry on with the environment as-is.
+		}
+		return;
+	}
+}
+
 export function loadConfig(): HubConfig {
+	loadEnvFile();
 	let fileCfg: Partial<HubConfig> = {};
 	try {
 		fileCfg = JSON.parse(fs.readFileSync(configFile(), "utf8")) as Partial<HubConfig>;
@@ -111,4 +138,70 @@ export function saveConfig(cfg: HubConfig): void {
 	const file = configFile();
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	fs.writeFileSync(file, `${JSON.stringify(cfg, null, 2)}\n`);
+}
+
+/** How much of each conversation is allowed off the machine (see report-server.es.html §8). */
+export type ConversationReportMode = "off" | "digest" | "full";
+
+/**
+ * Activity-reporting settings, derived from the environment (the `.env`) rather
+ * than config.json, so the destination URL and secret live only in the
+ * git-ignored `.env`. Read fresh each call — it's a handful of env lookups, and
+ * keeping it stateless means a test can flip a variable and see the effect
+ * without a reload dance.
+ */
+export interface ReportConfig {
+	/** True only when a URL is set AND the off-switch isn't thrown. Gate for every emit/flush. */
+	enabled: boolean;
+	/** Ingest endpoint; empty string means "not configured". */
+	url: string;
+	/** Bearer token for the ingest endpoint. */
+	token: string;
+	/** Flush cadence in ms (floored so a typo can't busy-loop the daemon). */
+	intervalMs: number;
+	/** Conversation privacy mode. */
+	includeConversations: ConversationReportMode;
+	/** Operator-pinned instance id, or null to let the DB generate+persist one. */
+	instanceId: string | null;
+}
+
+const DEFAULT_REPORT_INTERVAL_MS = 30_000;
+const MIN_REPORT_INTERVAL_MS = 1_000;
+
+function envFlag(value: string | undefined, fallback: boolean): boolean {
+	if (value === undefined) return fallback;
+	const v = value.trim().toLowerCase();
+	if (["false", "0", "off", "no"].includes(v)) return false;
+	if (["true", "1", "on", "yes"].includes(v)) return true;
+	return fallback;
+}
+
+export function loadReportConfig(): ReportConfig {
+	const url = (process.env.TARGET_REPORT_URL ?? "").trim();
+	const token = (process.env.TARGET_REPORT_TOKEN ?? "").trim();
+	const enabled = url.length > 0 && envFlag(process.env.TARGET_REPORT_ENABLED, true);
+
+	const rawInterval = Number.parseInt(process.env.TARGET_REPORT_INTERVAL_MS ?? "", 10);
+	const intervalMs = Number.isFinite(rawInterval)
+		? Math.max(MIN_REPORT_INTERVAL_MS, rawInterval)
+		: DEFAULT_REPORT_INTERVAL_MS;
+
+	const rawMode = (process.env.TARGET_REPORT_INCLUDE_CONVERSATIONS ?? "digest").trim().toLowerCase();
+	const includeConversations: ConversationReportMode =
+		rawMode === "off" || rawMode === "full" ? rawMode : "digest";
+
+	const pinnedId = (process.env.TARGET_INSTANCE_ID ?? "").trim();
+
+	return { enabled, url, token, intervalMs, includeConversations, instanceId: pinnedId.length > 0 ? pinnedId : null };
+}
+
+/** True when the URL is a non-loopback plaintext http:// endpoint (worth a startup warning). */
+export function isInsecureReportUrl(url: string): boolean {
+	try {
+		const u = new URL(url);
+		if (u.protocol !== "http:") return false;
+		return !["localhost", "127.0.0.1", "::1", "[::1]"].includes(u.hostname);
+	} catch {
+		return false;
+	}
 }

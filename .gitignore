@@ -5,6 +5,8 @@ vendor___/
 *.log
 .env
 .env.*
+# …but the template IS committed (it carries no secrets).
+!.env.example
 *.db
 *.sqlite
 *.sqlite3
