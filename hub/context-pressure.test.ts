@@ -53,7 +53,6 @@ const { CONTEXT_PRESSURE_SUFFIX, INLINE_SUFFIX, SUBAGENT_SUFFIX, composeStepInpu
 // Every exec prompt names the on-disk copies of the prior steps' results
 // (step-results.ts); the byte-for-byte assertion below spells it out.
 const { stepResultsNote } = await import("./step-results.ts");
-const { hookRuntime } = await import("./awb.ts");
 
 const cfg = loadConfig();
 const silent = () => {};
@@ -264,7 +263,7 @@ test("a delegated step is dispatched identically whether or not the session is c
 	await dispatchStep(step, withSession(workflow.id, "sess-full"), cfg, silent);
 
 	assert.ok(!dispatches[0].input.includes(CONTEXT_PRESSURE_SUFFIX), "no need to explain an override that didn't happen");
-	const priorResults = stepResultsNote(hookRuntime(getWorkflow(workflow.id)!.hookUrl).workdir);
+	const priorResults = stepResultsNote(getWorkflow(workflow.id)!.agentName);
 	assert.equal(
 		dispatches[0].input,
 		`the step${priorResults}${SUBAGENT_SUFFIX}`,

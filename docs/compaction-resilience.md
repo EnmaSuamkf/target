@@ -17,7 +17,7 @@ Four changes, each independent.
 Every completed step's **full** result is written to
 
 ```
-<workdir>/.target/steps/<NN>-<slug>.md
+~/.target/steps/<agent-name>/<NN>-<slug>.md
 ```
 
 one file per step, zero-padded so `ls` sorts them into workflow order, and the
@@ -28,11 +28,16 @@ The result was already persisted twice, and neither copy helped:
 | Where | Why it didn't help |
 |---|---|
 | `steps.result` in the hub's SQLite DB | the agent has no access to it |
-| `~/.target/<slug>-<id>.md` | truncated to 500 chars, never named in a prompt, and under `$HOME` — which the docker sandbox **deliberately never mounts** |
+| `~/.target/<slug>-<id>.md` | truncated to 500 chars, never named in a prompt |
 
-The workdir, by contrast, is mounted in every sandbox mode. Writing there needs
-no new mount and changes nothing about the security posture: it's the one
-directory the agent could already read and write.
+They are **not** written into the workflow's workdir. That was the first shape
+of this feature — the workdir is mounted in every sandbox mode, so it needed no
+new mount — but the workdir is usually a project the hub was merely pointed at,
+and a `.target/` directory of the hub's scratch notes has no business appearing
+in somebody else's repository. They live under the hub's own `TARGET_HOME`
+instead, and a `sandbox: docker` workflow adds that one directory to its hook's
+bind mounts (`ensureHookMounts`, hub/awb.ts) so the absolute path in the prompt
+resolves inside the container too.
 
 The operator-facing `~/.target/<slug>-<id>.md` is unchanged, still truncated —
 it's the summary view, and these files are the untruncated ones. Two readers,

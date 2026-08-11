@@ -95,6 +95,8 @@ export function inspectLocalHook(hookUrl: string): LocalHookInfo {
 export interface HookSandbox {
 	kind: "docker";
 	image: string;
+	/** Extra host paths the hook bind-mounts on top of the workdir and the harness state. */
+	mounts?: string[];
 }
 
 export interface HookRuntime {
@@ -137,10 +139,14 @@ export function hookRuntime(hookUrl: string): HookRuntime {
 		}
 	}
 	const workdir = typeof hook?.workdir === "string" && hook.workdir !== "" ? hook.workdir : null;
-	const block = hook?.sandbox as { kind?: unknown; image?: unknown } | undefined;
+	const block = hook?.sandbox as { kind?: unknown; image?: unknown; mounts?: unknown } | undefined;
 	const sandbox =
 		block?.kind === "docker" && typeof block.image === "string" && block.image !== ""
-			? { kind: "docker" as const, image: block.image }
+			? {
+					kind: "docker" as const,
+					image: block.image,
+					mounts: Array.isArray(block.mounts) ? block.mounts.filter((m) => typeof m === "string") : [],
+				}
 			: null;
 	// Only the modes the hub is allowed to publish come back as themselves; a
 	// hook carrying anything else reads as "not set", so a clone of it falls back
@@ -280,7 +286,7 @@ function harnessStateMounts(): string[] {
  * whole reason the session the steps built is findable from in here.
  */
 function dockerResumePrefix(sandbox: HookSandbox, workdir: string): string {
-	const mounts = [workdir, ...harnessStateMounts()];
+	const mounts = [workdir, ...harnessStateMounts(), ...existingPaths(sandbox.mounts ?? [])];
 	const parts = [
 		"docker run --rm -it",
 		`--user ${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`,
@@ -759,6 +765,40 @@ export function createAwbHook(
 	fs.writeFileSync(file, `${JSON.stringify(cfg, null, 2)}\n`);
 
 	return { hookUrl: `http://${cfg.host}:${cfg.port}/hook/${encodeURIComponent(name)}`, secret };
+}
+
+/**
+ * Adds `mounts` to a hook's sandbox block, so a containerised run can open a
+ * host path the hub needs it to reach — today the workflow's step-results
+ * directory, which lives under the hub's own TARGET_HOME (see step-results.ts)
+ * and would otherwise be invisible inside the container, since `$HOME` is
+ * never mounted.
+ *
+ * Only docker hooks are touched: on the host there is no boundary to punch
+ * through, and a remote hook's filesystem is not ours to describe. Existing
+ * mounts are kept and duplicates skipped, so this is idempotent and safe to
+ * call on every step transition; hooks.json is only rewritten when something
+ * actually changed. Best-effort — a missing hook or an unwritable hooks.json
+ * comes back `false` rather than failing the step that triggered it.
+ */
+export function ensureHookMounts(hookUrl: string, mounts: string[]): boolean {
+	try {
+		const info = inspectLocalHook(hookUrl);
+		if (!info.local || !info.found || !info.name) return false;
+		const cfg = loadAwbConfig();
+		const sandbox = cfg.hooks[info.name]?.sandbox as { kind?: unknown; mounts?: unknown } | undefined;
+		if (!sandbox || sandbox.kind !== "docker") return false;
+		const current = Array.isArray(sandbox.mounts) ? (sandbox.mounts as string[]) : [];
+		const missing = mounts.filter((mount) => !current.includes(mount));
+		if (missing.length === 0) return false;
+		sandbox.mounts = [...current, ...missing];
+		const file = awbConfigFile();
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, `${JSON.stringify(cfg, null, 2)}\n`);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 /**

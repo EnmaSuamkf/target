@@ -75,7 +75,7 @@ test('sandbox: "host" is the explicit form of the same thing — still no block'
 test("createAwbHook with sandbox docker writes the block, defaulting the image", () => {
 	const { hookUrl } = createAwbHook("docker-hook", path.join(tmpHome, "wd-docker"), "{{payload}}", { sandbox: "docker" });
 	assert.deepEqual(hooksJson()["docker-hook"].sandbox, { kind: "docker", image: DEFAULT_SANDBOX_IMAGE });
-	assert.deepEqual(hookRuntime(hookUrl).sandbox, { kind: "docker", image: DEFAULT_SANDBOX_IMAGE });
+	assert.deepEqual(hookRuntime(hookUrl).sandbox, { kind: "docker", image: DEFAULT_SANDBOX_IMAGE, mounts: [] });
 });
 
 // The regression that produced `exit 127` in the field: the broker passes the
@@ -92,7 +92,7 @@ test("the default docker image follows the runner — free-code gets the image t
 	const image = DEFAULT_SANDBOX_IMAGES["free-code"];
 	assert.notEqual(image, DEFAULT_SANDBOX_IMAGES.claude, "free-code must not fall back to the claude-only image");
 	assert.deepEqual(hooksJson()["docker-freecode-default"].sandbox, { kind: "docker", image });
-	assert.deepEqual(hookRuntime(hookUrl).sandbox, { kind: "docker", image });
+	assert.deepEqual(hookRuntime(hookUrl).sandbox, { kind: "docker", image, mounts: [] });
 });
 
 test("defaultSandboxImage maps every publishable runner to a distinct image, claude when unspecified", () => {

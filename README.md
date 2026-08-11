@@ -194,7 +194,7 @@ Notes on behaviour worth knowing:
   the step above or below, so a step is no longer stuck where it was created.
   One press is one place, and the other arrow undoes it. Only **pending** steps
   move, and only past other pending ones — a step that has run owns its position
-  (its result was written to `.target/steps/<NN>-<slug>.md` under that index),
+  (its result was written to `<NN>-<slug>.md` under that index),
   so its arrows are greyed with a tooltip saying why rather than hidden. The
   conversation-context step has none: it is pinned before everything and isn't
   part of the ordering. Over the API this is
@@ -274,12 +274,16 @@ re-states the conversation context on the next step — no restart, no progress
 discarded. It shows up in the log, in the progress `.md` and in the
 **Conversation** panel.
 
-Independently of that, every completed step's **full** result is written inside
-the workdir at `<workdir>/.target/steps/<NN>-<slug>.md`, and every step prompt
-names that directory. The workdir is mounted in every sandbox mode, so a
-sandboxed agent can read what step 3 actually produced instead of trying to
-remember it. (The `~/.target/<name>-<id>.md` progress file stays the
-operator-facing view, results still truncated to 500 chars.)
+Independently of that, every completed step's **full** result is written to
+`~/.target/steps/<agent-name>/<NN>-<slug>.md`, and every step prompt names that
+directory, so the agent can read what step 3 actually produced instead of trying
+to remember it. The files live under the hub's own `TARGET_HOME`, never inside
+the workflow's workdir — the hub does not leave scratch directories in a project
+it was pointed at — and a `sandbox: docker` workflow bind-mounts that one
+directory into its container at the same absolute path, so the path in the
+prompt is the path the agent opens either way. (The `~/.target/<name>-<id>.md`
+progress file stays the operator-facing view, results still truncated to 500
+chars.)
 
 The context meter's window is derived from the model the session actually ran
 on, not assumed — override it per model with `modelContextWindows` in
