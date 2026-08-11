@@ -303,7 +303,7 @@ export function composeStepInput(
 	// EVERY exec prompt, not just the ones after a compaction: by the time the
 	// hub notices a boundary the agent has already lost the history, so the
 	// pointer has to have been given while the conversation was still intact.
-	const priorResults = stepResultsNote(hookRuntime(workflow.hookUrl).workdir);
+	const priorResults = stepResultsNote(workflow.agentName);
 	return `${preamble}${step.description}${descriptionImages}${criteriaNote(
 		step.acceptanceCriteria,
 		acceptanceImages,

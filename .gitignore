@@ -14,8 +14,8 @@ vendor___/
 # Built web UI (produced by `npm run target:install` / `npm run ui:build`).
 hub/ui/dist/
 
-# Per-step results the hub writes into a workflow's workdir (see
-# hub/step-results.ts). This repo is itself the workdir of the workflows that
-# develop it, so its own runs land here: they are one agent's notes to the
-# next, not source, and they change on every run.
+# Legacy per-step results. The hub used to write these into a workflow's workdir
+# and now keeps them under its own TARGET_HOME (see hub/step-results.ts), but
+# this repo is the workdir of the workflows that develop it, so the directory
+# earlier runs left behind is still here and is still not source.
 .target/

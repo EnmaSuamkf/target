@@ -87,7 +87,7 @@ import {
 import { sendManualReviewNotification, sendWorkflowCompletedNotification } from "./notifier.ts";
 import { forgetProbe, humanizeSeconds, probeStepProgress, pruneProbes, stepActivity } from "./progress.ts";
 import { dispatchStep, type Logger } from "./runner.ts";
-import { writeStepResults } from "./step-results.ts";
+import { stepResultsDir, writeStepResults } from "./step-results.ts";
 
 export class WorkflowError extends Error {}
 
@@ -511,12 +511,12 @@ function truncateMd(s: string, n = 120): string {
 /**
  * Rewrites the workflow's whole progress file — cheap enough to do on every
  * state change — and, in the same breath, the agent-facing copies of each
- * step's result under `<workdir>/.target/steps/` (see step-results.ts).
+ * step's result under `~/.target/steps/<agent name>/` (see step-results.ts).
  *
  * The two files serve different readers and neither replaces the other: this
- * one is the operator's view (every step, truncated results, statuses, under
- * `~/.target`), those are the agent's (one full result per step, inside the
- * workdir so a sandboxed run can actually open them). They're written together
+ * one is the operator's view (every step, truncated results, statuses), those
+ * are the agent's (one full result per step, untruncated, and bind-mounted into
+ * the sandbox so a containerised run can open them). They're written together
  * because this function is the single choke point every step transition already
  * passes through — hanging the agent-facing write off any one of the six
  * done-paths would mean the seventh silently not having it.
@@ -1074,14 +1074,17 @@ export function setConversationContext(workflowId: string, context: string | nul
 /**
  * Tears down a workflow entirely: its awb hook (so it doesn't linger in
  * hooks.json pointing at a workdir nobody uses anymore), its progress
- * markdown file, and finally its DB rows. db.ts stays a pure storage layer —
- * this orchestration lives here, not there.
+ * markdown file, its step-results directory, and finally its DB rows. db.ts
+ * stays a pure storage layer — this orchestration lives here, not there.
  */
 export function removeWorkflow(workflowId: string): void {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	deleteAwbHook(workflow.agentName);
 	fs.rmSync(workflow.mdPath, { force: true });
+	// The agent-facing copies of its results live under ~/.target/steps/<agent
+	// name>/ — the hub's own directory, so removing the workflow removes them too.
+	fs.rmSync(stepResultsDir(workflow.agentName), { recursive: true, force: true });
 	// Its attached images live in ~/.target/attachments/<id>/ — delete the rows
 	// and the directory, or a removed workflow would leak both forever.
 	removeWorkflowAttachments(workflowId);
@@ -1266,7 +1269,7 @@ export type StepMoveDirection = "up" | "down";
  *
  * - Only a `pending` step moves, and only past another `pending` one. A step
  *   that has already run owns its position in the record — its result was
- *   written to `.target/steps/<NN>-<slug>.md` under the index it had, and the
+ *   written to `steps/<agent name>/<NN>-<slug>.md` under the index it had, and the
  *   sequential run reached it in that order — so renumbering it would make the
  *   list disagree with what happened. In practice this is also exactly the
  *   restriction that matters: only work that hasn't run yet can still be

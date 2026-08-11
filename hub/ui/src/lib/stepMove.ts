@@ -10,7 +10,7 @@
  * The rule itself is "only pending work reorders":
  *
  * - A step that has already run (or is running, queued, or held at its gate)
- *   owns its position. Its result was written to `.target/steps/<NN>-<slug>.md`
+ *   owns its position. Its result was written to `<NN>-<slug>.md`
  *   under the index it had, and the run really did reach it in that order, so
  *   renumbering it would make the list disagree with what happened.
  * - The step it would swap WITH has to be pending for the same reason — moving a

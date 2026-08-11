@@ -96,7 +96,7 @@ export function SessionPanel({
 							{info?.compactionPending
 								? "The workflow's conversation context will be re-stated on the next step."
 								: "The workflow's conversation context has been re-stated since."}{" "}
-							Each completed step's full result is also on disk in the workdir, under <code>.target/steps/</code>.
+							Each completed step's full result is also on disk, under <code>~/.target/steps/</code>.
 						</p>
 					)}
 

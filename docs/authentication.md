@@ -61,9 +61,8 @@ npm start
 ```
 
 This destroys **everything**: workflows, steps, templates, attachments,
-settings, and the account. Step-result files under each workdir's
-`.target/steps/` survive, but the hub no longer knows the workflows they
-belonged to. Back up first if any of it matters.
+settings, the account and every step-result file. Back up first if any of it
+matters.
 
 ## The legacy admin token
 

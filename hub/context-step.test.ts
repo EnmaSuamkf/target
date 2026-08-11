@@ -418,7 +418,7 @@ test("progress counts the operator's steps only", async () => {
 });
 
 test("no 00-*.md is written, and the task steps' result filenames are unchanged", async () => {
-	const { workflow, steps, workdir } = makeWorkflow({ steps: 2 });
+	const { workflow, steps } = makeWorkflow({ steps: 2 });
 	setConversationContext(workflow.id, "FILES-BG");
 
 	await startWorkflow(workflow.id, cfg, silent, steps.map((s) => s.id));
@@ -426,7 +426,7 @@ test("no 00-*.md is written, and the task steps' result filenames are unchanged"
 	await finishOk(steps[0].id);
 	await finishOk(steps[1].id);
 
-	const files = fs.readdirSync(stepResultsDir(workdir)).sort();
+	const files = fs.readdirSync(stepResultsDir(workflow.agentName)).sort();
 	assert.deepEqual(files, ["01-step-1.md", "02-step-2.md"]);
 	assert.equal(
 		files.some((f) => f.startsWith("00-")),

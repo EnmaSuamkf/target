@@ -72,14 +72,13 @@ const legacyDbFile = path.join(tmpHome, "target.db");
 const { getStep, insertStep, insertWorkflow, listSteps } = await import("./db.ts");
 const { loadConfig } = await import("./config.ts");
 const { INLINE_SUFFIX, SUBAGENT_SUFFIX, judgeInput } = await import("./runner.ts");
-const { hookRuntime } = await import("./awb.ts");
 // Every exec prompt now names the on-disk copies of the prior steps' results
 // (step-results.ts). The byte-for-byte assertions below keep being byte-for-byte
 // by spelling that note out too.
 const { stepResultsNote } = await import("./step-results.ts");
 const { getWorkflow } = await import("./db.ts");
 /** The prior-results pointer as it appears in this workflow's prompts. */
-const priorResults = (workflowId: string) => stepResultsNote(hookRuntime(getWorkflow(workflowId)!.hookUrl).workdir);
+const priorResults = (workflowId: string) => stepResultsNote(getWorkflow(workflowId)!.agentName);
 const { addStep, editStep, onStepResult, startWorkflow, writeStatusMd } = await import("./workflow.ts");
 const { createServer } = await import("./server.ts");
 

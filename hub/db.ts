@@ -61,9 +61,10 @@ export type StepKind = "task" | "context";
  * `listSteps` and `nextPendingStep`) puts it first for free, while renumbering
  * NOTHING — every task step keeps the index it already had, so
  * `stepResultFileName` keeps emitting the same `01-….md`, `02-….md` names, no
- * orphaned duplicates are left behind in `.target/steps/` (which never deletes),
- * and `steps.at(-1)` still means "the last real step". At index 0 all of that
- * would have had to be migrated exactly once, and could not be rolled back.
+ * orphaned duplicates are left behind in the step-results directory (which never
+ * deletes), and `steps.at(-1)` still means "the last real step". At index 0 all
+ * of that would have had to be migrated exactly once, and could not be rolled
+ * back.
  */
 export const CONTEXT_STEP_ORDER_INDEX = -1;
 
