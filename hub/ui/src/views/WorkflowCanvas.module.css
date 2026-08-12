@@ -59,6 +59,10 @@
 	position: relative;
 	overflow: auto;
 	max-height: 32rem;
+	/* The stage is only as big as the drawing AT THE CURRENT ZOOM, so without a
+	   floor the surface collapses around a zoomed-out graph and the canvas reads
+	   as a strip rather than as somewhere a workflow is drawn. */
+	min-height: 14rem;
 	padding: 0;
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
@@ -72,12 +76,20 @@
 
 .stage {
 	position: relative;
-	/* The stage is exactly as wide as the drawing and the viewport is usually
-	   much wider: without auto margins the graph hugs the left edge and the
-	   canvas reads as empty. Auto margins compute to 0 the moment the drawing
-	   is wider than the viewport, so nothing is lost to centring it can't
-	   reach by scrolling. */
+	/* The stage is exactly as wide as the drawing AT THE CURRENT ZOOM (the
+	   component sizes it), and the viewport is usually much wider: without auto
+	   margins the graph hugs the left edge and the canvas reads as empty. Auto
+	   margins compute to 0 the moment the drawing is wider than the viewport, so
+	   nothing is lost to centring it can't reach by scrolling. */
 	margin-inline: auto;
+}
+
+/* The drawing at its natural size, scaled into the stage. Separate from the
+   stage because a transform doesn't change layout: scaled in place, a
+   zoomed-out graph would leave the scroll area — and the centring above — sized
+   for a picture that is no longer there. */
+.drawing {
+	position: relative;
 	transform-origin: 0 0;
 	transition: transform var(--transition);
 }
@@ -320,6 +332,47 @@
 	color: var(--danger-700);
 }
 
+/* --- the subagent box --- */
+
+/* Square, and wired into the LEFT of the card, so the two branches read as the
+   two different questions they answer: who runs this step (left) and what its
+   result has to pass (right, and round). */
+.subagent {
+	position: absolute;
+	display: grid;
+	place-items: center;
+	align-content: center;
+	gap: 2px;
+	padding: var(--space-2);
+	border: 1px dashed var(--border-strong);
+	border-left: 3px solid var(--gray-300);
+	border-radius: var(--radius);
+	background: var(--surface);
+	box-shadow: var(--shadow-sm);
+	color: var(--text-muted);
+	font-family: inherit;
+	cursor: pointer;
+	transition:
+		box-shadow var(--transition),
+		border-color var(--transition),
+		color var(--transition);
+}
+
+.subagent:hover {
+	box-shadow: var(--shadow-md);
+}
+
+.subagent:focus-visible {
+	outline: none;
+	box-shadow: var(--ring), var(--shadow-md);
+}
+
+.subagentLabel {
+	font-size: 0.6875rem;
+	font-weight: 700;
+	letter-spacing: 0.02em;
+}
+
 /* --- the judge circle --- */
 
 .judge {
@@ -447,6 +500,13 @@
 .swatchJudge {
 	border: 2px solid var(--border-strong);
 	border-radius: 50%;
+	background: var(--surface);
+}
+
+.swatchSubagent {
+	border: 1px dashed var(--border-strong);
+	border-left: 3px solid var(--gray-300);
+	border-radius: 2px;
 	background: var(--surface);
 }
 

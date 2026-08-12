@@ -126,6 +126,11 @@ export function StepItem({
 	// called back, and refusing the result of a step held for review.
 	const abortable = inFlight || waiting;
 	const editable = !running && !waiting;
+	// Delegated to a subagent, which is what a step does unless the toggle was
+	// turned off — and what a step stored before that toggle existed did too. The
+	// hub-owned context step is dispatched by the engine, not by this choice, so
+	// it never claims either way.
+	const delegated = !isContext && step.useSubagent !== false;
 	const removable = step.status === "pending";
 	const statusLabel = running && step.phase === "judge" ? "judging" : step.status;
 
@@ -230,7 +235,13 @@ export function StepItem({
 				</p>
 			)}
 
-			{(step.acceptanceCriteria || elapsed || step.manualRun || step.manualReview || step.useSubagent === false || activity) && (
+			{(step.acceptanceCriteria ||
+				elapsed ||
+				step.manualRun ||
+				step.manualReview ||
+				delegated ||
+				step.useSubagent === false ||
+				activity) && (
 				<div className={styles.meta}>
 					{step.acceptanceCriteria && (
 						<span className={styles.metaItem} title={step.acceptanceCriteria}>
@@ -256,8 +267,25 @@ export function StepItem({
 							manual review
 						</span>
 					)}
-					{/* Only the non-default choice is worth a badge: delegating is what
-					    every step does unless someone turned it off here. */}
+					{/* Both halves of "how will this step run" are spelled out, not just
+					    the non-default one: a row that says nothing was ambiguous between
+					    "delegated" and "nobody has decided", and the two facts an operator
+					    checks before pressing Start are exactly these — is this step handed
+					    to a subagent, and will it stop for me. The gate above and this
+					    badge sit next to each other for that reason. */}
+					{delegated && (
+						<span
+							className={styles.metaItem}
+							title="This step's work is delegated to a subagent (the Task tool), so the shared session only keeps its summary."
+						>
+							<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+								<path d="M6 3v6a3 3 0 0 0 3 3h9" />
+								<path d="M15 9l3 3-3 3" />
+								<circle cx="6" cy="18" r="2" />
+							</svg>
+							subagent
+						</span>
+					)}
 					{step.useSubagent === false && (
 						<span
 							className={styles.metaItem}

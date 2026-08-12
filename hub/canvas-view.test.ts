@@ -42,6 +42,9 @@ const {
 	CARD_WIDTH,
 	COLUMN_GAP,
 	JUDGE_SIZE,
+	SUBAGENT_GAP,
+	SUBAGENT_HEIGHT,
+	SUBAGENT_WIDTH,
 	edgePath,
 	focusNodeId,
 	layoutWorkflow,
@@ -145,6 +148,39 @@ test("a judge circle appears only where there are acceptance criteria", () => {
 	assert.equal(judges[0].description, "the file exists", "the criteria are the circle's tooltip");
 });
 
+test("a box hangs off every delegated step, and off no inline one", () => {
+	const delegated = step({ orderIndex: 0, useSubagent: true });
+	const inline = step({ orderIndex: 1, useSubagent: false });
+	// A step stored before the toggle existed was delegated, so an absent value
+	// draws a box like an explicit true.
+	const legacy = step({ orderIndex: 2, useSubagent: undefined });
+	const { nodes, edges } = layoutWorkflow([contextStep(), delegated, inline, legacy]);
+
+	const boxes = nodes.filter((n) => n.kind === "subagent");
+	assert.deepEqual(
+		boxes.map((n) => n.stepId),
+		[delegated.id, legacy.id],
+		"only the steps that really hand their work to a subagent get one — and never the context step",
+	);
+	// The box carries its step's id, so it is clickable through to that row like
+	// every other node on the canvas.
+	assert.equal(boxes[0].id, `${delegated.id}:subagent`);
+	assert.equal(boxes[0].subagent, true);
+	assert.equal(byId(nodes, delegated.id).subagent, true, "the card knows too");
+	assert.equal(byId(nodes, inline.id).subagent, false);
+	assert.equal(byId(nodes, inline.id).inline, true, "and says so the other way round");
+
+	const wires = edges.filter((e) => e.kind === "subagent");
+	assert.deepEqual(
+		wires.map((e) => [e.from, e.to]),
+		[
+			[`${delegated.id}:subagent`, delegated.id],
+			[`${legacy.id}:subagent`, legacy.id],
+		],
+		"the arrow points INTO the step: the subagent is what carries that step's work",
+	);
+});
+
 test("the retry loop is drawn only when there is a retry budget to spend", () => {
 	const noBudget = step({ orderIndex: 0, acceptanceCriteria: "ok", maxRetries: 0 });
 	const budget = step({ orderIndex: 1, acceptanceCriteria: "ok", maxRetries: 2 });
@@ -187,10 +223,11 @@ test("an empty workflow lays out to an empty graph rather than crashing", () => 
 test("cards stack in one column, top to bottom, without overlapping", () => {
 	const steps = [step({ orderIndex: 0 }), step({ orderIndex: 1 }), step({ orderIndex: 2 })];
 	const { nodes, height } = layoutWorkflow(steps);
-	const cards = nodes.filter((n) => n.kind !== "judge");
+	const cards = nodes.filter((n) => n.kind === "step" || n.kind === "context");
 
 	for (const card of cards) {
-		assert.equal(card.x, CANVAS_PADDING, "one column: every card shares a left edge");
+		// One column, clear of the lane the subagent boxes hang in on the left.
+		assert.equal(card.x, CANVAS_PADDING + SUBAGENT_WIDTH + SUBAGENT_GAP, "one column: every card shares a left edge");
 		assert.equal(card.width, CARD_WIDTH);
 	}
 	for (let i = 1; i < cards.length; i++) {
@@ -217,6 +254,37 @@ test("a judge circle sits beside its own card, vertically centred on it", () => 
 	assert.equal(judge.y + judge.height / 2, card.y + card.height / 2, "level with the middle of its card");
 	// The stage is wide enough for the branch, not just the spine.
 	assert.equal(width, judge.x + JUDGE_SIZE + CANVAS_PADDING);
+});
+
+test("a subagent box sits in its own lane on the left, wired into the middle of its card", () => {
+	const delegated = step({ orderIndex: 0, useSubagent: true });
+	const { nodes, edges } = layoutWorkflow([delegated]);
+	const card = byId(nodes, delegated.id);
+	const box = byId(nodes, `${delegated.id}:subagent`);
+
+	assert.equal(box.x, CANVAS_PADDING, "the lane is flush with the left of the drawing");
+	assert.equal(box.width, SUBAGENT_WIDTH);
+	assert.equal(box.height, SUBAGENT_HEIGHT);
+	assert.equal(box.y + box.height / 2, card.y + card.height / 2, "level with the middle of its card");
+	assert.equal(box.x + box.width + SUBAGENT_GAP, card.x, "clear of the card, to its left");
+
+	const wire = edgeBetween(edges, box.id, delegated.id);
+	assert.deepEqual(wire.points, [
+		{ x: box.x + SUBAGENT_WIDTH, y: card.y + CARD_HEIGHT / 2 },
+		{ x: card.x, y: card.y + CARD_HEIGHT / 2 },
+	]);
+});
+
+test("a workflow with nothing delegated reserves no lane for boxes that aren't there", () => {
+	const { nodes } = layoutWorkflow([
+		step({ orderIndex: 0, useSubagent: false }),
+		step({ orderIndex: 1, useSubagent: false }),
+	]);
+
+	assert.equal(nodes.filter((n) => n.kind === "subagent").length, 0);
+	for (const card of nodes) {
+		assert.equal(card.x, CANVAS_PADDING, "an all-inline workflow is not pushed off-centre by an empty column");
+	}
 });
 
 test("every arrow is routed between the two boxes it joins", () => {
@@ -373,6 +441,35 @@ test("the viewport follows the run: in flight first, then the hold, then the nex
 	assert.equal(focusNodeId(finished.nodes), null);
 });
 
+test("a subagent box shows the state of the step it is carrying", () => {
+	const done = step({ orderIndex: 0, status: "done" });
+	const live = step({ orderIndex: 1, status: "running" });
+	const later = step({ orderIndex: 2 });
+	const { nodes, edges } = layoutWorkflow([done, live, later]);
+
+	// The whole point of drawing the box rather than a badge: while the run is in
+	// flight it says there is a subagent on this step RIGHT NOW, not merely that
+	// this step would use one.
+	assert.equal(byId(nodes, `${live.id}:subagent`).state, "running");
+	assert.equal(edgeBetween(edges, `${live.id}:subagent`, live.id).state, "active");
+
+	assert.equal(byId(nodes, `${done.id}:subagent`).state, "done");
+	assert.equal(edgeBetween(edges, `${done.id}:subagent`, done.id).state, "done");
+
+	assert.equal(byId(nodes, `${later.id}:subagent`).state, "pending");
+	assert.equal(edgeBetween(edges, `${later.id}:subagent`, later.id).state, "pending");
+});
+
+test("neither branch is what the viewport follows — the step is", () => {
+	// The boxes are appended after the cards, so a naive "first live node" would
+	// still find the card; this pins the intent rather than the ordering.
+	const { nodes } = layoutWorkflow([step({ orderIndex: 0, status: "done" }), step({ orderIndex: 1, status: "running" })]);
+	const focused = focusNodeId(nodes);
+
+	assert.equal(focused, nodes.find((n) => n.kind === "step" && n.state === "running")?.id);
+	assert.notEqual(nodes.find((n) => n.id === focused)?.kind, "subagent");
+});
+
 test("the judge circle is never what the viewport follows — the step is", () => {
 	const judging = step({ orderIndex: 0, status: "running", phase: "judge", acceptanceCriteria: "ok" });
 	const { nodes } = layoutWorkflow([judging]);
@@ -395,6 +492,75 @@ test("WorkflowDetail renders the canvas behind a List/Canvas toggle, in place of
 	assert.match(source, /<WorkflowCanvas steps=\{steps\}/);
 	// "Select all" is a list control — there are no checkboxes on the canvas.
 	assert.match(source, /taskSteps\.length > 0 && stepsView === "list" &&/);
+});
+
+test("pressing the run control switches the steps to the canvas", () => {
+	const source = read("views/WorkflowDetail.tsx");
+
+	// Once a run is in flight the question stops being "what is in this workflow"
+	// and becomes "where is it now", which is the canvas' whole job. The Start
+	// button answers it without being asked — and it's the same button the
+	// Alt/Shift+S shortcut clicks, so the shortcut inherits this for free.
+	const at = source.indexOf("const startRun = (): void => {");
+	assert.ok(at > 0, "the run control's handler must stay findable");
+	const handler = source.slice(at, source.indexOf("};", at));
+	assert.match(handler, /setStepsView\("canvas"\)/, "Start shows the canvas");
+	assert.match(handler, /onStart\(\[\.\.\.selection\]\)/, "and still starts exactly the selected steps");
+	// Wired to the one button that carries the shortcut's hook, so Alt/Shift+S
+	// lands on the canvas too.
+	assert.match(source, /onClick=\{startRun\}[\s\S]{0,200}data-start-workflow/);
+});
+
+test("the canvas opens at 60% zoom, zoomed out but still readable", () => {
+	const source = read("views/WorkflowCanvas.tsx");
+
+	const steps = /const ZOOM_STEPS = \[([^\]]+)\]/.exec(source);
+	assert.ok(steps, "the zoom ladder must stay a plain array of scales");
+	const ladder = steps[1].split(",").map((n) => Number(n.trim()));
+	assert.ok(
+		ladder.every((n, i) => i === 0 || n > ladder[i - 1]),
+		"the ladder runs from most zoomed out to most zoomed in",
+	);
+	assert.ok(ladder[0] >= 0.1, "the ladder's floor stays legible — a card, not a smudge");
+
+	// The canvas is unmounted while the list is up, so the default index is what
+	// the operator gets EVERY time the canvas is shown, not just the first. Read
+	// through the index rather than pinning it, so the pair can't drift apart.
+	const index = /const DEFAULT_ZOOM_INDEX = (\d+);/.exec(source);
+	assert.ok(index, "the opening zoom must stay a named constant");
+	assert.equal(ladder[Number(index[1])], 0.6, "the canvas opens at 60%");
+	assert.match(source, /useState\(DEFAULT_ZOOM_INDEX\)/);
+	// Zooming out from the default still has somewhere to go, and the button that
+	// does it is only disabled at the actual floor.
+	assert.ok(Number(index[1]) > 0, "there is room to zoom out from the default");
+	assert.match(source, /disabled=\{zoomIndex === 0\}/);
+	// And the toolbar says what it is, so the operator can see it reads 60%.
+	assert.match(source, /\{Math\.round\(zoom \* 100\)\}%/);
+});
+
+test("the canvas draws a subagent box, and it is a button like every other node", () => {
+	const source = read("views/WorkflowCanvas.tsx");
+
+	assert.match(source, /node\.kind === "subagent" \? \(\s*<SubagentBox/);
+	assert.match(source, /data-canvas-subagent/, "a stable hook for the box");
+	assert.match(source, /aria-label=\{`Runs in a subagent — \$\{node\.state\}\./);
+	assert.match(source, /onClick=\{\(\) => onOpen\(node\.stepId\)\}/);
+	// The legend has to name it, or a box with no explanation is just decoration.
+	assert.match(source, /swatchSubagent[\s\S]{0,80}runs in a subagent/);
+});
+
+test("the step list says, for every step, whether it delegates and whether it stops for a human", () => {
+	const source = read("views/StepItem.tsx");
+
+	// Both facts, on every row — not just the non-default one. "No badge" used to
+	// mean both "delegated" and "nobody decided", which is exactly the ambiguity
+	// an operator is checking the row for before pressing Start.
+	assert.match(source, /const delegated = !isContext && step\.useSubagent !== false;/);
+	assert.match(source, /\{delegated && \(/);
+	assert.match(source, /subagent\s*<\/span>/);
+	assert.match(source, /manual review\s*<\/span>/);
+	// The inline badge stays: it is the other half of the same question.
+	assert.match(source, /\{step\.useSubagent === false && \(/);
 });
 
 test("the canvas is read-only: it is handed no way to change anything", () => {
