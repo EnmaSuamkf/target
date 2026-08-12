@@ -16,16 +16,21 @@
  *
  * Layout is a vertical spine with side branches:
  *
- *     ┌──────────────┐
- *     │  ctx         │        the conversation context, when there is one
- *     └──────┬───────┘
- *     ┌──────▼───────┐        ╭───────╮
- *     │  1  step     │───────▶│ judge │   ─┐  a step with acceptance criteria
- *     └──────┬───────┘        ╰───────╯    │  is judged before the run moves on
- *            │  ◀─────────────────────────┘   (dashed = the retry it can force)
- *     ┌──────▼───────┐
- *     │  2  step     │
- *     └──────────────┘
+ *                  ┌──────────────┐
+ *                  │  ctx         │        the conversation context, when there is one
+ *                  └──────┬───────┘
+ *     ┌────────┐   ┌──────▼───────┐        ╭───────╮
+ *     │subagent│──▶│  1  step     │───────▶│ judge │   ─┐  a step with acceptance criteria
+ *     └────────┘   └──────┬───────┘        ╰───────╯    │  is judged before the run moves on
+ *                         │  ◀─────────────────────────┘   (dashed = the retry it can force)
+ *                  ┌──────▼───────┐
+ *                  │  2  step     │        no box on the left: this one runs inline
+ *                  └──────────────┘
+ *
+ * The two side branches are the two questions the list answers in words and the
+ * canvas answers in shape: WHO does the work (the box on the left — a subagent,
+ * or nobody, meaning the session does it itself) and WHAT has to pass before the
+ * run moves on (the circle on the right).
  *
  * Vertical, not horizontal, for two reasons: it is the order the steps already
  * read in, and it is the axis a phone has room on — a horizontal chain of six
@@ -55,7 +60,7 @@ export interface CanvasStep {
 	selected?: boolean;
 }
 
-export type CanvasNodeKind = "context" | "step" | "judge";
+export type CanvasNodeKind = "context" | "step" | "judge" | "subagent";
 
 /**
  * What a node is doing, in one vocabulary shared by cards and circles so the
@@ -76,8 +81,10 @@ export type CanvasEdgeState = "done" | "active" | "pending";
  * - `judge` — into the circle: this step's result is checked (solid, short).
  * - `retry` — out of the circle and back into the step (dashed): a reject
  *   re-runs it, and it only exists when the step has a retry budget to spend.
+ * - `subagent` — out of the box on the left and into the step: this step's work
+ *   is handed to a subagent rather than done in the shared conversation.
  */
-export type CanvasEdgeKind = "flow" | "judge" | "retry";
+export type CanvasEdgeKind = "flow" | "judge" | "retry" | "subagent";
 
 export interface CanvasPoint {
 	x: number;
@@ -105,6 +112,8 @@ export interface CanvasNode {
 	manualReview: boolean;
 	/** The step runs inline in the conversation instead of being delegated. */
 	inline: boolean;
+	/** The step is delegated to a subagent — the box drawn on its left. */
+	subagent: boolean;
 	/** Retry budget of the judged step, or null when it has none to spend. */
 	retries: { count: number; max: number } | null;
 }
@@ -143,6 +152,16 @@ export const CONTEXT_CARD_HEIGHT = 76;
 export const JUDGE_SIZE = 72;
 /** Horizontal gap between a card and its judge circle. */
 export const COLUMN_GAP = 64;
+/**
+ * The box hanging off the left of a delegated step — "this work is handed to a
+ * subagent", which the list can only say in a badge. Deliberately a rectangle
+ * and not a circle: the circle already means "judge", and the two branches say
+ * different things (who runs it vs. what it has to pass).
+ */
+export const SUBAGENT_WIDTH = 104;
+export const SUBAGENT_HEIGHT = 56;
+/** Horizontal gap between the subagent box and the card it feeds. */
+export const SUBAGENT_GAP = 48;
 /** Vertical gap between one card and the next — where the spine arrow lives. */
 export const ROW_GAP = 62;
 /** How far below a card the retry loop runs before turning back up into it. */
@@ -183,6 +202,15 @@ function hasJudge(step: CanvasStep): boolean {
 }
 
 /**
+ * Whether this step's work is handed to a subagent. Undefined counts as yes:
+ * delegating is what a step does unless someone turned it off, and a step
+ * stored before the toggle existed was delegated too.
+ */
+function usesSubagent(step: CanvasStep): boolean {
+	return step.kind !== "context" && step.useSubagent !== false;
+}
+
+/**
  * Builds the whole picture from a workflow's steps, in the order they are given
  * (which is already display order — the caller does not have to sort).
  *
@@ -195,8 +223,16 @@ export function layoutWorkflow(steps: readonly CanvasStep[]): CanvasGraph {
 	const taskSteps = steps.filter((s) => s.kind !== "context");
 
 	const nodes: CanvasNode[] = [];
+	// Held back and appended once the spine is built, so the head of `nodes` stays
+	// the run in order — cards first, in the order they run. They are a branch off
+	// the drawing, not a stop on it.
+	const subagentNodes: CanvasNode[] = [];
 	const edges: CanvasEdge[] = [];
-	const x = CANVAS_PADDING;
+	// A lane on the left for the subagent boxes, reserved only when some step
+	// actually delegates: a workflow of purely inline steps would otherwise be
+	// pushed off-centre by an empty column.
+	const lane = taskSteps.some(usesSubagent) ? SUBAGENT_WIDTH + SUBAGENT_GAP : 0;
+	const x = CANVAS_PADDING + lane;
 	let y = CANVAS_PADDING;
 
 	if (contextStep) {
@@ -216,6 +252,7 @@ export function layoutWorkflow(steps: readonly CanvasStep[]): CanvasGraph {
 			selected: false,
 			manualReview: false,
 			inline: false,
+			subagent: false,
 			retries: null,
 		});
 		y += CONTEXT_CARD_HEIGHT + ROW_GAP;
@@ -238,8 +275,48 @@ export function layoutWorkflow(steps: readonly CanvasStep[]): CanvasGraph {
 			selected: step.selected === true,
 			manualReview: step.manualReview === true,
 			inline: step.useSubagent === false,
+			subagent: usesSubagent(step),
 			retries: max > 0 ? { count: step.retryCount ?? 0, max } : null,
 		});
+
+		// The box on the left, and the arrow out of it into the step. Drawn only
+		// for a delegated step: an inline step is done by the session itself, and
+		// a box there would invent a worker that never exists. The pair shares the
+		// step's own state, so while the step is in flight the box lights up too —
+		// which is the difference between "this step WILL use a subagent" and
+		// "there is a subagent on this step right now".
+		if (usesSubagent(step)) {
+			const boxY = y + (CARD_HEIGHT - SUBAGENT_HEIGHT) / 2;
+			const midY = y + CARD_HEIGHT / 2;
+			subagentNodes.push({
+				id: `${step.id}:subagent`,
+				stepId: step.id,
+				kind: "subagent",
+				state,
+				label: "subagent",
+				description: step.description,
+				x: CANVAS_PADDING,
+				y: boxY,
+				width: SUBAGENT_WIDTH,
+				height: SUBAGENT_HEIGHT,
+				selected: false,
+				manualReview: false,
+				inline: false,
+				subagent: true,
+				retries: null,
+			});
+			edges.push({
+				id: `${step.id}:from-subagent`,
+				from: `${step.id}:subagent`,
+				to: step.id,
+				kind: "subagent",
+				state: IN_FLIGHT.has(step.status) ? "active" : state === "done" ? "done" : "pending",
+				points: [
+					{ x: CANVAS_PADDING + SUBAGENT_WIDTH, y: midY },
+					{ x, y: midY },
+				],
+			});
+		}
 
 		if (hasJudge(step)) {
 			const jState = judgeState(step);
@@ -259,6 +336,7 @@ export function layoutWorkflow(steps: readonly CanvasStep[]): CanvasGraph {
 				selected: false,
 				manualReview: false,
 				inline: false,
+				subagent: false,
 				retries: max > 0 ? { count: step.retryCount ?? 0, max } : null,
 			});
 
@@ -302,8 +380,9 @@ export function layoutWorkflow(steps: readonly CanvasStep[]): CanvasGraph {
 	}
 
 	// The spine, added once every card's box is known so each arrow can be routed
-	// from the bottom of one to the top of the next.
-	const spine = nodes.filter((n) => n.kind !== "judge");
+	// from the bottom of one to the top of the next. Cards only — the branches
+	// hanging off a card (its judge, its subagent) are not stops on the run.
+	const spine = nodes.filter((n) => n.kind === "context" || n.kind === "step");
 	for (let i = 0; i < spine.length - 1; i++) {
 		const from = spine[i];
 		const to = spine[i + 1];
@@ -325,6 +404,8 @@ export function layoutWorkflow(steps: readonly CanvasStep[]): CanvasGraph {
 		});
 	}
 
+	nodes.push(...subagentNodes);
+
 	const width = nodes.reduce((max, n) => Math.max(max, n.x + n.width), 0) + CANVAS_PADDING;
 	const height = nodes.reduce((max, n) => Math.max(max, n.y + n.height), 0) + CANVAS_PADDING;
 
@@ -342,7 +423,9 @@ export function layoutWorkflow(steps: readonly CanvasStep[]): CanvasGraph {
  * Null only when there is nothing to look at.
  */
 export function focusNodeId(nodes: readonly CanvasNode[]): string | null {
-	const cards = nodes.filter((n) => n.kind !== "judge");
+	// Cards only: what the operator came to watch is the step, never one of the
+	// boxes hanging off it.
+	const cards = nodes.filter((n) => n.kind === "context" || n.kind === "step");
 	const byState = (...states: CanvasNodeState[]): CanvasNode | undefined =>
 		cards.find((n) => states.includes(n.state));
 	const node =

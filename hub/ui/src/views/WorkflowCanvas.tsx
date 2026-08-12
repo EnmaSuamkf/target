@@ -34,7 +34,22 @@ import styles from "./WorkflowCanvas.module.css";
  * scene that needs a raster.
  */
 
-const ZOOM_STEPS = [0.6, 0.75, 0.9, 1, 1.15, 1.35] as const;
+/**
+ * The zoom ladder, from "the whole workflow as a map" to "close enough to read
+ * a card". The low end exists because a long workflow is taller than any
+ * viewport: at 100% a twenty-step run is a scrollbar, and the shape the canvas
+ * is FOR — where the run is, what branches off what — is only visible zoomed
+ * out. It stops at 15% because below that a card is a few pixels of smudge:
+ * that is not a map, it is a broken render.
+ */
+const ZOOM_STEPS = [0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1, 1.15, 1.35] as const;
+/**
+ * Where the canvas opens, every time it is shown (it is unmounted while the
+ * list is up, so this is genuinely "on display", not just "on first render").
+ * 60%: zoomed out enough that several steps and the shape joining them are on
+ * screen at once, still large enough that a card's title reads. From here the
+ * operator goes either way — down for the whole map, up to read one step.
+ */
 const DEFAULT_ZOOM_INDEX = 3;
 
 /**
@@ -122,14 +137,20 @@ export function WorkflowCanvas({
 			</div>
 
 			<div className={styles.viewport} ref={viewportRef}>
-				<div
-					className={styles.stage}
-					style={{
-						width: graph.width,
-						height: graph.height,
-						transform: `scale(${zoom})`,
-					}}
-				>
+				{/* Two boxes, because a transform doesn't change layout: the outer one is
+				    the drawing at its ZOOMED size, so the scroll area and the centring
+				    match what is on screen; the inner one is the drawing at its natural
+				    size, scaled into it from its top-left corner. With one box, zooming
+				    out left the picture in the corner of a scrollable void. */}
+				<div className={styles.stage} style={{ width: graph.width * zoom, height: graph.height * zoom }}>
+					<div
+						className={styles.drawing}
+						style={{
+							width: graph.width,
+							height: graph.height,
+							transform: `scale(${zoom})`,
+						}}
+					>
 					<svg
 						className={styles.edges}
 						width={graph.width}
@@ -163,10 +184,13 @@ export function WorkflowCanvas({
 					{graph.nodes.map((node) =>
 						node.kind === "judge" ? (
 							<JudgeCircle key={node.id} node={node} onOpen={onOpenStep} />
+						) : node.kind === "subagent" ? (
+							<SubagentBox key={node.id} node={node} onOpen={onOpenStep} />
 						) : (
 							<StepCard key={node.id} node={node} onOpen={onOpenStep} />
 						),
 					)}
+					</div>
 				</div>
 			</div>
 
@@ -185,6 +209,9 @@ export function WorkflowCanvas({
 				</li>
 				<li>
 					<span className={`${styles.swatch} ${styles.swatchJudge}`} aria-hidden="true" /> judged step
+				</li>
+				<li>
+					<span className={`${styles.swatch} ${styles.swatchSubagent}`} aria-hidden="true" /> runs in a subagent
 				</li>
 			</ul>
 		</div>
@@ -241,6 +268,45 @@ function StepCard({ node, onOpen }: { node: CanvasNode; onOpen: (stepId: string)
 					{node.inline && <span className={styles.flag}>inline</span>}
 				</span>
 			)}
+		</button>
+	);
+}
+
+/**
+ * Who does the work: the box wired into the left of a delegated step.
+ *
+ * It answers, at a glance and without reading a badge, the question the list
+ * only answers in words — is this step handed to a subagent, or is the shared
+ * session doing it itself? A step with no box beside it runs inline, which is
+ * why the box is drawn only where there really is a subagent.
+ *
+ * It wears the step's own state, so during a run it isn't just "this step WILL
+ * delegate": the box pulses beside the card while the subagent is actually
+ * working, and settles green with it when it's done.
+ */
+function SubagentBox({ node, onOpen }: { node: CanvasNode; onOpen: (stepId: string) => void }): React.JSX.Element {
+	const live = isLiveState(node.state);
+	return (
+		<button
+			type="button"
+			data-canvas-node={node.id}
+			data-canvas-subagent
+			className={cls(styles.subagent, styles[`state_${node.state}`])}
+			style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
+			onClick={() => onOpen(node.stepId)}
+			title="This step's work is delegated to a subagent (the Task tool), so the shared session only keeps its summary."
+			aria-label={`Runs in a subagent — ${node.state}. Opens this step in the list.`}
+		>
+			{/* A worker with a task, not a robot: what the box means is "someone else
+			    carries this step", which is a hand-off, not a machine. */}
+			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+				<path d="M6 3v6a3 3 0 0 0 3 3h9" />
+				<path d="M15 9l3 3-3 3" />
+				<circle cx="6" cy="18" r="2" />
+				<circle cx="6" cy="3" r="0.5" />
+			</svg>
+			<span className={styles.subagentLabel}>subagent</span>
+			{live && <span className={styles.dot} aria-hidden="true" />}
 		</button>
 	);
 }

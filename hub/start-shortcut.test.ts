@@ -299,10 +299,11 @@ test("the real Start button in WorkflowDetail carries the attribute the shortcut
 	const attribute = START_BUTTON_SELECTOR.replace(/^\[|\]$/g, "");
 	assert.match(attribute, /^data-[a-z-]+$/, "the selector is a plain data-attribute selector");
 
-	// The run control is identified by what it does, not by its label: the same
-	// button reads Start / Resume / Start over depending on the status, and the
-	// shortcut is bound to all three (see lib/startShortcut.ts).
-	const runControls = jsxButtons(source).filter((button) => button.attributes.includes("onClick={() => onStart("));
+	// The run control is identified by what it does — `startRun`, which dispatches
+	// the selection and shows the canvas — not by its label: the same button reads
+	// Start / Resume / Start over depending on the status, and the shortcut is
+	// bound to all three (see lib/startShortcut.ts).
+	const runControls = jsxButtons(source).filter((button) => button.attributes.includes("onClick={startRun}"));
 	assert.equal(runControls.length, 1, "WorkflowDetail renders exactly one run control");
 	const [start] = runControls;
 	assert.ok(

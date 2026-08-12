@@ -63,9 +63,15 @@ import styles from "./WorkflowDetail.module.css";
  * The steps themselves are shown in one of two ways, chosen by the toggle above
  * them: as the **list** (every control the workflow has), or as the **canvas**
  * (`WorkflowCanvas` — the same steps as cards, wired by arrows, with a circle on
- * each judged step). The canvas edits nothing; clicking a card there switches
- * back to the list and scrolls to that step, so there is exactly one place a
- * workflow can be changed.
+ * each judged step and a box on each step that is handed to a subagent). The
+ * canvas edits nothing; clicking a card there switches back to the list and
+ * scrolls to that step, so there is exactly one place a workflow can be changed.
+ *
+ * **Start switches to the canvas.** Once a run is in flight the question stops
+ * being "what is in this workflow" (the list) and becomes "where is it now"
+ * (the canvas), so pressing the run control answers the second one without
+ * being asked. It is the only thing that picks the view for the operator, and
+ * the toggle above the steps takes it straight back.
  */
 /** Which of the two renderings of the same steps is on screen. */
 type StepsView = "list" | "canvas";
@@ -278,6 +284,23 @@ export function WorkflowDetail({
 	};
 
 	/**
+	 * Pressing go. It dispatches exactly the checked steps — and it switches the
+	 * steps to the canvas, because the moment a run starts the question stops
+	 * being "what is in this workflow" (which the list answers) and becomes
+	 * "where is it now" (which only the canvas does). The toggle above the steps
+	 * takes it straight back, and this is the one place the view is chosen for
+	 * the operator rather than by them.
+	 *
+	 * It is a named handler rather than an inline arrow so the Alt/Shift+S
+	 * shortcut, which clicks this same button in the DOM, cannot end up doing
+	 * something different from a real click.
+	 */
+	const startRun = (): void => {
+		setStepsView("canvas");
+		onStart([...selection]);
+	};
+
+	/**
 	 * What a click on a canvas card does. The canvas has no controls of its own by
 	 * design, so the one thing a card can offer is to take you to where the
 	 * controls are: switch back to the list and put that step in the middle of the
@@ -374,7 +397,7 @@ export function WorkflowDetail({
 					<button
 						type="button"
 						className="btn btn--primary"
-						onClick={() => onStart([...selection])}
+						onClick={startRun}
 						disabled={!startAction || busy || selectedCount === 0}
 						data-start-workflow
 						title={
