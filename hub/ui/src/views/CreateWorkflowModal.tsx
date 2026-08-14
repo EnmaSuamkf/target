@@ -38,14 +38,24 @@ import styles from "./CreateWorkflowModal.module.css";
  * daemon isn't reachable, is not offered at all rather than offered and left
  * to fail at the workflow's first step.
  *
- * The conversation picker under the runtime is the "create a workflow from a
+ * The conversation picker under the runtime is the "run this workflow on a
  * conversation you're already having" path. It reads the chosen runtime's
  * on-disk sessions (`GET /api/conversations`), and the order is deliberate: the
  * agent selector above it is the filter, so picking claude or free-code narrows
  * the list to that harness's conversations. "Open in terminal" reopens the
  * selected one in a real terminal window, because the titles alone are not
- * enough to be sure it's the right conversation, and the import is not something
- * you want to discover was wrong two steps in.
+ * enough to be sure it's the right conversation, and this is not something you
+ * want to discover was wrong two steps in.
+ *
+ * Picking one is not an import: the workflow RESUMES that session, so the agent
+ * begins with the whole conversation rather than a summary of it (see
+ * hub/conversations.ts). That is why picking one also TAKES OVER the working
+ * directory field instead of merely proposing a value — the harness resumes a
+ * session relative to the directory it ran in, so a workflow continuing a
+ * conversation has exactly one directory it can run in, and the server refuses
+ * any other. The field stays visible, and read-only, rather than disappearing:
+ * where the agent will run is not something to hide because it was decided for
+ * you.
  *
  * ## Clone mode
  *
@@ -157,6 +167,14 @@ export function CreateWorkflowModal({
 	const [conversationTotal, setConversationTotal] = useState(0);
 	const [conversationId, setConversationId] = useState("");
 	const [conversationQuery, setConversationQuery] = useState("");
+	// What the operator wants said INSIDE the adopted conversation before the
+	// first step ("from here on, answer in Spanish"). Delivered as the context
+	// step's own turn — with the conversation itself no longer copied anywhere,
+	// this is the only prose a create carries.
+	const [conversationNote, setConversationNote] = useState("");
+	// The workdir this workflow will run in came from the conversation, not from
+	// the operator — which the field says, and which is why it's read-only.
+	const [workdirFromConversation, setWorkdirFromConversation] = useState(false);
 	const [loadingConversations, setLoadingConversations] = useState(false);
 	const [conversationError, setConversationError] = useState<string | null>(null);
 	// Bumped by Refresh. A conversation you had seconds ago should be one click
@@ -199,6 +217,8 @@ export function CreateWorkflowModal({
 		setConversationTotal(0);
 		setConversationId("");
 		setConversationQuery("");
+		setConversationNote("");
+		setWorkdirFromConversation(false);
 		setConversationError(null);
 		setPreview(null);
 		setTerminalNote(null);
@@ -249,6 +269,13 @@ export function CreateWorkflowModal({
 	useEffect(() => {
 		if (!open || cloning || loadingRunners || probeFailed) return;
 		setConversationId("");
+		// Dropping the conversation drops the directory it dictated, or the form
+		// would keep a read-only path belonging to a session it is no longer
+		// continuing.
+		setWorkdirFromConversation((taken) => {
+			if (taken) setWorkdir("");
+			return false;
+		});
 		setPreview(null);
 		setTerminalNote(null);
 		setLoadingConversations(true);
@@ -294,17 +321,32 @@ export function CreateWorkflowModal({
 		: conversations;
 
 	/**
-	 * Adopting a conversation also proposes its working directory, because a
-	 * workflow continuing that conversation's work almost always belongs in the
-	 * same repo. Only when the operator hasn't typed one — never overwriting a
-	 * deliberate choice.
+	 * Adopting a conversation TAKES the working directory — it doesn't propose
+	 * one. The harness resumes a session relative to the directory it ran in, so
+	 * this is the only directory in which the workflow can pick that conversation
+	 * up; the server refuses any other. Overwriting something the operator typed
+	 * is the honest outcome here (the field goes read-only and says why), because
+	 * the alternative is a form that looks like it accepted a choice the create
+	 * will reject.
+	 *
+	 * Deselecting hands the field back, empty, rather than leaving the departed
+	 * conversation's path behind as if it had been chosen.
 	 */
 	const pickConversation = (sessionId: string): void => {
 		setConversationId(sessionId);
 		setPreview(null);
 		setTerminalNote(null);
 		const picked = conversations.find((c) => c.sessionId === sessionId);
-		if (picked?.workdir && workdir.trim() === "") setWorkdir(picked.workdir);
+		if (picked?.workdir) {
+			setWorkdir(picked.workdir);
+			setWorkdirFromConversation(true);
+			setBrowsing(false);
+			return;
+		}
+		// Either "no conversation", or one whose transcript never recorded a
+		// directory — which can't be continued at all, and is reported below.
+		if (workdirFromConversation) setWorkdir("");
+		setWorkdirFromConversation(false);
 	};
 
 	const openInTerminal = async (): Promise<void> => {
@@ -330,7 +372,7 @@ export function CreateWorkflowModal({
 		setPreviewing(true);
 		try {
 			const result = await previewConversation(conversation.runner, conversation.sessionId);
-			setPreview(result.digest.text);
+			setPreview(result.preview.text);
 		} catch (err) {
 			setPreview(err instanceof Error ? err.message : "Couldn't read that conversation.");
 		} finally {
@@ -369,11 +411,21 @@ export function CreateWorkflowModal({
 	const runnerHint = loadingRunners
 		? "Checking which agent CLIs are installed on this machine…"
 		: installedOptions.find((o) => o.value === runner)?.description ?? "";
+	// A conversation whose transcript never recorded a working directory can't be
+	// continued: there is nowhere to resume it from. Caught here so the form says
+	// so at the moment it's picked, rather than at submit — the server refuses it
+	// either way.
+	const unusableConversation = !!conversation && !conversation.workdir;
 	// The probe has to have succeeded with at least one installed runner before
 	// a workflow can be created — otherwise the form would POST a runner the
 	// host can't spawn (or, on a failed probe, one it couldn't even verify).
 	const canSubmit =
-		probeDone && installedOptions.length > 0 && name.trim() !== "" && (!bypass || acceptRisk) && !saving;
+		probeDone &&
+		installedOptions.length > 0 &&
+		name.trim() !== "" &&
+		!unusableConversation &&
+		(!bypass || acceptRisk) &&
+		!saving;
 
 	const submit = async (ev: React.FormEvent): Promise<void> => {
 		ev.preventDefault();
@@ -403,7 +455,12 @@ export function CreateWorkflowModal({
 			if (sandbox === "docker" && image.trim()) input.image = image.trim();
 			if (permissionMode) input.permissionMode = permissionMode;
 			if (templateId) input.templateId = templateId;
-			if (conversation) input.conversation = { runner: conversation.runner, sessionId: conversation.sessionId };
+			if (conversation) {
+				input.conversation = { runner: conversation.runner, sessionId: conversation.sessionId };
+				// Only with a conversation to say it in: a note alone is ignored by the
+				// server (a workflow still can't be born with free-text context).
+				if (conversationNote.trim()) input.conversationNote = conversationNote.trim();
+			}
 			if (bypass) input.acceptBypassRisk = true;
 			await onCreate(input);
 		} finally {
@@ -464,7 +521,11 @@ export function CreateWorkflowModal({
 
 				<Field
 					label="Working directory"
-					hint="Where this workflow's agent works. Leave empty for a dedicated sandbox under ~/.target/sandboxes/. Type a path or browse with …"
+					hint={
+						workdirFromConversation
+							? "Fixed by the conversation this workflow continues — the agent has to run where that conversation ran, or it can't pick the session up. Clear the conversation below to choose a directory again."
+							: "Where this workflow's agent works. Leave empty for a dedicated sandbox under ~/.target/sandboxes/. Type a path or browse with …"
+					}
 				>
 					{(props) => (
 						<div className={styles.workdirRow}>
@@ -474,11 +535,13 @@ export function CreateWorkflowModal({
 								className="input"
 								value={workdir}
 								placeholder="~/my-project"
+								readOnly={workdirFromConversation}
 								onChange={(ev) => setWorkdir(ev.target.value)}
 							/>
 							<button
 								type="button"
 								className="btn"
+								disabled={workdirFromConversation}
 								onClick={() => setBrowsing((value) => !value)}
 								aria-expanded={browsing}
 								aria-label="Browse directories"
@@ -490,7 +553,7 @@ export function CreateWorkflowModal({
 					)}
 				</Field>
 
-				{browsing && (
+				{browsing && !workdirFromConversation && (
 					<DirectoryBrowser
 						initialPath={workdir}
 						onSelect={(path) => {
@@ -541,19 +604,26 @@ export function CreateWorkflowModal({
 				    one imported here would only fight it. */}
 				{!cloning && (
 					<Field
-					label="Create from a conversation"
+					label="Run on a conversation"
 					hint={
 						loadingConversations
 							? `Reading this machine's ${runner} conversations…`
 							: conversations.length === 0 && !conversationError
-								? `No ${runner} conversations found on this machine. Only conversations this machine has on disk can be imported.`
+								? `No ${runner} conversations found on this machine. Only conversations this machine has on disk can be continued.`
 								: query
 									? `${visibleConversations.length} of ${conversations.length} match “${conversationQuery.trim()}”.`
 									: conversationTotal > conversations.length
 										? `Showing the ${conversations.length} most recent of ${conversationTotal}. Search to reach the rest.`
-										: `${conversations.length} conversation${conversations.length === 1 ? "" : "s"} — the chosen one becomes this workflow's context, delivered to the agent before the first step. The list follows the agent runtime above.`
+										: `${conversations.length} conversation${conversations.length === 1 ? "" : "s"} — the workflow resumes the chosen one, so its agent starts with that whole conversation instead of a summary, and its steps continue the thread. The list follows the agent runtime above.`
 					}
-					{...(conversationError ? { error: conversationError } : {})}
+					{...(conversationError
+						? { error: conversationError }
+						: unusableConversation
+							? {
+									error:
+										"This conversation's transcript doesn't record the directory it ran in, so a workflow has nowhere to resume it from. Pick another one.",
+								}
+							: {})}
 				>
 					{(props) => (
 						<div className={styles.conversationPicker}>
@@ -587,7 +657,7 @@ export function CreateWorkflowModal({
 									disabled={runnerDisabled || loadingConversations || conversations.length === 0}
 									onChange={(ev) => pickConversation(ev.target.value)}
 								>
-									<option value="">No conversation — start with an empty context</option>
+									<option value="">No conversation — start a fresh session</option>
 									{visibleConversations.map((option) => (
 										<option key={option.sessionId} value={option.sessionId}>
 											{`${truncate(option.title, 70)} · ${prettyPath(option.workdir) || "unknown dir"} · ${relativeTime(option.updatedAt)}`}
@@ -617,12 +687,40 @@ export function CreateWorkflowModal({
 							{conversation.runner} · {prettyPath(conversation.workdir) || "unknown directory"} ·{" "}
 							{Math.max(1, Math.round(conversation.sizeBytes / 1024))} KB · last active {relativeTime(conversation.updatedAt)}
 						</p>
+						{/* Said plainly, because it is the one consequence that isn't
+						    reversible: the steps are spoken into a conversation the operator
+						    owns and will reopen. */}
+						<p className={styles.conversationMeta}>
+							This workflow's steps will run inside this conversation — reopening it later shows them there.
+						</p>
+						{/* The tail, not the import: there is no import. */}
 						<button type="button" className="btn btn--ghost" onClick={() => void togglePreview()} disabled={previewing}>
-							{previewing ? "Reading…" : preview !== null ? "Hide what will be imported" : "Show what will be imported"}
+							{previewing ? "Reading…" : preview !== null ? "Hide the end of the conversation" : "Show the end of the conversation"}
 						</button>
 						{preview !== null && <pre className={styles.preview}>{preview}</pre>}
 						{terminalNote && <p className={styles.conversationMeta}>{terminalNote}</p>}
 					</div>
+				)}
+
+				{/* Only with a conversation to say it in: the server ignores a note
+				    without one, and a workflow still can't be created with free-text
+				    context. */}
+				{!cloning && conversation && !unusableConversation && (
+					<Field
+						label="Say this first (optional)"
+						hint="Delivered as one turn in that conversation, before the first step — for what the workflow should do differently from here on. The conversation itself needs no summarising: the agent still has it."
+					>
+						{(props) => (
+							<textarea
+								{...props}
+								className="input"
+								rows={3}
+								value={conversationNote}
+								placeholder="e.g. From here on, work only on the parser and answer in Spanish."
+								onChange={(ev) => setConversationNote(ev.target.value)}
+							/>
+						)}
+					</Field>
 				)}
 
 				<Field

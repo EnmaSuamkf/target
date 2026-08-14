@@ -101,6 +101,18 @@ export interface Workflow {
 	status: WorkflowStatus;
 	/** Claude session the last completed step produced; chained into the next dispatch. */
 	lastSessionId: string | null;
+	/**
+	 * The operator's own conversation this workflow was created to CONTINUE, when
+	 * it was created from one (see conversations.ts). Set once at creation and
+	 * never rewritten: `lastSessionId` moves with whatever the harness reports and
+	 * is cleared by a restart, so it cannot answer "which conversation is this
+	 * workflow's" after the first step — this can, which is what lets a restart
+	 * go back to the adopted conversation instead of starting a blank one.
+	 *
+	 * Null for every workflow that started from nothing, which is still the
+	 * default.
+	 */
+	adoptedSessionId: string | null;
 	/** Absolute path of the progress markdown file under ~/.target. */
 	mdPath: string;
 	/**
@@ -297,6 +309,7 @@ export function open(): DatabaseSync {
 			secret TEXT NOT NULL,
 			status TEXT NOT NULL DEFAULT 'draft',
 			last_session_id TEXT,
+			adopted_session_id TEXT,
 			md_path TEXT NOT NULL,
 			conversation_context TEXT,
 			context_injected INTEGER NOT NULL DEFAULT 0,
@@ -452,6 +465,10 @@ export function open(): DatabaseSync {
 		if (!existingWorkflowColumns.has(name)) database.exec(`ALTER TABLE workflows ADD COLUMN ${ddl};`);
 	};
 	addWorkflowColumn("conversation_context", "conversation_context TEXT");
+	// Nullable with no default: an existing DB upgrades to "this workflow adopted
+	// no conversation", which is what every workflow created before this existed
+	// did.
+	addWorkflowColumn("adopted_session_id", "adopted_session_id TEXT");
 	addWorkflowColumn("context_injected", "context_injected INTEGER NOT NULL DEFAULT 0");
 	// Compaction bookkeeping. Both nullable with no default, so an existing DB
 	// upgrades to "never compacted, nothing to re-inject" — which is exactly what
@@ -486,6 +503,7 @@ function rowToWorkflow(row: Record<string, unknown>): Workflow {
 		secret: String(row.secret),
 		status: row.status as WorkflowStatus,
 		lastSessionId: row.last_session_id == null ? null : String(row.last_session_id),
+		adoptedSessionId: row.adopted_session_id == null ? null : String(row.adopted_session_id),
 		mdPath: String(row.md_path),
 		conversationContext: row.conversation_context == null ? null : String(row.conversation_context),
 		contextInjected: Number(row.context_injected ?? 0) === 1,
@@ -506,9 +524,16 @@ export function insertWorkflow(input: {
 	secret: string;
 	mdPath: string;
 	conversationContext?: string | null;
+	/**
+	 * The conversation this workflow continues. It seeds `lastSessionId` as well
+	 * as `adoptedSessionId`, which is what makes the very first dispatch a
+	 * `--resume` of that conversation rather than a fresh one.
+	 */
+	adoptedSessionId?: string | null;
 }): Workflow {
 	const now = new Date().toISOString();
 	const conversationContext = input.conversationContext?.trim() || null;
+	const adoptedSessionId = input.adoptedSessionId?.trim() || null;
 	const workflow: Workflow = {
 		id: input.id,
 		name: input.name,
@@ -516,7 +541,8 @@ export function insertWorkflow(input: {
 		hookUrl: input.hookUrl,
 		secret: input.secret,
 		status: "draft",
-		lastSessionId: null,
+		lastSessionId: adoptedSessionId,
+		adoptedSessionId,
 		mdPath: input.mdPath,
 		conversationContext,
 		contextInjected: false,
@@ -529,8 +555,8 @@ export function insertWorkflow(input: {
 	};
 	open()
 		.prepare(
-			`INSERT INTO workflows (id, name, agent_name, hook_url, secret, status, last_session_id, md_path, conversation_context, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO workflows (id, name, agent_name, hook_url, secret, status, last_session_id, adopted_session_id, md_path, conversation_context, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			workflow.id,
@@ -540,6 +566,7 @@ export function insertWorkflow(input: {
 			workflow.secret,
 			workflow.status,
 			workflow.lastSessionId,
+			workflow.adoptedSessionId,
 			workflow.mdPath,
 			workflow.conversationContext,
 			workflow.createdAt,

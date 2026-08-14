@@ -70,11 +70,14 @@ export interface RunnerAvailability {
 
 /**
  * One conversation already on this machine, from `GET /api/conversations`
- * (hub/conversations.ts) — the source a workflow can be created from.
+ * (hub/conversations.ts) — the conversation a workflow can be created to
+ * continue.
  *
  * `sessionId` is the harness's own handle (a uuid for claude, the transcript's
  * absolute path for free-code) and is the only field the API takes back; the
- * rest is what makes the list readable.
+ * rest is what makes the list readable. `workdir` doubles as whether the
+ * conversation can be continued at all: the workflow has to run where the
+ * conversation ran, so a transcript that never recorded one can't be adopted.
  */
 export interface Conversation {
 	runner: Runner;
@@ -86,12 +89,21 @@ export interface Conversation {
 	sizeBytes: number;
 }
 
-/** What importing a conversation would actually hand the workflow. */
-export interface ConversationDigest {
+/**
+ * The tail of a conversation, for recognising it. NOT what the workflow
+ * receives — the workflow resumes the conversation itself, in full.
+ */
+export interface ConversationPreview {
 	text: string;
 	turns: number;
-	includedTurns: number;
-	truncated: boolean;
+	shownTurns: number;
+}
+
+/** Whether a workflow can be created to run on a conversation, and why not. */
+export interface Adoptability {
+	ok: boolean;
+	workdir: string | null;
+	reason: string | null;
 }
 
 /**
@@ -169,6 +181,12 @@ export interface Workflow {
 	agentName: string;
 	status: WorkflowStatus;
 	lastSessionId: string | null;
+	/**
+	 * The operator's own conversation this workflow continues, when it was created
+	 * to run on one; null for a workflow that started from nothing. Its steps are
+	 * turns in a thread that predates them.
+	 */
+	adoptedSessionId: string | null;
 	mdPath: string;
 	/** Resolved from the awb hook, so it can be absent if the hook is gone. */
 	workdir: string | null;
@@ -391,15 +409,18 @@ export interface CreateWorkflowInput {
 	image?: string;
 	templateId?: string;
 	/**
-	 * Create the workflow FROM this existing conversation: the server condenses
-	 * that transcript and stores it as the workflow's conversation context, so it
-	 * is delivered as the context step before any real work.
+	 * Create the workflow to RUN ON this existing conversation: the server adopts
+	 * that session, so the workflow's first step resumes it and the agent starts
+	 * with the conversation's full history. Sending this also fixes `runner` and
+	 * `workdir` to the conversation's own — the server refuses a request that
+	 * asks for different ones rather than overriding them silently.
 	 */
 	conversation?: { runner: Runner; sessionId: string };
 	/**
-	 * The operator's own framing of the import, placed above the transcript.
-	 * Only meaningful together with `conversation` — a workflow still cannot be
-	 * created with a free-text context (that's PATCH /api/workflows/:id/context).
+	 * The operator's own framing of the adoption ("from here on, do X"), delivered
+	 * as the context step's turn inside the adopted conversation. Only meaningful
+	 * together with `conversation` — a workflow still cannot be created with a
+	 * free-text context (that's PATCH /api/workflows/:id/context).
 	 */
 	conversationNote?: string;
 	/** Required confirmation when permissionMode is "bypassPermissions". */

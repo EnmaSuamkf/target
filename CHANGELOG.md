@@ -25,6 +25,22 @@ The current version is reported by every instance to the central server (see
 
 ### Changed
 
+- **A workflow created from a conversation now RUNS ON that conversation.**
+  Picking one no longer condenses it into the workflow's context — a summary
+  with turns cut out of the middle, delivered to a brand-new session. The
+  workflow adopts the session itself, so its first step is a `claude --resume` /
+  `free-code --session` of that exact conversation and the agent starts with the
+  whole history, nothing truncated. Because the harness resumes a session
+  relative to the directory it ran in, the create form now *takes* the working
+  directory from the chosen conversation (read-only, and the runner follows the
+  agent filter); the API refuses a request asking for different ones instead of
+  overriding them silently. A restart returns to the adopted conversation rather
+  than to a blank session, and a clone deliberately gets a fresh session of its
+  own — two workflows must not interleave turns in the operator's thread. The
+  new "Say this first" box replaces the old import note: one turn delivered in
+  that conversation before step 1, for what should change from here on. See
+  `docs/createFromConversation.md`.
+
 - **Start switches the steps to the canvas.** Once a run is in flight the
   question stops being "what is in this workflow" and becomes "where is it now",
   so the run control shows the canvas without being asked (Alt/Shift+S too). The

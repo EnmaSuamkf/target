@@ -1,15 +1,41 @@
 /**
  * The operator's existing harness conversations, read straight off disk, so a
- * workflow can be created FROM one instead of starting from a blank context
- * box.
+ * workflow can be created to RUN ON one instead of starting from a blank
+ * context box.
  *
  * The motivating case: you are already talking to `claude` (or `free-code`)
  * about a piece of work, you decide it should become a workflow, and you want
- * that conversation to be the background every step runs under. The hub already
- * has the delivery half of that — a workflow's `conversation_context` is
- * dispatched as its own `kind='context'` step before any real work (see
- * `reconcileContextStep` in workflow.ts). What was missing is the capture half,
- * which is what this module is.
+ * the workflow to carry on in that same conversation.
+ *
+ * ## Adoption, not import
+ *
+ * This module used to condense the transcript into a workflow's
+ * `conversation_context` — a summary of a conversation, delivered as one turn to
+ * a brand-new session. That was always a lossy copy of something the machine
+ * already had: the conversation itself, which both harnesses can resume. So the
+ * workflow now ADOPTS the session instead (`adoptedSessionId` in db.ts, seeded
+ * into `lastSessionId` at creation), and its very first step dispatches with
+ * that session id — i.e. `claude --resume <uuid>` / `free-code --session
+ * <path>`, the same mechanism every step after the first has always used to
+ * chain onto the previous one. The agent therefore starts the workflow with the
+ * conversation's full history, exactly as the operator left it, with nothing
+ * truncated and no context step spent restating it.
+ *
+ * What adoption costs, and why the constraints below exist: the workflow writes
+ * into the operator's own conversation. That is the point — reopening it shows
+ * the workflow's steps continuing the thread — but it means the runner and the
+ * working directory are no longer free choices. They are the conversation's:
+ *
+ *  - the RUNNER must be the harness that wrote the transcript (a claude uuid
+ *    means nothing to free-code, and vice versa);
+ *  - the WORKDIR must be the conversation's own, because that is where the
+ *    harness looks the session up (claude derives its `projects/<slug>` from the
+ *    cwd, so `--resume` from anywhere else simply doesn't find it) and because
+ *    the work continues in the repo it was about.
+ *
+ * `adoptability` below answers, for one conversation, whether those hold — the
+ * server refuses a create that can't satisfy them, rather than producing a
+ * workflow that dies at step 1 or silently opens a fresh session.
  *
  * Two harnesses, two on-disk layouts — the same split transcript.ts documents,
  * but walked in the opposite direction (there: workdir + session id → file;
@@ -31,18 +57,15 @@
  * `<sessionId>/subagents/*.jsonl` and free-code keeps a whole `subagents/` tree,
  * and neither is a conversation the operator ever had.
  *
- * ## Why a digest and not the transcript
+ * ## The preview is for identification only
  *
- * These files are big — megabytes each on this machine — and the hub's JSON body
- * limit is `maxInputBytes` (64 KiB, config.ts), which is the smaller problem.
- * The real one is that the context step is ONE turn on the workflow's shared
- * session, and `context-pressure.ts` exists precisely because that session's
- * occupancy is a finite resource the workflow spends on actual work. So the
- * transcript is condensed: tool calls, tool results, thinking blocks and
- * injected reminders are dropped (they are the bulk, and they describe machinery
- * the new workflow will redo anyway), leaving the human/agent prose, capped per
- * turn and fitted to a byte budget from both ends — the opening frames what the
- * conversation was for, the end is where it got to.
+ * `readConversationPreview` renders the tail of a transcript so the operator can
+ * confirm, by eye, that this is the conversation they mean. It is deliberately
+ * NOT what the workflow receives — the workflow receives the conversation — so
+ * it drops tool calls, results and thinking (the bulk of a file that runs to
+ * megabytes) and keeps only the last few prose turns. Nothing about it is on the
+ * workflow's critical path: get it wrong and a preview looks odd, not a workflow
+ * runs on the wrong history.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -71,15 +94,29 @@ export interface ConversationSummary {
 	sizeBytes: number;
 }
 
-export interface ConversationDigest {
-	/** The condensed transcript, ready to be stored as a workflow's conversation context. */
+/**
+ * The tail of a conversation, for the operator to recognise it by. See "The
+ * preview is for identification only" above: this is never given to an agent.
+ */
+export interface ConversationPreview {
+	/** The rendered turns, newest last, as shown in the picker. */
 	text: string;
 	/** Prose turns found in the transcript. */
 	turns: number;
-	/** How many of them survived the budget. */
-	includedTurns: number;
-	/** True when turns were dropped from the middle, or a turn was cut short. */
-	truncated: boolean;
+	/** How many of them the preview shows. */
+	shownTurns: number;
+}
+
+/**
+ * Whether a workflow can be created to run ON a conversation, and — when it
+ * can't — the sentence the operator gets instead. See "Adoption, not import".
+ */
+export interface Adoptability {
+	ok: boolean;
+	/** The workdir the workflow must use; null exactly when `ok` is false for that reason. */
+	workdir: string | null;
+	/** Why not, in the operator's terms. Null when `ok`. */
+	reason: string | null;
 }
 
 /**
@@ -103,14 +140,13 @@ const HEAD_BYTES = 64 * 1024;
 const MAX_CONVERSATIONS = 1000;
 
 /**
- * Default size of the condensed transcript, in characters. Comfortably inside
- * `maxInputBytes` (64 KiB) with room for the rest of the create body, and small
- * enough that the context step stays one modest turn rather than a large chunk
- * of the session's window.
+ * How many trailing prose turns the preview shows. Enough to recognise where a
+ * conversation got to — which is the only question it answers — without
+ * rendering a megabyte into the form.
  */
-export const DEFAULT_DIGEST_BUDGET = 16 * 1024;
+export const DEFAULT_PREVIEW_TURNS = 12;
 
-/** Per-turn cap, so one pasted file can't consume the whole budget. */
+/** Per-turn cap in the preview, so one pasted file doesn't fill the panel. */
 const MAX_TURN_CHARS = 2000;
 
 /** Longest title shown in the picker. */
@@ -390,88 +426,60 @@ function readTurns(file: string): Turn[] {
 	return turns;
 }
 
-/**
- * Fits rendered turns into `budget` characters by keeping both ends and
- * dropping the middle — the opening says what the conversation was for and the
- * end says where it got to, whereas the middle is the part a summary would have
- * compressed anyway.
- */
-function fitToBudget(entries: string[], budget: number): { kept: string[]; omitted: number } {
-	const SEPARATOR = 2; // the "\n\n" between turns
-	const total = entries.reduce((sum, entry) => sum + entry.length + SEPARATOR, 0);
-	if (total <= budget) return { kept: entries, omitted: 0 };
-	// Reserve room for the elision marker itself, so the result cannot come out
-	// over budget by adding the line that says it was trimmed.
-	const usable = Math.max(0, budget - 80);
-	const head: string[] = [];
-	let used = 0;
-	let first = 0;
-	while (first < entries.length && used + entries[first].length + SEPARATOR <= Math.floor(usable / 2)) {
-		head.push(entries[first]);
-		used += entries[first].length + SEPARATOR;
-		first += 1;
-	}
-	const tail: string[] = [];
-	let last = entries.length - 1;
-	while (last >= first && used + entries[last].length + SEPARATOR <= usable) {
-		tail.unshift(entries[last]);
-		used += entries[last].length + SEPARATOR;
-		last -= 1;
-	}
-	const omitted = last - first + 1;
-	if (omitted <= 0) return { kept: [...head, ...tail], omitted: 0 };
-	return { kept: [...head, `[… ${omitted} turn(s) omitted from the middle of the conversation …]`, ...tail], omitted };
-}
-
-/** One turn as it appears in the digest, capped so no single message can dominate. */
-function renderTurn(turn: Turn): { line: string; cut: boolean } {
+/** One turn as it appears in the preview, capped so no single message dominates. */
+function renderTurn(turn: Turn): string {
 	const speaker = turn.role === "user" ? "User" : "Assistant";
-	if (turn.text.length <= MAX_TURN_CHARS) return { line: `${speaker}: ${turn.text}`, cut: false };
-	return { line: `${speaker}: ${turn.text.slice(0, MAX_TURN_CHARS)}\n[… turn truncated …]`, cut: true };
+	if (turn.text.length <= MAX_TURN_CHARS) return `${speaker}: ${turn.text}`;
+	return `${speaker}: ${turn.text.slice(0, MAX_TURN_CHARS)}\n[… turn truncated in this preview …]`;
 }
 
 /**
- * Condenses a conversation into the text a workflow will carry as its
- * conversation context — background for every step, delivered once by the
- * context step.
+ * The last `tailTurns` prose turns of a conversation, for the operator to
+ * confirm they picked the right one.
  *
- * The header is not decoration: the agent receiving this needs to know it is
- * reading a transcript of an earlier conversation rather than instructions
- * addressed to it, and that the transcript is incomplete. Without that framing
- * an imported conversation reads as a pile of contradictory orders.
+ * The tail rather than the head, because what you check before continuing a
+ * conversation is where it GOT TO. This never reaches an agent — the workflow
+ * resumes the real transcript — so trimming here loses nothing.
  */
-export function readConversationDigest(
+export function readConversationPreview(
 	conversation: ConversationSummary,
-	budget: number = DEFAULT_DIGEST_BUDGET,
-): ConversationDigest {
+	tailTurns: number = DEFAULT_PREVIEW_TURNS,
+): ConversationPreview {
 	const turns = readTurns(conversation.path);
-	const rendered = turns.map(renderTurn);
-	const { kept, omitted } = fitToBudget(
-		rendered.map((entry) => entry.line),
-		budget,
-	);
-	const truncated = omitted > 0 || rendered.some((entry) => entry.cut);
-	const header = [
-		`This workflow was created from an existing ${conversation.runner} conversation. What follows is that conversation, condensed — it is background for every step of this workflow, not a task in itself.`,
-		"",
-		`Source: ${conversation.runner} session ${conversation.sessionId}`,
-		conversation.workdir ? `Working directory of that conversation: ${conversation.workdir}` : null,
-		`Last active: ${conversation.updatedAt}`,
-		truncated
-			? `Note: tool calls, tool results and internal reasoning were dropped, and the transcript was shortened — ${omitted > 0 ? `${omitted} turn(s) from the middle are missing` : "some long turns were cut"}. Treat it as a summary, not a complete record.`
-			: "Note: tool calls, tool results and internal reasoning were dropped; the prose is complete.",
-		"",
-		"--- conversation ---",
-	]
-		.filter((line) => line !== null)
-		.join("\n");
-	// A conversation with no prose at all still produces a usable context: the
-	// header alone says where the workflow came from, which beats a blank one.
-	const body = kept.length > 0 ? kept.join("\n\n") : "(no prose turns found in this transcript)";
-	return {
-		text: `${header}\n\n${body}`,
-		turns: turns.length,
-		includedTurns: turns.length - omitted,
-		truncated,
-	};
+	const shown = turns.slice(Math.max(0, turns.length - tailTurns));
+	const omitted = turns.length - shown.length;
+	const lines = shown.map(renderTurn);
+	const body = lines.length > 0 ? lines.join("\n\n") : "(no prose turns found in this transcript)";
+	const head =
+		omitted > 0
+			? `[… ${omitted} earlier turn(s) not shown. The workflow resumes this conversation in full — this is only the tail, so you can check it's the right one …]\n\n`
+			: "";
+	return { text: `${head}${body}`, turns: turns.length, shownTurns: shown.length };
+}
+
+/**
+ * Whether a workflow can be created to run on `conversation`, and with which
+ * working directory.
+ *
+ * The one hard requirement is the workdir: the workflow's agent must run where
+ * the conversation ran, or the harness won't find the session to resume (claude
+ * derives `~/.claude/projects/<slug>` from the cwd) and the work would continue
+ * in the wrong repo. A transcript that never recorded a `cwd` therefore cannot
+ * be adopted — the alternative is guessing a directory and finding out at step
+ * 1, on the operator's real conversation.
+ *
+ * The runner is not checked here because it isn't a question: the conversation
+ * knows which harness wrote it, and the caller takes it from `conversation.runner`
+ * rather than offering a choice.
+ */
+export function adoptability(conversation: ConversationSummary): Adoptability {
+	if (!conversation.workdir) {
+		return {
+			ok: false,
+			workdir: null,
+			reason:
+				"this conversation's transcript doesn't record the directory it ran in, so the workflow has nowhere to resume it from",
+		};
+	}
+	return { ok: true, workdir: conversation.workdir, reason: null };
 }
