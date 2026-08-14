@@ -9,6 +9,7 @@ import type {
 import { OVERRIDABLE_STEP_STATUSES } from "../api/types.ts";
 import { Badge } from "../components/Badge.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
+import { Markdown } from "../components/Markdown.tsx";
 import { Switch } from "../components/Switch.tsx";
 import { activityLabel, duration } from "../lib/format.ts";
 import { AddStepModal } from "./AddStepModal.tsx";
@@ -49,12 +50,21 @@ import styles from "./StepItem.module.css";
  * - **Add step** inserts a correction directly after this one, so Continue then
  *   runs that instead of whatever followed.
  *
- * The last two are the reason `waiting` is the only status showing them: they're
- * answers to "what do I do about this result", and there is no result being
- * asked about in any other state.
+ * **Add step** is the one of those that only `waiting` shows: it is an answer to
+ * "what do I do about this result", and no other state is holding a result to be
+ * answered. **Open conversation** is also offered on a `failed` step, which is
+ * where an operator wants it most — the step is finished, its error is right
+ * there, and the only way to find out more than the error says is to resume the
+ * conversation and ask. The button is not about reviewing, it is about there
+ * being a conversation to reopen, and a failed step has one.
  *
  * The result body is collapsed by default and expandable, replacing the old
- * hard truncation at 240 characters that made longer output unreadable.
+ * hard truncation at 240 characters that made longer output unreadable. Both it
+ * and the error are rendered as Markdown (components/Markdown.tsx) rather than
+ * dumped as preformatted text: a step's resolution is written by an agent, and
+ * agents write headings, bullets and backticked paths — shown raw, the operator
+ * read `## What changed` and `**1. Canvas**` instead of the structure those
+ * markers are there to carry.
  *
  * The two arrows beside the step number are the answer to "this has to run
  * before that one": a step used to be stuck wherever it was created (appended at
@@ -63,6 +73,9 @@ import styles from "./StepItem.module.css";
  * action row below because the number is the thing they change — press ↑ and the
  * "3" becomes a "2".
  */
+/** Length past which a resolution pane offers "Show more" — see below. */
+const RESULT_CLAMP = 220;
+
 export function StepItem({
 	step,
 	selected,
@@ -107,6 +120,9 @@ export function StepItem({
 }): React.JSX.Element {
 	const [editing, setEditing] = useState(false);
 	const [expanded, setExpanded] = useState(false);
+	// Its own toggle, not the result's: a step can carry both (a failed attempt
+	// that still reported something), and expanding one shouldn't expand the other.
+	const [errorExpanded, setErrorExpanded] = useState(false);
 	const [adding, setAdding] = useState(false);
 
 	// The hub-owned conversation-context step. Everything an operator can do to a
@@ -118,6 +134,17 @@ export function StepItem({
 	const isContext = step.kind === "context";
 	const running = step.status === "running";
 	const waiting = step.status === "waiting";
+	const failed = step.status === "failed";
+	// "Open conversation" is offered wherever there is a finished conversation to
+	// have: a step held for review (decide whether to approve it) and a step that
+	// FAILED (find out what actually happened). A failure is in fact the stronger
+	// case of the two — the error pane above says what the agent reported, and the
+	// only way to learn anything more is to go and ask it. Not offered for the
+	// other states because they have no conversation yet: a pending step never
+	// ran, and a running one hasn't reported its session (awb only names it in the
+	// completion callback), which is also why the button stays disabled until
+	// `sessionId` is actually there rather than opening a terminal onto nothing.
+	const conversational = waiting || failed;
 	// A step with a job in flight is the one state the override refuses: its
 	// callback is still coming, so a status written now would be overwritten (or
 	// would strand a live agent). Abort first — the button next to it does that.
@@ -323,17 +350,33 @@ export function StepItem({
 				</p>
 			)}
 
+			{/* The failed resolution, in the same collapsing pane as a successful
+			    one and rendered the same way — an agent writes its failure in
+			    Markdown too, and a stack trace or a diff in it is unreadable
+			    reflowed. Only the palette differs, so a failure can never be
+			    mistaken for a result at a glance. */}
 			{step.error && (
 				<div className={styles.error} role="alert">
-					{step.error}
+					<Markdown
+						text={step.error}
+						className={`${styles.resultBody} ${styles.errorBody} ${errorExpanded ? styles.resultExpanded : ""}`}
+					/>
+					{step.error.length > RESULT_CLAMP && (
+						<button type="button" className={styles.resultToggle} onClick={() => setErrorExpanded((v) => !v)}>
+							{errorExpanded ? "Show less" : "Show more"}
+						</button>
+					)}
 				</div>
 			)}
 
 			{hasResult && (
 				<div className={styles.result}>
-					<pre className={`${styles.resultBody} ${expanded ? styles.resultExpanded : ""}`}>{step.result}</pre>
+					<Markdown
+						text={step.result ?? ""}
+						className={`${styles.resultBody} ${expanded ? styles.resultExpanded : ""}`}
+					/>
 					{/* Only offer the toggle when there's plausibly more to see. */}
-					{(step.result?.length ?? 0) > 220 && (
+					{(step.result?.length ?? 0) > RESULT_CLAMP && (
 						<button type="button" className={styles.resultToggle} onClick={() => setExpanded((v) => !v)}>
 							{expanded ? "Show less" : "Show more"}
 						</button>
@@ -346,43 +389,52 @@ export function StepItem({
 				    the server refuses Continue on any other status, so buttons that were
 				    always there would just be 400s waiting to happen. */}
 				{waiting && (
-					<>
-						{/* data-continue-step is the stable hook the Alt/Shift+C shortcut
-						    clicks (CSS Module class names are hashed, so they can't be
-						    querySelector'd) — see lib/continueShortcut.ts. */}
-						<button
-							type="button"
-							className="btn btn--primary btn--sm"
-							onClick={() => onContinue(step.id)}
-							disabled={busy}
-							title="Approve this step's result: it's marked done and the workflow carries on with the next step. Alt/Shift+C presses this button."
-							data-continue-step
-						>
-							Continue
-						</button>
-						<button
-							type="button"
-							className="btn btn--sm"
-							onClick={() => onOpenConversation(step.id)}
-							disabled={!step.sessionId || busy}
-							title={
-								step.sessionId
-									? "Opens a terminal resuming this step's own conversation, so you can ask the agent about what it just did before you decide."
-									: "This step never reported a session, so there's no conversation to resume."
-							}
-						>
-							Open conversation
-						</button>
-						<button
-							type="button"
-							className="btn btn--sm"
-							onClick={() => setAdding(true)}
-							disabled={busy}
-							title="Insert a new step right after this one — it becomes the next thing the agent does when you press Continue."
-						>
-							Add step
-						</button>
-					</>
+					/* data-continue-step is the stable hook the Alt/Shift+C shortcut
+					   clicks (CSS Module class names are hashed, so they can't be
+					   querySelector'd) — see lib/continueShortcut.ts. */
+					<button
+						type="button"
+						className="btn btn--primary btn--sm"
+						onClick={() => onContinue(step.id)}
+						disabled={busy}
+						title="Approve this step's result: it's marked done and the workflow carries on with the next step. Alt/Shift+C presses this button."
+						data-continue-step
+					>
+						Continue
+					</button>
+				)}
+				{/* Sits between Continue and Add step, so a held step's three actions
+				    read in the order they're used; on a failed step it is simply the
+				    first of the row. `data-open-conversation-step` is the stable hook
+				    the tests read, for the hashed-class-name reason above. */}
+				{conversational && (
+					<button
+						type="button"
+						className="btn btn--sm"
+						onClick={() => onOpenConversation(step.id)}
+						disabled={!step.sessionId || busy}
+						title={
+							!step.sessionId
+								? "This step never reported a session, so there's no conversation to resume."
+								: failed
+									? "Opens a terminal resuming this step's own conversation, so you can ask the agent what it actually did before it failed."
+									: "Opens a terminal resuming this step's own conversation, so you can ask the agent about what it just did before you decide."
+						}
+						data-open-conversation-step
+					>
+						Open conversation
+					</button>
+				)}
+				{waiting && (
+					<button
+						type="button"
+						className="btn btn--sm"
+						onClick={() => setAdding(true)}
+						disabled={busy}
+						title="Insert a new step right after this one — it becomes the next thing the agent does when you press Continue."
+					>
+						Add step
+					</button>
 				)}
 				{/* Plain text, not a button: no row runs itself any more, but the state
 				    the removed ▶ used to spell out is still worth spelling out, in the

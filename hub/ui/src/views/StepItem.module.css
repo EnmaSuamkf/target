@@ -166,20 +166,9 @@
 	color: var(--gray-700);
 }
 
-.error {
-	padding: var(--space-2) var(--space-3);
-	margin-left: calc(15px + var(--space-3));
-	border-left: 2px solid var(--danger-500);
-	background: var(--danger-50);
-	border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-	font-family: var(--font-mono);
-	font-size: var(--text-xs);
-	line-height: 1.5;
-	color: var(--danger-700);
-	overflow-wrap: anywhere;
-	white-space: pre-wrap;
-}
-
+/* Both halves of a step's resolution — what it failed with, and what it
+   produced — are the same collapsing pane, differing only in palette. */
+.error,
 .result {
 	margin-left: calc(15px + var(--space-3));
 }
@@ -191,15 +180,21 @@
 	border-left: 2px solid var(--success-200);
 	background: var(--surface-sunken);
 	border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-	font-family: var(--font-mono);
 	font-size: var(--text-xs);
 	line-height: 1.55;
 	color: var(--gray-600);
 	overflow: hidden;
-	white-space: pre-wrap;
 	overflow-wrap: anywhere;
 	/* Fade the clipped edge so it reads as "more below", not a hard cut. */
 	mask-image: linear-gradient(to bottom, #000 70%, transparent);
+}
+
+/* The failure. Red rail, red text, same shape — the distinction is colour, not
+   a different treatment, because both are "how this step ended". */
+.errorBody {
+	border-left-color: var(--danger-500);
+	background: var(--danger-50);
+	color: var(--danger-700);
 }
 
 .resultExpanded {
@@ -376,8 +371,8 @@
 		font-size: var(--text-sm);
 	}
 
+	/* `.resultBody` covers the error pane too — it wears both classes. */
 	.criteria,
-	.error,
 	.resultBody {
 		font-size: var(--text-sm);
 	}

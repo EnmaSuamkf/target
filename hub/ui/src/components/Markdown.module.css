@@ -1,0 +1,109 @@
+/* Typography for agent-written Markdown (see Markdown.tsx).
+ *
+ * Deliberately sizeless at the root: the caller's box decides the font size and
+ * colour of the body text (a step's result pane is small and grey, its error
+ * pane is small and red), and everything here is relative to that so one
+ * component can serve both without either looking pasted in. */
+
+.markdown {
+	display: grid;
+	gap: var(--space-2);
+	/* Long agent output is full of paths and URLs with no spaces in them. */
+	overflow-wrap: anywhere;
+}
+
+.markdown > :first-child {
+	margin-top: 0;
+}
+
+.markdown > :last-child {
+	margin-bottom: 0;
+}
+
+.paragraph {
+	margin: 0;
+	/* The line breaks an agent typed inside a paragraph are layout it meant. */
+	white-space: pre-wrap;
+}
+
+.heading {
+	margin: var(--space-1) 0 0;
+	font-weight: 650;
+	line-height: 1.35;
+	color: var(--gray-800);
+}
+
+/* Sizes track the source's `#` count, not the tag the outline needed. */
+.h1 {
+	font-size: 1.25em;
+}
+
+.h2 {
+	font-size: 1.15em;
+}
+
+.h3 {
+	font-size: 1.05em;
+}
+
+.h4 {
+	font-size: 1em;
+	text-transform: none;
+}
+
+.list {
+	margin: 0;
+	padding-left: 1.35em;
+	display: grid;
+	gap: 2px;
+}
+
+.list .list {
+	margin-top: 2px;
+	padding-left: 1.2em;
+}
+
+.code {
+	padding: 0.05em 0.35em;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	background: var(--surface);
+	font-family: var(--font-mono);
+	font-size: 0.92em;
+	/* A path or symbol name is one token: never break it mid-word unless it is
+	   genuinely wider than the pane. */
+	overflow-wrap: break-word;
+}
+
+.codeBlock {
+	margin: 0;
+	padding: var(--space-2);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	background: var(--surface);
+	font-family: var(--font-mono);
+	font-size: 0.92em;
+	line-height: 1.5;
+	/* Code is the one place a line must NOT be reflowed, so it scrolls instead. */
+	overflow-x: auto;
+	white-space: pre;
+}
+
+.quote {
+	margin: 0;
+	padding-left: var(--space-2);
+	border-left: 2px solid var(--border-strong);
+	color: var(--text-muted);
+	white-space: pre-wrap;
+}
+
+.rule {
+	margin: var(--space-1) 0;
+	border: 0;
+	border-top: 1px solid var(--border);
+}
+
+.link {
+	color: var(--accent-600);
+	text-decoration: underline;
+}
