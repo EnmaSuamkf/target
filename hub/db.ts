@@ -1226,6 +1226,21 @@ export function beginRetry(id: string): void {
 		.run(id);
 }
 
+/**
+ * Settles a step with its run's outcome.
+ *
+ * `session_id` is COALESCEd rather than overwritten, for the same reason
+ * `markStepWaiting` does it and `chainSession` does it at the workflow level: an
+ * outcome that names no session is "I have nothing to add", not "there was no
+ * conversation". Every judge-phase failure lands here with no session in hand —
+ * the verdict couldn't run, couldn't be parsed, or rejected the step out of its
+ * retries — and a plain overwrite wiped the id `markStepJudging` had just
+ * stored, so the one step an operator most wants to read had a dead "Open
+ * conversation" (the route answers `no_session_yet` off `step.sessionId`) while
+ * the workflow itself still knew the session perfectly well. Nothing is lost by
+ * keeping it: the two statements that legitimately drop a session (`beginRetry`,
+ * `startManualRun`) both null it explicitly before the next dispatch.
+ */
 export function completeStep(
 	id: string,
 	outcome: { ok: boolean; result?: string; error?: string; sessionId?: string },
@@ -1233,7 +1248,7 @@ export function completeStep(
 	const status = outcome.ok ? "done" : "failed";
 	open()
 		.prepare(
-			`UPDATE steps SET status = ?, result = ?, error = ?, session_id = ?, finished_at = ?,
+			`UPDATE steps SET status = ?, result = ?, error = ?, session_id = COALESCE(?, session_id), finished_at = ?,
 			 ${DESELECT_IF_STATUS_DONE}
 			 WHERE id = ? AND status IN ('pending', 'queued', 'running')`,
 		)
