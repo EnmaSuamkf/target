@@ -540,6 +540,13 @@ export function writeStatusMd(workflowId: string): void {
 		`- Progress: ${progress.done}/${progress.total} steps done (${progress.pct}%)${progress.failed ? `, ${progress.failed} failed` : ""}`,
 		`- Agent: ${workflow.agentName}`,
 		`- Session: ${workflow.lastSessionId ?? "(none yet)"}`,
+		// Only for a workflow that runs ON one of the operator's conversations. It's
+		// the difference between "this session is the workflow's own" and "the steps
+		// are being spoken into a conversation that existed before them", which is
+		// the first thing to know when reading what the agent did.
+		...(workflow.adoptedSessionId
+			? [`- Continues the conversation: ${workflow.adoptedSessionId} (adopted at creation — its history is this workflow's context)`]
+			: []),
 		`- Conversation context: ${workflow.conversationContext ? truncateMd(workflow.conversationContext) : "(none)"}${workflow.conversationContext ? ` — injected: ${workflow.contextInjected ? "yes" : "no"}` : ""}`,
 		// Which mechanism actually delivers that background, and where it got to.
 		// Without this line a workflow with a context step looks identical to one
@@ -624,14 +631,20 @@ export function writeStatusMd(workflowId: string): void {
  * rather than a naming convention. Steps are added afterwards, one at a time,
  * from the Workflow section's "+ step" button.
  *
+ * `adoptedSessionId` is the operator's own conversation this workflow was
+ * created to CONTINUE (see conversations.ts). It seeds `lastSessionId`, so the
+ * workflow's very first step dispatches as a resume of that conversation and
+ * the agent begins with its full history — rather than being handed a summary
+ * of it. The caller is responsible for having pinned `workdir` and `runner` to
+ * that conversation's own; nothing downstream can recover from getting those
+ * wrong (the harness would simply not find the session).
+ *
  * `conversationContext` is the background every step of this workflow runs
- * under, set at creation because that's when it's known: the workflow was
- * created FROM an existing conversation (see conversations.ts and
- * `POST /api/workflows`), so there is no moment at which the workflow exists
- * and its background doesn't. It's stored on the row and immediately
- * materialised as the hub-owned context step, so an imported conversation is
- * delivered by exactly the same path as one typed into the context panel
- * afterwards — one turn, before any real step, exactly once.
+ * under. With an adopted conversation it holds only what the operator wrote
+ * ABOUT the import, if anything — the conversation itself is no longer copied
+ * into it. It's stored on the row and immediately materialised as the hub-owned
+ * context step, so it's delivered by exactly the same path as one typed into
+ * the context panel afterwards — one turn, before any real step, exactly once.
  */
 export function createWorkflow(
 	name: string,
@@ -642,6 +655,7 @@ export function createWorkflow(
 		sandbox?: HookOptions["sandbox"];
 		image?: HookOptions["image"];
 		conversationContext?: string | null;
+		adoptedSessionId?: string | null;
 	} = {},
 ): Workflow {
 	const trimmed = name.trim();
@@ -667,6 +681,7 @@ export function createWorkflow(
 		secret: hook.secret,
 		mdPath,
 		conversationContext: options.conversationContext ?? null,
+		adoptedSessionId: options.adoptedSessionId ?? null,
 	});
 	// Before writeStatusMd, so a workflow created with a context has that step in
 	// its progress file from the first write rather than only after the next edit.
@@ -825,7 +840,12 @@ function copyAttachment(attachment: Attachment, workflowId: string, stepId: stri
  *
  * Not copied (what a RUN produced): status, session id, step results, errors,
  * retry counters, timestamps, compaction markers and the "context injected"
- * flag. The clone comes out of `createWorkflow`/`addStep` exactly as a
+ * flag. Nor the adopted conversation, which is not run state but is just as
+ * un-copyable: a session can only be continued by one workflow at a time, and
+ * two agents resuming the same transcript would interleave their turns in the
+ * operator's own conversation. A clone of a workflow that runs ON a conversation
+ * therefore starts a fresh session of its own — the steps come across, the
+ * thread doesn't. The clone comes out of `createWorkflow`/`addStep` exactly as a
  * hand-typed workflow does — `draft`, every step `pending` — because it is built
  * through them rather than by duplicating rows. That is the whole reason this
  * is written as a re-creation and not as an `INSERT ... SELECT`: run state has
@@ -1621,6 +1641,15 @@ export function setWorkflowStepSelection(workflowId: string, stepIds: string[]):
  * Resets the selected steps to pending and drops session chaining, then starts
  * over. With a subset chosen it re-runs only those, leaving the rest
  * untouched; with nothing selected, nothing is reset and nothing runs.
+ *
+ * "Drops session chaining" means back to where the workflow BEGAN, which for a
+ * workflow that adopted one of the operator's conversations is that conversation
+ * — not a blank session. Restarting such a workflow into an empty context would
+ * silently turn it into a different workflow: its steps were written to continue
+ * a thread, and the thread is the only place that says what they mean. (The
+ * conversation has grown since, with whatever the first run said in it; there is
+ * no rewinding a real transcript, and pretending otherwise by starting fresh
+ * loses strictly more.)
  */
 export async function restartWorkflow(
 	workflowId: string,
@@ -1634,9 +1663,12 @@ export async function restartWorkflow(
 	// Selection first, so resetSteps only wipes the chosen steps.
 	setStepSelection(workflowId, stepIds);
 	resetSteps(workflowId);
-	setWorkflowSessionId(workflowId, null);
+	setWorkflowSessionId(workflowId, workflow.adoptedSessionId);
 	// A restart starts a brand-new conversation, so the conversation context
 	// (if any) must be injected again on the new first step — reset the guard.
+	// True of an adopted conversation too: the context (a note the operator wrote
+	// about the import) is delivered by the context step, which `resetSteps` has
+	// just put back to pending.
 	setContextInjected(workflowId, false);
 	// …and the compaction that happened in the OLD conversation is not something
 	// the new one has to recover from. Clearing both markers together keeps

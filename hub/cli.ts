@@ -106,6 +106,8 @@ interface WorkflowJson {
 	progress: { total: number; done: number; failed: number; pct: number };
 	agentName: string;
 	lastSessionId: string | null;
+	/** The operator's own conversation this workflow continues; null when it started from nothing. */
+	adoptedSessionId: string | null;
 	mdPath: string;
 	/** True when the status was forced by a human rather than derived from the steps. */
 	statusManual?: boolean;
@@ -312,6 +314,12 @@ async function main(): Promise<void> {
 		if (!res.ok) await fail(res);
 		const { workflow, steps } = (await res.json()) as { workflow: WorkflowJson; steps: StepJson[] };
 		console.log(`'${workflow.name}' (${workflow.id}) — ${workflow.status} — ${workflow.progress.pct}%`);
+		// Which conversation the steps are being spoken into, when it isn't one the
+		// hub opened. Printed above the context line because it's the bigger fact:
+		// the agent's memory here is a thread that predates the workflow.
+		if (workflow.adoptedSessionId) {
+			console.log(`Continues the conversation: ${workflow.adoptedSessionId}`);
+		}
 		if (workflow.conversationContext) {
 			const preview = workflow.conversationContext.replace(/\s+/g, " ").trim().slice(0, 100);
 			console.log(`Conversation context (injected: ${workflow.contextInjected ? "yes" : "no"}): ${preview}${workflow.conversationContext.length > 100 ? "…" : ""}`);

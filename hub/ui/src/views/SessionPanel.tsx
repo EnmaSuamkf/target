@@ -13,11 +13,20 @@ import styles from "./DetailPanels.module.css";
  */
 export function SessionPanel({
 	info,
+	adoptedSessionId,
 	canOpen,
 	onOpenTerminal,
 	opening,
 }: {
 	info: SessionInfo | null;
+	/**
+	 * Set when this workflow was created to continue one of the operator's own
+	 * conversations. Worth saying here and nowhere else: it's the difference
+	 * between a session the hub started and one that existed before the workflow,
+	 * which is what "Open conversation" will show — the steps, below history the
+	 * hub never wrote.
+	 */
+	adoptedSessionId: string | null;
 	canOpen: boolean;
 	onOpenTerminal: () => void;
 	opening: boolean;
@@ -68,8 +77,20 @@ export function SessionPanel({
 				</button>
 			</div>
 
+			{adoptedSessionId && (
+				<p className="hint">
+					This workflow continues a conversation you were already having — its steps run in that conversation, on top of
+					everything said in it before the workflow existed. A restart goes back to it rather than starting a blank
+					session.
+				</p>
+			)}
+
 			{!info?.sessionId ? (
-				<p className="hint">No session yet. The first step's callback reports one.</p>
+				<p className="hint">
+					{adoptedSessionId
+						? "No step has run yet. The first one resumes the adopted conversation."
+						: "No session yet. The first step's callback reports one."}
+				</p>
 			) : (
 				<>
 					<dl className={styles.facts}>

@@ -83,7 +83,7 @@ import {
 } from "./awb.ts";
 import { needsContextReinjection, observeCompaction } from "./compaction.ts";
 import type { HubConfig } from "./config.ts";
-import { findConversation, listConversations, readConversationDigest } from "./conversations.ts";
+import { adoptability, findConversation, listConversations, readConversationPreview } from "./conversations.ts";
 import {
 	AccountError,
 	createAccount,
@@ -358,6 +358,12 @@ function publicWorkflow(workflow: Workflow): Record<string, unknown> {
 		agentName: workflow.agentName,
 		status: workflow.status,
 		lastSessionId: workflow.lastSessionId,
+		// The operator's own conversation this workflow continues, when it was
+		// created from one. Exposed because it changes what the workflow IS: its
+		// steps are turns in a thread that existed before it, so "Open conversation"
+		// opens something with history the hub never wrote, and a restart goes back
+		// to that conversation rather than to a blank one.
+		adoptedSessionId: workflow.adoptedSessionId,
 		mdPath: workflow.mdPath,
 		workdir: runtime.workdir,
 		// The directory an operator CHOSE, as opposed to the per-agent sandbox this
@@ -1246,8 +1252,11 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			return;
 		}
 
-		// What the workflow would actually be given: the condensed transcript, so
-		// the operator sees the import before it happens rather than after.
+		// The tail of the conversation, so the operator can see WHERE IT GOT TO
+		// before committing a workflow to carrying on from there. Not "what will be
+		// imported": nothing is imported anymore — the workflow resumes this exact
+		// session (see conversations.ts) — so this is identification only, and it
+		// reports whether that resume is possible at all.
 		if (parts[2] === "preview" && !parts[3] && req.method === "GET") {
 			const sessionId = url.searchParams.get("sessionId") ?? "";
 			const conversation = findConversation(runner, sessionId);
@@ -1255,8 +1264,8 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, 404, { error: "unknown_conversation" });
 				return;
 			}
-			const digest = readConversationDigest(conversation);
-			sendJson(res, 200, { conversation, digest });
+			const preview = readConversationPreview(conversation);
+			sendJson(res, 200, { conversation, preview, adoptable: adoptability(conversation) });
 			return;
 		}
 
@@ -1327,7 +1336,10 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			}
 			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
 				const name = typeof body.name === "string" ? body.name : "";
-				const workdir =
+				// `let`: adopting a conversation replaces this with that conversation's
+				// own directory, which is not a preference but a requirement (see the
+				// `conversation` block below).
+				let workdir =
 					typeof body.workdir === "string" && body.workdir.trim() !== ""
 						? body.workdir.trim().replace(/^~(?=\/|$)/, os.homedir())
 						: undefined;
@@ -1360,6 +1372,74 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						return;
 					}
 					runner = body.runner as PublishableRunner;
+				}
+				// Optional: create the workflow to RUN ON an existing conversation of
+				// the operator's. The named transcript is resolved here and its session
+				// id becomes the workflow's `adoptedSessionId`, which seeds
+				// `lastSessionId` — so the first step dispatches as a resume of that
+				// conversation and the agent starts with its whole history, rather than
+				// with a summary of it (see conversations.ts, "Adoption, not import").
+				//
+				// Resolved BEFORE the runtime checks below, because it decides two of
+				// them: the runner must be the harness that wrote the transcript, and
+				// the workdir must be the directory the conversation ran in — the
+				// harness looks a session up relative to it. Both are taken from the
+				// conversation rather than asked for; a request that explicitly asks
+				// for something else is refused rather than silently overridden, since
+				// the alternative is a workflow that quietly runs somewhere the
+				// operator didn't choose.
+				//
+				// `conversationNote` is the operator's own framing of the adoption,
+				// and it is still the ONLY prose a create accepts (acceptance criterion
+				// #8 — arbitrary context is set on an existing workflow, via PATCH).
+				// It becomes the workflow's conversation context, delivered by the
+				// hub-owned context step as its own turn inside the adopted
+				// conversation.
+				let adoptedSessionId: string | undefined;
+				let conversationContext: string | undefined;
+				const source = body.conversation as { runner?: unknown; sessionId?: unknown } | null | undefined;
+				if (source && typeof source === "object") {
+					const sourceRunner = typeof source.runner === "string" ? source.runner : "";
+					if (!PUBLISHABLE_RUNNERS.includes(sourceRunner as PublishableRunner)) {
+						sendJson(res, 400, {
+							error: `invalid conversation.runner (allowed: ${PUBLISHABLE_RUNNERS.join(", ")})`,
+						});
+						return;
+					}
+					if (runner && runner !== sourceRunner) {
+						sendJson(res, 400, {
+							error: `this workflow would run on a ${sourceRunner} conversation, so its runner has to be ${sourceRunner} — ${runner} cannot resume that session`,
+						});
+						return;
+					}
+					const sessionId = typeof source.sessionId === "string" ? source.sessionId : "";
+					// Same index-resolution guard as the /api/conversations routes: a
+					// free-code session id is an absolute path, so it is never trusted
+					// as one.
+					const conversation = findConversation(sourceRunner as PublishableRunner, sessionId);
+					if (!conversation) {
+						sendJson(res, 404, { error: "unknown_conversation" });
+						return;
+					}
+					const adoptable = adoptability(conversation);
+					if (!adoptable.ok || !adoptable.workdir) {
+						sendJson(res, 400, { error: `this conversation can't be continued by a workflow: ${adoptable.reason}` });
+						return;
+					}
+					if (workdir && workdir !== adoptable.workdir) {
+						sendJson(res, 400, {
+							error: `a workflow continuing this conversation has to run in ${adoptable.workdir} — the harness resumes the session relative to that directory`,
+						});
+						return;
+					}
+					runner = conversation.runner;
+					workdir = adoptable.workdir;
+					adoptedSessionId = conversation.sessionId;
+					const note =
+						typeof body.conversationNote === "string" && body.conversationNote.trim() !== ""
+							? body.conversationNote.trim()
+							: null;
+					if (note) conversationContext = note;
 				}
 				// Optional: where that CLI runs — on the host (default, unchanged) or
 				// in a container. Orthogonal to the runner, so it's validated the same
@@ -1409,48 +1489,6 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				// (a docker tag / name), never a path or a command, so it's taken as
 				// an opaque trimmed string.
 				const image = typeof body.image === "string" && body.image.trim() !== "" ? body.image.trim() : undefined;
-				// Optional: create the workflow FROM an existing harness conversation.
-				// The named transcript is condensed here (conversations.ts) and stored
-				// as the workflow's conversation context, which `createWorkflow` then
-				// materialises as the hub-owned context step — so the background is
-				// delivered by the machinery that already exists for it: before any
-				// real step, on the shared session, exactly once.
-				//
-				// This is the ONE way a workflow may be born with a context, and it is
-				// deliberately not a free-text field: `conversationContext` in a create
-				// body is still ignored (acceptance criterion #8 — a context is set on
-				// an existing workflow, via PATCH). What's accepted here is a REFERENCE
-				// to a transcript that exists on this machine, which the server resolves
-				// and condenses itself. `conversationNote` rides along as the operator's
-				// own framing of the import and is meaningless without it; it goes
-				// FIRST, because it is what they wrote for THIS workflow, with the
-				// transcript as reference material underneath.
-				let conversationContext: string | undefined;
-				const source = body.conversation as { runner?: unknown; sessionId?: unknown } | null | undefined;
-				if (source && typeof source === "object") {
-					const note =
-						typeof body.conversationNote === "string" && body.conversationNote.trim() !== ""
-							? body.conversationNote.trim()
-							: null;
-					const sourceRunner = typeof source.runner === "string" ? source.runner : "";
-					if (!PUBLISHABLE_RUNNERS.includes(sourceRunner as PublishableRunner)) {
-						sendJson(res, 400, {
-							error: `invalid conversation.runner (allowed: ${PUBLISHABLE_RUNNERS.join(", ")})`,
-						});
-						return;
-					}
-					const sessionId = typeof source.sessionId === "string" ? source.sessionId : "";
-					// Same index-resolution guard as the /api/conversations routes: a
-					// free-code session id is an absolute path, so it is never trusted
-					// as one.
-					const conversation = findConversation(sourceRunner as PublishableRunner, sessionId);
-					if (!conversation) {
-						sendJson(res, 404, { error: "unknown_conversation" });
-						return;
-					}
-					const digest = readConversationDigest(conversation);
-					conversationContext = note ? `${note}\n\n${digest.text}` : digest.text;
-				}
 				// Optional: seed the new workflow with a template's steps (same order,
 				// same judge config), leaving the template itself untouched — a
 				// template's name/tags never carry over, only its steps.
@@ -1470,6 +1508,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						sandbox,
 						image,
 						conversationContext,
+						adoptedSessionId,
 					});
 					if (template) {
 						for (const step of template.steps) {

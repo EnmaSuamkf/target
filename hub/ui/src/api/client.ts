@@ -14,12 +14,13 @@
  */
 import type {
 	Account,
+	Adoptability,
 	Attachment,
 	AttachmentField,
 	AuthStatus,
 	CloneWorkflowInput,
 	Conversation,
-	ConversationDigest,
+	ConversationPreview,
 	CreateWorkflowInput,
 	DirListing,
 	HostCapabilities,
@@ -176,15 +177,20 @@ export function listConversations(runner: Runner): Promise<{ conversations: Conv
 	);
 }
 
-/** Exactly what would be imported as the new workflow's context, before importing it. */
+/**
+ * The tail of a conversation, so the operator can check where it got to before
+ * committing a workflow to carrying on from there — plus whether it can be
+ * carried on at all. Identification only: the workflow resumes the real session.
+ */
 export function previewConversation(
 	runner: Runner,
 	sessionId: string,
-): Promise<{ conversation: Conversation; digest: ConversationDigest }> {
+): Promise<{ conversation: Conversation; preview: ConversationPreview; adoptable: Adoptability }> {
 	const query = `runner=${encodeURIComponent(runner)}&sessionId=${encodeURIComponent(sessionId)}`;
-	return request<{ conversation: Conversation; digest: ConversationDigest }>(`/api/conversations/preview?${query}`, {
-		admin: true,
-	});
+	return request<{ conversation: Conversation; preview: ConversationPreview; adoptable: Adoptability }>(
+		`/api/conversations/preview?${query}`,
+		{ admin: true },
+	);
 }
 
 /**

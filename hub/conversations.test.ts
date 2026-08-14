@@ -1,20 +1,19 @@
 /**
- * Tests for creating a workflow FROM a conversation the operator is already
- * having (hub/conversations.ts + the `/api/conversations` routes + the
+ * Tests for creating a workflow that RUNS ON a conversation the operator is
+ * already having (hub/conversations.ts + the `/api/conversations` routes + the
  * `conversation` field on POST /api/workflows).
  *
- * The end-to-end guarantee this file exists for is the last test: posting a
- * conversation to POST /api/workflows produces a workflow whose conversation
- * context IS that conversation and whose context step is already sitting at
- * order -1, ready to be dispatched before step 1. Everything above it pins the
- * pieces that failure would be silent in:
+ * The end-to-end guarantee this file exists for is the dispatch test near the
+ * bottom: a workflow created from a conversation dispatches its first step with
+ * that conversation's session id, i.e. the agent resumes the real thread with
+ * its whole history instead of being handed a summary of it. Everything above it
+ * pins the pieces that failure would be silent in:
  *
  *  - the two harnesses' completely different on-disk layouts, and the session id
- *    each of them resumes by (a uuid vs. an absolute .jsonl path);
- *  - which lines are conversation and which are machinery — a digest that
- *    carried tool results and system reminders would blow the budget on content
- *    the new workflow doesn't need, and one that carried a subagent's sidechain
- *    would attribute things to the operator they never said;
+ *    each of them resumes by (a uuid vs. an absolute .jsonl path) — get this
+ *    wrong and the harness quietly opens a NEW session instead of resuming;
+ *  - the two things adoption fixes rather than asks for (runner and workdir),
+ *    since a workflow running anywhere else cannot find the session at all;
  *  - the index-resolution guard, which is the only thing standing between a
  *    free-code "session id" (an absolute path, straight off the wire) and
  *    reading — or opening a terminal on — an arbitrary file.
@@ -25,6 +24,7 @@
  */
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
@@ -40,10 +40,23 @@ process.env.TARGET_HOME = path.join(tmpHome, ".target");
 // real ~/.agent-webhook-bridge/hooks.json. Same convention as server.test.ts.
 process.env.AWB_HOME = path.join(tmpHome, ".agent-webhook-bridge");
 
-const { findConversation, listConversations, readConversationDigest } = await import("./conversations.ts");
+const { adoptability, findConversation, listConversations, readConversationPreview } = await import("./conversations.ts");
 const { loadConfig } = await import("./config.ts");
 const { createServer } = await import("./server.ts");
 const { _impl: terminalImpl } = await import("./terminal.ts");
+const { getWorkflow, insertStep, getStep, setWorkflowSessionId } = await import("./db.ts");
+const { dispatchStep } = await import("./runner.ts");
+const { restartWorkflow } = await import("./workflow.ts");
+
+/**
+ * The directory the fixture conversations ran in. A REAL one, under the
+ * throwaway HOME, because adopting a conversation pins the workflow's agent to
+ * it — the create path makes the hook's workdir this directory and awb creates
+ * it — so an imaginary `/home/u/proj` would fail at mkdir rather than testing
+ * anything.
+ */
+const projDir = path.join(tmpHome, "proj");
+fs.mkdirSync(projDir, { recursive: true });
 
 const CLAUDE_SESSION = "aaaaaaaa-1111-2222-3333-444444444444";
 const claudeDir = path.join(tmpHome, ".claude", "projects", "-home-u-proj");
@@ -66,7 +79,7 @@ write(
 		{ type: "file-history-snapshot" },
 		{
 			type: "user",
-			cwd: "/home/u/proj",
+			cwd: projDir,
 			timestamp: "2026-08-01T09:00:00.000Z",
 			message: { role: "user", content: "Necesito un workflow para el release" },
 		},
@@ -100,7 +113,7 @@ write(path.join(claudeDir, CLAUDE_SESSION, "subagents", "sub-1.jsonl"), [{ type:
 write(
 	freeCodeFile,
 	[
-		{ type: "session", version: 3, id: "bbbbbbbb-5555", timestamp: "2026-08-01T10:00:00.000Z", cwd: "/home/u/proj" },
+		{ type: "session", version: 3, id: "bbbbbbbb-5555", timestamp: "2026-08-01T10:00:00.000Z", cwd: projDir },
 		{ type: "model_change", id: "m1", parentId: null, modelId: "some/model" },
 		{ type: "message", id: "u1", message: { role: "user", content: [{ type: "text", text: "Arregla el bug del login" }] } },
 		{ type: "message", id: "a1", message: { role: "assistant", content: [{ type: "text", text: "Hecho, era el token." }] } },
@@ -140,7 +153,7 @@ test("a claude conversation is listed under its resume uuid, titled by the first
 	assert.equal(conversation.sessionId, CLAUDE_SESSION);
 	assert.equal(conversation.path, claudeFile);
 	// Read from the records' own `cwd`: the directory name is a lossy slug of it.
-	assert.equal(conversation.workdir, "/home/u/proj");
+	assert.equal(conversation.workdir, projDir);
 	assert.equal(conversation.title, "Necesito un workflow para el release");
 });
 
@@ -149,7 +162,7 @@ test("a free-code conversation is listed under its .jsonl path, which is what --
 	assert.equal(found.length, 1, "the sibling subagents/ directory is excluded by name");
 	const [conversation] = found;
 	assert.equal(conversation.sessionId, freeCodeFile, "the session id IS the path for free-code");
-	assert.equal(conversation.workdir, "/home/u/proj");
+	assert.equal(conversation.workdir, projDir);
 	assert.equal(conversation.title, "Arregla el bug del login");
 });
 
@@ -173,7 +186,7 @@ test("a previous workflow's session is titled by the workflow, not by the prompt
 		[
 			{
 				type: "user",
-				cwd: "/home/u/proj",
+				cwd: projDir,
 				message: {
 					role: "user",
 					content:
@@ -191,33 +204,29 @@ test("a previous workflow's session is titled by the workflow, not by the prompt
 	fs.rmSync(file);
 });
 
-test("the digest keeps the prose and drops the machinery", () => {
+test("the preview keeps the prose and drops the machinery", () => {
 	const conversation = findConversation("claude", CLAUDE_SESSION);
 	assert.ok(conversation);
-	const digest = readConversationDigest(conversation);
+	const preview = readConversationPreview(conversation);
 
-	assert.match(digest.text, /Necesito un workflow para el release/);
-	assert.match(digest.text, /Podemos hacerlo en tres pasos\./);
-	assert.match(digest.text, /Y el segundo paso\?/);
+	assert.match(preview.text, /Necesito un workflow para el release/);
+	assert.match(preview.text, /Podemos hacerlo en tres pasos\./);
+	assert.match(preview.text, /Y el segundo paso\?/);
 
-	// Everything below would either blow the budget or misattribute words to the
-	// operator, and none of it is background the new workflow needs.
-	assert.doesNotMatch(digest.text, /PENSAMIENTO PRIVADO/, "thinking blocks are not part of the conversation");
-	assert.doesNotMatch(digest.text, /SALIDA DE LA HERRAMIENTA/, "tool results are dropped");
-	assert.doesNotMatch(digest.text, /CHARLA DEL SUBAGENTE/, "a sidechain is a subagent, not the operator");
-	assert.doesNotMatch(digest.text, /RECORDATORIO INYECTADO/, "injected reminders are not things the human typed");
-
-	// The framing matters as much as the content: without it the agent reads the
-	// transcript as a stack of orders addressed to it.
-	assert.match(digest.text, /created from an existing claude conversation/);
-	assert.match(digest.text, new RegExp(CLAUDE_SESSION));
-	assert.equal(digest.turns, 3);
+	// The preview is for recognising a conversation, so it shows what was SAID.
+	// (None of this is a fidelity question for the workflow: the workflow resumes
+	// the transcript itself, tool calls and all.)
+	assert.doesNotMatch(preview.text, /PENSAMIENTO PRIVADO/, "thinking blocks are not part of the conversation");
+	assert.doesNotMatch(preview.text, /SALIDA DE LA HERRAMIENTA/, "tool results are dropped");
+	assert.doesNotMatch(preview.text, /CHARLA DEL SUBAGENTE/, "a sidechain is a subagent, not the operator");
+	assert.doesNotMatch(preview.text, /RECORDATORIO INYECTADO/, "injected reminders are not things the human typed");
+	assert.equal(preview.turns, 3);
 });
 
-test("an oversized conversation is cut from the middle, keeping both ends and saying so", () => {
+test("a long conversation previews its tail — where it got to is what you check before continuing it", () => {
 	const noisy = path.join(claudeDir, "cccccccc-9999.jsonl");
 	const lines: unknown[] = [
-		{ type: "user", cwd: "/home/u/proj", message: { role: "user", content: "PRIMER MENSAJE" } },
+		{ type: "user", cwd: projDir, message: { role: "user", content: "PRIMER MENSAJE" } },
 	];
 	for (let i = 0; i < 400; i += 1) {
 		lines.push({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: `relleno ${i} ${"x".repeat(300)}` }] } });
@@ -227,16 +236,42 @@ test("an oversized conversation is cut from the middle, keeping both ends and sa
 
 	const conversation = findConversation("claude", "cccccccc-9999");
 	assert.ok(conversation);
-	const digest = readConversationDigest(conversation, 4000);
+	const preview = readConversationPreview(conversation, 5);
 
-	assert.equal(digest.truncated, true);
-	assert.ok(digest.text.length <= 4000 + 600, `digest stayed near the budget (was ${digest.text.length})`);
-	assert.match(digest.text, /PRIMER MENSAJE/, "the opening says what the conversation was for");
-	assert.match(digest.text, /ULTIMO MENSAJE/, "the end says where it got to");
-	assert.match(digest.text, /turn\(s\) omitted from the middle/, "the agent is told the record is incomplete");
-	assert.ok(digest.includedTurns < digest.turns);
+	assert.equal(preview.turns, 402);
+	assert.equal(preview.shownTurns, 5);
+	assert.match(preview.text, /ULTIMO MENSAJE/, "the end is what identifies where to carry on from");
+	assert.doesNotMatch(preview.text, /PRIMER MENSAJE/, "the opening is 400 turns back");
+	// Said out loud, or the operator reads a 5-turn panel as the whole history
+	// the workflow is about to work from.
+	assert.match(preview.text, /earlier turn\(s\) not shown/);
+	assert.match(preview.text, /resumes this conversation in full/);
 
 	fs.rmSync(noisy);
+});
+
+test("a conversation with no recorded directory cannot be continued by a workflow", () => {
+	// The harness resumes a session relative to the directory it ran in (claude
+	// derives ~/.claude/projects/<slug> from the cwd), so without one there is
+	// nowhere to pick it up. Refused rather than guessed: the guess would be found
+	// out at step 1, inside the operator's real conversation.
+	const file = path.join(claudeDir, "eeeeeeee-0000.jsonl");
+	write(file, [{ type: "user", message: { role: "user", content: "sin directorio" } }], 1_800_000_700);
+
+	const conversation = findConversation("claude", "eeeeeeee-0000");
+	assert.ok(conversation);
+	assert.equal(conversation.workdir, null);
+	const verdict = adoptability(conversation);
+	assert.equal(verdict.ok, false);
+	assert.equal(verdict.workdir, null);
+	assert.match(String(verdict.reason), /directory/);
+
+	// …and one that does record it is adoptable, in exactly that directory.
+	const usable = findConversation("claude", CLAUDE_SESSION);
+	assert.ok(usable);
+	assert.deepEqual(adoptability(usable), { ok: true, workdir: projDir, reason: null });
+
+	fs.rmSync(file);
 });
 
 test("a session id that isn't one of this harness's transcripts resolves to nothing", () => {
@@ -283,7 +318,7 @@ test("every conversation is listed, not just a fixed first page, and the total i
 		const file = path.join(claudeDir, `bulk-${String(i).padStart(3, "0")}.jsonl`);
 		// Ascending mtimes, all OLDER than the original fixture, so a cap that kept
 		// only the newest N would drop the oldest of these.
-		write(file, [{ type: "user", cwd: "/home/u/proj", message: { role: "user", content: `conversacion ${i}` } }], 1_700_000_000 + i);
+		write(file, [{ type: "user", cwd: projDir, message: { role: "user", content: `conversacion ${i}` } }], 1_700_000_000 + i);
 		made.push(file);
 	}
 
@@ -317,7 +352,7 @@ test("a conversation created after the first listing shows up on the next one", 
 	const before = listConversations("claude").total;
 	const file = path.join(claudeDir, "recien-creada.jsonl");
 	// Newer than every fixture above (whose mtimes are pinned, not wall-clock).
-	write(file, [{ type: "user", cwd: "/home/u/proj", message: { role: "user", content: "acabo de crear esto" } }], 1_900_000_000);
+	write(file, [{ type: "user", cwd: projDir, message: { role: "user", content: "acabo de crear esto" } }], 1_900_000_000);
 
 	const after = listConversations("claude");
 	assert.equal(after.total, before + 1);
@@ -326,12 +361,17 @@ test("a conversation created after the first listing shows up on the next one", 
 	fs.rmSync(file);
 });
 
-test("GET /api/conversations/preview shows exactly what would be imported", async () => {
+test("GET /api/conversations/preview shows where the conversation got to, and whether it can be continued", async () => {
 	const query = `runner=claude&sessionId=${encodeURIComponent(CLAUDE_SESSION)}`;
 	const res = await fetch(`${baseUrl}/api/conversations/preview?${query}`, { headers: adminHeaders() });
 	assert.equal(res.status, 200);
-	const body = (await res.json()) as { digest: { text: string; turns: number } };
-	assert.match(body.digest.text, /Necesito un workflow para el release/);
+	const body = (await res.json()) as {
+		preview: { text: string; turns: number };
+		adoptable: { ok: boolean; workdir: string | null };
+	};
+	assert.match(body.preview.text, /Necesito un workflow para el release/);
+	assert.deepEqual(body.adoptable.ok, true);
+	assert.equal(body.adoptable.workdir, projDir, "the directory the workflow will be pinned to");
 
 	const missing = await fetch(`${baseUrl}/api/conversations/preview?runner=claude&sessionId=nope`, {
 		headers: adminHeaders(),
@@ -367,11 +407,11 @@ test("POST /api/conversations/open-terminal reopens THAT conversation, in its ow
 	assert.equal(body.sessionId, CLAUDE_SESSION);
 	// The conversation's own cwd, not the hub's: for claude that's what makes
 	// `--resume` find the transcript at all.
-	assert.equal(body.workdir, "/home/u/proj");
+	assert.equal(body.workdir, projDir);
 
 	assert.equal(calls.length, 1);
 	const shellCommand = calls[0].args.at(-1) ?? "";
-	assert.match(shellCommand, /cd '\/home\/u\/proj'/);
+	assert.match(shellCommand, new RegExp(`cd '${projDir}'`));
 	assert.match(shellCommand, new RegExp(`claude --resume '${CLAUDE_SESSION}'`));
 
 	// A path that isn't one of this harness's transcripts must not reach the
@@ -385,7 +425,7 @@ test("POST /api/conversations/open-terminal reopens THAT conversation, in its ow
 	assert.equal(calls.length, 1, "no terminal was spawned for the unresolvable id");
 });
 
-test("a workflow can be created FROM a conversation: it arrives with that conversation as its context step", async () => {
+test("a workflow created from a conversation ADOPTS it: same session, same directory, no summary", async () => {
 	const res = await fetch(`${baseUrl}/api/workflows`, {
 		method: "POST",
 		headers: adminHeaders(),
@@ -395,29 +435,39 @@ test("a workflow can be created FROM a conversation: it arrives with that conver
 		}),
 	});
 	assert.equal(res.status, 200);
-	const created = (await res.json()) as { workflow: { id: string; conversationContext: string | null } };
-
-	// 1. The conversation is the workflow's background.
-	assert.ok(created.workflow.conversationContext, "the new workflow has a conversation context");
-	assert.match(created.workflow.conversationContext, /Necesito un workflow para el release/);
-	assert.match(created.workflow.conversationContext, /Y el segundo paso\?/);
-	assert.doesNotMatch(created.workflow.conversationContext, /SALIDA DE LA HERRAMIENTA/);
-
-	// 2. It is already materialised as the hub-owned context step, pinned before
-	//    every step the operator will add — the same delivery a context typed into
-	//    the panel afterwards would get, so it runs once, first, on the shared
-	//    session. Without this the context would sit in a column nobody dispatches.
-	const detail = (await (await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`, { headers: adminHeaders() })).json()) as {
-		steps: { kind: string; orderIndex: number; status: string; description: string }[];
+	const created = (await res.json()) as {
+		workflow: {
+			id: string;
+			conversationContext: string | null;
+			adoptedSessionId: string | null;
+			lastSessionId: string | null;
+			workdir: string | null;
+			harness: string | null;
+		};
 	};
-	const contextSteps = detail.steps.filter((step) => step.kind === "context");
-	assert.equal(contextSteps.length, 1, "exactly one context step");
-	assert.equal(contextSteps[0].orderIndex, -1, "sorts before every step the operator adds");
-	assert.equal(contextSteps[0].status, "pending", "it hasn't run yet — it runs when the workflow starts");
-	assert.match(contextSteps[0].description, /Necesito un workflow para el release/);
+
+	// 1. The workflow continues that conversation. `lastSessionId` is what the
+	//    dispatcher resumes, and it is already the conversation's — before a
+	//    single step has run.
+	assert.equal(created.workflow.adoptedSessionId, CLAUDE_SESSION);
+	assert.equal(created.workflow.lastSessionId, CLAUDE_SESSION, "the first step will resume it, not start fresh");
+
+	// 2. Pinned to the conversation's own runtime, which is not a preference: the
+	//    harness looks a session up relative to its directory, and a claude uuid
+	//    means nothing to free-code.
+	assert.equal(created.workflow.workdir, projDir);
+	assert.equal(created.workflow.harness, "claude");
+
+	// 3. Nothing is copied. No digest of the transcript, and so no context step to
+	//    deliver one — the agent will have the conversation itself.
+	assert.equal(created.workflow.conversationContext, null, "the conversation is resumed, not summarised");
+	const detail = (await (await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`, { headers: adminHeaders() })).json()) as {
+		steps: { kind: string }[];
+	};
+	assert.equal(detail.steps.filter((step) => step.kind === "context").length, 0);
 });
 
-test("an operator note frames the import, above the transcript", async () => {
+test("an operator note is delivered as one turn inside the adopted conversation", async () => {
 	const res = await fetch(`${baseUrl}/api/workflows`, {
 		method: "POST",
 		headers: adminHeaders(),
@@ -428,19 +478,164 @@ test("an operator note frames the import, above the transcript", async () => {
 		}),
 	});
 	assert.equal(res.status, 200);
-	const created = (await res.json()) as { workflow: { conversationContext: string } };
-	const note = created.workflow.conversationContext.indexOf("Responde siempre en espanol.");
-	const transcript = created.workflow.conversationContext.indexOf("Arregla el bug del login");
-	assert.ok(note >= 0 && transcript >= 0);
-	assert.ok(note < transcript, "what the operator wrote for THIS workflow comes first");
+	const created = (await res.json()) as {
+		workflow: { id: string; conversationContext: string; adoptedSessionId: string | null };
+	};
+	assert.equal(created.workflow.adoptedSessionId, freeCodeFile);
+	// The note, and ONLY the note: the transcript it would once have been prefixed
+	// to is the session the workflow is now running in.
+	assert.equal(created.workflow.conversationContext, "Responde siempre en espanol.");
+	assert.doesNotMatch(created.workflow.conversationContext, /Arregla el bug del login/);
+
+	// It rides the machinery that already delivers a workflow's background: the
+	// hub-owned context step, one turn, before any real step.
+	const detail = (await (await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`, { headers: adminHeaders() })).json()) as {
+		steps: { kind: string; orderIndex: number; status: string; description: string }[];
+	};
+	const contextSteps = detail.steps.filter((step) => step.kind === "context");
+	assert.equal(contextSteps.length, 1);
+	assert.equal(contextSteps[0].orderIndex, -1);
+	assert.equal(contextSteps[0].status, "pending");
+	assert.match(contextSteps[0].description, /Responde siempre en espanol\./);
 });
 
-test("importing a conversation is the ONLY context a workflow can be born with (acceptance #8 holds)", async () => {
-	// The escape hatch this feature needed is a REFERENCE to a real transcript,
-	// resolved and condensed by the server — not a free-text field. A bare
-	// conversationContext at creation is still ignored, and a note without a
-	// conversation to frame is ignored with it, so the only way to give a
-	// workflow arbitrary prose is still PATCH /api/workflows/:id/context.
+test("the runner and the directory belong to the conversation — a request that contradicts them is refused", async () => {
+	// Silently overriding either would produce a workflow running somewhere the
+	// operator didn't choose, or on a harness that cannot resume the session at
+	// all — both discovered at step 1, in the operator's real conversation.
+	const wrongRunner = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({
+			name: "runner equivocado",
+			runner: "free-code",
+			conversation: { runner: "claude", sessionId: CLAUDE_SESSION },
+		}),
+	});
+	assert.equal(wrongRunner.status, 400);
+	assert.match(((await wrongRunner.json()) as { error: string }).error, /has to be claude/);
+
+	const wrongDir = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({
+			name: "directorio equivocado",
+			workdir: "/tmp/otro-sitio",
+			conversation: { runner: "claude", sessionId: CLAUDE_SESSION },
+		}),
+	});
+	assert.equal(wrongDir.status, 400);
+	// The error names the one directory that WOULD work, so it's actionable.
+	assert.ok(((await wrongDir.json()) as { error: string }).error.includes(projDir));
+
+	// Asking for exactly what the conversation says is fine — it agrees.
+	const agreeing = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({
+			name: "de acuerdo",
+			runner: "claude",
+			workdir: projDir,
+			conversation: { runner: "claude", sessionId: CLAUDE_SESSION },
+		}),
+	});
+	assert.equal(agreeing.status, 200);
+});
+
+test("a conversation with no recorded directory is refused at create, not adopted into nowhere", async () => {
+	const file = path.join(claudeDir, "ffffffff-1111.jsonl");
+	write(file, [{ type: "user", message: { role: "user", content: "sin cwd" } }], 1_800_000_800);
+
+	const res = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ name: "sin sitio", conversation: { runner: "claude", sessionId: "ffffffff-1111" } }),
+	});
+	assert.equal(res.status, 400);
+	assert.match(((await res.json()) as { error: string }).error, /can't be continued/);
+
+	fs.rmSync(file);
+});
+
+test("the first step of an adopted workflow dispatches as a RESUME of that conversation", async (t) => {
+	// The whole feature, end to end: awb receives the conversation's own session
+	// id in the `sessionid` header, which is what makes it run `claude --resume
+	// <uuid>` instead of starting a fresh one. Without this the workflow would
+	// begin talking to an agent that has never heard of the conversation.
+	const dispatched: { sessionId: string | null; input: string }[] = [];
+	const broker = http.createServer((req, res) => {
+		let body = "";
+		req.on("data", (chunk) => {
+			body += String(chunk);
+		});
+		req.on("end", () => {
+			dispatched.push({
+				sessionId: typeof req.headers.sessionid === "string" ? req.headers.sessionid : null,
+				input: (JSON.parse(body) as { input: string }).input,
+			});
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end(JSON.stringify({ ok: true }));
+		});
+	});
+	await new Promise<void>((resolve) => broker.listen(0, "127.0.0.1", resolve));
+	const brokerAddress = broker.address();
+	if (!brokerAddress || typeof brokerAddress === "string") throw new Error("fake broker did not bind");
+	t.after(() => broker.close());
+
+	const res = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({
+			name: "reanuda la conversacion",
+			conversation: { runner: "claude", sessionId: CLAUDE_SESSION },
+		}),
+	});
+	assert.equal(res.status, 200);
+	const { workflow: created } = (await res.json()) as { workflow: { id: string } };
+	const workflow = getWorkflow(created.id);
+	assert.ok(workflow);
+	const step = getStep(insertStep(workflow.id, "el primer paso").id);
+	assert.ok(step);
+
+	// Point the dispatch at the fake broker instead of the real awb port.
+	await dispatchStep(step, { ...workflow, hookUrl: workflow.hookUrl.replace(/:\d+\//, `:${brokerAddress.port}/`) }, cfg, silent);
+
+	assert.equal(dispatched.length, 1);
+	assert.equal(dispatched[0].sessionId, CLAUDE_SESSION, "the first step resumes the operator's conversation");
+});
+
+test("restarting an adopted workflow goes back to the conversation, not to a blank session", async () => {
+	// A restart drops session chaining so the run starts over — but "over" for
+	// this workflow is the conversation it was created to continue. Starting it
+	// blank would quietly turn it into a different workflow: its steps were
+	// written to continue a thread.
+	const res = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({
+			name: "reinicia",
+			conversation: { runner: "claude", sessionId: CLAUDE_SESSION },
+		}),
+	});
+	assert.equal(res.status, 200);
+	const { workflow: created } = (await res.json()) as { workflow: { id: string } };
+	insertStep(created.id, "un paso");
+
+	// A run has moved the session on (the harness reports its own id back).
+	setWorkflowSessionId(created.id, "una-sesion-posterior");
+	await restartWorkflow(created.id, cfg, silent);
+
+	const after = getWorkflow(created.id);
+	assert.equal(after?.lastSessionId, CLAUDE_SESSION, "the restart resumes the adopted conversation");
+	assert.equal(after?.adoptedSessionId, CLAUDE_SESSION, "and it stays recorded for the next restart");
+});
+
+test("adopting a conversation is the ONLY context a workflow can be born with (acceptance #8 holds)", async () => {
+	// What create accepts is a REFERENCE to a real transcript, which the server
+	// resolves and then RUNS ON. A bare conversationContext at creation is still
+	// ignored, and a note without a conversation to say it in is ignored with it,
+	// so the only way to give a workflow arbitrary prose is still
+	// PATCH /api/workflows/:id/context.
 	const res = await fetch(`${baseUrl}/api/workflows`, {
 		method: "POST",
 		headers: adminHeaders(),

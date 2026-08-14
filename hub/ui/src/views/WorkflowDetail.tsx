@@ -598,6 +598,7 @@ export function WorkflowDetail({
 
 				<SessionPanel
 					info={sessionInfo}
+					adoptedSessionId={workflow.adoptedSessionId}
 					canOpen={Boolean(sessionInfo?.sessionId ?? workflow.lastSessionId)}
 					onOpenTerminal={() => void handleOpenTerminal()}
 					opening={opening}
