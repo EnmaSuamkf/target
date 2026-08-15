@@ -35,6 +35,7 @@ import type {
 	Step,
 	StepConfigInput,
 	Template,
+	TemplateBundle,
 	TemplateInput,
 	Workflow,
 } from "./types.ts";
@@ -545,6 +546,37 @@ export async function updateTemplate(id: string, input: TemplateInput): Promise<
 
 export function deleteTemplate(id: string): Promise<{ ok: true }> {
 	return request<{ ok: true }>(`/api/templates/${id}`, { method: "DELETE", admin: true });
+}
+
+/**
+ * The export bundle for one template. Fetched as JSON rather than linked to
+ * directly: the route is behind the login session, and it's the caller that
+ * turns the bundle into a downloaded file (see `downloadJson` in TemplatesView),
+ * so the same call also serves anything that just wants to look at the shape.
+ */
+export function exportTemplate(id: string): Promise<TemplateBundle> {
+	return request<TemplateBundle>(`/api/templates/${id}/export`);
+}
+
+/** The same envelope, holding every template on this hub. */
+export function exportAllTemplates(): Promise<TemplateBundle> {
+	return request<TemplateBundle>("/api/templates/export");
+}
+
+/**
+ * Stores a bundle's templates as new ones and returns what was created — with
+ * fresh ids, and with a colliding name disambiguated by the hub, so the result
+ * is what to tell the operator they actually got. `bundle` is whatever was
+ * parsed out of the chosen file: the hub validates it and answers 400 with the
+ * reason (`unknown_kind`, `unsupported_schema_version`, `invalid_bundle`).
+ */
+export async function importTemplates(bundle: unknown): Promise<Template[]> {
+	const data = await request<{ templates: Template[] }>("/api/templates/import", {
+		method: "POST",
+		admin: true,
+		body: json(bundle),
+	});
+	return data.templates;
 }
 
 // --- settings ---

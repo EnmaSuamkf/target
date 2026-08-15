@@ -32,6 +32,7 @@ import { useDictation } from "./hooks/useDictation.ts";
 import { useIsMobile } from "./hooks/useIsMobile.ts";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts.ts";
 import { usePolling } from "./hooks/usePolling.ts";
+import { downloadJson, jsonFilename } from "./lib/download.ts";
 import { CreateWorkflowModal } from "./views/CreateWorkflowModal.tsx";
 import { LandingView } from "./views/LandingView.tsx";
 import { LoginView } from "./views/LoginView.tsx";
@@ -832,6 +833,49 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		);
 	};
 
+	// Export/import move templates between machines as a plain .json file. The
+	// bundle is fetched rather than linked to (the route needs the session), and
+	// the file is written from the response — see lib/download.ts.
+	const handleExportTemplate = async (id: string): Promise<void> => {
+		await act("Could not export the template", async () => {
+			const name = templates.find((t) => t.id === id)?.name ?? "template";
+			const bundle = await api.exportTemplate(id);
+			downloadJson(jsonFilename(name, "template"), bundle);
+			toast.success("Template exported.");
+		});
+	};
+
+	const handleExportAllTemplates = async (): Promise<void> => {
+		await act("Could not export the templates", async () => {
+			const bundle = await api.exportAllTemplates();
+			downloadJson("target-templates.json", bundle);
+			toast.success(`Exported ${bundle.templates.length} template${bundle.templates.length === 1 ? "" : "s"}.`);
+		});
+	};
+
+	/**
+	 * The chosen file is parsed here so a file that isn't JSON at all fails with
+	 * the same error banner as a bundle the hub rejects, rather than as an
+	 * unhandled throw inside the file input's change handler. The names in the
+	 * toast come from the RESPONSE: the hub renames a template whose name is
+	 * already taken, and silently landing a differently-named one would be a
+	 * surprise the operator only finds later in the list.
+	 */
+	const handleImportTemplates = async (file: File): Promise<void> => {
+		await act(
+			"Could not import the templates",
+			async () => {
+				const created = await api.importTemplates(JSON.parse(await file.text()));
+				toast.success(
+					created.length === 1
+						? `Imported "${created[0]?.name}".`
+						: `Imported ${created.length} templates: ${created.map((t) => t.name).join(", ")}.`,
+				);
+			},
+			refreshTemplates,
+		);
+	};
+
 	// --- settings actions ---
 
 	// The response carries the stored values, so there's nothing to re-fetch —
@@ -952,6 +996,9 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 						onCreate={handleCreateTemplate}
 						onUpdate={handleUpdateTemplate}
 						onDelete={(id) => void handleDeleteTemplate(id)}
+						onExport={(id) => void handleExportTemplate(id)}
+						onExportAll={() => void handleExportAllTemplates()}
+						onImport={(file) => void handleImportTemplates(file)}
 					/>
 				) : settings && shortcutSettings ? (
 					// Keyed on both save stamps: a successful save in either section re-seeds

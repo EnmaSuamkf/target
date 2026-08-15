@@ -103,6 +103,7 @@ import {
 	getNotificationSettings,
 	getShortcutSettings,
 	getWorkflow,
+	importTemplates,
 	insertTemplate,
 	getTemplate,
 	latestStepSession,
@@ -113,9 +114,12 @@ import {
 	normalizeShortcutBindings,
 	OVERRIDABLE_STEP_STATUSES,
 	OVERRIDABLE_WORKFLOW_STATUSES,
+	parseTemplateBundle,
 	saveNotificationSettings,
 	saveShortcutSettings,
 	stepProgress,
+	templateBundle,
+	TemplateBundleError,
 	updateTemplate,
 	type Attachment,
 	type AttachmentField,
@@ -976,7 +980,59 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			return;
 		}
 
+		// --- /api/templates/export and /api/templates/import ---
+		//
+		// Both sit where a template id would, and can never be mistaken for one:
+		// an id is a uuid. They're matched before `templateId` is read for exactly
+		// that reason.
+		//
+		// A bundle is portable data, not a machine-specific dump — see the export
+		// section in db.ts — so exporting is a read like GET /api/templates (the
+		// blanket access gate above already requires the operator), while importing
+		// creates rows and is admin-gated like every other write here.
+
+		if (parts[2] === "export" && !parts[3] && req.method === "GET") {
+			sendJson(res, 200, templateBundle(listTemplates()));
+			return;
+		}
+
+		if (parts[2] === "import" && !parts[3] && req.method === "POST") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				let entries;
+				try {
+					entries = parseTemplateBundle(body);
+				} catch (err) {
+					// The parser's `code` IS the wire error ("unknown_kind",
+					// "unsupported_schema_version", …) so the UI can say which of them
+					// the file failed on rather than a flat "bad file".
+					if (err instanceof TemplateBundleError) {
+						sendJson(res, 400, { error: err.code });
+						return;
+					}
+					throw err;
+				}
+				const created = importTemplates(entries);
+				log(`imported ${created.length} template(s): ${created.map((t) => `'${t.name}' (${t.id})`).join(", ")}`);
+				sendJson(res, 200, { templates: created.map(publicTemplate) });
+			});
+			return;
+		}
+
 		const templateId = parts[2];
+
+		if (parts[3] === "export" && !parts[4] && req.method === "GET") {
+			const template = getTemplate(templateId);
+			if (!template) {
+				sendJson(res, 404, { error: "unknown_template" });
+				return;
+			}
+			sendJson(res, 200, templateBundle([template]));
+			return;
+		}
 
 		if (!parts[3] && req.method === "GET") {
 			const template = getTemplate(templateId);

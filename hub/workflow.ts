@@ -35,6 +35,7 @@ import {
 	beginRetry,
 	claimWorkflowCompletionNotice,
 	clearCompactionMarkers,
+	CLONE_NAME_PREFIX,
 	completeStep,
 	CONTEXT_STEP_ORDER_INDEX,
 	deleteStep,
@@ -758,10 +759,12 @@ export function renameWorkflow(workflowId: string, name: string): Workflow {
 	return renamed;
 }
 
-/** What a clone is called by default: the original's name behind a fixed marker, so a copy is one in the list too. */
-const CLONE_NAME_PREFIX = "Clone - ";
-
-/** The name a clone of `workflow` is proposed under — what the clone form starts from. */
+/**
+ * The name a clone of `workflow` is proposed under — what the clone form starts
+ * from. The prefix itself lives in db.ts because template import disambiguates
+ * a colliding name the same way, and "a copy of that" should read identically
+ * wherever it shows up in the UI.
+ */
 export function cloneName(name: string): string {
 	return `${CLONE_NAME_PREFIX}${name}`;
 }
