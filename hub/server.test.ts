@@ -973,3 +973,115 @@ test("PUT /api/workflows/:id/selection on an unknown workflow returns 400", asyn
 	assert.equal(res.status, 400);
 	assert.equal(((await res.json()) as { error: string }).error, "unknown workflow");
 });
+
+// --- template export / import over HTTP -------------------------------
+//
+// The bundle rules themselves are covered in templates.test.ts; here it's only
+// the routing (both "export"/"import" sit where a template id would), the auth
+// level of each half, and the error codes a bad file comes back with.
+
+test("GET /api/templates/:id/export returns that template as a versioned bundle", async () => {
+	const template = insertTemplate({
+		name: "exportable",
+		tags: ["ops"],
+		steps: [{ description: "do the thing", acceptanceCriteria: "it is done", manualReview: true, maxRetries: 2, retryIntervalSeconds: 30 }],
+	});
+
+	const res = await fetch(`${baseUrl}/api/templates/${template.id}/export`, { headers: adminHeaders() });
+	assert.equal(res.status, 200);
+	const bundle = (await res.json()) as {
+		kind: string;
+		schemaVersion: number;
+		exportedAt: string;
+		templates: { name: string; tags: string[]; steps: { description: string; manualReview: boolean }[] }[];
+	};
+	assert.equal(bundle.kind, "target.templates");
+	assert.equal(bundle.schemaVersion, 1);
+	assert.ok(!Number.isNaN(Date.parse(bundle.exportedAt)));
+	assert.equal(bundle.templates.length, 1);
+	assert.equal(bundle.templates[0].name, "exportable");
+	assert.deepEqual(bundle.templates[0].tags, ["ops"]);
+	assert.equal(bundle.templates[0].steps[0].manualReview, true);
+	// The id never travels — the importing hub mints its own.
+	assert.ok(!("id" in bundle.templates[0]));
+});
+
+test("GET /api/templates/:id/export on an unknown id is a 404 unknown_template", async () => {
+	const res = await fetch(`${baseUrl}/api/templates/does-not-exist/export`, { headers: adminHeaders() });
+	assert.equal(res.status, 404);
+	assert.equal(((await res.json()) as { error: string }).error, "unknown_template");
+});
+
+test("GET /api/templates/export returns every template in one bundle", async () => {
+	const template = insertTemplate({ name: "in the all-export", steps: [{ description: "step" }] });
+	const res = await fetch(`${baseUrl}/api/templates/export`, { headers: adminHeaders() });
+	assert.equal(res.status, 200);
+	const bundle = (await res.json()) as { kind: string; templates: { name: string }[] };
+	assert.equal(bundle.kind, "target.templates");
+	assert.ok(bundle.templates.some((t) => t.name === template.name));
+});
+
+test("POST /api/templates/import stores the bundle's templates and returns them in the public shape", async () => {
+	const source = insertTemplate({
+		name: "import me",
+		tags: ["release"],
+		steps: [{ description: "step one", useSubagent: false }],
+	});
+	const exportRes = await fetch(`${baseUrl}/api/templates/${source.id}/export`, { headers: adminHeaders() });
+	const bundle = await exportRes.json();
+
+	const res = await fetch(`${baseUrl}/api/templates/import`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify(bundle),
+	});
+	assert.equal(res.status, 200);
+	const body = (await res.json()) as {
+		templates: { id: string; name: string; tags: string[]; steps: { description: string; useSubagent: boolean }[]; createdAt: string }[];
+	};
+	assert.equal(body.templates.length, 1);
+	const imported = body.templates[0];
+	// Same content, fresh id, and the colliding name disambiguated by the hub.
+	assert.notEqual(imported.id, source.id);
+	assert.equal(imported.name, "Clone - import me");
+	assert.deepEqual(imported.tags, ["release"]);
+	assert.equal(imported.steps[0].description, "step one");
+	assert.equal(imported.steps[0].useSubagent, false);
+	assert.ok(imported.createdAt);
+
+	// And it's really in the list, not just in the response.
+	const listRes = await fetch(`${baseUrl}/api/templates`, { headers: adminHeaders() });
+	const list = (await listRes.json()) as { templates: { id: string }[] };
+	assert.ok(list.templates.some((t) => t.id === imported.id));
+});
+
+test("POST /api/templates/import rejects a malformed bundle with the reason it failed on", async () => {
+	const cases: [unknown, string][] = [
+		[{ kind: "other.tool", schemaVersion: 1, templates: [] }, "unknown_kind"],
+		[{ kind: "target.templates", schemaVersion: 99, templates: [{ name: "x", steps: [] }] }, "unsupported_schema_version"],
+		[{ kind: "target.templates", schemaVersion: 1, templates: [{ steps: [] }] }, "invalid_bundle"],
+		[{ kind: "target.templates", schemaVersion: 1, templates: [] }, "empty_bundle"],
+	];
+	for (const [body, expected] of cases) {
+		const res = await fetch(`${baseUrl}/api/templates/import`, {
+			method: "POST",
+			headers: adminHeaders(),
+			body: JSON.stringify(body),
+		});
+		assert.equal(res.status, 400);
+		assert.equal(((await res.json()) as { error: string }).error, expected);
+	}
+});
+
+test("POST /api/templates/import requires an admin token and creates nothing without one", async () => {
+	const res = await fetch(`${baseUrl}/api/templates/import`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ kind: "target.templates", schemaVersion: 1, templates: [{ name: "unauthorized import", steps: [] }] }),
+	});
+	// The blanket access gate answers first — either way it never reached the DB.
+	assert.equal(res.status, 401);
+	const listRes = await fetch(`${baseUrl}/api/templates`, { headers: adminHeaders() });
+	const list = (await listRes.json()) as { templates: { name: string }[] };
+	assert.ok(!list.templates.some((t) => t.name === "unauthorized import"));
+});

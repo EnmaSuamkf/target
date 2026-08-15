@@ -1680,6 +1680,168 @@ export function deleteTemplate(id: string): boolean {
 	return open().prepare("DELETE FROM templates WHERE id = ?").run(id).changes > 0;
 }
 
+// --- Template export / import -----------------------------------------
+//
+// A template is already pure, portable data: no filesystem paths, no secrets,
+// no session/agent ids, no attachments, no foreign keys — and it never
+// executes, it only seeds the "+ Add step" form. So moving one between machines
+// is moving JSON, with no environment fixup at either end. All this layer adds
+// is an envelope and the rules for reading a foreign one back.
+//
+// The envelope is versioned from the start, mirroring REPORT_SCHEMA_VERSION in
+// reporter.ts. The step shape has already grown twice (`manualReview`,
+// `useSubagent`) and both times `normalizeTemplateSteps`'s defaults-on-absence
+// behaviour absorbed it silently; an explicit version is what makes the growth
+// that CAN'T be absorbed cheap to detect, instead of a file from a future hub
+// importing as quietly-wrong data.
+
+/** Marks a file as ours, so a stray JSON dropped on the import control is refused rather than half-read. */
+export const TEMPLATE_BUNDLE_KIND = "target.templates";
+
+/** Version of the bundle envelope. Bump when a change can NOT be absorbed by the normalizers' defaults. */
+export const TEMPLATE_BUNDLE_SCHEMA_VERSION = 1;
+
+/**
+ * One template inside a bundle. Deliberately WITHOUT the id and the
+ * created/updated stamps: those describe a row on the machine that exported it,
+ * not the template itself. Carrying the id across would let an import collide
+ * with (or silently claim to be) an unrelated local template — see
+ * `importTemplates`, which mints a fresh one instead.
+ */
+export interface TemplateBundleEntry {
+	name: string;
+	tags: string[];
+	steps: TemplateStep[];
+}
+
+export interface TemplateBundle {
+	kind: typeof TEMPLATE_BUNDLE_KIND;
+	schemaVersion: number;
+	exportedAt: string;
+	templates: TemplateBundleEntry[];
+}
+
+/** Thrown by `parseTemplateBundle`; `code` is the wire error string the route answers with. */
+export class TemplateBundleError extends Error {
+	readonly code: string;
+	constructor(code: string) {
+		super(code);
+		this.name = "TemplateBundleError";
+		this.code = code;
+	}
+}
+
+/** Wraps templates in the export envelope. Used for one template and for the whole list alike. */
+export function templateBundle(templates: Template[]): TemplateBundle {
+	return {
+		kind: TEMPLATE_BUNDLE_KIND,
+		schemaVersion: TEMPLATE_BUNDLE_SCHEMA_VERSION,
+		exportedAt: new Date().toISOString(),
+		templates: templates.map((t) => ({ name: t.name, tags: t.tags, steps: t.steps })),
+	};
+}
+
+/**
+ * Reads an untrusted bundle into entries ready for `importTemplates`, or throws
+ * a `TemplateBundleError` naming what's wrong with it.
+ *
+ * The canonical shape is the envelope, but a bare array of templates and a bare
+ * single template are accepted too — someone hand-editing a file, or pasting
+ * one template out of a bundle, shouldn't be told "invalid" for a shape whose
+ * meaning is unambiguous. Everything below the entry level goes through
+ * `normalizeTemplateTags`/`normalizeTemplateSteps`, the same functions the CRUD
+ * already runs on API input: they coerce types, clamp the retry numbers, drop
+ * empty-description steps and default the newer flags when a step from an older
+ * hub omits them. A second validation layer here would only be a second place
+ * for the two to disagree.
+ */
+export function parseTemplateBundle(input: unknown): TemplateBundleEntry[] {
+	if (input === null || typeof input !== "object") throw new TemplateBundleError("invalid_bundle");
+
+	let rawTemplates: unknown;
+	if (Array.isArray(input)) {
+		// A bare array of templates.
+		rawTemplates = input;
+	} else if ("templates" in (input as Record<string, unknown>) || "kind" in (input as Record<string, unknown>)) {
+		// An envelope — anything claiming to be one is held to all of its rules.
+		const envelope = input as Record<string, unknown>;
+		if (envelope.kind !== TEMPLATE_BUNDLE_KIND) throw new TemplateBundleError("unknown_kind");
+		// Absent reads as "version 1": the field is required going forward, but a
+		// file that predates nothing at all can only be the first version.
+		const version = envelope.schemaVersion === undefined ? TEMPLATE_BUNDLE_SCHEMA_VERSION : envelope.schemaVersion;
+		if (typeof version !== "number" || !Number.isInteger(version) || version < 1) {
+			throw new TemplateBundleError("invalid_bundle");
+		}
+		// Only a NEWER version is refused. An older one is exactly the case the
+		// normalizers already handle, so it stays importable.
+		if (version > TEMPLATE_BUNDLE_SCHEMA_VERSION) throw new TemplateBundleError("unsupported_schema_version");
+		if (!Array.isArray(envelope.templates)) throw new TemplateBundleError("invalid_bundle");
+		rawTemplates = envelope.templates;
+	} else {
+		// A bare single template.
+		rawTemplates = [input];
+	}
+
+	const entries: TemplateBundleEntry[] = [];
+	for (const raw of rawTemplates as unknown[]) {
+		if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new TemplateBundleError("invalid_bundle");
+		const obj = raw as Record<string, unknown>;
+		const name = typeof obj.name === "string" ? obj.name.trim() : "";
+		// A nameless template is unusable — it would land in the list as a blank
+		// row nobody can identify — and it's the clearest sign the file isn't one
+		// of ours, so it fails the whole import rather than being skipped quietly.
+		if (name === "") throw new TemplateBundleError("invalid_bundle");
+		entries.push({ name, tags: normalizeTemplateTags(obj.tags), steps: normalizeTemplateSteps(obj.steps) });
+	}
+	if (entries.length === 0) throw new TemplateBundleError("empty_bundle");
+	return entries;
+}
+
+/**
+ * The prefix a copy of something is proposed under ("Clone - release
+ * checklist"). It lives here rather than in workflow.ts (whose `cloneName`
+ * still owns the workflow half of it) because template import needs the same
+ * convention: one prefix for "this is a copy of that", not two.
+ */
+export const CLONE_NAME_PREFIX = "Clone - ";
+
+/**
+ * A name that isn't already `taken`. An import of a template whose name is free
+ * keeps it — that's the common case, importing onto a machine that has never
+ * seen it — and only a genuine collision is disambiguated, with the same
+ * "Clone - " prefix the workflow clone uses. The numeric suffix is for the
+ * third copy onwards, where the prefix alone would collide again.
+ */
+function uniqueTemplateName(name: string, taken: Set<string>): string {
+	if (!taken.has(name)) return name;
+	const cloned = `${CLONE_NAME_PREFIX}${name}`;
+	if (!taken.has(cloned)) return cloned;
+	for (let n = 2; ; n += 1) {
+		const candidate = `${cloned} (${n})`;
+		if (!taken.has(candidate)) return candidate;
+	}
+}
+
+/**
+ * Stores parsed bundle entries as new templates, newest last, and returns them.
+ *
+ * Every one gets a fresh id from `insertTemplate` — an import is a copy, never
+ * a restore over the top of an existing row, so it can't overwrite or shadow a
+ * local template that happens to share the exported one's id.
+ */
+export function importTemplates(entries: TemplateBundleEntry[]): Template[] {
+	// Seeded once and grown as we go, so two same-named templates inside ONE
+	// bundle disambiguate against each other too, not just against the DB.
+	const taken = new Set(listTemplates().map((t) => t.name));
+	const created: Template[] = [];
+	for (const entry of entries) {
+		const name = uniqueTemplateName(entry.name, taken);
+		taken.add(name);
+		created.push(insertTemplate({ name, tags: entry.tags, steps: entry.steps }));
+	}
+	return created;
+}
+
 // --- Settings ---------------------------------------------------------
 //
 // Hub-wide preferences, stored as one JSON blob per key in `settings` (same

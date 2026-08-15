@@ -11,6 +11,18 @@ The current version is reported by every instance to the central server (see
 
 ### Added
 
+- **Templates travel between machines as a file.** A template was always pure
+  data — a name, tags and an ordered step list, with no path, secret or session
+  id anywhere in it — but it had no way out of the SQLite file it was born in.
+  Export writes one (or every) template as a versioned `target.templates`
+  bundle, import reads one back: the same `.json` a teammate can be handed, kept
+  in a repo, or diffed by hand before it is used. An imported template is a new
+  template, never an overwrite — it is given a fresh id, and a name already
+  taken on this machine gets the same `Clone - ` prefix a cloned workflow does.
+  Because import reuses the normalizers the CRUD routes already trusted, a
+  bundle written before a step field existed still lands with that field's
+  default rather than being rejected.
+
 - **Subagent boxes on the canvas.** A step whose work is delegated now has a box
   wired into the left of its card, opposite the judge circle: the two branches
   are the two questions the list only answers in words — who runs this step, and

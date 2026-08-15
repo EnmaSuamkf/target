@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Template, TemplateInput, TemplateStep } from "../api/types.ts";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
@@ -28,18 +28,31 @@ export function TemplatesView({
 	onCreate,
 	onUpdate,
 	onDelete,
+	onExport,
+	onExportAll,
+	onImport,
 }: {
 	templates: Template[];
 	busy: boolean;
 	onCreate: (input: TemplateInput) => Promise<void>;
 	onUpdate: (id: string, input: TemplateInput) => Promise<void>;
 	onDelete: (id: string) => void;
+	/** Downloads one template as a .json bundle — the export half of moving one between machines. */
+	onExport: (id: string) => void;
+	/** The same, for every template at once. */
+	onExportAll: () => void;
+	/** Reads a chosen .json bundle and stores its templates as new ones. */
+	onImport: (file: File) => void;
 }): React.JSX.Element {
 	const [query, setQuery] = useState("");
 	const [tagFilter, setTagFilter] = useState("");
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const [creating, setCreating] = useState(false);
 	const isMobile = useIsMobile();
+	// A file input can only be opened by the user clicking the input itself, so
+	// the visible "Import" button clicks a hidden one on their behalf — that's
+	// the only way to have an import control that matches the other buttons.
+	const fileInput = useRef<HTMLInputElement>(null);
 
 	const allTags = useMemo(() => {
 		const tags = new Set<string>();
@@ -94,6 +107,47 @@ export function TemplatesView({
 							</svg>
 							New
 						</button>
+					</div>
+
+					{/* Moving templates between machines: a bundle is plain, portable
+					    JSON (no ids, no paths, nothing machine-specific), so export is
+					    a download and import is a file the operator picks. */}
+					<div className={styles.ioRow}>
+						<button
+							type="button"
+							className="btn btn--sm"
+							onClick={() => fileInput.current?.click()}
+							disabled={busy}
+							title="Import templates from a .json bundle"
+						>
+							Import
+						</button>
+						{templates.length > 0 && (
+							<button
+								type="button"
+								className="btn btn--sm"
+								onClick={onExportAll}
+								disabled={busy}
+								title="Download every template as one .json bundle"
+							>
+								Export all
+							</button>
+						)}
+						<input
+							ref={fileInput}
+							type="file"
+							accept="application/json,.json"
+							className={styles.fileInput}
+							aria-label="Template bundle to import"
+							onChange={(ev) => {
+								const file = ev.target.files?.[0];
+								// Cleared straight away so picking the SAME file again still
+								// fires a change event — re-importing after a failed attempt
+								// would otherwise appear to do nothing.
+								ev.target.value = "";
+								if (file) onImport(file);
+							}}
+						/>
 					</div>
 
 					{templates.length > 0 && (
@@ -192,6 +246,9 @@ export function TemplatesView({
 						{...(isMobile ? { onBack: closeForm } : {})}
 						onCancel={closeForm}
 						onDelete={editing ? () => onDelete(editing.id) : undefined}
+						// Only for a template that exists: there is nothing to export
+						// from a form that hasn't been saved yet.
+						onExport={editing ? () => onExport(editing.id) : undefined}
 						onSubmit={async (input) => {
 							if (editing) await onUpdate(editing.id, input);
 							else await onCreate(input);
@@ -226,6 +283,7 @@ function TemplateForm({
 	onCancel,
 	onBack,
 	onDelete,
+	onExport,
 }: {
 	template: Template | null;
 	busy: boolean;
@@ -234,6 +292,8 @@ function TemplateForm({
 	/** Only supplied when the list isn't on screen beside this form. */
 	onBack?: () => void;
 	onDelete?: (() => void) | undefined;
+	/** Only supplied for a saved template — downloads it as a .json bundle. */
+	onExport?: (() => void) | undefined;
 }): React.JSX.Element {
 	const [name, setName] = useState(template?.name ?? "");
 	const [tags, setTags] = useState(template?.tags.join(", ") ?? "");
@@ -290,11 +350,24 @@ function TemplateForm({
 
 			<div className={styles.formHead}>
 				<h2 className={styles.heading}>{template ? "Edit template" : "New template"}</h2>
-				{onDelete && (
-					<button type="button" className="btn btn--sm btn--danger" onClick={onDelete} disabled={busy || saving}>
-						Delete
-					</button>
-				)}
+				<div className={styles.formHeadActions}>
+					{onExport && (
+						<button
+							type="button"
+							className="btn btn--sm"
+							onClick={onExport}
+							disabled={busy || saving}
+							title="Download this template as a .json bundle"
+						>
+							Export
+						</button>
+					)}
+					{onDelete && (
+						<button type="button" className="btn btn--sm btn--danger" onClick={onDelete} disabled={busy || saving}>
+							Delete
+						</button>
+					)}
+				</div>
 			</div>
 
 			<Field label="Name" required>

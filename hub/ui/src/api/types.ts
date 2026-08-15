@@ -307,6 +307,28 @@ export interface Template {
 }
 
 /**
+ * The file a template export downloads and an import reads back (the hub's
+ * `templateBundle` / `parseTemplateBundle` in db.ts).
+ *
+ * No id and no timestamps per template: those describe a row on the machine
+ * that exported it, and the importing hub mints its own. `schemaVersion` is
+ * what lets a future field be added without a file from an older hub becoming
+ * unreadable — the hub refuses only a version NEWER than the one it knows.
+ */
+export interface TemplateBundleEntry {
+	name: string;
+	tags: string[];
+	steps: TemplateStep[];
+}
+
+export interface TemplateBundle {
+	kind: "target.templates";
+	schemaVersion: number;
+	exportedAt: string;
+	templates: TemplateBundleEntry[];
+}
+
+/**
  * Per-channel notification config, keyed by channel id.
  *
  * Slack is the only channel that's been specified, so it's the only one here —
