@@ -70,6 +70,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { PublishableRunner } from "./awb.ts";
 
 /** One conversation the operator can pick as the source for a new workflow. */
@@ -120,11 +121,33 @@ export interface Adoptability {
 }
 
 /**
- * How much of the head of a transcript is read to label it. Enough to clear the
- * preamble records (mode, permissions, file-history snapshots) and reach the
- * first human turn, without reading megabytes per file just to draw a list.
+ * How much of the head of a transcript is read at a time to label it. Enough to
+ * clear the preamble records (mode, permissions, file-history snapshots) and
+ * reach the first human turn in one read, without pulling megabytes per file
+ * just to draw a list.
  */
-const HEAD_BYTES = 64 * 1024;
+const HEAD_CHUNK_BYTES = 64 * 1024;
+
+/**
+ * How far `readHead` will keep reading when one chunk didn't answer both
+ * questions.
+ *
+ * This used to be a single 64 KB read, and a record can be much bigger than the
+ * whole chunk: paste three screenshots into your first message and that one turn
+ * runs to ~170 KB, with the record's `cwd` at the END of it. The head then held
+ * nothing but the preamble plus a truncated line that `JSON.parse` throws away,
+ * so a conversation that recorded its directory perfectly well was reported as
+ * having none — and `adoptability` turns that into a refusal to build a workflow
+ * on it ("nowhere to resume it from"), which is a hard stop for the operator,
+ * not a cosmetic one. It also fell back to the file name for the title, i.e. a
+ * row in the picker labelled with a bare uuid.
+ *
+ * So the read continues chunk by chunk until both answers are in hand. The
+ * ceiling is what keeps a pathological file from being read end to end for a
+ * label; normal transcripts still cost exactly one chunk, since the loop stops
+ * as soon as it has what it came for.
+ */
+const HEAD_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
  * Safety ceiling on how many conversations one listing returns, newest first.
@@ -316,45 +339,63 @@ function titleOf(text: string): string {
 }
 
 /**
- * Reads the label for one transcript out of its first `HEAD_BYTES`: the workdir
- * (from any record's `cwd`) and a title (the first human turn). Both optional —
- * a transcript whose opening is one enormous line yields neither, and the caller
- * falls back to the file name.
+ * Reads the label for one transcript off the head of the file: the workdir (from
+ * any record's `cwd`) and a title (the first human turn). Reads a chunk at a
+ * time and stops as soon as it has both, or at `HEAD_MAX_BYTES` — see there for
+ * why it doesn't stop at the first chunk. Both are still optional: a transcript
+ * that genuinely never says where it ran yields no workdir (which is what makes
+ * it unadoptable), and the caller falls back to the file name for the title.
  */
 function readHead(file: string): { workdir: string | null; title: string | null } {
-	let text: string;
-	try {
-		const fd = fs.openSync(file, "r");
-		try {
-			const buffer = Buffer.alloc(HEAD_BYTES);
-			const read = fs.readSync(fd, buffer, 0, HEAD_BYTES, 0);
-			text = buffer.subarray(0, read).toString("utf8");
-		} finally {
-			fs.closeSync(fd);
-		}
-	} catch {
-		return { workdir: null, title: null };
-	}
-	let workdir: string | null = null;
-	let title: string | null = null;
-	// The last line is normally cut mid-record by the byte cap; JSON.parse simply
-	// fails on it, which is the same skip a malformed line gets.
-	for (const line of text.split("\n")) {
-		if (!line.trim()) continue;
+	const head: { workdir: string | null; title: string | null } = { workdir: null, title: null };
+	const take = (line: string): void => {
+		if (!line.trim()) return;
 		let obj: Record<string, unknown>;
 		try {
 			obj = JSON.parse(line) as Record<string, unknown>;
 		} catch {
-			continue;
+			// A malformed line is simply skipped — as is the final one at the ceiling,
+			// which is cut mid-record by the byte cap rather than by the writer.
+			return;
 		}
-		if (!workdir && typeof obj.cwd === "string" && obj.cwd !== "") workdir = obj.cwd;
-		if (!title) {
+		if (!head.workdir && typeof obj.cwd === "string" && obj.cwd !== "") head.workdir = obj.cwd;
+		if (!head.title) {
 			const turn = turnOfLine(obj);
-			if (turn?.role === "user") title = titleOf(turn.text);
+			if (turn?.role === "user") head.title = titleOf(turn.text);
 		}
-		if (workdir && title) break;
+	};
+	let fd: number;
+	try {
+		fd = fs.openSync(file, "r");
+	} catch {
+		return head;
 	}
-	return { workdir, title };
+	try {
+		const buffer = Buffer.alloc(HEAD_CHUNK_BYTES);
+		// Chunk boundaries fall wherever they fall: mid-character, which is what the
+		// decoder carries across, and mid-record, which is what `pending` carries —
+		// a line is only parsed once a newline has completed it, or at EOF, where
+		// the file may simply end without one.
+		const decoder = new StringDecoder("utf8");
+		let pending = "";
+		let read = 0;
+		while (read < HEAD_MAX_BYTES && !(head.workdir && head.title)) {
+			const got = fs.readSync(fd, buffer, 0, Math.min(buffer.length, HEAD_MAX_BYTES - read), read);
+			if (got === 0) {
+				take(pending + decoder.end());
+				break;
+			}
+			read += got;
+			const lines = (pending + decoder.write(buffer.subarray(0, got))).split("\n");
+			pending = lines.pop() ?? "";
+			for (const line of lines) take(line);
+		}
+	} catch {
+		// Whatever was read before the failure still labels the row.
+	} finally {
+		fs.closeSync(fd);
+	}
+	return head;
 }
 
 function summarize(runner: PublishableRunner, entry: FileEntry): ConversationSummary {

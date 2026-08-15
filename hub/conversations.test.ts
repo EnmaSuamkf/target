@@ -274,6 +274,35 @@ test("a conversation with no recorded directory cannot be continued by a workflo
 	fs.rmSync(file);
 });
 
+test("a huge opening turn doesn't hide the directory the conversation ran in", () => {
+	// Observed on a real transcript: three screenshots pasted into the first
+	// message make that ONE record ~170 KB, with its `cwd` at the end — past any
+	// fixed head read. Reported as "no directory recorded", the picker refuses to
+	// build a workflow on a conversation that is perfectly adoptable, so the head
+	// read keeps going until it has an answer rather than stopping at a chunk edge.
+	const file = path.join(claudeDir, "ffffffff-1111.jsonl");
+	const pasted = "x".repeat(300_000);
+	write(
+		file,
+		[
+			{ type: "mode", mode: "normal" },
+			{ type: "file-history-snapshot", messageId: "m0", snapshot: {} },
+			// Content first, cwd last: the field order the harness actually writes.
+			{ type: "user", message: { role: "user", content: `mira estas capturas\n${pasted}` }, cwd: projDir },
+			{ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "vale" }] } },
+		],
+		1_800_000_800,
+	);
+
+	const conversation = findConversation("claude", "ffffffff-1111");
+	assert.ok(conversation);
+	assert.equal(conversation.workdir, projDir);
+	assert.equal(conversation.title, "mira estas capturas", "and the row is titled by the turn, not by the uuid");
+	assert.deepEqual(adoptability(conversation), { ok: true, workdir: projDir, reason: null });
+
+	fs.rmSync(file);
+});
+
 test("a session id that isn't one of this harness's transcripts resolves to nothing", () => {
 	// free-code session ids are absolute paths and arrive straight off the wire,
 	// so this is the guard that stops one naming a file outside the session roots.
