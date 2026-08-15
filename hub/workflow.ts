@@ -68,7 +68,7 @@ import {
 	setStatusBeforeReview,
 	setStepSelection,
 	setWorkflowSessionId,
-	setWorkflowStatus,
+	setWorkflowStatus as setWorkflowStatusRow,
 	slugify,
 	startManualRun,
 	stepProgress,
@@ -195,6 +195,21 @@ export function expireStale(cfg: HubConfig, log: Logger): void {
 		// settled and this sweep has nothing to do.
 		if (!failTimedOutStep(stepId, error)) continue;
 		forgetProbe(stepId);
+		// A timeout is a failure nobody's callback ever announces — the sweep is
+		// the only thing that knows — so it has to be reported from here or the
+		// server keeps the step `running` for as long as its row survives.
+		{
+			const timedOut = getStep(stepId) ?? step;
+			reportStepEvent(timedOut, "step.failed", {
+				phase: timedOut.phase,
+				manual_run: timedOut.manualRun === true,
+				duration_ms: stepDurationMs(timedOut),
+				retry_count: timedOut.retryCount,
+				max_retries: timedOut.maxRetries,
+				error: reportError(timedOut, timedOut.phase, `timeout_${candidate.reason}`, error),
+			});
+			reportUsageSnapshot(workflow, timedOut);
+		}
 		log(`step ${stepId} timed out — ${error}`, "warning");
 
 		if (step.retryCount < step.maxRetries) {
@@ -244,6 +259,14 @@ async function retryTimedOutStep(step: Step, workflow: Workflow, cfg: HubConfig,
 	}
 	const current = getStep(step.id);
 	if (!current || current.status !== "pending") return; // resolved another way meanwhile
+	reportStepEvent(current, "step.started", {
+		phase: "exec",
+		manual_run: current.manualRun === true,
+		use_subagent: current.useSubagent,
+		attempt: current.retryCount + 1,
+		max_retries: current.maxRetries,
+		after_timeout: true,
+	});
 	await dispatchStep(current, workflow, cfg, log, {
 		resumeSession: true,
 		manual: current.manualRun,
@@ -326,6 +349,13 @@ async function holdForManualReview(
 	const before = getWorkflow(step.workflowId)?.status;
 	setStatusBeforeReview(step.workflowId, before === undefined || before === "waiting" ? null : before);
 	setWorkflowStatus(step.workflowId, "waiting");
+	// The gate opening is a step transition like any other, and the one the
+	// server most needs: without it a held step's last word on the wire is
+	// `step.started`, so the dashboard reads a human hold as a live agent run.
+	reportStepEvent(getStep(step.id) ?? step, "step.waiting", {
+		manual_run: step.manualRun === true,
+		has_acceptance_criteria: !!step.acceptanceCriteria,
+	});
 	writeStatusMd(step.workflowId);
 	log(`step ${step.id} is waiting for a manual review — workflow ${step.workflowId} paused`, "warning");
 	const workflow = getWorkflow(step.workflowId);
@@ -353,6 +383,19 @@ export async function continueStep(workflowId: string, stepId: string, cfg: HubC
 	if (!releaseWaitingStep(stepId)) throw new WorkflowError("only a step waiting for its manual review can be continued");
 	const stashed = takeStatusBeforeReview(workflowId);
 	log(`step ${stepId} released by its manual review`);
+	// This is the moment the step becomes `done`, so it is the moment it has to
+	// say so — the engine's own done-paths never run for a gated step, and a
+	// release that reported nothing is what left steps reading `running` upstream
+	// forever. `approved_by` marks it as a human's verdict, not the judge's.
+	{
+		const released = getStep(stepId) ?? step;
+		reportStepEvent(released, "step.done", {
+			duration_ms: stepDurationMs(released),
+			retry_count: released.retryCount,
+			approved_by: "manual_review",
+		});
+		reportUsageSnapshot(workflow, released);
+	}
 	if (step.manualRun) {
 		// An on-demand ▶ run never drove the workflow and must not start driving it
 		// now: releasing it puts back the status the hold interrupted and settles
@@ -429,6 +472,19 @@ export function forceStepStatus(
 	}
 	if (!overrideStepStatus(stepId, status)) throw new WorkflowError("step disappeared");
 	log(`step ${stepId} status set manually to ${status}`);
+	// A human's verdict is still a step transition. `manual: true` is what tells
+	// the dashboard this status was asserted rather than observed — the same
+	// distinction `workflow.status_changed` has always carried in its schema.
+	{
+		const forced = getStep(stepId) ?? step;
+		const kind = status === "done" ? "step.done" : status === "failed" ? "step.failed" : "step.reset";
+		reportStepEvent(forced, kind, {
+			manual: true,
+			from: step.status,
+			duration_ms: stepDurationMs(forced),
+			retry_count: forced.retryCount,
+		});
+	}
 	// The workflow's badge is a function of its steps, so it has to follow. This
 	// is the ordinary derivation: it leaves a `running` workflow to the engine and
 	// a manually-pinned one to whoever pinned it.
@@ -527,6 +583,11 @@ export function writeStatusMd(workflowId: string): void {
 	if (!workflow) return;
 	const allSteps = listSteps(workflowId);
 	writeStepResults(workflow, allSteps);
+	// Same reasoning as the agent-facing write above, for the same reason it sits
+	// here: this is the choke point every mutation passes through, so it is the
+	// one place a plan snapshot can be taken without a mutation being able to
+	// skip it. Deduped by content, so polling costs nothing (see `reportPlan`).
+	reportPlan(workflow, allSteps);
 	// The hub-owned context step is reported on its own line above the list rather
 	// than numbered into it: `orderIndex + 1` would print it as "0." and it isn't
 	// one of the N steps the operator wrote.
@@ -1112,6 +1173,11 @@ export function removeWorkflow(workflowId: string): void {
 	// and the directory, or a removed workflow would leak both forever.
 	removeWorkflowAttachments(workflowId);
 	deleteWorkflow(workflowId);
+	// Declared in the contract from the start and never emitted, which left
+	// deleted workflows on the dashboard forever with no way to tell a removed
+	// one from an idle one.
+	reportEmit("workflow.removed", { workflowId, data: { name: workflow.name } });
+	forgetPlanDigest(workflowId);
 }
 
 /**
@@ -1202,12 +1268,11 @@ export function addStep(
 	// pending step here — back to draft so the badge/progress stay honest and
 	// "Start" dispatches just the new step, instead of leaving it stuck
 	// "completed"/"failed" forever (advance() only ever runs while `running`).
+	// The report server derives workflow status from events, so this transition
+	// has to reach it or it keeps showing the old terminal badge while the hub
+	// already considers the workflow reopened. `setWorkflowStatus` reports it.
 	if (workflow.status === "completed" || workflow.status === "failed") {
 		setWorkflowStatus(workflowId, "draft");
-		// The report server derives workflow status from events alone; without
-		// this emit it would keep showing the old terminal badge while the hub
-		// already considers the workflow reopened.
-		reportEmit("workflow.status_changed", { workflowId, data: { to: "draft", manual: false } });
 	}
 	writeStatusMd(workflowId);
 	return step;
@@ -1526,7 +1591,6 @@ async function advance(workflowId: string, cfg: HubConfig, log: Logger): Promise
 		const terminal: WorkflowStatus = steps.some((s) => s.status === "failed") ? "failed" : "completed";
 		setWorkflowStatus(workflowId, terminal);
 		writeStatusMd(workflowId);
-		reportEmit("workflow.status_changed", { workflowId, data: { to: terminal, manual: false } });
 		log(`workflow ${workflowId} ${terminal}`, terminal === "failed" ? "error" : "info");
 		// The main completion path: the engine ran out of work. Only `completed`
 		// notifies — a run that ended `failed` is a different message nobody asked
@@ -1543,6 +1607,21 @@ async function advance(workflowId: string, cfg: HubConfig, log: Logger): Promise
 		max_retries: next.maxRetries,
 	});
 	await dispatchStep(next, workflow, cfg, log);
+	// A dispatch that died synchronously (hook unreachable, hook refused) marks
+	// the step failed inside `dispatchStep` and returns normally, so no callback
+	// and no other emit site is ever reached. Whoever called `advance` decides
+	// what that does to the WORKFLOW; the step's own failure is reported here,
+	// because this is the only place that knows it happened.
+	const dispatched = getStep(next.id);
+	if (dispatched?.status === "failed") {
+		reportStepEvent(dispatched, "step.failed", {
+			phase: "exec",
+			duration_ms: stepDurationMs(dispatched),
+			retry_count: dispatched.retryCount,
+			max_retries: dispatched.maxRetries,
+			error: reportError(dispatched, "exec", "dispatch_failed", dispatched.error ?? "dispatch failed"),
+		});
+	}
 	writeStatusMd(workflowId);
 }
 
@@ -1738,10 +1817,35 @@ function parseJudgeVerdict(text: string | undefined): { ok: boolean; reason: str
 	return null;
 }
 
-/** Fails a workflow at a step with a message, keeping the .md and log in sync. Used by every judge-path dead end. */
-function failWorkflowAt(stepId: string, workflowId: string, error: string, log: Logger): void {
+/**
+ * Fails a workflow at a step with a message, keeping the .md and log in sync.
+ * Used by every judge-path dead end.
+ *
+ * Reports the failure itself, because two of its dead ends (a judge that
+ * couldn't run, a verdict that wouldn't parse) reported nothing at all before —
+ * leaving the step reading `running` upstream forever. `report: false` is for
+ * the one caller that emits a richer event of its own (a judge REJECTION knows
+ * the verdict's reason; this function only sees a message).
+ */
+function failWorkflowAt(
+	stepId: string,
+	workflowId: string,
+	error: string,
+	log: Logger,
+	options: { report?: boolean } = {},
+): void {
 	completeStep(stepId, { ok: false, error });
 	setWorkflowStatus(workflowId, "failed");
+	const failed = options.report === false ? null : getStep(stepId);
+	if (failed) {
+		reportStepEvent(failed, "step.failed", {
+			phase: "judge",
+			duration_ms: stepDurationMs(failed),
+			retry_count: failed.retryCount,
+			max_retries: failed.maxRetries,
+			error: reportError(failed, "judge", "judge_unusable", error),
+		});
+	}
 	writeStatusMd(workflowId);
 	log(`workflow ${workflowId} failed at step ${stepId}: ${error}`, "error");
 }
@@ -1756,6 +1860,17 @@ function failWorkflowIfDispatchDied(stepId: string, workflowId: string, what: st
 	const after = getStep(stepId);
 	if (after?.status === "failed") {
 		setWorkflowStatus(workflowId, "failed");
+		// A hook that was down when we tried to dispatch is the failure mode most
+		// worth seeing on a fleet dashboard, and it was the one that reported
+		// nothing: `dispatchStep` marks the step failed without going through any
+		// callback, so no other emit site is ever reached.
+		reportStepEvent(after, "step.failed", {
+			phase: after.phase,
+			duration_ms: stepDurationMs(after),
+			retry_count: after.retryCount,
+			max_retries: after.maxRetries,
+			error: reportError(after, after.phase, "dispatch_failed", `${what}: ${after.error ?? "unknown"}`),
+		});
 		log(`workflow ${workflowId} failed: ${what} for step ${stepId} could not be dispatched (${after.error})`, "error");
 	}
 	writeStatusMd(workflowId);
@@ -1783,6 +1898,115 @@ function failWorkflowIfDispatchDied(stepId: string, workflowId: string, what: st
 // — reporting must not change a workflow's outcome. Only `task` steps are
 // reported; the hub-owned `context` step is plumbing, not work.
 // ---------------------------------------------------------------------------
+
+// --- the plan snapshot ------------------------------------------------------
+//
+// Lifecycle events say what HAPPENED. They cannot say what the workflow IS.
+//
+// Three things broke because of that gap. A step edited, removed or reordered
+// emitted nothing at all, so the server's step list drifted from the operator's
+// and never came back. A lifecycle event that simply never arrived — hub
+// restarted mid-run, queue parked on a 4xx — left the last event standing as
+// the truth forever, which is how a step that finished locally kept reading
+// `running` upstream. And a `pending` step emits nothing until it runs, so the
+// plan ahead of the cursor was invisible.
+//
+// So the plan is reported as a SNAPSHOT of the whole step list, taken at the
+// one place every mutation already funnels through (`writeStatusMd`). It
+// carries every field the canvas lays out from, which is what lets the server
+// redraw the operator's canvas rather than approximate it. And it self-heals:
+// a lost event is corrected by the next snapshot instead of living forever.
+//
+// The events stay — they are the timeline, the durations and the token
+// attribution, and a snapshot can't reconstruct any of those. The snapshot is
+// what makes them non-load-bearing for correctness.
+
+/** Longest description/criterion carried in a snapshot; matches `step.added`'s cap. */
+const PLAN_TEXT_MAX = 300;
+
+/**
+ * Content digest of the last plan reported per workflow, so the ~40
+ * `writeStatusMd` calls collapse into one event per actual change. A workflow
+ * polled for an hour with nothing happening emits nothing.
+ */
+const lastPlanDigest = new Map<string, string>();
+
+/** Forget a workflow's snapshot digest — it's gone, and the map must not outlive it. */
+function forgetPlanDigest(workflowId: string): void {
+	lastPlanDigest.delete(workflowId);
+}
+
+/** One step, as the canvas needs to see it (mirrors `CanvasStep` in the UI). */
+function planStep(step: Step): Record<string, unknown> {
+	return {
+		step_id: step.id,
+		kind: step.kind,
+		order_index: step.orderIndex,
+		description: step.description.slice(0, PLAN_TEXT_MAX),
+		status: step.status,
+		// What a `running` step is actually on — this is what turns the judge
+		// circle on in the canvas, and nothing else reports it.
+		phase: step.phase,
+		acceptance_criteria: step.acceptanceCriteria ? step.acceptanceCriteria.slice(0, PLAN_TEXT_MAX) : null,
+		manual_review: step.manualReview === true,
+		use_subagent: step.useSubagent !== false,
+		manual_run: step.manualRun === true,
+		max_retries: step.maxRetries ?? 0,
+		retry_count: step.retryCount ?? 0,
+		selected: step.selected === true,
+		started_at: step.startedAt,
+		finished_at: step.finishedAt,
+	};
+}
+
+/**
+ * Emit the workflow's current plan, unless it is byte-identical to the last one
+ * we sent. Best-effort and never throws, like every other hook in this section.
+ *
+ * Unlike `reportStepEvent` this includes the hub-owned `context` step: the
+ * canvas draws it as the card pinned above step 1, so leaving it out would draw
+ * a different workflow than the operator sees.
+ */
+function reportPlan(workflow: Workflow, steps: readonly Step[]): void {
+	const rc = loadReportConfig();
+	if (!rc.enabled) return;
+	try {
+		const payload = {
+			name: workflow.name,
+			status: workflow.status,
+			status_manual: workflow.statusManual === true,
+			steps: steps.map(planStep),
+		};
+		const body = JSON.stringify(payload);
+		if (lastPlanDigest.get(workflow.id) === body) return;
+		lastPlanDigest.set(workflow.id, body);
+		reportEmit("workflow.plan", { workflowId: workflow.id, data: payload }, rc);
+	} catch {
+		// Reporting is best-effort: a snapshot that can't be built is skipped.
+	}
+}
+
+/**
+ * Records a workflow status transition on the wire.
+ *
+ * This wraps db.ts's writer rather than sitting at its ~19 call sites: every
+ * pause, resume, restart, abort, manual-review hold, override and heal writes
+ * through here, and before this wrapper only two of them reported. Wrapping is
+ * also what keeps `manual` honest — the flag was in the contract from the start
+ * but nothing ever set it, because the one emit site was the engine's.
+ *
+ * A no-op transition (same status written again, which `reconcileStatus` does
+ * routinely) emits nothing.
+ */
+function setWorkflowStatus(id: string, status: WorkflowStatus, options: { manual?: boolean } = {}): void {
+	const before = getWorkflow(id)?.status ?? null;
+	setWorkflowStatusRow(id, status, options);
+	if (before === status) return;
+	reportEmit("workflow.status_changed", {
+		workflowId: id,
+		data: { from: before, to: status, manual: options.manual === true },
+	});
+}
 
 /** Duration of a step, ms, if both timestamps are present. */
 function stepDurationMs(step: Step): number | null {
@@ -1952,6 +2176,16 @@ export async function onStepResult(
 	const judging = getStep(stepId);
 	if (!workflow || !judging) return;
 	log(`step ${stepId} done, dispatching judge`);
+	// The judge is a second job on the same step, and until now it was invisible:
+	// every `step.started` on the wire said `phase: "exec"`, so a step being
+	// judged was indistinguishable from a step still being worked on — and the
+	// canvas can't light its judge circle without knowing.
+	reportStepEvent(judging, "step.started", {
+		phase: "judge",
+		acceptance_criteria: judging.acceptanceCriteria,
+		attempt: judging.retryCount + 1,
+		max_retries: judging.maxRetries,
+	});
 	await dispatchStep(judging, workflow, cfg, log, { mode: "judge" });
 	failWorkflowIfDispatchDied(stepId, step.workflowId, "judge", log);
 }
@@ -1985,6 +2219,22 @@ async function onManualRun(
 	// --- exec phase: the manual run's actual work finished ---
 	if (!outcome.ok) {
 		completeStep(step.id, outcome);
+		// A ▶ run stays out of the engine for STATUS, but it is still real work on
+		// a real step: it burned tokens and it changed the step's state, so it
+		// reports like any other run. `manual_run` is what tells the two apart.
+		{
+			const failed = getStep(step.id) ?? step;
+			const wf = getWorkflow(step.workflowId);
+			reportStepEvent(failed, "step.failed", {
+				phase: "exec",
+				manual_run: true,
+				duration_ms: stepDurationMs(failed),
+				retry_count: failed.retryCount,
+				max_retries: failed.maxRetries,
+				error: reportError(failed, "exec", "agent_error", outcome.error),
+			});
+			if (wf) reportUsageSnapshot(wf, failed);
+		}
 		log(`step ${step.id} (on-demand run) failed (${outcome.error})`);
 		settleManual(step.workflowId, log);
 		return;
@@ -2000,6 +2250,17 @@ async function onManualRun(
 			return;
 		}
 		completeStep(step.id, outcome);
+		{
+			const done = getStep(step.id) ?? step;
+			const wf = getWorkflow(step.workflowId);
+			reportStepEvent(done, "step.done", {
+				manual_run: true,
+				duration_ms: stepDurationMs(done),
+				retry_count: done.retryCount,
+				result_len: outcome.result?.length ?? 0,
+			});
+			if (wf) reportUsageSnapshot(wf, done);
+		}
 		log(`step ${step.id} (on-demand run) done`);
 		settleManual(step.workflowId, log);
 		return;
@@ -2012,6 +2273,13 @@ async function onManualRun(
 	const judging = getStep(step.id);
 	if (!workflow || !judging) return;
 	log(`step ${step.id} (on-demand run) done, dispatching judge`);
+	reportStepEvent(judging, "step.started", {
+		phase: "judge",
+		manual_run: true,
+		acceptance_criteria: judging.acceptanceCriteria,
+		attempt: judging.retryCount + 1,
+		max_retries: judging.maxRetries,
+	});
 	await dispatchStep(judging, workflow, cfg, log, { mode: "judge" });
 	// If the judge dispatch died synchronously it already marked the step failed;
 	// otherwise it's `running` in its judge phase and we just refresh the .md.
@@ -2034,16 +2302,44 @@ async function onManualJudgeVerdict(
 ): Promise<void> {
 	chainSession(step.workflowId, outcome.sessionId);
 
+	// Every settle below reports, for the same reason the engine's do: a ▶ run
+	// moves a real step to a real terminal state, and until now it did so
+	// silently — the server's last word on a ▶-run step was whatever the engine
+	// had said about it, possibly nothing at all.
+	const reportManualSettle = (kind: string, data: Record<string, unknown>): void => {
+		const settled = getStep(step.id) ?? step;
+		const wf = getWorkflow(step.workflowId);
+		reportStepEvent(settled, kind, {
+			manual_run: true,
+			duration_ms: stepDurationMs(settled),
+			retry_count: settled.retryCount,
+			...data,
+		});
+		if (wf) reportUsageSnapshot(wf, settled);
+	};
+
 	// The judge job itself couldn't run — we can't evaluate, so mark it failed.
 	if (!outcome.ok) {
-		completeStep(step.id, { ok: false, error: `judge run failed: ${outcome.error ?? "unknown"}` });
+		const error = `judge run failed: ${outcome.error ?? "unknown"}`;
+		completeStep(step.id, { ok: false, error });
+		reportManualSettle("step.failed", {
+			phase: "judge",
+			max_retries: step.maxRetries,
+			error: reportError(step, "judge", "judge_unusable", error),
+		});
 		log(`step ${step.id} (on-demand run) judge could not run: ${outcome.error ?? "unknown"}`, "error");
 		settleManual(step.workflowId, log);
 		return;
 	}
 	const verdict = parseJudgeVerdict(outcome.result);
 	if (!verdict) {
-		completeStep(step.id, { ok: false, error: `judge verdict unparseable: ${truncateText(outcome.result)}` });
+		const error = `judge verdict unparseable: ${truncateText(outcome.result)}`;
+		completeStep(step.id, { ok: false, error });
+		reportManualSettle("step.failed", {
+			phase: "judge",
+			max_retries: step.maxRetries,
+			error: reportError(step, "judge", "judge_unusable", error),
+		});
 		log(`step ${step.id} (on-demand run) judge verdict unparseable`, "error");
 		settleManual(step.workflowId, log);
 		return;
@@ -2052,6 +2348,12 @@ async function onManualJudgeVerdict(
 		// Judged good, but a gated step still needs a human on top of that.
 		if (step.manualReview && (await holdForManualReview(step, {}, log))) return;
 		finishStepDone(step.id);
+		reportStepEvent(getStep(step.id) ?? step, "step.judged", {
+			ok: true,
+			manual_run: true,
+			acceptance_criteria: step.acceptanceCriteria,
+		});
+		reportManualSettle("step.done", {});
 		log(`step ${step.id} (on-demand run) passed the judge`);
 		settleManual(step.workflowId, log);
 		return;
@@ -2059,15 +2361,28 @@ async function onManualJudgeVerdict(
 
 	// Rejected. Out of retries → fail; otherwise re-run the same manual step.
 	if (step.retryCount >= step.maxRetries) {
-		completeStep(step.id, {
+		const error = `rejected by the judge after ${step.retryCount} retry(ies): ${verdict.reason || "(no reason given)"}`;
+		completeStep(step.id, { ok: false, error });
+		const err = reportError(step, "judge", "judge_rejected", verdict.reason);
+		reportStepEvent(getStep(step.id) ?? step, "step.judged", {
 			ok: false,
-			error: `rejected by the judge after ${step.retryCount} retry(ies): ${verdict.reason || "(no reason given)"}`,
+			manual_run: true,
+			acceptance_criteria: step.acceptanceCriteria,
+			error: err,
 		});
+		reportManualSettle("step.failed", { phase: "judge", max_retries: step.maxRetries, error: err });
 		log(`step ${step.id} (on-demand run) failed: rejected by the judge`, "error");
 		settleManual(step.workflowId, log);
 		return;
 	}
 
+	reportStepEvent(step, "step.judged", {
+		ok: false,
+		manual_run: true,
+		acceptance_criteria: step.acceptanceCriteria,
+		retrying: true,
+		error: reportError(step, "judge", "judge_rejected", verdict.reason),
+	});
 	beginRetry(step.id); // status → pending, retry_count++, keeps is_manual_run
 	writeStatusMd(step.workflowId);
 	log(`step ${step.id} (on-demand run) rejected by judge (retry ${step.retryCount + 1}/${step.maxRetries}): ${verdict.reason}`);
@@ -2078,6 +2393,14 @@ async function onManualJudgeVerdict(
 	const workflow = getWorkflow(step.workflowId);
 	const retried = getStep(step.id);
 	if (!workflow || !retried) return;
+	reportStepEvent(retried, "step.started", {
+		phase: "exec",
+		manual_run: true,
+		use_subagent: retried.useSubagent,
+		attempt: retried.retryCount + 1,
+		max_retries: retried.maxRetries,
+		retry_reason: truncateText(verdict.reason),
+	});
 	// Resume the shared session (now equal to the judge's session we just chained).
 	await dispatchStep(retried, workflow, cfg, log, { manual: true, resumeSession: true, retryReason: verdict.reason });
 	// A dead dispatch already marked the step failed; otherwise it's running again.
@@ -2135,6 +2458,8 @@ async function onJudgeVerdict(
 			step.workflowId,
 			`rejected by the judge after ${step.retryCount} retry(ies): ${verdict.reason || "(no reason given)"}`,
 			log,
+			// This path emits its own pair below, carrying the verdict's reason.
+			{ report: false },
 		);
 		const failed = getStep(step.id) ?? step;
 		const wfFailed = getWorkflow(step.workflowId);
@@ -2151,6 +2476,16 @@ async function onJudgeVerdict(
 		return;
 	}
 
+	// A rejection that still has budget was the quietest hole of all: the step
+	// went back to `pending` and re-ran, and the wire saw neither the verdict nor
+	// the new attempt — only the eventual outcome, with a retry_count that had
+	// silently grown. Both halves are reported now.
+	reportStepEvent(step, "step.judged", {
+		ok: false,
+		acceptance_criteria: step.acceptanceCriteria,
+		retrying: true,
+		error: reportError(step, "judge", "judge_rejected", verdict.reason),
+	});
 	beginRetry(step.id);
 	writeStatusMd(step.workflowId);
 	log(`step ${step.id} rejected by judge (retry ${step.retryCount + 1}/${step.maxRetries}): ${verdict.reason}`);
@@ -2163,6 +2498,13 @@ async function onJudgeVerdict(
 	const workflow = getWorkflow(step.workflowId);
 	const retried = getStep(step.id);
 	if (!workflow || !retried) return;
+	reportStepEvent(retried, "step.started", {
+		phase: "exec",
+		use_subagent: retried.useSubagent,
+		attempt: retried.retryCount + 1,
+		max_retries: retried.maxRetries,
+		retry_reason: truncateText(verdict.reason),
+	});
 	await dispatchStep(retried, workflow, cfg, log, { resumeSession: true, retryReason: verdict.reason });
 	failWorkflowIfDispatchDied(step.id, step.workflowId, "retry", log);
 }
@@ -2200,6 +2542,15 @@ export async function runStep(workflowId: string, stepId: string, cfg: HubConfig
 		throw new WorkflowError("this step is waiting for its manual review — continue it instead");
 	}
 	if (!startManualRun(stepId)) throw new WorkflowError("this step is already running");
+	// `advance` reports the engine's starts; nothing reported this one, so a ▶ run
+	// showed up on the dashboard only if and when it happened to settle.
+	reportStepEvent(getStep(stepId) ?? step, "step.started", {
+		phase: "exec",
+		manual_run: true,
+		use_subagent: step.useSubagent,
+		attempt: step.retryCount + 1,
+		max_retries: step.maxRetries,
+	});
 	writeStatusMd(workflowId);
 	await dispatchStep(step, workflow, cfg, log, { manual: true });
 	writeStatusMd(workflowId);
@@ -2251,6 +2602,20 @@ export async function abortStep(workflowId: string, stepId: string, log?: Logger
 		}
 		takeStatusBeforeReview(workflowId);
 		setWorkflowStatus(workflowId, "failed");
+		// The mirror image of `continueStep`'s report: a human's rejection settles
+		// the step just as surely as their approval, and neither used to say so.
+		{
+			const rejected = getStep(stepId) ?? step;
+			reportStepEvent(rejected, "step.failed", {
+				phase: "review",
+				manual_run: rejected.manualRun === true,
+				duration_ms: stepDurationMs(rejected),
+				retry_count: rejected.retryCount,
+				max_retries: rejected.maxRetries,
+				error: reportError(rejected, "exec", "manual_review_rejected", "rejected at its manual review"),
+			});
+			reportUsageSnapshot(workflow, rejected);
+		}
 		writeStatusMd(workflowId);
 		log?.(`step ${stepId} rejected at its manual review — workflow ${workflowId} stopped`, "warning");
 		const stopped = getWorkflow(workflowId);
@@ -2260,6 +2625,19 @@ export async function abortStep(workflowId: string, stepId: string, log?: Logger
 	if (step.status !== "running" && step.status !== "queued") throw new WorkflowError("only a running step can be aborted");
 	if (!failRunningStep(stepId, "aborted")) throw new WorkflowError("only a running step can be aborted");
 	setWorkflowStatus(workflowId, "failed");
+	{
+		const aborted = getStep(stepId) ?? step;
+		reportStepEvent(aborted, "step.failed", {
+			phase: aborted.phase,
+			manual_run: aborted.manualRun === true,
+			aborted: true,
+			duration_ms: stepDurationMs(aborted),
+			retry_count: aborted.retryCount,
+			max_retries: aborted.maxRetries,
+			error: reportError(aborted, aborted.phase, "aborted", "aborted by the operator"),
+		});
+		reportUsageSnapshot(workflow, aborted);
+	}
 	writeStatusMd(workflowId);
 	// Kill the spawned process on the broker so it stops holding the workdir
 	// `flock`. Fire after the DB is settled so the operator sees `failed` first;
