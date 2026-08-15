@@ -780,6 +780,14 @@ export function announceWorkflows(): void {
 			workflowId: workflow.id,
 			data: { name: workflow.name, agent_name: workflow.agentName, ...workflowRuntimeMeta(workflow.hookUrl) },
 		});
+		// …and its plan, which is the whole point of announcing on startup: a
+		// snapshot is only emitted when something MUTATES a workflow, so without
+		// this a hub that has just learned to send them would leave every
+		// existing workflow un-drawable until someone happened to touch it. A
+		// finished one would never be touched again. One snapshot per workflow
+		// per daemon start, and the dedup in `reportPlan` means the ordinary
+		// `writeStatusMd` traffic afterwards costs nothing.
+		reportPlan(workflow, listSteps(workflow.id));
 	}
 }
 
