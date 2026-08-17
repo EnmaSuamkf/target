@@ -39,6 +39,12 @@ process.env.TARGET_HOME = tmpHome;
 process.env.AWB_HOME = tmpHome;
 process.env.CLAUDE_CONFIG_DIR = path.join(tmpHome, "claude");
 
+// Never let a developer's real Slack session become a transport in tests: with
+// these exported, an unstubbed path would attempt an actual DM.
+for (const suffix of ["XOXC", "XOXD"]) {
+	for (const prefix of ["TARGET_SLACK_", "SLACK_MCP_", "SLACK_"]) delete process.env[`${prefix}${suffix}_TOKEN`];
+}
+
 /**
  * Seeds the DB file with a `workflows` table as it looked at launch — before
  * `conversation_context`, `context_injected`, `status_before_review` and the
@@ -131,7 +137,7 @@ function captureSends(
 		saveNotificationSettings({ enabled: false, channels: { slack: { username: "" } } });
 	});
 	const sent: { username: string; message: string }[] = [];
-	notifierImpl.detect = overrides.detect ?? (() => endpoint);
+	notifierImpl.detect = overrides.detect ?? (() => [endpoint]);
 	notifierImpl.send = async (ep, username, message) => {
 		sent.push({ username, message });
 		if (overrides.send) await overrides.send(ep, username, message);
@@ -266,7 +272,7 @@ test("case 1: with notifications disabled nothing is sent and nothing is even lo
 	const sent: string[] = [];
 	notifierImpl.detect = () => {
 		detects++;
-		return endpoint;
+		return [endpoint];
 	};
 	notifierImpl.send = async (_e, _u, message) => {
 		sent.push(message);
@@ -291,12 +297,12 @@ test("case 2: enabled with no Slack username sends nothing", async (t) => {
 	assert.equal(sent.length, 0);
 });
 
-test("case 3: with a username but no confirmed Slack MCP, nothing is sent", async (t) => {
-	const sent = captureSends(t, { detect: () => null });
+test("case 3: with a username but no way to reach Slack at all, nothing is sent", async (t) => {
+	const sent = captureSends(t, { detect: () => [] });
 
 	const result = await sendWorkflowCompletedNotification(notice);
 
-	assert.deepEqual(result, { sent: false, reason: "mcp-unavailable" });
+	assert.deepEqual(result, { sent: false, reason: "no-transport" });
 	assert.equal(sent.length, 0);
 });
 
@@ -319,7 +325,7 @@ test("case 5: a send that throws is swallowed and reported, never rethrown", asy
 
 	const result = await sendWorkflowCompletedNotification(notice);
 
-	assert.deepEqual(result, { sent: false, reason: "send-failed" });
+	assert.deepEqual(result, { sent: false, reason: "send-failed", detail: "slack said no" });
 	assert.equal(sent.length, 1); // it really was attempted
 });
 
@@ -330,7 +336,11 @@ test("a detector that throws is treated as a failure, not as an exception", asyn
 		},
 	});
 
-	assert.deepEqual(await sendWorkflowCompletedNotification(notice), { sent: false, reason: "send-failed" });
+	assert.deepEqual(await sendWorkflowCompletedNotification(notice), {
+		sent: false,
+		reason: "send-failed",
+		detail: "unreadable credentials",
+	});
 });
 
 // --- the message --------------------------------------------------------

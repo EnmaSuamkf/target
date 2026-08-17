@@ -42,6 +42,12 @@ process.env.TARGET_HOME = tmpHome;
 process.env.AWB_HOME = tmpHome;
 process.env.CLAUDE_CONFIG_DIR = path.join(tmpHome, "claude");
 
+// Never let a developer's real Slack session become a transport in tests: with
+// these exported, an unstubbed path would attempt an actual DM.
+for (const suffix of ["XOXC", "XOXD"]) {
+	for (const prefix of ["TARGET_SLACK_", "SLACK_MCP_", "SLACK_"]) delete process.env[`${prefix}${suffix}_TOKEN`];
+}
+
 /**
  * Seeds the DB file with a `steps` table as it looked BEFORE `manual_review`
  * existed, so importing db.ts below runs the real upgrade path (`addColumn`)
@@ -806,7 +812,7 @@ test("a step still enters (and stays in) waiting when the notification fails to 
 		notifierImpl.send = originalSend;
 		saveNotificationSettings({ enabled: false, channels: { slack: { username: "" } } });
 	});
-	notifierImpl.detect = () => ({ serverName: "slack", serverUrl: "http://127.0.0.1:1/mcp", accessToken: "tok" });
+	notifierImpl.detect = () => [{ serverName: "slack", serverUrl: "http://127.0.0.1:1/mcp", accessToken: "tok" }];
 	notifierImpl.send = async () => {
 		throw new Error("slack is down");
 	};
@@ -835,7 +841,7 @@ test("the notification carries the workflow, the step number and its description
 		saveNotificationSettings({ enabled: false, channels: { slack: { username: "" } } });
 	});
 	const sent: { username: string; message: string }[] = [];
-	notifierImpl.detect = () => ({ serverName: "slack", serverUrl: "http://127.0.0.1:1/mcp", accessToken: "tok" });
+	notifierImpl.detect = () => [{ serverName: "slack", serverUrl: "http://127.0.0.1:1/mcp", accessToken: "tok" }];
 	notifierImpl.send = async (_endpoint, username, message) => {
 		sent.push({ username, message });
 	};

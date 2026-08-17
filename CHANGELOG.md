@@ -11,6 +11,25 @@ The current version is reported by every instance to the central server (see
 
 ### Added
 
+- **Slack notifications no longer need the official plugin.** Delivery used to
+  have exactly one route — an OAuth login for the Slack MCP, stored by
+  `claude /mcp` in `~/.claude/.credentials.json` — so anyone using a different
+  Slack MCP got silence, whatever they had configured: the hub read only that
+  one file, spoke only HTTP MCP, and called two tool names only that plugin
+  exposes. It now also reads a Slack web session from the environment
+  (`TARGET_SLACK_XOXC_TOKEN` + `TARGET_SLACK_XOXD_TOKEN`, with the
+  `SLACK_MCP_*` and `SLACK_*` names a third-party MCP may already use accepted
+  too) and posts to `slack.com/api` directly, with no MCP anywhere in the path.
+  That route is tried first, because two variables in `.env` are a deliberate
+  choice while a stored OAuth token is whatever a past `/mcp` login left behind.
+  It is a preference, not a commitment: the transports are tried in turn, so a
+  `d` cookie that expired overnight falls through to the MCP instead of costing
+  the notification, and only when every route has failed is one lost. When that
+  happens the log now carries Slack's own words (`send-failed:
+  chat.postMessage: invalid_auth`) instead of a bare `send-failed` — the point
+  being that expired client tokens announce themselves rather than turning into
+  notifications that quietly stop arriving.
+
 - **Templates travel between machines as a file.** A template was always pure
   data — a name, tags and an ordered step list, with no path, secret or session
   id anywhere in it — but it had no way out of the SQLite file it was born in.
