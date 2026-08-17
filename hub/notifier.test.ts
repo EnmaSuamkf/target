@@ -33,9 +33,24 @@ process.env.AWB_HOME = tmpHome;
 const configDir = path.join(tmpHome, "claude");
 process.env.CLAUDE_CONFIG_DIR = configDir;
 fs.mkdirSync(configDir, { recursive: true });
+// The client-token transport reads the environment, and the machine running the
+// suite may well have a real Slack session exported (that is the whole point of
+// accepting the SLACK_MCP_* names). Clear every accepted name so "no transport"
+// tests are testing the code and not the developer's shell.
+for (const suffix of ["XOXC", "XOXD"]) {
+	for (const prefix of ["TARGET_SLACK_", "SLACK_MCP_", "SLACK_"]) delete process.env[`${prefix}${suffix}_TOKEN`];
+}
 
 const { saveNotificationSettings } = await import("./db.ts");
-const { _impl, detectSlackMcp, manualReviewMessage, sendManualReviewNotification } = await import("./notifier.ts");
+const {
+	_impl,
+	detectSlackClientTokens,
+	detectSlackMcp,
+	manualReviewMessage,
+	resolveSlackTransports,
+	sendManualReviewNotification,
+} = await import("./notifier.ts");
+type SlackTransport = Awaited<ReturnType<typeof resolveSlackTransports>>[number];
 
 const notice = {
 	workflowName: "release 1.4",
@@ -55,19 +70,20 @@ function stubImpl(
 		_impl.detect = originalDetect;
 		_impl.send = originalSend;
 	});
-	const calls = { detect: 0, send: [] as { username: string; message: string; serverUrl: string }[] };
+	const calls = { detect: 0, send: [] as { username: string; message: string; transport: SlackTransport }[] };
 	_impl.detect = () => {
 		calls.detect++;
-		return overrides.detect ? overrides.detect() : null;
+		return overrides.detect ? overrides.detect() : [];
 	};
-	_impl.send = async (endpoint, username, message) => {
-		calls.send.push({ username, message, serverUrl: endpoint.serverUrl });
-		if (overrides.send) await overrides.send(endpoint, username, message);
+	_impl.send = async (transport, username, message) => {
+		calls.send.push({ username, message, transport });
+		if (overrides.send) await overrides.send(transport, username, message);
 	};
 	return calls;
 }
 
 const endpoint = { serverName: "plugin:slack:slack", serverUrl: "https://mcp.slack.com/mcp", accessToken: "tok-123" };
+const clientTokens = { xoxc: "xoxc-abc", xoxd: "xoxd-def" };
 
 /** Writes the credential store detectSlackMcp reads (or removes it entirely). */
 function writeCredentials(contents: unknown | null): void {
@@ -83,7 +99,7 @@ function writeCredentials(contents: unknown | null): void {
 
 test("case 1: with notifications disabled nothing is sent and nothing is even looked up", async (t) => {
 	saveNotificationSettings({ enabled: false, channels: { slack: { username: "ada" } } });
-	const calls = stubImpl(t, { detect: () => endpoint });
+	const calls = stubImpl(t, { detect: () => [endpoint] });
 
 	const result = await sendManualReviewNotification(notice);
 
@@ -96,7 +112,7 @@ test("case 1: with notifications disabled nothing is sent and nothing is even lo
 
 test("case 2: enabled with no Slack username sends nothing", async (t) => {
 	saveNotificationSettings({ enabled: true, channels: { slack: { username: "" } } });
-	const calls = stubImpl(t, { detect: () => endpoint });
+	const calls = stubImpl(t, { detect: () => [endpoint] });
 
 	const result = await sendManualReviewNotification(notice);
 
@@ -109,7 +125,7 @@ test("case 2: a whitespace-only username counts as none", async (t) => {
 	// saveNotificationSettings trims on the way in, so this is stored as "" — the
 	// point is that "   " can never reach the send as a Slack handle.
 	saveNotificationSettings({ enabled: true, channels: { slack: { username: "   " } } });
-	const calls = stubImpl(t, { detect: () => endpoint });
+	const calls = stubImpl(t, { detect: () => [endpoint] });
 
 	const result = await sendManualReviewNotification(notice);
 
@@ -117,27 +133,27 @@ test("case 2: a whitespace-only username counts as none", async (t) => {
 	assert.equal(calls.send.length, 0);
 });
 
-test("case 3: with a username but no confirmed Slack MCP, nothing is sent", async (t) => {
+test("case 3: with a username but no way to reach Slack at all, nothing is sent", async (t) => {
 	saveNotificationSettings({ enabled: true, channels: { slack: { username: "ada" } } });
-	const calls = stubImpl(t); // detect answers null
+	const calls = stubImpl(t); // detect answers no transports
 
 	const result = await sendManualReviewNotification(notice);
 
-	assert.deepEqual(result, { sent: false, reason: "mcp-unavailable" });
+	assert.deepEqual(result, { sent: false, reason: "no-transport" });
 	assert.equal(calls.detect, 1);
 	assert.equal(calls.send.length, 0);
 });
 
 test("case 4: fully configured, the message is sent once to the configured user", async (t) => {
 	saveNotificationSettings({ enabled: true, channels: { slack: { username: "@ada" } } });
-	const calls = stubImpl(t, { detect: () => endpoint });
+	const calls = stubImpl(t, { detect: () => [endpoint] });
 
 	const result = await sendManualReviewNotification(notice);
 
 	assert.deepEqual(result, { sent: true });
 	assert.equal(calls.send.length, 1);
 	assert.equal(calls.send[0].username, "@ada");
-	assert.equal(calls.send[0].serverUrl, endpoint.serverUrl);
+	assert.deepEqual(calls.send[0].transport, endpoint);
 	// The message has to stand on its own: which workflow, which step, why.
 	const message = calls.send[0].message;
 	assert.match(message, /release 1\.4/);
@@ -149,7 +165,7 @@ test("case 4: fully configured, the message is sent once to the configured user"
 test("case 5: a send that throws is swallowed and reported, never rethrown", async (t) => {
 	saveNotificationSettings({ enabled: true, channels: { slack: { username: "ada" } } });
 	const calls = stubImpl(t, {
-		detect: () => endpoint,
+		detect: () => [endpoint],
 		send: async () => {
 			throw new Error("slack said no");
 		},
@@ -157,7 +173,8 @@ test("case 5: a send that throws is swallowed and reported, never rethrown", asy
 
 	const result = await sendManualReviewNotification(notice);
 
-	assert.deepEqual(result, { sent: false, reason: "send-failed" });
+	// The `detail` is Slack's own words, carried so a log line can say WHY.
+	assert.deepEqual(result, { sent: false, reason: "send-failed", detail: "slack said no" });
 	assert.equal(calls.send.length, 1); // it really was attempted
 });
 
@@ -171,12 +188,12 @@ test("a detector that throws is treated as a failure, not as an exception", asyn
 
 	const result = await sendManualReviewNotification(notice);
 
-	assert.deepEqual(result, { sent: false, reason: "send-failed" });
+	assert.deepEqual(result, { sent: false, reason: "send-failed", detail: "unreadable credentials" });
 });
 
 test("even a settings read that blows up cannot throw into the engine", async (t) => {
 	saveNotificationSettings({ enabled: true, channels: { slack: { username: "ada" } } });
-	const calls = stubImpl(t, { detect: () => endpoint });
+	const calls = stubImpl(t, { detect: () => [endpoint] });
 
 	// Pull the settings table out from under it — the harshest version of "the
 	// preferences could not be read". A second connection to the same file, so
@@ -190,7 +207,8 @@ test("even a settings read that blows up cannot throw into the engine", async (t
 
 	const result = await sendManualReviewNotification(notice);
 
-	assert.deepEqual(result, { sent: false, reason: "send-failed" });
+	assert.equal(result.sent, false);
+	assert.equal(result.sent === false && result.reason, "send-failed");
 	assert.equal(calls.send.length, 0);
 });
 
@@ -202,6 +220,135 @@ test("manualReviewMessage names the workflow, the step and the reason", () => {
 	assert.match(message, /needs your approval/);
 	// It has to say what unblocks it, since the recipient may not have the UI open.
 	assert.match(message, /Continue/);
+});
+
+// --- more than one transport -------------------------------------------
+//
+// The order (client tokens first) and the fallthrough are the whole point of
+// `detect` answering a LIST, so both are pinned here rather than left to the
+// integration suites.
+
+test("the first transport that succeeds is the only one used", async (t) => {
+	saveNotificationSettings({ enabled: true, channels: { slack: { username: "ada" } } });
+	const calls = stubImpl(t, { detect: () => [clientTokens, endpoint] });
+
+	assert.deepEqual(await sendManualReviewNotification(notice), { sent: true });
+	assert.equal(calls.send.length, 1);
+	assert.deepEqual(calls.send[0].transport, clientTokens);
+});
+
+test("a transport that fails falls through to the next one", async (t) => {
+	saveNotificationSettings({ enabled: true, channels: { slack: { username: "ada" } } });
+	// The realistic version of this: an `xoxd` cookie that expired overnight,
+	// with the Slack MCP still logged in behind it.
+	const calls = stubImpl(t, {
+		detect: () => [clientTokens, endpoint],
+		send: async (transport) => {
+			if ("xoxc" in transport) throw new Error("chat.postMessage: invalid_auth");
+		},
+	});
+
+	assert.deepEqual(await sendManualReviewNotification(notice), { sent: true });
+	assert.equal(calls.send.length, 2);
+	assert.deepEqual(calls.send[1].transport, endpoint);
+	// Both attempts carry the SAME text — a fallthrough re-sends, it never recomposes.
+	assert.equal(calls.send[0].message, calls.send[1].message);
+});
+
+test("only when every transport fails is the notification lost, and the first failure is what's reported", async (t) => {
+	saveNotificationSettings({ enabled: true, channels: { slack: { username: "ada" } } });
+	const calls = stubImpl(t, {
+		detect: () => [clientTokens, endpoint],
+		send: async (transport) => {
+			throw new Error("xoxc" in transport ? "chat.postMessage: invalid_auth" : "mcp is down");
+		},
+	});
+
+	const result = await sendManualReviewNotification(notice);
+
+	// The first failure, not the last: it comes from the transport the operator
+	// deliberately configured, so it's the one worth acting on.
+	assert.deepEqual(result, { sent: false, reason: "send-failed", detail: "chat.postMessage: invalid_auth" });
+	assert.equal(calls.send.length, 2);
+});
+
+// --- detectSlackClientTokens --------------------------------------------
+
+/** Sets (or clears) one accepted client-token variable for the duration of a test. */
+function withEnv(t: { after: (fn: () => void) => void }, vars: Record<string, string | undefined>): void {
+	const original = new Map(Object.keys(vars).map((k) => [k, process.env[k]]));
+	t.after(() => {
+		for (const [k, v] of original) {
+			if (v === undefined) delete process.env[k];
+			else process.env[k] = v;
+		}
+	});
+	for (const [k, v] of Object.entries(vars)) {
+		if (v === undefined) delete process.env[k];
+		else process.env[k] = v;
+	}
+}
+
+test("no client tokens in the environment means no client transport", () => {
+	assert.equal(detectSlackClientTokens(), null);
+});
+
+test("half a pair is not a transport", (t) => {
+	// Slack rejects either one alone, so accepting a lone xoxc would only produce
+	// a guaranteed-failing send.
+	withEnv(t, { TARGET_SLACK_XOXC_TOKEN: "xoxc-abc" });
+	assert.equal(detectSlackClientTokens(), null);
+});
+
+test("a complete pair is a transport", (t) => {
+	withEnv(t, { TARGET_SLACK_XOXC_TOKEN: "xoxc-abc", TARGET_SLACK_XOXD_TOKEN: "xoxd-def" });
+	assert.deepEqual(detectSlackClientTokens(), { xoxc: "xoxc-abc", xoxd: "xoxd-def" });
+});
+
+test("the names a third-party Slack MCP already uses are accepted", (t) => {
+	// So the secret lives in one place instead of two copies that drift apart.
+	withEnv(t, { SLACK_MCP_XOXC_TOKEN: "xoxc-mcp", SLACK_MCP_XOXD_TOKEN: "xoxd-mcp" });
+	assert.deepEqual(detectSlackClientTokens(), { xoxc: "xoxc-mcp", xoxd: "xoxd-mcp" });
+});
+
+test("the TARGET_-prefixed names win over the others", (t) => {
+	withEnv(t, {
+		TARGET_SLACK_XOXC_TOKEN: "xoxc-target",
+		TARGET_SLACK_XOXD_TOKEN: "xoxd-target",
+		SLACK_XOXC_TOKEN: "xoxc-bare",
+		SLACK_XOXD_TOKEN: "xoxd-bare",
+	});
+	assert.deepEqual(detectSlackClientTokens(), { xoxc: "xoxc-target", xoxd: "xoxd-target" });
+});
+
+test("a blank variable counts as unset, so it can't shadow a name set further down", (t) => {
+	withEnv(t, {
+		TARGET_SLACK_XOXC_TOKEN: "   ",
+		TARGET_SLACK_XOXD_TOKEN: "",
+		SLACK_XOXC_TOKEN: "xoxc-bare",
+		SLACK_XOXD_TOKEN: "xoxd-bare",
+	});
+	assert.deepEqual(detectSlackClientTokens(), { xoxc: "xoxc-bare", xoxd: "xoxd-bare" });
+});
+
+// --- resolveSlackTransports ---------------------------------------------
+
+test("with nothing configured there are no transports at all", () => {
+	writeCredentials(null);
+	assert.deepEqual(resolveSlackTransports(), []);
+});
+
+test("client tokens come before the MCP login", (t) => {
+	writeCredentials({
+		mcpOAuth: { "plugin:slack:slack|abc": { serverUrl: "https://mcp.slack.com/mcp", accessToken: "tok" } },
+	});
+	withEnv(t, { TARGET_SLACK_XOXC_TOKEN: "xoxc-abc", TARGET_SLACK_XOXD_TOKEN: "xoxd-def" });
+
+	// Explicit configuration outranks an ambient `/mcp` login that may be months old.
+	assert.deepEqual(resolveSlackTransports(), [
+		{ xoxc: "xoxc-abc", xoxd: "xoxd-def" },
+		{ serverName: "plugin:slack:slack|abc", serverUrl: "https://mcp.slack.com/mcp", accessToken: "tok" },
+	]);
 });
 
 // --- detectSlackMcp -----------------------------------------------------
@@ -307,5 +454,5 @@ test("the real detector is what sendManualReviewNotification uses by default", a
 	saveNotificationSettings({ enabled: true, channels: { slack: { username: "ada" } } });
 	writeCredentials(null);
 
-	assert.deepEqual(await sendManualReviewNotification(notice), { sent: false, reason: "mcp-unavailable" });
+	assert.deepEqual(await sendManualReviewNotification(notice), { sent: false, reason: "no-transport" });
 });

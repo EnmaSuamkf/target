@@ -14,6 +14,11 @@ vendor___/
 # Built web UI (produced by `npm run target:install` / `npm run ui:build`).
 hub/ui/dist/
 
+# Claude Code's per-machine permission allowlist: absolute paths, PIDs and
+# personal directories from whoever's machine it was written on. The shared
+# `.claude/settings.json` (if one is ever added) is source; this one is not.
+.claude/settings.local.json
+
 # Legacy per-step results. The hub used to write these into a workflow's workdir
 # and now keeps them under its own TARGET_HOME (see hub/step-results.ts), but
 # this repo is the workdir of the workflows that develop it, so the directory

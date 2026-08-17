@@ -302,6 +302,16 @@ async function retryTimedOutStep(step: Step, workflow: Workflow, cfg: HubConfig,
 // resumes the run, a ▶ run just settles back into the status it interrupted
 // (see `continueStep`).
 
+/**
+ * The log form of a notification that didn't go out: the reason, plus whatever
+ * Slack itself said when there is one. `send-failed` on its own never told an
+ * operator that their client tokens had expired; `send-failed: chat.postMessage:
+ * invalid_auth` does.
+ */
+function describeSkip(outcome: { reason: string; detail?: string }): string {
+	return outcome.detail ? `${outcome.reason}: ${outcome.detail}` : outcome.reason;
+}
+
 /** What the notification tells the human to look at — the acceptance criterion when there is one, otherwise the result itself. */
 function manualReviewReason(step: Step): string {
 	const base = "this step has Manual review enabled, so its result needs your approval before the workflow moves on";
@@ -327,7 +337,7 @@ async function notifyManualReview(step: Step, workflow: Workflow, log: Logger): 
 	log(
 		outcome.sent
 			? `manual-review notification sent for step ${step.id}`
-			: `manual-review notification not sent for step ${step.id} (${outcome.reason})`,
+			: `manual-review notification not sent for step ${step.id} (${describeSkip(outcome)})`,
 	);
 }
 
@@ -1461,7 +1471,7 @@ async function notifyWorkflowCompleted(workflowId: string, log?: Logger): Promis
 	log?.(
 		outcome.sent
 			? `workflow-completed notification sent for workflow ${workflowId}`
-			: `workflow-completed notification not sent for workflow ${workflowId} (${outcome.reason})`,
+			: `workflow-completed notification not sent for workflow ${workflowId} (${describeSkip(outcome)})`,
 	);
 }
 
