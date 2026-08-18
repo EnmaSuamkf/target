@@ -30,7 +30,7 @@ import {
 } from "./awb.ts";
 import { loadReportConfig, targetDir, type HubConfig } from "./config.ts";
 import { emit as reportEmit } from "./reporter.ts";
-import { readTokenUsage } from "./transcript.ts";
+import { readTokenUsage, usageSnapshot } from "./transcript.ts";
 import {
 	beginRetry,
 	claimWorkflowCompletionNotice,
@@ -2063,6 +2063,10 @@ function reportStepEvent(step: Step, kind: string, data: Record<string, unknown>
  * Emit a usage snapshot for a step's session. Reads the transcript (via
  * readTokenUsage) only when reporting is enabled, so a default install pays
  * nothing here.
+ *
+ * The payload's shape — and in particular WHICH number `input_tokens` is — is
+ * `usageSnapshot` in transcript.ts, so the figures the server tiles show are
+ * the same ones the operator's own client shows for that session.
  */
 function reportUsageSnapshot(workflow: Workflow, step: Step): void {
 	const rc = loadReportConfig();
@@ -2078,15 +2082,7 @@ function reportUsageSnapshot(workflow: Workflow, step: Step): void {
 			{
 				workflowId: workflow.id,
 				sessionId,
-				data: {
-					input_tokens: u.inputTokens,
-					output_tokens: u.outputTokens,
-					cache_read: u.cacheReadTokens,
-					cache_creation: u.cacheCreationTokens,
-					cost_usd: null,
-					compacted: u.compactions > 0,
-					turns: u.turns,
-				},
+				data: usageSnapshot(u),
 			},
 			rc,
 		);

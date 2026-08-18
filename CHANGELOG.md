@@ -11,6 +11,16 @@ The current version is reported by every instance to the central server (see
 
 ### Added
 
+- **Token usage on the workflow detail page, under the steps.** Below the
+  Canvas/List content and the canvas legend, a workflow now shows the same
+  readout its operator's client shows for the same session: a
+  `Context 202.0k / 1.0M` bar with the percentage, then
+  `143 turns · in 16.0M · out 98.6k · incl. subagents`. Same words, same
+  abbreviations, so the two can be held side by side and compared digit for
+  digit — which is the only way to notice they have drifted apart again. The
+  Conversation panel and this one render the same component, so they cannot
+  disagree with each other either.
+
 - **Slack notifications no longer need the official plugin.** Delivery used to
   have exactly one route — an OAuth login for the Slack MCP, stored by
   `claude /mcp` in `~/.claude/.credentials.json` — so anyone using a different
@@ -53,6 +63,26 @@ The current version is reported by every instance to the central server (see
   operator checks before pressing Start are on the row. Previously only the
   non-default choice (`inline`) was shown, and a silent row meant both
   "delegated" and "nobody decided".
+
+### Fixed
+
+- **The token numbers the server reports now match the ones the operator's own
+  client shows.** The hub reported a session's `input_tokens` as the bare
+  `usage.input_tokens` field of each assistant turn. With prompt caching on
+  almost every input token is a cache *read*, so that field measures next to
+  nothing: a real 143-turn session on this machine billed **416** uncached input
+  tokens against **16,015,192** total (1,605,396 cache creation + 14,409,380
+  cache read), and the report server's "INPUT TOKENS" tile duly read `416` next
+  to a client reading `in 16.0M`. Output tokens had always agreed (98,599 either
+  way), which is what made the input column look like a display bug rather than
+  a different number. `usage.snapshot` now leads with that total — the same one
+  the client calls "in" — and carries the components beside it
+  (`input_tokens_uncached`, `cache_creation`, `cache_read`) so the headline
+  stays auditable and the three rates can still be priced apart. It also carries
+  what the server previously had no notion of at all: `context_tokens`,
+  `context_window` and `context_pct` (how full the window is), `model`, `turns`,
+  and `includes_subagents` — a step's real work runs in a subagent, so totals
+  that fold those transcripts in are unexplainable unless they say so.
 
 ### Changed
 

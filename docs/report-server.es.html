@@ -492,7 +492,7 @@ CREATE INDEX IF NOT EXISTS idx_report_pending
             <tr><td rowspan="3">Steps</td><td><code>step.added</code></td><td>step id, order_index, descripción, <code>manual_review</code>, <code>has_acceptance_criteria</code> — la lista de steps planificada</td></tr>
             <tr><td><code>step.started</code> / <code>step.done</code> / <code>step.failed</code> / <code>step.waiting</code></td><td>step id, order_index, descripción, status, phase, retries, duración</td></tr>
             <tr><td><code>step.judged</code></td><td>veredicto del auto-eval y criterio de aceptación</td></tr>
-            <tr><td>Uso</td><td><code>usage.snapshot</code></td><td>session id, tokens in/out, cache, coste estimado (de <code>readTokenUsage</code>)</td></tr>
+            <tr><td>Uso</td><td><code>usage.snapshot</code></td><td>session id, tokens in (total, caché incluida) / out, componentes de caché, ocupación de contexto, turnos, coste estimado (de <code>readTokenUsage</code> vía <code>usageSnapshot</code>)</td></tr>
             <tr><td>Conversación</td><td><code>conversation.snapshot</code></td><td>session id, nº de turnos, <code>digest</code> o texto según privacidad</td></tr>
             <tr><td>Global</td><td><code>heartbeat</code></td><td>instance id, versión, SO, uptime, contadores agregados</td></tr>
           </tbody>
@@ -628,7 +628,7 @@ X-Target-Version: 0.2.0
             <tr><td><code>step.failed</code></td><td><code>step_id</code>, <code>order_index</code>, <code>phase</code>, <code>duration_ms</code>, <code>retry_count</code>, <code>max_retries</code>, <code>error</code> (§7.3)</td></tr>
             <tr><td><code>step.waiting</code></td><td><code>step_id</code>, <code>order_index</code>, <code>reason: "manual_review"</code></td></tr>
             <tr><td><code>step.judged</code></td><td><code>step_id</code>, <code>ok</code> (bool), <code>acceptance_criteria</code>, y si <code>ok=false</code> el <code>error</code> con <code>reason</code> del veredicto</td></tr>
-            <tr><td><code>usage.snapshot</code></td><td><code>input_tokens</code>, <code>output_tokens</code>, <code>cache_read</code>, <code>cache_creation</code>, <code>cost_usd</code>, <code>compacted</code> (bool)</td></tr>
+            <tr><td><code>usage.snapshot</code></td><td><code>input_tokens</code> (<strong>total</strong>: nuevo + creación de caché + lectura de caché — el mismo número que el cliente del operador muestra como «in»), <code>output_tokens</code>, y sus componentes <code>input_tokens_uncached</code>, <code>cache_creation</code>, <code>cache_read</code>; ocupación de contexto <code>context_tokens</code>, <code>context_window</code>, <code>context_pct</code>, <code>model</code>; <code>turns</code>, <code>includes_subagents</code> (bool), <code>compacted</code> (bool), <code>cost_usd</code></td></tr>
             <tr><td><code>conversation.snapshot</code></td><td><code>turns</code>, <code>mode</code> (<code>digest|full</code>), <code>digest</code> o <code>messages[]</code> según privacidad</td></tr>
             <tr><td><code>heartbeat</code></td><td><code>version</code>, <code>os</code>, <code>uptime_ms</code>, <code>workflows_total</code>, <code>queue_pending</code></td></tr>
           </tbody>

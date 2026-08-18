@@ -1,6 +1,6 @@
 import type { SessionInfo } from "../api/types.ts";
-import { compactNumber } from "../lib/format.ts";
 import styles from "./DetailPanels.module.css";
+import { UsageMeter, contextPercent } from "./UsageMeter.tsx";
 
 /**
  * The workflow's shared Claude session: harness, session id, token usage, and
@@ -32,16 +32,11 @@ export function SessionPanel({
 	opening: boolean;
 }): React.JSX.Element {
 	const usage = info?.usage ?? null;
-	// `contextWindow` is the window of the model this session actually ran on
-	// (the hub derives it from the transcript — see hub/models.ts), not a fixed
-	// 200k. Every threshold below is therefore a percentage of the real window;
-	// against the old assumed one a 1M-context session read as permanently over
-	// 100% and the meter said nothing at all.
-	const pct = usage && usage.contextWindow > 0 ? (100 * usage.contextTokens) / usage.contextWindow : 0;
-
-	// Warn as the context window fills — past ~90% a resumed session is close
-	// to compaction, which is worth seeing before starting more steps.
-	const meterClass = pct >= 90 ? styles.meterDanger : pct >= 70 ? styles.meterWarn : "";
+	// The meter itself is UsageMeter — the same component the steps section
+	// renders — so this panel and that one can never quote different numbers for
+	// the same session. What stays here is the one thing only this panel says:
+	// whether the conversation is under enough pressure to change how steps run.
+	const pct = usage ? contextPercent(usage) : 0;
 
 	// Already compacted at least once: the conversation the steps share has lost
 	// its earlier turns. The hub recovers by re-injecting the workflow's
@@ -122,31 +117,15 @@ export function SessionPanel({
 					)}
 
 					{usage && usage.turns > 0 && (
-						<div className={styles.usage}>
-							<div className={styles.usageHead}>
-								{/* The window is per-model, so name the model it belongs to — otherwise
-								    the same session showing "of 1M" one day and "of 200k" the next
-								    (because the operator switched models) looks like a bug. */}
-								<span title={usage.model ? `window for ${usage.model}` : "no model reported yet — assuming the fallback window"}>
-									Context {compactNumber(usage.contextTokens)} / {compactNumber(usage.contextWindow)}
-								</span>
-								<span className={styles.usagePct}>{pct.toFixed(1)}%</span>
-							</div>
-							<div className={`${styles.meter} ${meterClass}`}>
-								<div className={styles.meterFill} style={{ width: `${Math.min(100, pct)}%` }} />
-							</div>
-							<p className={styles.usageTotals}>
-								{usage.turns} turns · in {compactNumber(usage.totalInputTokens)} · out{" "}
-								{compactNumber(usage.outputTokens)}
-								{usage.includesSubagents && " · incl. subagents"}
-							</p>
+						<>
+							<UsageMeter usage={usage} />
 							{pressured && (
 								<p className="hint">
 									Over 60% — steps set to run inline are delegated to a subagent anyway, so this conversation doesn't
 									fill up and degrade.
 								</p>
 							)}
-						</div>
+						</>
 					)}
 				</>
 			)}
