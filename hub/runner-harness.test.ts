@@ -63,15 +63,14 @@ test("createAwbHook with runner free-code writes spawn:free-code", () => {
 
 test("harnessResumeCommand knows both harnesses and quotes the session id", () => {
 	assert.equal(harnessResumeCommand("claude", "sess-1"), "claude --resume 'sess-1'");
-	// `--no-extensions` mirrors what the steps run with; without it free-code's
-	// profile-manager extension stops the terminal on a profile picker, and
+	// The resume is the operator's interactive session, so it loads the full
+	// extension set (no `--no-extensions`, unlike the headless steps), and
 	// `--no-rag-server` skips the 90s wait for a RAG server the resume image
-	// doesn't have. Matched rather than compared because the `-e <widget>` in
-	// between depends on the host's free-code install; the exact flag list is
-	// pinned against a throwaway HOME in sandbox.test.ts.
+	// doesn't have. The exact flag list is pinned against a throwaway HOME in
+	// sandbox.test.ts.
 	assert.match(
 		harnessResumeCommand("free-code", "/home/u/.agent-webhook-bridge/sessions/h/a.jsonl") ?? "",
-		/^free-code --session '\/home\/u\/\.agent-webhook-bridge\/sessions\/h\/a\.jsonl' --no-extensions( -e '.*')? --no-rag-server$/,
+		/^free-code --session '\/home\/u\/\.agent-webhook-bridge\/sessions\/h\/a\.jsonl' --no-rag-server$/,
 	);
 	assert.equal(harnessResumeCommand("unknown-harness", "sess-1"), null);
 	assert.equal(harnessResumeCommand(null, "sess-1"), null);
@@ -218,5 +217,5 @@ test("POST /api/workflows/:id/open-terminal on a free-code workflow spawns free-
 	assert.equal(res.status, 200);
 	assert.equal(calls.length, 1);
 	const shellCmd = calls[0].args.at(-1) ?? "";
-	assert.match(shellCmd, /^cd '.*' && free-code --session '.*s1\.jsonl' --no-extensions.*; exec bash$/);
+	assert.match(shellCmd, /^cd '.*' && free-code --session '.*s1\.jsonl' --no-rag-server; exec bash$/);
 });

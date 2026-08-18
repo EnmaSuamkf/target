@@ -45,12 +45,14 @@ that assumed Claude's session/transcript conventions.
 
 - **Session ids** are `.jsonl` paths, shown as-is in the Conversation panel
   and the progress `.md`.
-- **"Open conversation"** spawns `free-code --session <path> --no-extensions
-  -e <subagent-widget> --no-rag-server` instead of `claude --resume <uuid>`.
-  `--no-extensions` reopens with only the subagent widget (the steps ran that
-  way); `--no-rag-server` skips the local Python RAG server auto-start, which
-  isn't installed in the docker image and otherwise blocks ~90s before the
-  conversation paints (an apparently empty terminal).
+- **"Open conversation"** spawns `free-code --session <path> --no-rag-server`
+  instead of `claude --resume <uuid>`. Unlike the steps (which run headless
+  with `--no-extensions`), the reopened terminal is the operator's own
+  interactive session, so it loads the full extension set — including the
+  startup profile picker, if that extension is installed. `--no-rag-server`
+  skips the local Python RAG server auto-start, which isn't installed in the
+  docker image and otherwise blocks ~90s before the conversation paints (an
+  apparently empty terminal).
 - **Permissions**: awb maps the hook's `permissionMode` to free-code's
   `--tools` flag (unset → read-only; `acceptEdits` → +write/edit, no bash;
   `bypassPermissions`/`auto`/`dontAsk` → full incl. bash; `manual`/`plan` →
