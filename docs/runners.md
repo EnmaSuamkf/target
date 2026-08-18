@@ -49,9 +49,13 @@ that assumed Claude's session/transcript conventions.
   instead of `claude --resume <uuid>`. Like the steps, the reopened terminal
   loads free-code's full environment — extensions (subagent widget included),
   skills, prompt templates and themes auto-discovered from `~/.free-code` and
-  the workdir. `--no-rag-server` skips the local Python RAG server
-  auto-start, which isn't installed in the docker image and otherwise blocks
-  ~90s before the conversation paints (an apparently empty terminal).
+  the workdir. The terminal also sets `FREE_CODE_STARTUP_PROFILE=default`
+  (a docker resume gets it as a `-e` flag), which free-code's profile-manager
+  extension reads to apply the default profile instead of stopping the
+  terminal on its startup profile picker. `--no-rag-server` skips the local
+  Python RAG server auto-start, which isn't installed in the docker image and
+  otherwise blocks ~90s before the conversation paints (an apparently empty
+  terminal).
 - **Steps run with the full free-code environment.** awb's free-code adapter
   passes only `--no-rag-server` (plus the `--tools` set mapped from the
   hook's `permissionMode`): no `--no-extensions`, no `--no-skills`, so a step
