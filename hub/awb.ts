@@ -187,10 +187,9 @@ const HARNESS_RESUME_COMMANDS: Record<string, (sessionId: string) => string> = {
 	// conversation only paints after that delay — i.e. an apparently empty
 	// terminal. The RAG server is not used by these workflow sessions, so
 	// disabling it loses nothing and makes the conversation appear at once.
-	// Unlike the steps (awb's adapter keeps `--no-extensions` so an untrusted
-	// workdir can't plant extensions on a headless run), this terminal is the
-	// operator's own interactive session, so it loads the full extension set —
-	// the same toolset they'd get running free-code by hand in that directory.
+	// Like the steps (awb's adapter also passes just `--no-rag-server`), the
+	// reopened terminal loads the full extension set — the same toolset the
+	// operator would get running free-code by hand in that directory.
 	"free-code": (sessionId) => `free-code --session ${shellQuote(sessionId)} --no-rag-server`,
 };
 

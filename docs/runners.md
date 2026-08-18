@@ -46,13 +46,18 @@ that assumed Claude's session/transcript conventions.
 - **Session ids** are `.jsonl` paths, shown as-is in the Conversation panel
   and the progress `.md`.
 - **"Open conversation"** spawns `free-code --session <path> --no-rag-server`
-  instead of `claude --resume <uuid>`. Unlike the steps (which run headless
-  with `--no-extensions`), the reopened terminal is the operator's own
-  interactive session, so it loads the full extension set — including the
-  startup profile picker, if that extension is installed. `--no-rag-server`
-  skips the local Python RAG server auto-start, which isn't installed in the
-  docker image and otherwise blocks ~90s before the conversation paints (an
-  apparently empty terminal).
+  instead of `claude --resume <uuid>`. Like the steps, the reopened terminal
+  loads free-code's full environment — extensions (subagent widget included),
+  skills, prompt templates and themes auto-discovered from `~/.free-code` and
+  the workdir. `--no-rag-server` skips the local Python RAG server
+  auto-start, which isn't installed in the docker image and otherwise blocks
+  ~90s before the conversation paints (an apparently empty terminal).
+- **Steps run with the full free-code environment.** awb's free-code adapter
+  passes only `--no-rag-server` (plus the `--tools` set mapped from the
+  hook's `permissionMode`): no `--no-extensions`, no `--no-skills`, so a step
+  has the same extensions, skills and MCP tools as running free-code by hand
+  in that directory. `~/.free-code` is mounted at its own path in the docker
+  sandbox, so discovery agrees on both sides.
 - **Permissions**: awb maps the hook's `permissionMode` to free-code's
   `--tools` flag (unset → read-only; `acceptEdits` → +write/edit, no bash;
   `bypassPermissions`/`auto`/`dontAsk` → full incl. bash; `manual`/`plan` →

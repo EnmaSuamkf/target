@@ -197,11 +197,11 @@ test("the docker resume mounts every harness state dir, ~/.free-code included", 
 });
 
 test("a free-code resume loads the full extension set — no --no-extensions, no explicit -e", (t) => {
-	// The resumed terminal is the operator's own interactive session, so it
-	// must NOT carry the steps' `--no-extensions` (that flag also silently
-	// removes subagent_create, MCP tools and every other extension tool from
-	// the reopened conversation). The subagent widget needs no `-e` here:
-	// without `--no-extensions` it is auto-discovered from
+	// The resumed terminal must NOT carry `--no-extensions` (that flag
+	// silently removes subagent_create, MCP tools and every other extension
+	// tool from the reopened conversation) — like the steps, it loads the full
+	// extension set. The subagent widget needs no `-e` here: without
+	// `--no-extensions` it is auto-discovered from
 	// `~/.free-code/agent/extensions/` like every other extension.
 	const realHome = process.env.HOME;
 	const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-test-fchome-"));

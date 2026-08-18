@@ -63,11 +63,10 @@ test("createAwbHook with runner free-code writes spawn:free-code", () => {
 
 test("harnessResumeCommand knows both harnesses and quotes the session id", () => {
 	assert.equal(harnessResumeCommand("claude", "sess-1"), "claude --resume 'sess-1'");
-	// The resume is the operator's interactive session, so it loads the full
-	// extension set (no `--no-extensions`, unlike the headless steps), and
-	// `--no-rag-server` skips the 90s wait for a RAG server the resume image
-	// doesn't have. The exact flag list is pinned against a throwaway HOME in
-	// sandbox.test.ts.
+	// The resume loads the full extension set (no `--no-extensions`, like the
+	// headless steps), and `--no-rag-server` skips the 90s wait for a RAG
+	// server the resume image doesn't have. The exact flag list is pinned
+	// against a throwaway HOME in sandbox.test.ts.
 	assert.match(
 		harnessResumeCommand("free-code", "/home/u/.agent-webhook-bridge/sessions/h/a.jsonl") ?? "",
 		/^free-code --session '\/home\/u\/\.agent-webhook-bridge\/sessions\/h\/a\.jsonl' --no-rag-server$/,
