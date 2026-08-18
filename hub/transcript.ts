@@ -341,3 +341,74 @@ export function readTokenUsage(workdir: string, sessionId: string): TokenUsage {
 		includesSubagents: subs.length > 0,
 	};
 }
+
+/**
+ * How full the main thread's context window was at its last turn, as a
+ * percentage. Zero when no window is known (nothing has run yet), which reads
+ * as "empty" rather than dividing by zero.
+ *
+ * This is the number the operator's own client shows next to the context bar
+ * ("20.2%"), and it is computed here so the hub and its report server quote the
+ * same figure instead of each rounding their own.
+ */
+export function contextPercent(usage: TokenUsage): number {
+	return usage.contextWindow > 0 ? (100 * usage.contextTokens) / usage.contextWindow : 0;
+}
+
+/**
+ * The wire shape of a `usage.snapshot` report event
+ * (docs/report-server.es.html §7.2), built from one `TokenUsage`.
+ *
+ * The point of this function is `input_tokens`. It is the SUM of every input
+ * field — new input + cache creation + cache read — because that is what the
+ * operator's client counts as "in", and a dashboard that disagrees with the
+ * client about the same session is worse than no dashboard. Reporting only the
+ * bare `input_tokens` field (what this used to do) reads as a rounding error
+ * once prompt caching is on: a real session measured here billed 416 uncached
+ * input tokens against 16,015,192 total, because 14.4M of it was cache reads.
+ *
+ * The components are kept alongside it (`input_tokens_uncached`,
+ * `cache_creation`, `cache_read`) so the total stays auditable and the server
+ * can still price the three rates apart — nothing is lost by leading with the
+ * total, only by leading with a part of it.
+ */
+export function usageSnapshot(usage: TokenUsage): {
+	input_tokens: number;
+	output_tokens: number;
+	input_tokens_uncached: number;
+	cache_creation: number;
+	cache_read: number;
+	context_tokens: number;
+	context_window: number;
+	context_pct: number;
+	model: string | null;
+	turns: number;
+	includes_subagents: boolean;
+	compacted: boolean;
+	cost_usd: null;
+} {
+	return {
+		// The headline the dashboard tiles show — the same total the client's
+		// "in 16.0M" is.
+		input_tokens: usage.totalInputTokens,
+		output_tokens: usage.outputTokens,
+		// …and its parts, so the headline can be checked against them.
+		input_tokens_uncached: usage.inputTokens,
+		cache_creation: usage.cacheCreationTokens,
+		cache_read: usage.cacheReadTokens,
+		// Context occupancy: the client shows a bar, not a total, and a server that
+		// only has totals cannot tell a session that is about to compact from one
+		// that has barely started.
+		context_tokens: usage.contextTokens,
+		context_window: usage.contextWindow,
+		context_pct: Number(contextPercent(usage).toFixed(1)),
+		model: usage.model,
+		turns: usage.turns,
+		// Whether subagent transcripts were folded in — the client says "incl.
+		// subagents" for exactly this, and without it the totals are unexplainable
+		// (a step's real work runs in a subagent).
+		includes_subagents: usage.includesSubagents,
+		compacted: usage.compactions > 0,
+		cost_usd: null,
+	};
+}
