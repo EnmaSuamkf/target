@@ -225,3 +225,38 @@ test("openResumeTerminal on Windows falls back to `cmd /c start` when Windows Te
 		"/tmp/target-resume-test.ps1",
 	]);
 });
+
+test("openResumeTerminal sets the resume env as POSIX assignment prefixes on Linux", async (t) => {
+	const { calls } = harness(t, "linux", () => fakeChild());
+
+	await openResumeTerminal("/wd", "free-code --session '/s/x.jsonl' --no-rag-server", {
+		FREE_CODE_STARTUP_PROFILE: "default",
+	});
+
+	assert.equal(
+		calls[0].args[3],
+		"cd '/wd' && FREE_CODE_STARTUP_PROFILE='default' free-code --session '/s/x.jsonl' --no-rag-server; exec bash",
+	);
+});
+
+test("openResumeTerminal sets the resume env inside the macOS .command script", async (t) => {
+	const { scripts } = harness(t, "darwin", () => exitingChild(0));
+
+	await openResumeTerminal("/Users/u/project", "free-code --session '/s/x.jsonl'", { FREE_CODE_STARTUP_PROFILE: "default" });
+
+	assert.equal(
+		scripts[0].contents,
+		`#!/bin/bash\ncd '/Users/u/project' && FREE_CODE_STARTUP_PROFILE='default' free-code --session '/s/x.jsonl'\nexec "\${SHELL:-/bin/bash}"\n`,
+	);
+});
+
+test("openResumeTerminal sets the resume env as `$env:` lines in the Windows script", async (t) => {
+	const { scripts } = harness(t, "win32", () => fakeChild());
+
+	await openResumeTerminal("C:\\wd", "free-code --session 'C:\\s\\x.jsonl'", { FREE_CODE_STARTUP_PROFILE: "default" });
+
+	assert.equal(
+		scripts[0].contents,
+		"Set-Location -LiteralPath 'C:\\wd'\r\n$env:FREE_CODE_STARTUP_PROFILE = 'default'\r\nfree-code --session 'C:\\s\\x.jsonl'\r\n",
+	);
+});

@@ -73,6 +73,7 @@ import {
 	availableSandboxes,
 	explainRunError,
 	harnessResumeCommand,
+	harnessResumeEnv,
 	hookRuntime,
 	PUBLISHABLE_PERMISSION_MODES,
 	type PublishablePermissionMode,
@@ -1358,7 +1359,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				const workdir = conversation.workdir ?? os.homedir();
 				void (async () => {
 					try {
-						await openResumeTerminal(workdir, command);
+						await openResumeTerminal(workdir, command, harnessResumeEnv(conversation.runner));
 						sendJson(res, 200, { ok: true, sessionId: conversation.sessionId, workdir });
 					} catch (err) {
 						sendJson(res, 500, { error: String((err as Error).message ?? err) });
@@ -1897,7 +1898,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		const workdir = runtime.workdir;
 		(async () => {
 			try {
-				await openResumeTerminal(workdir, resumeCommand);
+				await openResumeTerminal(workdir, resumeCommand, harnessResumeEnv(runtime.harness));
 				sendJson(res, 200, { ok: true, sessionId, workdir });
 			} catch (err) {
 				sendJson(res, 500, { error: String((err as Error).message ?? err) });
@@ -2137,7 +2138,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		const sessionId = step.sessionId;
 		(async () => {
 			try {
-				await openResumeTerminal(workdir, resumeCommand);
+				await openResumeTerminal(workdir, resumeCommand, harnessResumeEnv(runtime.harness));
 				sendJson(res, 200, { ok: true, sessionId, workdir });
 			} catch (err) {
 				sendJson(res, 500, { error: String((err as Error).message ?? err) });

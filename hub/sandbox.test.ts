@@ -228,6 +228,11 @@ test("a free-code resume loads the full extension set — no --no-extensions, no
 	const docker = harnessResumeCommand("free-code", "/s/x.jsonl", { kind: "docker", image: "img" }, "/home/u/repos/demo");
 	assert.ok(docker);
 	assert.ok(docker.endsWith("free-code --session '/s/x.jsonl' --no-rag-server"), docker);
+	// …and the resume env arrives as docker flags, since the container has no
+	// host shell to inherit FREE_CODE_STARTUP_PROFILE from (terminal.ts only
+	// sets it for the local shell). On the host the command itself stays clean.
+	assert.ok(docker.includes("-e 'FREE_CODE_STARTUP_PROFILE=default'"), docker);
+	assert.ok(!harnessResumeCommand("free-code", "/s/x.jsonl")!.includes("FREE_CODE_STARTUP_PROFILE"));
 });
 
 test("harness state dirs that don't exist on the host are skipped, not mounted", (t) => {

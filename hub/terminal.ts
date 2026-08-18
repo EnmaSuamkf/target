@@ -53,6 +53,20 @@ function psQuote(value: string): string {
 	return `'${value.replace(/'/g, "''")}'`;
 }
 
+/** `KEY='value' ` prefixes for a POSIX command line (the Linux/macOS plans). */
+function posixEnvPrefix(env: Record<string, string>): string {
+	return Object.entries(env)
+		.map(([k, v]) => `${k}=${shellQuote(v)} `)
+		.join("");
+}
+
+/** `$env:KEY = 'value'` lines for the Windows PowerShell script. */
+function psEnvLines(env: Record<string, string>): string {
+	return Object.entries(env)
+		.map(([k, v]) => `$env:${k} = ${psQuote(v)}\r\n`)
+		.join("");
+}
+
 /**
  * Writes `contents` to a private temp file and returns its path. Used by the
  * macOS and Windows plans, which both hand a *file* to the terminal rather
@@ -85,8 +99,8 @@ const LINUX_CANDIDATES: { bin: string; args: (shellCmd: string) => string[] }[] 
  * `; exec bash` keeps the window open once the harness exits instead of
  * dropping the user back to a dead terminal.
  */
-function linuxPlan(workdir: string, resumeCommand: string): TerminalCandidate[] {
-	const shellCmd = `cd ${shellQuote(workdir)} && ${resumeCommand}; exec bash`;
+function linuxPlan(workdir: string, resumeCommand: string, env: Record<string, string>): TerminalCandidate[] {
+	const shellCmd = `cd ${shellQuote(workdir)} && ${posixEnvPrefix(env)}${resumeCommand}; exec bash`;
 	return LINUX_CANDIDATES.map((c) => ({ bin: c.bin, args: c.args(shellCmd) }));
 }
 
@@ -104,8 +118,8 @@ function linuxPlan(workdir: string, resumeCommand: string): TerminalCandidate[] 
  * has not been the default shell since Catalina, so the window would otherwise
  * hand the user a shell that isn't theirs.
  */
-async function darwinPlan(workdir: string, resumeCommand: string): Promise<TerminalCandidate[]> {
-	const script = `#!/bin/bash\ncd ${shellQuote(workdir)} && ${resumeCommand}\nexec "\${SHELL:-/bin/bash}"\n`;
+async function darwinPlan(workdir: string, resumeCommand: string, env: Record<string, string>): Promise<TerminalCandidate[]> {
+	const script = `#!/bin/bash\ncd ${shellQuote(workdir)} && ${posixEnvPrefix(env)}${resumeCommand}\nexec "\${SHELL:-/bin/bash}"\n`;
 	const file = await _impl.writeScript(script, ".command");
 	return [
 		{ bin: "open", args: ["-a", "Terminal", file], label: "Terminal.app", awaitExit: true },
@@ -128,8 +142,8 @@ async function darwinPlan(workdir: string, resumeCommand: string): Promise<Termi
  * required because the default policy on a client Windows refuses to run a
  * `.ps1` from disk at all.
  */
-async function windowsPlan(workdir: string, resumeCommand: string): Promise<TerminalCandidate[]> {
-	const script = `Set-Location -LiteralPath ${psQuote(workdir)}\r\n${resumeCommand}\r\n`;
+async function windowsPlan(workdir: string, resumeCommand: string, env: Record<string, string>): Promise<TerminalCandidate[]> {
+	const script = `Set-Location -LiteralPath ${psQuote(workdir)}\r\n${psEnvLines(env)}${resumeCommand}\r\n`;
 	const file = await _impl.writeScript(script, ".ps1");
 	const pwsh = ["powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass", "-File", file];
 	return [
@@ -178,19 +192,21 @@ function trySpawn(candidate: TerminalCandidate): Promise<boolean> {
 }
 
 /** The candidates for this machine's OS, in the order they should be tried. */
-async function planFor(platform: NodeJS.Platform, workdir: string, resumeCommand: string): Promise<TerminalCandidate[]> {
-	if (platform === "darwin") return darwinPlan(workdir, resumeCommand);
-	if (platform === "win32") return windowsPlan(workdir, resumeCommand);
-	return linuxPlan(workdir, resumeCommand);
+async function planFor(platform: NodeJS.Platform, workdir: string, resumeCommand: string, env: Record<string, string>): Promise<TerminalCandidate[]> {
+	if (platform === "darwin") return darwinPlan(workdir, resumeCommand, env);
+	if (platform === "win32") return windowsPlan(workdir, resumeCommand, env);
+	return linuxPlan(workdir, resumeCommand, env);
 }
 
 /**
  * Opens a terminal in `workdir` running `resumeCommand`, trying each terminal
- * known for this platform until one launches.
+ * known for this platform until one launches. `env` holds extra variables the
+ * resumed harness needs (awb's `harnessResumeEnv`), set in the shell/script
+ * the command runs in.
  * Throws NoTerminalEmulatorError if none of the candidates are available.
  */
-export async function openResumeTerminal(workdir: string, resumeCommand: string): Promise<void> {
-	const candidates = await planFor(_impl.platform(), workdir, resumeCommand);
+export async function openResumeTerminal(workdir: string, resumeCommand: string, env: Record<string, string> = {}): Promise<void> {
+	const candidates = await planFor(_impl.platform(), workdir, resumeCommand, env);
 	for (const candidate of candidates) {
 		if (await trySpawn(candidate)) return;
 	}

@@ -23,7 +23,7 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-test-runner-"));
 process.env.TARGET_HOME = tmpHome;
 process.env.AWB_HOME = tmpHome;
 
-const { createAwbHook, harnessResumeCommand, hookRuntime } = await import("./awb.ts");
+const { createAwbHook, harnessResumeCommand, harnessResumeEnv, hookRuntime } = await import("./awb.ts");
 const { readTokenUsage } = await import("./transcript.ts");
 const { loadConfig } = await import("./config.ts");
 const { createServer } = await import("./server.ts");
@@ -216,5 +216,17 @@ test("POST /api/workflows/:id/open-terminal on a free-code workflow spawns free-
 	assert.equal(res.status, 200);
 	assert.equal(calls.length, 1);
 	const shellCmd = calls[0].args.at(-1) ?? "";
-	assert.match(shellCmd, /^cd '.*' && free-code --session '.*s1\.jsonl' --no-rag-server; exec bash$/);
+	// The resume env (profile pinned to default, so the reopened conversation
+	// doesn't stop on free-code's profile picker) is set by the terminal's
+	// shell, not baked into the command string.
+	assert.match(
+		shellCmd,
+		/^cd '.*' && FREE_CODE_STARTUP_PROFILE='default' free-code --session '.*s1\.jsonl' --no-rag-server; exec bash$/,
+	);
+});
+
+test("harnessResumeEnv pins free-code's startup profile and leaves claude alone", () => {
+	assert.deepEqual(harnessResumeEnv("free-code"), { FREE_CODE_STARTUP_PROFILE: "default" });
+	assert.deepEqual(harnessResumeEnv("claude"), {});
+	assert.deepEqual(harnessResumeEnv(null), {});
 });

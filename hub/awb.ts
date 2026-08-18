@@ -254,12 +254,31 @@ function harnessStateMounts(): string[] {
 }
 
 /**
+ * Extra environment a harness's resumed session needs, keyed by harness name.
+ * Set by the terminal that runs the resume (terminal.ts sets them in the
+ * shell/script it spawns; a docker resume gets them as `-e` flags, baked into
+ * the command by `harnessResumeCommand`).
+ */
+const HARNESS_RESUME_ENV: Record<string, Record<string, string>> = {
+	// free-code's profile-manager extension reads this at startup and applies
+	// the named profile instead of opening its blocking "Select session
+	// profile" picker — without it the reopened terminal would stop on that
+	// prompt before the conversation paints.
+	"free-code": { FREE_CODE_STARTUP_PROFILE: "default" },
+};
+
+/** The resume-time environment for `harness` ({} when it needs none). */
+export function harnessResumeEnv(harness: string | null): Record<string, string> {
+	return (harness && HARNESS_RESUME_ENV[harness]) || {};
+}
+
+/**
  * `docker run …` up to and including the image, for an interactive resume in
  * a real terminal (hence `-it`, which the broker's own headless runs don't
  * use). Every path is mounted at its own absolute path — that identity is the
  * whole reason the session the steps built is findable from in here.
  */
-function dockerResumePrefix(sandbox: HookSandbox, workdir: string): string {
+function dockerResumePrefix(sandbox: HookSandbox, workdir: string, env: Record<string, string> = {}): string {
 	const mounts = [workdir, ...harnessStateMounts(), ...existingPaths(sandbox.mounts ?? [])];
 	const parts = [
 		"docker run --rm -it",
@@ -269,6 +288,7 @@ function dockerResumePrefix(sandbox: HookSandbox, workdir: string): string {
 		`--pids-limit ${SANDBOX_LIMITS.pidsLimit}`,
 		...mounts.map((m) => `-v ${shellQuote(`${m}:${m}`)}`),
 		`-e ${shellQuote(`HOME=${os.homedir()}`)}`,
+		...Object.entries(env).map(([k, v]) => `-e ${shellQuote(`${k}=${v}`)}`),
 		`-w ${shellQuote(workdir)}`,
 		shellQuote(sandbox.image),
 	];
@@ -299,7 +319,7 @@ export function harnessResumeCommand(
 	if (!command) return null;
 	if (!sandbox) return command;
 	if (!workdir) return null;
-	return `${dockerResumePrefix(sandbox, workdir)} ${command}`;
+	return `${dockerResumePrefix(sandbox, workdir, harnessResumeEnv(harness))} ${command}`;
 }
 
 /**
