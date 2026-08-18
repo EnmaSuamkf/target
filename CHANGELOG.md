@@ -11,15 +11,15 @@ The current version is reported by every instance to the central server (see
 
 ### Added
 
-- **Token usage on the workflow detail page, under the steps.** Below the
-  Canvas/List content and the canvas legend, a workflow now shows the same
-  readout its operator's client shows for the same session: a
-  `Context 202.0k / 1.0M` bar with the percentage, then
+- **Token usage on the workflow detail page, in the Conversation panel.** A
+  workflow now shows the same readout its operator's client shows for the same
+  session: a `Context 202.0k / 1.0M` bar with the percentage, then
   `143 turns · in 16.0M · out 98.6k · incl. subagents`. Same words, same
   abbreviations, so the two can be held side by side and compared digit for
-  digit — which is the only way to notice they have drifted apart again. The
-  Conversation panel and this one render the same component, so they cannot
-  disagree with each other either.
+  digit — which is the only way to notice they have drifted apart again. It is
+  stated once, in the panel that describes the session it belongs to; a separate
+  "Token usage" panel under the steps was tried first and only meant the page
+  printed the same context bar twice, one directly above the other.
 
 - **Slack notifications no longer need the official plugin.** Delivery used to
   have exactly one route — an OAuth login for the Slack MCP, stored by

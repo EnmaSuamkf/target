@@ -18,8 +18,8 @@
  *
  * `readTokenUsage` already had the total (`totalInputTokens`); nothing read it
  * on the way out. So the coverage here is the whole path: that the sum is
- * right, that the report payload leads with it, and that the UI panel that
- * shows the operator the same numbers is rendered where it can be compared.
+ * right, that the report payload leads with it, and that the UI states those
+ * same numbers to the operator exactly once, in the Conversation panel.
  *
  * HOME is redirected to a scratch dir before transcript.ts is imported, so the
  * claude-layout fixtures never touch the real ~/.claude.
@@ -186,21 +186,20 @@ test("the report event is built from usageSnapshot, so the wire can't drift from
 	assert.doesNotMatch(source, /input_tokens: u\.inputTokens/);
 });
 
-test("the workflow detail page shows the same readout, under the Canvas/List content", () => {
+test("the workflow detail page states the token readout once, in the Conversation panel", () => {
 	const detail = read("ui/src/views/WorkflowDetail.tsx");
 
-	// The panel exists, has a stable hook, and renders the shared meter.
-	assert.match(detail, /data-workflow-usage/);
-	assert.match(detail, /<UsageMeter usage=\{sessionInfo\.usage\} \/>/);
+	// The page once carried its own "Token usage" panel as well, so the same
+	// context bar and the same "n turns · in · out" line were printed twice, one
+	// directly above the other. The numbers describe the session, so they are
+	// stated where the session is — and nowhere else on the page.
+	assert.doesNotMatch(detail, /data-workflow-usage/);
+	assert.doesNotMatch(detail, /<UsageMeter/, "the meter is the Conversation panel's to render");
+	assert.doesNotMatch(detail, /Token usage/);
 
-	// Position: after the canvas/list branch closes and before the steps section
-	// does — i.e. below the canvas and its legend, not above the steps.
-	const canvasBranch = detail.indexOf("stepsView === \"canvas\" ? (");
-	const panel = detail.indexOf("data-workflow-usage");
-	const sessionPanel = detail.indexOf("<SessionPanel");
-	assert.ok(canvasBranch > 0 && panel > 0 && sessionPanel > 0);
-	assert.ok(panel > canvasBranch, "the usage panel comes after the Canvas/List content");
-	assert.ok(panel < sessionPanel, "…and still inside the steps section, above the Conversation panel");
+	// It is still on the page, once, because SessionPanel renders it.
+	assert.match(detail, /<SessionPanel/);
+	assert.match(read("ui/src/views/SessionPanel.tsx"), /<UsageMeter usage=\{usage\} \/>/);
 });
 
 test("the meter quotes the total, in the client's own abbreviations", () => {
@@ -216,6 +215,7 @@ test("the meter quotes the total, in the client's own abbreviations", () => {
 	// Never the uncached field — that is the number that read as 416.
 	assert.doesNotMatch(meter, /compactNumber\(usage\.inputTokens\)/);
 
-	// Both panels render THIS component rather than their own copy of the markup.
+	// The Conversation panel renders THIS component rather than its own copy of
+	// the markup, so the readout has one definition and one place on the page.
 	assert.match(read("ui/src/views/SessionPanel.tsx"), /<UsageMeter usage=\{usage\} \/>/);
 });

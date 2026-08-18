@@ -18,11 +18,11 @@ export function contextPercent(usage: TokenUsage): number {
  * a `Context <used> / <window>` bar with the percentage, then
  * `<n> turns · in <x> · out <y> · incl. subagents`.
  *
- * It lives in its own component because it is rendered in two places on the
- * workflow detail page — under the steps, where an operator is looking at the
- * run, and in the Conversation panel, where they are looking at the session —
- * and the whole point of this readout is that it agrees, digit for digit, with
- * what the client reports. Two copies of the markup would eventually disagree.
+ * It lives in its own component, rendered by the Conversation panel, because
+ * these numbers describe the session and belong wherever the session is shown.
+ * The workflow detail page briefly printed a second copy under the steps, which
+ * only meant the same context bar and the same totals appeared twice, one above
+ * the other. One definition, one place on the page.
  *
  * `in` is `totalInputTokens`: new input + cache creation + cache read. The bare
  * `inputTokens` field is near-zero once prompt caching is on (one real session
