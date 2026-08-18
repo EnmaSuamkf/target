@@ -32,10 +32,11 @@ export function SessionPanel({
 	opening: boolean;
 }): React.JSX.Element {
 	const usage = info?.usage ?? null;
-	// The meter itself is UsageMeter — the same component the steps section
-	// renders — so this panel and that one can never quote different numbers for
-	// the same session. What stays here is the one thing only this panel says:
-	// whether the conversation is under enough pressure to change how steps run.
+	// The meter itself is UsageMeter, and this panel is the only place on the page
+	// that renders it: the numbers describe the session, so they are stated where
+	// the session is and nowhere else. What stays here is the one thing only this
+	// panel says: whether the conversation is under enough pressure to change how
+	// steps run.
 	const pct = usage ? contextPercent(usage) : 0;
 
 	// Already compacted at least once: the conversation the steps share has lost

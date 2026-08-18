@@ -24,9 +24,7 @@ import { ContextPanel } from "./ContextPanel.tsx";
 import { RenameWorkflowModal } from "./RenameWorkflowModal.tsx";
 import { SessionPanel } from "./SessionPanel.tsx";
 import { StepItem } from "./StepItem.tsx";
-import { UsageMeter } from "./UsageMeter.tsx";
 import { WorkflowCanvas } from "./WorkflowCanvas.tsx";
-import panelStyles from "./DetailPanels.module.css";
 import styles from "./WorkflowDetail.module.css";
 
 /**
@@ -597,23 +595,10 @@ export function WorkflowDetail({
 						</>
 					)}
 
-					{/* Under the steps — under the canvas and its legend when the canvas is
-					    up — because it is the run's bill, and a bill is read after the work,
-					    not before it. It says exactly what the operator's own client says
-					    about this session, in the same words and the same abbreviations
-					    ("Context 202.0k / 1.0M", "143 turns · in 16.0M · out 98.6k"), so
-					    the two can be held side by side and compared digit for digit. They
-					    used to disagree: the hub reported the bare `input_tokens` field,
-					    which is a few hundred once prompt caching is on, against a client
-					    counting cache reads too. */}
-					{sessionInfo?.usage && sessionInfo.usage.turns > 0 && (
-						<section className={panelStyles.block} data-workflow-usage>
-							<div className={panelStyles.blockHead}>
-								<h3 className={panelStyles.blockTitle}>Token usage</h3>
-							</div>
-							<UsageMeter usage={sessionInfo.usage} />
-						</section>
-					)}
+					{/* No token readout here: the Conversation panel below already carries it,
+					    and this page had ended up printing the same context bar and the same
+					    "n turns · in · out" line twice, one right above the other. The numbers
+					    belong to the session, so they are stated once, where the session is. */}
 				</div>
 
 				<SessionPanel
