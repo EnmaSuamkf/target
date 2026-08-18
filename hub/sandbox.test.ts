@@ -196,11 +196,13 @@ test("the docker resume mounts every harness state dir, ~/.free-code included", 
 	assert.ok(command.includes(` 'target-agent-freecode:latest' free-code --session '${sessionFile}'`), command);
 });
 
-test("a free-code resume runs with --no-extensions, so it opens the conversation and not the profile picker", (t) => {
-	// free-code's bundled profile-manager extension opens a blocking
-	// "Select session profile" picker on every startup with a UI. The steps run
-	// with --no-extensions and never see it; a terminal that omitted the flag
-	// would stop on that prompt instead of reopening the conversation.
+test("a free-code resume loads the full extension set — no --no-extensions, no explicit -e", (t) => {
+	// The resumed terminal is the operator's own interactive session, so it
+	// must NOT carry the steps' `--no-extensions` (that flag also silently
+	// removes subagent_create, MCP tools and every other extension tool from
+	// the reopened conversation). The subagent widget needs no `-e` here:
+	// without `--no-extensions` it is auto-discovered from
+	// `~/.free-code/agent/extensions/` like every other extension.
 	const realHome = process.env.HOME;
 	const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-test-fchome-"));
 	t.after(() => {
@@ -211,29 +213,21 @@ test("a free-code resume runs with --no-extensions, so it opens the conversation
 	process.env.HOME = fakeHome;
 
 	// Host resume: the flags are not a sandbox concern, so they are there either way.
-	assert.equal(
-		harnessResumeCommand("free-code", "/s/x.jsonl"),
-		"free-code --session '/s/x.jsonl' --no-extensions --no-rag-server",
-	);
-	// claude has no such picker and must keep the command it has always had.
+	assert.equal(harnessResumeCommand("free-code", "/s/x.jsonl"), "free-code --session '/s/x.jsonl' --no-rag-server");
 	assert.equal(harnessResumeCommand("claude", "sess-1"), "claude --resume 'sess-1'");
 
-	// The subagent widget is loaded back by absolute path once it exists, so a
-	// conversation that used subagent_create reopens with those tools.
+	// An installed subagent widget changes nothing: discovery loads it, and an
+	// explicit `-e` on top of that would register it twice.
 	const extDir = path.join(fakeHome, ".free-code", "agent", "extensions");
 	fs.mkdirSync(extDir, { recursive: true });
-	const widget = path.join(extDir, "subagent-widget.ts");
-	fs.writeFileSync(widget, "");
-	assert.equal(
-		harnessResumeCommand("free-code", "/s/x.jsonl"),
-		`free-code --session '/s/x.jsonl' --no-extensions -e '${widget}' --no-rag-server`,
-	);
+	fs.writeFileSync(path.join(extDir, "subagent-widget.ts"), "");
+	assert.equal(harnessResumeCommand("free-code", "/s/x.jsonl"), "free-code --session '/s/x.jsonl' --no-rag-server");
 
-	// Inside the container the same absolute path resolves, because ~/.free-code
-	// is mounted at its own path.
+	// Inside the container the same command runs: ~/.free-code is mounted at
+	// its own path, so discovery sees the same extensions there.
 	const docker = harnessResumeCommand("free-code", "/s/x.jsonl", { kind: "docker", image: "img" }, "/home/u/repos/demo");
 	assert.ok(docker);
-	assert.ok(docker.endsWith(`free-code --session '/s/x.jsonl' --no-extensions -e '${widget}' --no-rag-server`), docker);
+	assert.ok(docker.endsWith("free-code --session '/s/x.jsonl' --no-rag-server"), docker);
 });
 
 test("harness state dirs that don't exist on the host are skipped, not mounted", (t) => {
