@@ -27,6 +27,7 @@
  * before.
  */
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { awbDir, hookRuntime } from "./awb.ts";
 import type { HubConfig } from "./config.ts";
@@ -160,6 +161,30 @@ function freeCodeSessions(agentName: string, sessionId: string | null): string[]
 	return files;
 }
 
+/** Cursor chat store.db files for a session id — the store updates while a step runs. */
+function cursorSessionFiles(sessionId: string | null): string[] {
+	const root = path.join(os.homedir(), ".cursor", "chats");
+	const files: string[] = [];
+	let projects: fs.Dirent[];
+	try {
+		projects = fs.readdirSync(root, { withFileTypes: true });
+	} catch {
+		return files;
+	}
+	for (const project of projects) {
+		if (!project.isDirectory()) continue;
+		const chatDir = path.join(root, project.name, sessionId ?? "");
+		if (!sessionId) continue;
+		const store = path.join(chatDir, "store.db");
+		try {
+			if (fs.existsSync(store)) files.push(store);
+		} catch {
+			// Unreadable.
+		}
+	}
+	return files;
+}
+
 /** awb's per-run logs for this agent (`<agent>-<epoch>.log`) — the harness-agnostic fallback. */
 function runLogs(agentName: string): string[] {
 	const dir = path.join(awbDir(), "logs");
@@ -204,9 +229,13 @@ export function probeStepProgress(
 	// is gone (harness unknown) still resolves the right artifacts.
 	const looksFreeCode =
 		runtime.harness === "free-code" || (!!sessionId && sessionId.endsWith(".jsonl") && path.isAbsolute(sessionId));
+	const looksCursor = runtime.harness === "cursor";
 
 	if (looksFreeCode) {
 		const best = freshest(freeCodeSessions(workflow.agentName, sessionId));
+		if (best) return signal(best, "session-file");
+	} else if (looksCursor) {
+		const best = freshest(cursorSessionFiles(sessionId));
 		if (best) return signal(best, "session-file");
 	} else if (runtime.workdir) {
 		const best = freshest(claudeTranscripts(runtime.workdir));

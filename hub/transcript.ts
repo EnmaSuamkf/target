@@ -49,6 +49,33 @@ export function transcriptPath(workdir: string, sessionId: string): string {
 	return path.join(claudeProjectDir(workdir), `${sessionId}.jsonl`);
 }
 
+/** Cursor agent-transcript JSONL for a chat id, when one exists on this machine. */
+export function cursorTranscriptPath(sessionId: string): string | null {
+	const projectsRoot = path.join(os.homedir(), ".cursor", "projects");
+	let projects: fs.Dirent[];
+	try {
+		projects = fs.readdirSync(projectsRoot, { withFileTypes: true });
+	} catch {
+		return null;
+	}
+	for (const project of projects) {
+		if (!project.isDirectory()) continue;
+		const dir = path.join(projectsRoot, project.name, "agent-transcripts", sessionId);
+		try {
+			for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+				if (entry.isFile() && entry.name.endsWith(".jsonl")) return path.join(dir, entry.name);
+			}
+			const nested = path.join(dir, sessionId);
+			for (const entry of fs.readdirSync(nested, { withFileTypes: true })) {
+				if (entry.isFile() && entry.name.endsWith(".jsonl")) return path.join(nested, entry.name);
+			}
+		} catch {
+			// No transcript for this project.
+		}
+	}
+	return null;
+}
+
 /**
  * One compaction boundary read out of a transcript: the moment the harness
  * replaced the conversation's earlier history with a summary.
@@ -311,8 +338,10 @@ export function readTokenUsage(workdir: string, sessionId: string): TokenUsage {
 	// free-code sessions ARE .jsonl paths — read the transcript directly; there
 	// is no per-workdir project folder and no subagent-transcript convention.
 	const isFreeCodeSession = sessionId.endsWith(".jsonl") && path.isAbsolute(sessionId);
-	const main = accumulateUsage(isFreeCodeSession ? sessionId : transcriptPath(workdir, sessionId));
-	const subs = isFreeCodeSession ? [] : subagentFiles(workdir, sessionId);
+	const cursorTranscript = !isFreeCodeSession ? cursorTranscriptPath(sessionId) : null;
+	const mainFile = isFreeCodeSession ? sessionId : cursorTranscript ?? transcriptPath(workdir, sessionId);
+	const main = accumulateUsage(mainFile);
+	const subs = isFreeCodeSession || cursorTranscript ? [] : subagentFiles(workdir, sessionId);
 	let { input, cacheCreation, cacheRead, output, turns } = main;
 	for (const file of subs) {
 		const sub = accumulateUsage(file);

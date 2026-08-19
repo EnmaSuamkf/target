@@ -64,7 +64,7 @@ test("GET /api/runners reports which agent CLIs are installed on this host", asy
 	assert.equal(res.status, 200);
 	const body = (await res.json()) as { runners: { id: string; installed: boolean }[] };
 	const ids = body.runners.map((r) => r.id).sort();
-	assert.deepEqual(ids, ["claude", "free-code"]);
+	assert.deepEqual(ids, ["claude", "cursor", "free-code"]);
 	for (const r of body.runners) assert.equal(typeof r.installed, "boolean");
 });
 

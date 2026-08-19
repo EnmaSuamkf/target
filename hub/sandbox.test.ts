@@ -99,6 +99,7 @@ test("defaultSandboxImage maps every publishable runner to a distinct image, cla
 	assert.equal(defaultSandboxImage(), DEFAULT_SANDBOX_IMAGES.claude);
 	assert.equal(defaultSandboxImage("claude"), "target-agent:latest");
 	assert.equal(defaultSandboxImage("free-code"), "target-agent-freecode:latest");
+	assert.equal(defaultSandboxImage("cursor"), "target-agent-cursor:latest");
 });
 
 test("createAwbHook honours a per-workflow image, and leaves the runner alone", () => {

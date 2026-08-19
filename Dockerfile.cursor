@@ -1,0 +1,31 @@
+# The Target Project — agent image for `runner: cursor` + `sandbox: docker`.
+#
+# The broker invokes the runner's binary as the container command:
+#   docker run --rm ... <image> agent -p "<step>" ...
+# so this image ships the Cursor Agent CLI (`agent`). Requires
+# target-agent:latest as its base (see ./Dockerfile).
+#
+#   docker build -t target-agent-cursor:latest -f Dockerfile.cursor .
+#
+# Credentials arrive at run time via the mounted `~/.cursor` tree or
+# `CURSOR_API_KEY` — never bake a key into the image.
+
+FROM target-agent:latest
+
+USER root
+
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
+
+# Install the Cursor Agent CLI to /usr/local/bin/agent.
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends curl ca-certificates \
+	&& curl -fsS https://cursor.com/install | bash \
+	&& if [ -x /root/.local/bin/agent ]; then install -m 0755 /root/.local/bin/agent /usr/local/bin/agent; fi \
+	&& apt-get purge -y curl \
+	&& apt-get autoremove -y \
+	&& rm -rf /var/lib/apt/lists/*
+
+USER ${AGENT_UID}:${AGENT_GID}
+
+CMD ["agent", "--help"]

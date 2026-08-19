@@ -107,6 +107,11 @@ const RUNNER_OPTIONS: { value: Runner; label: string; description: string }[] = 
 		label: "free-code",
 		description: "Steps run on the free-code CLI; sessions are .jsonl files chained the same way.",
 	},
+	{
+		value: "cursor",
+		label: "Cursor Agent",
+		description: "Steps run on the Cursor Agent CLI (`agent`); sessions resume by chat id with --workspace.",
+	},
 ];
 
 /**
@@ -118,6 +123,7 @@ const RUNNER_OPTIONS: { value: Runner; label: string; description: string }[] = 
 const DEFAULT_IMAGES: Record<Runner, string> = {
 	claude: "target-agent:latest",
 	"free-code": "target-agent-freecode:latest",
+	cursor: "target-agent-cursor:latest",
 };
 
 /** What a clone is proposed as — mirrors the hub's `cloneName` (hub/workflow.ts). */
@@ -406,7 +412,7 @@ export function CreateWorkflowModal({
 	const runnerError = probeFailed
 		? "Couldn't reach the hub to verify installed agent CLIs. Please retry."
 		: noInstalled
-			? "No agent CLI is installed on this machine. Install `claude` or `free-code` to create a workflow."
+			? "No agent CLI is installed on this machine. Install `claude`, `free-code`, or `agent` (Cursor) to create a workflow."
 			: undefined;
 	const runnerHint = loadingRunners
 		? "Checking which agent CLIs are installed on this machine…"
@@ -759,7 +765,7 @@ export function CreateWorkflowModal({
 				{sandbox === "docker" && (
 					<Field
 						label="Container image"
-						hint={`Optional — leave empty for ${DEFAULT_IMAGES[runner]}, built from this repo's ${runner === "free-code" ? "Dockerfile.free-code" : "Dockerfile"}. It must ship the ${runner} binary, or steps die with exit 127. The image is per workflow, so a Python repo and a Node repo can use different ones.`}
+						hint={`Optional — leave empty for ${DEFAULT_IMAGES[runner]}, built from this repo's ${runner === "free-code" ? "Dockerfile.free-code" : runner === "cursor" ? "Dockerfile.cursor" : "Dockerfile"}. It must ship the ${runner === "cursor" ? "agent" : runner} binary, or steps die with exit 127. The image is per workflow, so a Python repo and a Node repo can use different ones.`}
 					>
 						{(props) => (
 							<input

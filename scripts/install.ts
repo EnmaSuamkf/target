@@ -58,7 +58,13 @@ function runQuiet(cmd: string, args: string[], cwd: string): { status: number; s
 function depsStamp(dir: string): { file: string; want: string } | null {
 	const lock = path.join(dir, "package-lock.json");
 	if (!fs.existsSync(lock)) return null;
-	const want = crypto.createHash("sha256").update(fs.readFileSync(lock)).digest("hex");
+	// Platform is part of the stamp so node_modules copied from another OS
+	// (e.g. darwin-arm64 rollup binaries on linux-x64) aren't treated as current.
+	const want = crypto
+		.createHash("sha256")
+		.update(fs.readFileSync(lock))
+		.update(`\0${process.platform}\0${process.arch}\n`)
+		.digest("hex");
 	return { file: path.join(dir, "node_modules", ".target-install-stamp"), want };
 }
 

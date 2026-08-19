@@ -61,7 +61,13 @@ test("createAwbHook with runner free-code writes spawn:free-code", () => {
 	assert.equal(hookRuntime(hookUrl).harness, "free-code");
 });
 
-test("harnessResumeCommand knows both harnesses and quotes the session id", () => {
+test("createAwbHook with runner cursor writes spawn:cursor", () => {
+	const { hookUrl } = createAwbHook("cursor-hook", path.join(tmpHome, "wd-cursor"), "{{payload}}", { runner: "cursor" });
+	assert.deepEqual(hooksJson()["cursor-hook"].consumers, ["spawn:cursor"]);
+	assert.equal(hookRuntime(hookUrl).harness, "cursor");
+});
+
+test("harnessResumeCommand knows all harnesses and quotes the session id", () => {
 	assert.equal(harnessResumeCommand("claude", "sess-1"), "claude --resume 'sess-1'");
 	// The resume loads the full extension set (no `--no-extensions`, like the
 	// headless steps), and `--no-rag-server` skips the 90s wait for a RAG
@@ -71,6 +77,11 @@ test("harnessResumeCommand knows both harnesses and quotes the session id", () =
 		harnessResumeCommand("free-code", "/home/u/.agent-webhook-bridge/sessions/h/a.jsonl") ?? "",
 		/^free-code --session '\/home\/u\/\.agent-webhook-bridge\/sessions\/h\/a\.jsonl' --no-rag-server$/,
 	);
+	assert.equal(
+		harnessResumeCommand("cursor", "chat-1", null, "/repo"),
+		"agent --resume 'chat-1' --trust --approve-mcps --workspace '/repo'",
+	);
+	assert.equal(harnessResumeCommand("cursor", "chat-1", null, null), null);
 	assert.equal(harnessResumeCommand("unknown-harness", "sess-1"), null);
 	assert.equal(harnessResumeCommand(null, "sess-1"), null);
 	assert.equal(harnessResumeCommand("claude", null), null);
@@ -103,7 +114,7 @@ test("POST /api/workflows rejects an unknown runner and creates nothing", async 
 	const res = await fetch(`${baseUrl}/api/workflows`, {
 		method: "POST",
 		headers: adminHeaders(),
-		body: JSON.stringify({ name: "bad runner workflow", runner: "cursor" }),
+		body: JSON.stringify({ name: "bad runner workflow", runner: "codex" }),
 	});
 	assert.equal(res.status, 400);
 	const body = (await res.json()) as { error: string };
