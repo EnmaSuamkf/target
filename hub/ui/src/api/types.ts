@@ -57,9 +57,9 @@ export type PermissionMode = (typeof PERMISSION_MODES)[number];
 /**
  * Runtimes a workflow's hook can spawn (server-validated). Both share the
  * same step protocol; only the spawned CLI and the session-id shape differ
- * (a claude uuid vs. a free-code `.jsonl` path).
+ * (a claude uuid vs. a free-code `.jsonl` path vs. a cursor chat uuid).
  */
-export const RUNNERS = ["claude", "free-code"] as const;
+export const RUNNERS = ["claude", "free-code", "cursor"] as const;
 export type Runner = (typeof RUNNERS)[number];
 
 /** Whether each runner's CLI is installed on the host (from `GET /api/runners`). */

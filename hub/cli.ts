@@ -6,6 +6,7 @@
  * directly) so there's no token to type locally.
  */
 import * as cp from "node:child_process";
+import { PUBLISHABLE_RUNNERS, runnerBinary, type PublishableRunner } from "./awb.ts";
 import { loadConfig } from "./config.ts";
 import { startHub } from "./daemon.ts";
 
@@ -14,13 +15,13 @@ function usage(): void {
 
 Commands:
   start                                 Run the hub (foreground)
-  create <name> [--workdir <dir>] [--runner <claude|free-code>] [--sandbox <host|docker>] [--image <name>] [--force]
+  create <name> [--workdir <dir>] [--runner <claude|free-code|cursor>] [--sandbox <host|docker>] [--image <name>] [--force]
                                          Create a workflow (creates its agent + awb hook too)
   set-context <workflowId> "<text>"   Set (or clear with "") a workflow's conversation context
   add-step <workflowId> <description...>
                                          Append a step to a workflow
   templates                             List available workflow templates
-  create-from-template <templateId> <workflowName> [--workdir <dir>] [--runner <claude|free-code>] [--sandbox <host|docker>] [--image <name>] [--force]
+  create-from-template <templateId> <workflowName> [--workdir <dir>] [--runner <claude|free-code|cursor>] [--sandbox <host|docker>] [--image <name>] [--force]
                                          Create a workflow seeded with a template's steps
   list                                  List workflows with progress
   show <workflowId>                     Show a workflow's steps (and their ids)
@@ -61,7 +62,10 @@ async function runnerInstalledOnHost(runner: string, apiBase: string): Promise<b
 	} catch {
 		// Hub unreachable — fall back to a local probe below.
 	}
-	const result = cp.spawnSync(runner, ["--version"], { stdio: ["ignore", "pipe", "pipe"], timeout: 5000 });
+	const binary = PUBLISHABLE_RUNNERS.includes(runner as PublishableRunner)
+		? runnerBinary(runner as PublishableRunner)
+		: runner;
+	const result = cp.spawnSync(binary, ["--version"], { stdio: ["ignore", "pipe", "pipe"], timeout: 5000 });
 	return result.status === 0;
 }
 
@@ -171,7 +175,7 @@ async function main(): Promise<void> {
 		const force = rest.includes("--force");
 		if (!name) {
 			console.error(
-				"Usage: target create <name> [--workdir <dir>] [--permission-mode <mode>] [--runner <claude|free-code>]\n" +
+				"Usage: target create <name> [--workdir <dir>] [--permission-mode <mode>] [--runner <claude|free-code|cursor>]\n" +
 					"                        [--sandbox <host|docker>] [--image <name>] [--yes-bypass-risk] [--force]\n" +
 					"  modes: acceptEdits, auto, manual, dontAsk, plan, bypassPermissions (needs --yes-bypass-risk)\n" +
 					"  --sandbox docker runs every step inside a container (default host = directly on this machine);\n" +
@@ -256,7 +260,7 @@ async function main(): Promise<void> {
 		if (!templateId || !name) {
 			console.error(
 				"Usage: target create-from-template <templateId> <workflowName> [--workdir <dir>] [--permission-mode <mode>]\n" +
-					"                                     [--runner <claude|free-code>] [--sandbox <host|docker>] [--image <name>] [--force]",
+					"                                     [--runner <claude|free-code|cursor>] [--sandbox <host|docker>] [--image <name>] [--force]",
 			);
 			process.exitCode = 1;
 			return;

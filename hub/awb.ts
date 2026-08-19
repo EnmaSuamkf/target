@@ -172,13 +172,14 @@ export function shellQuote(value: string): string {
 
 /**
  * Shell command that reopens a harness session in a terminal, keyed by the
- * harness name `hookRuntime` reports. awb ships the `spawn:claude` and
- * `spawn:free-code` adapters (broker/dispatch.ts); their resume mechanics
- * differ — claude resumes by session uuid, free-code by the session's .jsonl
- * path (`--session <path>`) — but both reopen the exact conversation the
- * workflow's steps have been chaining.
+ * harness name `hookRuntime` reports. awb ships the `spawn:claude`,
+ * `spawn:free-code`, and `spawn:cursor` adapters (broker/dispatch.ts); their
+ * resume mechanics differ — claude resumes by session uuid, free-code by the
+ * session's .jsonl path (`--session <path>`), cursor by chat uuid with
+ * `--workspace <cwd>` — but all reopen the exact conversation the workflow's
+ * steps have been chaining.
  */
-const HARNESS_RESUME_COMMANDS: Record<string, (sessionId: string) => string> = {
+const HARNESS_RESUME_COMMANDS: Record<string, (sessionId: string, workdir: string | null) => string | null> = {
 	claude: (sessionId) => `claude --resume ${shellQuote(sessionId)}`,
 	// `--no-rag-server` skips the auto-start of the local Python RAG server
 	// (free-code-rag on :8085). In the docker resume image that server is not
@@ -191,6 +192,12 @@ const HARNESS_RESUME_COMMANDS: Record<string, (sessionId: string) => string> = {
 	// reopened terminal loads the full extension set — the same toolset the
 	// operator would get running free-code by hand in that directory.
 	"free-code": (sessionId) => `free-code --session ${shellQuote(sessionId)} --no-rag-server`,
+	// Cursor sessions are scoped to `--workspace`, so reopening one without the
+	// workflow's workdir would start in the wrong workspace and lose history.
+		cursor: (sessionId, workdir) =>
+		workdir
+			? `agent --resume ${shellQuote(sessionId)} --trust --approve-mcps --workspace ${shellQuote(workdir)}`
+			: null,
 };
 
 /**
@@ -232,6 +239,9 @@ function existingPaths(paths: string[]): string[] {
  *    container the operator's whole home), and the `$HOME` docker synthesises
  *    to hold these mounts is root-owned, so every directory the harness writes
  *    to has to be named here.
+ *  - `~/.cursor` — Cursor Agent's config, credentials, chat databases and MCP
+ *    settings. Sessions resume by uuid scoped to `--workspace`, so the chats
+ *    tree must be visible at the same absolute path inside the container.
  *  - `<awbDir>/sessions` — free-code resumes by absolute `.jsonl` path, so that
  *    path has to resolve inside the container too. Only the sessions
  *    subdirectory: the awb dir itself holds `hooks.json`, i.e. every hook's
@@ -249,6 +259,7 @@ function harnessStateMounts(): string[] {
 		path.join(os.homedir(), ".claude"),
 		path.join(os.homedir(), ".claude.json"),
 		path.join(os.homedir(), ".free-code"),
+		path.join(os.homedir(), ".cursor"),
 		path.join(awbDir(), "sessions"),
 	]);
 }
@@ -315,7 +326,7 @@ export function harnessResumeCommand(
 	workdir: string | null = null,
 ): string | null {
 	if (!harness || !sessionId) return null;
-	const command = HARNESS_RESUME_COMMANDS[harness]?.(sessionId);
+	const command = HARNESS_RESUME_COMMANDS[harness]?.(sessionId, workdir);
 	if (!command) return null;
 	if (!sandbox) return command;
 	if (!workdir) return null;
@@ -338,10 +349,25 @@ export type PublishablePermissionMode = (typeof PUBLISHABLE_PERMISSION_MODES)[nu
  * Both share the same hook protocol (secret, `callbackUrl`, `sessionId`), so
  * the hub, the runner, and the step callbacks stay runtime-agnostic — only
  * the spawned binary and the session-id shape differ (a claude uuid vs. a
- * free-code `.jsonl` path).
+ * free-code `.jsonl` path, cursor chat uuid).
  */
-export const PUBLISHABLE_RUNNERS = ["claude", "free-code"] as const;
+export const PUBLISHABLE_RUNNERS = ["claude", "free-code", "cursor"] as const;
 export type PublishableRunner = (typeof PUBLISHABLE_RUNNERS)[number];
+
+/**
+ * CLI binary each runner id maps to on PATH. The Cursor Agent CLI installs as
+ * `agent`, not `cursor`, so the probe and install-check use this table rather
+ * than assuming id === binary.
+ */
+export const RUNNER_BINARIES: Record<PublishableRunner, string> = {
+	claude: "claude",
+	"free-code": "free-code",
+	cursor: "agent",
+};
+
+export function runnerBinary(runner: PublishableRunner): string {
+	return RUNNER_BINARIES[runner] ?? runner;
+}
 
 /**
  * Which runners are actually installed on the broker's host. The hub writes
@@ -373,7 +399,7 @@ export const _impl = { spawnSync: cp.spawnSync, spawn: cp.spawn };
 
 export function availableRunners(): { id: PublishableRunner; installed: boolean }[] {
 	return PUBLISHABLE_RUNNERS.map((id) => {
-		const result = _impl.spawnSync(id, ["--version"], {
+		const result = _impl.spawnSync(runnerBinary(id), ["--version"], {
 			stdio: ["ignore", "pipe", "pipe"],
 			timeout: 5000,
 		});
@@ -413,6 +439,7 @@ export type PublishableSandbox = (typeof PUBLISHABLE_SANDBOXES)[number];
 export const DEFAULT_SANDBOX_IMAGES: Record<PublishableRunner, string> = {
 	claude: "target-agent:latest",
 	"free-code": "target-agent-freecode:latest",
+	cursor: "target-agent-cursor:latest",
 };
 
 /** Back-compat alias for the claude default; prefer `defaultSandboxImage(runner)`. */
@@ -509,6 +536,12 @@ export const BUILDABLE_SANDBOX_IMAGES: BuildableImage[] = [
 		tag: DEFAULT_SANDBOX_IMAGES["free-code"],
 		dockerfile: "Dockerfile.free-code",
 		runner: "free-code",
+		base: DEFAULT_SANDBOX_IMAGES.claude,
+	},
+	{
+		tag: DEFAULT_SANDBOX_IMAGES.cursor,
+		dockerfile: "Dockerfile.cursor",
+		runner: "cursor",
 		base: DEFAULT_SANDBOX_IMAGES.claude,
 	},
 ];

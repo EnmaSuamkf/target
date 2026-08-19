@@ -3,7 +3,7 @@
  * (see hub/package.json `test`).
  *
  * The hub's host install-check in POST /api/workflows calls availableRunners(),
- * which probes `claude`/`free-code` on PATH with `<cli> --version`. Those CLIs
+ * which probes `claude`/`free-code`/`agent` (cursor) on PATH with `<cli> --version`.
  * are installed on dev machines but NOT on CI runners, so without this stub
  * every workflow-creation test would get a 400 ("runner not installed") and the
  * suite would be red on CI. Workflow-CRUD tests don't care whether the CLIs are

@@ -51,6 +51,11 @@
  *   `~/.agent-webhook-bridge/sessions/<hook>/`. Here the session id IS the
  *   absolute path (that's what `free-code --session` takes), so no slug is
  *   involved at all.
+ * - **Cursor Agent** — `~/.cursor/chats/<projectHash>/<chatId>/store.db`, with
+ *   optional JSONL transcripts under
+ *   `~/.cursor/projects/.../agent-transcripts/<chatId>/`. The session id is the
+ *   chat uuid (what `agent --resume` takes), scoped to the workspace recorded
+ *   in the transcript's `system` init line when one exists.
  *
  * Only depth 2 is walked (a session dir's `.jsonl` children), which is also what
  * keeps subagent transcripts out: claude nests those at
@@ -179,6 +184,7 @@ const MAX_TITLE_CHARS = 160;
 function sessionRoots(runner: PublishableRunner): string[] {
 	const home = os.homedir();
 	if (runner === "claude") return [path.join(home, ".claude", "projects")];
+	if (runner === "cursor") return [path.join(home, ".cursor", "chats")];
 	return [
 		path.join(home, ".free-code", "agent", "sessions"),
 		// awb's free-code adapter writes the sessions IT spawned here — including
@@ -225,19 +231,118 @@ function transcriptFiles(root: string): string[] {
 	return files;
 }
 
+/** Cursor chat directories that contain a `store.db` (depth: chats/<hash>/<chatId>/). */
+function cursorChatDirs(root: string): string[] {
+	let projectDirs: fs.Dirent[];
+	try {
+		projectDirs = fs.readdirSync(root, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	const dirs: string[] = [];
+	for (const project of projectDirs) {
+		if (!project.isDirectory()) continue;
+		const projectPath = path.join(root, project.name);
+		let chats: fs.Dirent[];
+		try {
+			chats = fs.readdirSync(projectPath, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const chat of chats) {
+			if (!chat.isDirectory()) continue;
+			const chatDir = path.join(projectPath, chat.name);
+			try {
+				if (fs.existsSync(path.join(chatDir, "store.db"))) dirs.push(chatDir);
+			} catch {
+				// Unreadable chat dir: skip it.
+			}
+		}
+	}
+	return dirs;
+}
+
+/** JSONL transcript for a Cursor chat id, when awb-style transcripts exist on disk. */
+function cursorTranscriptFile(chatId: string): string | null {
+	const projectsRoot = path.join(os.homedir(), ".cursor", "projects");
+	let projects: fs.Dirent[];
+	try {
+		projects = fs.readdirSync(projectsRoot, { withFileTypes: true });
+	} catch {
+		return null;
+	}
+	for (const project of projects) {
+		if (!project.isDirectory()) continue;
+		const dir = path.join(projectsRoot, project.name, "agent-transcripts", chatId);
+		let files: string[];
+		try {
+			files = fs
+				.readdirSync(dir, { withFileTypes: true })
+				.filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+				.map((entry) => path.join(dir, entry.name));
+		} catch {
+			continue;
+		}
+		if (files.length > 0) return files[0] ?? null;
+		const nested = path.join(dir, chatId);
+		try {
+			const inner = fs
+				.readdirSync(nested, { withFileTypes: true })
+				.filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+				.map((entry) => path.join(nested, entry.name));
+			if (inner.length > 0) return inner[0] ?? null;
+		} catch {
+			// No nested transcript dir.
+		}
+	}
+	return null;
+}
+
+/** Title/workdir hints from Cursor's per-chat `meta.json`, when no transcript exists yet. */
+function readCursorMeta(chatDir: string): { workdir: string | null; title: string | null } {
+	try {
+		const meta = JSON.parse(fs.readFileSync(path.join(chatDir, "meta.json"), "utf8")) as Record<string, unknown>;
+		const title = typeof meta.title === "string" && meta.title.trim() !== "" ? meta.title.trim() : null;
+		const workdir =
+			typeof meta.workspace === "string" && meta.workspace.trim() !== ""
+				? meta.workspace.trim()
+				: typeof meta.cwd === "string" && meta.cwd.trim() !== ""
+					? meta.cwd.trim()
+					: null;
+		return { workdir, title };
+	} catch {
+		return { workdir: null, title: null };
+	}
+}
+
 /** The transcripts for `runner`, newest first, capped. */
 function indexFiles(runner: PublishableRunner): FileEntry[] {
 	const entries: FileEntry[] = [];
-	for (const root of sessionRoots(runner)) {
-		for (const file of transcriptFiles(root)) {
+	if (runner === "cursor") {
+		for (const chatDir of cursorChatDirs(path.join(os.homedir(), ".cursor", "chats"))) {
+			const chatId = path.basename(chatDir);
+			const transcript = cursorTranscriptFile(chatId);
+			const file = transcript ?? path.join(chatDir, "store.db");
 			try {
 				const stat = fs.statSync(file);
-				// A zero-byte transcript is a session that never said anything; it has
-				// no context to import and resuming it shows an empty window.
 				if (!stat.isFile() || stat.size === 0) continue;
 				entries.push({ file, mtimeMs: stat.mtimeMs, size: stat.size });
 			} catch {
-				// Vanished between readdir and stat — fine, it's just not listed.
+				// Vanished between discovery and stat.
+			}
+		}
+	} else {
+		for (const root of sessionRoots(runner)) {
+			for (const file of transcriptFiles(root)) {
+				try {
+					const stat = fs.statSync(file);
+					// A zero-byte transcript is a session that never said anything; it has
+					// no context to import and resuming it shows an empty window.
+					if (!stat.isFile() || stat.size === 0) continue;
+					entries.push({ file, mtimeMs: stat.mtimeMs, size: stat.size });
+				} catch {
+					// Vanished between readdir and stat — fine, it's just not listed.
+				}
 			}
 		}
 	}
@@ -247,7 +352,15 @@ function indexFiles(runner: PublishableRunner): FileEntry[] {
 
 /** The handle the API and the resume command use for a transcript. */
 function sessionIdOf(runner: PublishableRunner, file: string): string {
-	return runner === "claude" ? path.basename(file, ".jsonl") : file;
+	if (runner === "claude") return path.basename(file, ".jsonl");
+	if (runner === "cursor") {
+		if (file.endsWith("store.db")) return path.basename(path.dirname(file));
+		const parts = file.split(path.sep);
+		const idx = parts.lastIndexOf("agent-transcripts");
+		if (idx !== -1 && parts[idx + 1]) return parts[idx + 1] as string;
+		return path.basename(file, ".jsonl");
+	}
+	return file;
 }
 
 /**
@@ -359,6 +472,8 @@ function readHead(file: string): { workdir: string | null; title: string | null 
 			return;
 		}
 		if (!head.workdir && typeof obj.cwd === "string" && obj.cwd !== "") head.workdir = obj.cwd;
+		// Cursor's system init line carries the workspace path as `cwd`.
+		if (!head.workdir && obj.type === "system" && typeof obj.cwd === "string" && obj.cwd !== "") head.workdir = obj.cwd;
 		if (!head.title) {
 			const turn = turnOfLine(obj);
 			if (turn?.role === "user") head.title = titleOf(turn.text);
@@ -399,7 +514,12 @@ function readHead(file: string): { workdir: string | null; title: string | null 
 }
 
 function summarize(runner: PublishableRunner, entry: FileEntry): ConversationSummary {
-	const head = readHead(entry.file);
+	let head = readHead(entry.file);
+	if (runner === "cursor" && entry.file.endsWith("store.db")) {
+		const meta = readCursorMeta(path.dirname(entry.file));
+		if (!head.workdir && meta.workdir) head = { ...head, workdir: meta.workdir };
+		if (!head.title && meta.title) head = { ...head, title: meta.title };
+	}
 	return {
 		runner,
 		sessionId: sessionIdOf(runner, entry.file),
