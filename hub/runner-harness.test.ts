@@ -194,6 +194,78 @@ test("GET /api/workflows/:id/session-info reads usage off a free-code .jsonl ses
 	assert.equal(body.usage.outputTokens, 20);
 });
 
+test("readTokenUsage reads cursor usage from awb run logs when the session id is a chat uuid", (t) => {
+	const sessionId = "cursor-chat-001";
+	const logsDir = path.join(tmpHome, "logs");
+	fs.mkdirSync(logsDir, { recursive: true });
+	t.after(() => fs.rmSync(logsDir, { recursive: true, force: true }));
+	const lines = [
+		JSON.stringify({
+			type: "result",
+			subtype: "success",
+			session_id: sessionId,
+			usage: { inputTokens: 1000, outputTokens: 50, cacheReadTokens: 2000, cacheWriteTokens: 100 },
+		}),
+		JSON.stringify({
+			type: "result",
+			subtype: "success",
+			session_id: sessionId,
+			usage: { inputTokens: 500, outputTokens: 20, cacheReadTokens: 8000, cacheWriteTokens: 0 },
+		}),
+	];
+	fs.writeFileSync(path.join(logsDir, "wf-1.log"), `${lines.join("\n")}\n`);
+
+	const usage = readTokenUsage("/irrelevant/workdir", sessionId);
+	assert.equal(usage.turns, 2);
+	assert.equal(usage.inputTokens, 1500);
+	assert.equal(usage.cacheCreationTokens, 100);
+	assert.equal(usage.cacheReadTokens, 10000);
+	assert.equal(usage.outputTokens, 70);
+	assert.equal(usage.totalInputTokens, 11600);
+	// Occupancy is the last step's input + cache.
+	assert.equal(usage.contextTokens, 8500);
+	assert.equal(usage.contextWindow, 1_000_000);
+	assert.equal(usage.includesSubagents, false);
+});
+
+test("GET /api/workflows/:id/session-info reads usage off a cursor session from awb logs", async (t) => {
+	const createRes = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ name: "cursor session-info", runner: "cursor" }),
+	});
+	const { workflow } = (await createRes.json()) as { workflow: { id: string } };
+
+	const sessionId = "cursor-chat-api-001";
+	const logsDir = path.join(tmpHome, "logs");
+	fs.mkdirSync(logsDir, { recursive: true });
+	t.after(() => fs.rmSync(logsDir, { recursive: true, force: true }));
+	fs.writeFileSync(
+		path.join(logsDir, "wf-api.log"),
+		`${JSON.stringify({
+			type: "result",
+			subtype: "success",
+			session_id: sessionId,
+			usage: { inputTokens: 500, outputTokens: 20, cacheReadTokens: 100, cacheWriteTokens: 50 },
+		})}\n`,
+	);
+	setWorkflowSessionId(workflow.id, sessionId);
+
+	const res = await fetch(`${baseUrl}/api/workflows/${workflow.id}/session-info`, { headers: adminHeaders() });
+	assert.equal(res.status, 200);
+	const body = (await res.json()) as {
+		sessionId: string;
+		harness: string;
+		usage: { turns: number; totalInputTokens: number; outputTokens: number; contextTokens: number };
+	};
+	assert.equal(body.sessionId, sessionId);
+	assert.equal(body.harness, "cursor");
+	assert.equal(body.usage.turns, 1);
+	assert.equal(body.usage.totalInputTokens, 650);
+	assert.equal(body.usage.outputTokens, 20);
+	assert.equal(body.usage.contextTokens, 650);
+});
+
 test("POST /api/workflows/:id/open-terminal on a free-code workflow spawns free-code --session <path>", async (t) => {
 	const { _impl: terminalImpl } = await import("./terminal.ts");
 	const createRes = await fetch(`${baseUrl}/api/workflows`, {

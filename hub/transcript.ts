@@ -29,11 +29,20 @@
  *   `~/.agent-webhook-bridge/sessions/<hook>/`), so no directory convention
  *   applies. Usage lives in `message.usage.{input,output,cacheRead,cacheWrite}`
  *   on assistant messages.
+ * - **Cursor Agent** — `~/.cursor/projects/.../agent-transcripts/<chatId>/`
+ *   JSONL for turns, but those lines carry no per-message usage. Each headless
+ *   `agent -p` run instead writes a one-line JSON result (with `usage.inputTokens`,
+ *   `cacheReadTokens`, …) into the awb run log under
+ *   `~/.agent-webhook-bridge/logs/`; that is what the hub sums.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { awbDir } from "./awb.ts";
 import { contextWindowForModel } from "./models.ts";
+
+/** Context window assumed for Cursor when a run log names no model (extended tier). */
+const CURSOR_FALLBACK_CONTEXT_WINDOW = 1_000_000;
 
 /**
  * Directory Claude Code keeps a workdir's session transcripts in. Exported for
@@ -71,6 +80,27 @@ export function cursorTranscriptPath(sessionId: string): string | null {
 			}
 		} catch {
 			// No transcript for this project.
+		}
+	}
+	return null;
+}
+
+/** `~/.cursor/chats/<projectHash>/<chatId>/` when that chat exists on disk. */
+export function cursorChatDir(sessionId: string): string | null {
+	const root = path.join(os.homedir(), ".cursor", "chats");
+	let projectDirs: fs.Dirent[];
+	try {
+		projectDirs = fs.readdirSync(root, { withFileTypes: true });
+	} catch {
+		return null;
+	}
+	for (const project of projectDirs) {
+		if (!project.isDirectory()) continue;
+		const chatDir = path.join(root, project.name, sessionId);
+		try {
+			if (fs.statSync(chatDir).isDirectory()) return chatDir;
+		} catch {
+			// Not under this project hash.
 		}
 	}
 	return null;
@@ -313,6 +343,139 @@ function accumulateUsage(file: string): RawUsage {
 	return acc;
 }
 
+/** Normalises Cursor Agent's JSON `usage` block from a headless run result. */
+function cursorUsageOfResult(obj: Record<string, unknown>): {
+	input: number;
+	cacheCreation: number;
+	cacheRead: number;
+	output: number;
+	model: string | null;
+} | null {
+	if (obj.type !== "result") return null;
+	const usage = obj.usage as Record<string, number> | undefined;
+	if (!usage || usage.inputTokens === undefined) return null;
+	let model: string | null = null;
+	if (typeof obj.model === "string" && obj.model !== "") model = obj.model;
+	const modelUsage = obj.modelUsage as Record<string, Record<string, unknown>> | undefined;
+	if (modelUsage) {
+		const ids = Object.keys(modelUsage);
+		if (ids.length > 0) model = ids[ids.length - 1] ?? model;
+	}
+	return {
+		input: usage.inputTokens ?? 0,
+		cacheCreation: usage.cacheWriteTokens ?? 0,
+		cacheRead: usage.cacheReadTokens ?? 0,
+		output: usage.outputTokens ?? 0,
+		model,
+	};
+}
+
+/**
+ * Sums usage from every awb run log whose JSON result names `sessionId`. Cursor
+ * headless runs write one result object per step at the tail of the log; only
+ * the end of each file is read so a large logs directory stays fast.
+ */
+function accumulateCursorUsageFromLogs(sessionId: string): RawUsage {
+	const acc: RawUsage = {
+		input: 0,
+		cacheCreation: 0,
+		cacheRead: 0,
+		output: 0,
+		turns: 0,
+		lastContext: 0,
+		lastModel: null,
+		lastCompaction: null,
+		compactions: 0,
+	};
+	const logDir = path.join(awbDir(), "logs");
+	let files: string[];
+	try {
+		files = fs
+			.readdirSync(logDir)
+			.filter((name) => name.endsWith(".log"))
+			.map((name) => path.join(logDir, name));
+	} catch {
+		return acc;
+	}
+	files.sort((a, b) => {
+		try {
+			return fs.statSync(a).mtimeMs - fs.statSync(b).mtimeMs;
+		} catch {
+			return 0;
+		}
+	});
+	const tailBytes = 128 * 1024;
+	for (const file of files) {
+		let raw: string;
+		try {
+			const stat = fs.statSync(file);
+			if (stat.size === 0) continue;
+			const start = Math.max(0, stat.size - tailBytes);
+			const length = stat.size - start;
+			const fd = fs.openSync(file, "r");
+			try {
+				const buf = Buffer.alloc(length);
+				fs.readSync(fd, buf, 0, length, start);
+				raw = buf.toString("utf8");
+			} finally {
+				fs.closeSync(fd);
+			}
+		} catch {
+			continue;
+		}
+		if (!raw.includes(sessionId) || !raw.includes('"type":"result"')) continue;
+		for (const line of raw.split("\n")) {
+			if (!line.includes('"type":"result"') || !line.includes(sessionId)) continue;
+			try {
+				const obj = JSON.parse(line) as Record<string, unknown>;
+				if (obj.session_id !== sessionId) continue;
+				const rec = cursorUsageOfResult(obj);
+				if (!rec) continue;
+				acc.input += rec.input;
+				acc.cacheCreation += rec.cacheCreation;
+				acc.cacheRead += rec.cacheRead;
+				acc.output += rec.output;
+				acc.turns += 1;
+				acc.lastContext = rec.input + rec.cacheCreation + rec.cacheRead;
+				if (rec.model) acc.lastModel = rec.model;
+			} catch {
+				// Malformed/partial line in a growing log — skip.
+			}
+		}
+	}
+	return acc;
+}
+
+function tokenUsageFromRaw(main: RawUsage, subs: RawUsage[], cursorSession: boolean): TokenUsage {
+	let { input, cacheCreation, cacheRead, output, turns } = main;
+	for (const sub of subs) {
+		input += sub.input;
+		cacheCreation += sub.cacheCreation;
+		cacheRead += sub.cacheRead;
+		output += sub.output;
+		turns += sub.turns;
+	}
+	const contextWindow = main.lastModel
+		? contextWindowForModel(main.lastModel)
+		: cursorSession
+			? CURSOR_FALLBACK_CONTEXT_WINDOW
+			: contextWindowForModel(null);
+	return {
+		contextTokens: main.lastContext,
+		contextWindow,
+		model: main.lastModel,
+		lastCompactionAt: main.lastCompaction?.at ?? null,
+		compactions: main.compactions,
+		inputTokens: input,
+		cacheCreationTokens: cacheCreation,
+		cacheReadTokens: cacheRead,
+		outputTokens: output,
+		totalInputTokens: input + cacheCreation + cacheRead,
+		turns,
+		includesSubagents: subs.length > 0,
+	};
+}
+
 /** Absolute paths of a session's subagent transcripts (`<session>/subagents/*.jsonl`); empty if none. */
 function subagentFiles(workdir: string, sessionId: string): string[] {
 	const dir = path.join(claudeProjectDir(workdir), sessionId, "subagents");
@@ -338,37 +501,50 @@ export function readTokenUsage(workdir: string, sessionId: string): TokenUsage {
 	// free-code sessions ARE .jsonl paths — read the transcript directly; there
 	// is no per-workdir project folder and no subagent-transcript convention.
 	const isFreeCodeSession = sessionId.endsWith(".jsonl") && path.isAbsolute(sessionId);
-	const cursorTranscript = !isFreeCodeSession ? cursorTranscriptPath(sessionId) : null;
-	const mainFile = isFreeCodeSession ? sessionId : cursorTranscript ?? transcriptPath(workdir, sessionId);
-	const main = accumulateUsage(mainFile);
-	const subs = isFreeCodeSession || cursorTranscript ? [] : subagentFiles(workdir, sessionId);
-	let { input, cacheCreation, cacheRead, output, turns } = main;
-	for (const file of subs) {
-		const sub = accumulateUsage(file);
-		input += sub.input;
-		cacheCreation += sub.cacheCreation;
-		cacheRead += sub.cacheRead;
-		output += sub.output;
-		turns += sub.turns;
+	if (isFreeCodeSession) {
+		const main = accumulateUsage(sessionId);
+		return tokenUsageFromRaw(main, [], false);
 	}
-	return {
-		contextTokens: main.lastContext,
-		// The window belongs to the MAIN thread's model: subagents can run on a
-		// different one, and their transcripts are folded into the billed totals
-		// only — `contextTokens` is the main thread's occupancy, so its denominator
-		// has to be the main thread's window too.
-		contextWindow: contextWindowForModel(main.lastModel),
-		model: main.lastModel,
-		lastCompactionAt: main.lastCompaction?.at ?? null,
-		compactions: main.compactions,
-		inputTokens: input,
-		cacheCreationTokens: cacheCreation,
-		cacheReadTokens: cacheRead,
-		outputTokens: output,
-		totalInputTokens: input + cacheCreation + cacheRead,
-		turns,
-		includesSubagents: subs.length > 0,
-	};
+
+	const claudeFile = transcriptPath(workdir, sessionId);
+	const claudeExists = (() => {
+		try {
+			return fs.statSync(claudeFile).isFile();
+		} catch {
+			return false;
+		}
+	})();
+
+	const cursorTranscript = cursorTranscriptPath(sessionId);
+	const cursorChat = cursorChatDir(sessionId);
+	const cursorLogs = !claudeExists ? accumulateCursorUsageFromLogs(sessionId) : null;
+	const isCursorSession =
+		!claudeExists &&
+		(cursorTranscript !== null || cursorChat !== null || (cursorLogs?.turns ?? 0) > 0);
+
+	if (isCursorSession) {
+		const main =
+			cursorLogs && cursorLogs.turns > 0
+				? cursorLogs
+				: cursorTranscript
+					? accumulateUsage(cursorTranscript)
+					: (cursorLogs ?? {
+							input: 0,
+							cacheCreation: 0,
+							cacheRead: 0,
+							output: 0,
+							turns: 0,
+							lastContext: 0,
+							lastModel: null,
+							lastCompaction: null,
+							compactions: 0,
+						});
+		return tokenUsageFromRaw(main, [], true);
+	}
+
+	const main = accumulateUsage(claudeFile);
+	const subs = subagentFiles(workdir, sessionId).map((file) => accumulateUsage(file));
+	return tokenUsageFromRaw(main, subs, false);
 }
 
 /**
