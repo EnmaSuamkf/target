@@ -117,7 +117,7 @@ export function SessionPanel({
 						</p>
 					)}
 
-					{usage && usage.turns > 0 && (
+					{usage && (
 						<>
 							<UsageMeter usage={usage} />
 							{pressured && (

@@ -323,6 +323,10 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 			setSessionInfo(null);
 			return;
 		}
+		// Drop the previous workflow's steps immediately so the detail pane cannot
+		// seed checkboxes from stale rows while the new fetch is in flight.
+		setSteps([]);
+		setSessionInfo(null);
 		void refreshDetail(selectedId).catch(() => {
 			// A workflow deleted from elsewhere — the poll drops it from the list.
 		});
