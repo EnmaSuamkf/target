@@ -34,7 +34,7 @@ process.env.TARGET_HOME = tmpHome;
 // same throwaway dir so each suite gets its own empty hooks.json.
 process.env.AWB_HOME = tmpHome;
 
-const { getStep, insertTemplate, markStepRunning, markStepWaiting, setWorkflowSessionId, setWorkflowStatus } =
+const { getStep, insertTemplate, markStepRunning, markStepWaiting, markStepJudging, setWorkflowSessionId, setWorkflowStatus } =
 	await import("./db.ts");
 const { deleteAwbHook } = await import("./awb.ts");
 const { loadConfig } = await import("./config.ts");
@@ -497,6 +497,108 @@ test("GET /api/workflows/:id/session-info with a resolvable session returns the 
 	// The derivation itself is pinned in models.test.ts.
 	assert.equal(body.usage.contextWindow, FALLBACK_CONTEXT_WINDOW_TOKENS);
 	assert.equal(body.usage.includesSubagents, false);
+});
+
+test("GET /api/workflows/:id/session-info after a failed step returns usage from that step's session", async (t) => {
+	const { onStepResult } = await import("./workflow.ts");
+
+	const createRes = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ name: "session-info failed step" }),
+	});
+	const created = (await createRes.json()) as { workflow: { id: string } };
+	const stepRes = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}/steps`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ description: "fail on purpose" }),
+	});
+	const { step } = (await stepRes.json()) as { step: { id: string } };
+	markStepRunning(step.id);
+	setWorkflowSessionId(created.workflow.id, "sess-failed");
+
+	const detailRes = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`, { headers: adminHeaders() });
+	const detail = (await detailRes.json()) as { workflow: { workdir: string } };
+
+	const file = transcriptPath(detail.workflow.workdir, "sess-failed");
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	t.after(() => fs.rmSync(path.dirname(file), { recursive: true, force: true }));
+	fs.writeFileSync(
+		file,
+		`${JSON.stringify({
+			message: {
+				id: "msg-fail",
+				role: "assistant",
+				usage: { input_tokens: 4200, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 50 },
+			},
+		})}\n`,
+	);
+
+	await onStepResult(step.id, { ok: false, error: "boom", sessionId: "sess-failed" }, cfg, silent);
+
+	const res = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}/session-info`, { headers: adminHeaders() });
+	assert.equal(res.status, 200);
+	const body = (await res.json()) as { sessionId: string; usage: { contextTokens: number; turns: number } };
+	assert.equal(body.sessionId, "sess-failed");
+	assert.equal(body.usage.turns, 1);
+	assert.equal(body.usage.contextTokens, 4200);
+});
+
+test("GET /api/workflows/:id/session-info during judging uses finalized usage, not a stale streaming copy", async (t) => {
+	const createRes = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ name: "session-info judging usage" }),
+	});
+	const created = (await createRes.json()) as { workflow: { id: string } };
+	const stepRes = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}/steps`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ description: "judged step", acceptanceCriteria: "ok" }),
+	});
+	const { step } = (await stepRes.json()) as { step: { id: string } };
+	const sessionId = "sess-judging-usage";
+	markStepRunning(step.id);
+	markStepJudging(step.id, { result: "done", sessionId });
+
+	const detailRes = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}`, { headers: adminHeaders() });
+	const detail = (await detailRes.json()) as { workflow: { workdir: string } };
+
+	const file = transcriptPath(detail.workflow.workdir, sessionId);
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	t.after(() => fs.rmSync(path.dirname(file), { recursive: true, force: true }));
+	const line = (id: string, usage: { input: number; cacheCreation: number; cacheRead: number; output: number }) =>
+		JSON.stringify({
+			message: {
+				id,
+				role: "assistant",
+				usage: {
+					input_tokens: usage.input,
+					cache_creation_input_tokens: usage.cacheCreation,
+					cache_read_input_tokens: usage.cacheRead,
+					output_tokens: usage.output,
+				},
+			},
+		});
+	fs.writeFileSync(
+		file,
+		[
+			line("msg-1", { input: 50_000, cacheCreation: 0, cacheRead: 0, output: 100 }),
+			line("msg-2", { input: 100, cacheCreation: 0, cacheRead: 1_249_900, output: 50 }),
+			line("msg-2", { input: 80_000, cacheCreation: 5_000, cacheRead: 740_500, output: 200 }),
+		].join("\n") + "\n",
+	);
+
+	const res = await fetch(`${baseUrl}/api/workflows/${created.workflow.id}/session-info`, { headers: adminHeaders() });
+	assert.equal(res.status, 200);
+	const body = (await res.json()) as {
+		sessionId: string;
+		usage: { contextTokens: number; totalInputTokens: number; turns: number };
+	};
+	assert.equal(body.sessionId, sessionId);
+	assert.equal(body.usage.turns, 2);
+	assert.equal(body.usage.contextTokens, 825_500);
+	assert.notEqual(body.usage.contextTokens, body.usage.totalInputTokens);
 });
 
 /**

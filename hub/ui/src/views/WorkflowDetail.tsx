@@ -19,7 +19,7 @@ import { Switch } from "../components/Switch.tsx";
 import { useStagedImages } from "../hooks/useStagedImages.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
 import { canMoveStep } from "../lib/stepMove.ts";
-import { selectionAfterPoll, stepStatuses } from "../lib/stepSelection.ts";
+import { seedSelectionFromSteps, selectionAfterPoll, stepStatuses } from "../lib/stepSelection.ts";
 import { ContextPanel } from "./ContextPanel.tsx";
 import { RenameWorkflowModal } from "./RenameWorkflowModal.tsx";
 import { SessionPanel } from "./SessionPanel.tsx";
@@ -167,6 +167,9 @@ export function WorkflowDetail({
 	// difference between "untick it now" and "untick it forever". A ref, not
 	// state: it feeds the next comparison, it is never rendered.
 	const seenStatuses = useRef<Map<string, string>>(new Map());
+	// False again after every workflow switch; flipped once its steps load so a
+	// reload (steps arrive after the first paint) still picks up server selection.
+	const selectionSynced = useRef(false);
 
 	const sectionRef = useRef<HTMLElement>(null);
 
@@ -180,18 +183,23 @@ export function WorkflowDetail({
 	const taskSteps = useMemo(() => steps.filter((s) => s.kind !== "context"), [steps]);
 
 	useEffect(() => {
-		setSelection(new Set(taskSteps.filter((s) => s.selected).map((s) => s.id)));
+		selectionSynced.current = false;
 		// A rename dialog left open belongs to the workflow it was opened from —
 		// carrying it into another one would offer that name for this workflow.
 		setRenaming(false);
-		// The steps of the workflow being left tell us nothing about the one being
-		// opened: start the transition history empty so every step of the new
-		// workflow counts as a first sighting and the seed above stands as it is.
 		seenStatuses.current = new Map();
-		// Re-seed only when the workflow changes, not on every poll — otherwise
-		// the operator's checkbox changes would be reverted every 2 seconds.
-		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [workflow.id]);
+
+	// Seed from the server once per workflow open/reload, when steps first land.
+	// On a refresh the detail fetch completes after mount, so seeding only in the
+	// workflow-id effect (with steps still []) left every box unchecked while the
+	// engine still had the prior selection in the DB.
+	useEffect(() => {
+		if (selectionSynced.current || taskSteps.length === 0) return;
+		setSelection(seedSelectionFromSteps(taskSteps));
+		seenStatuses.current = new Map();
+		selectionSynced.current = true;
+	}, [workflow.id, taskSteps]);
 
 	// A step that finishes lets go of its checkbox: the selection says what the
 	// next run should do, and a step that just succeeded isn't it. Only the

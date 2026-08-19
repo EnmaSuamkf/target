@@ -280,6 +280,7 @@ test("WorkflowDetail actually applies the rule (the seam these unit tests can't 
 	);
 
 	assert.match(source, /selectionAfterPoll/, "the detail view must apply the deselect-on-done rule");
+	assert.match(source, /seedSelectionFromSteps/, "and seed from the server when steps first arrive");
 	// Driven by the polled steps, and remembering their statuses for the next
 	// comparison — without the ref there is no transition to spot.
 	assert.match(source, /seenStatuses\.current = stepStatuses\(taskSteps\)/);

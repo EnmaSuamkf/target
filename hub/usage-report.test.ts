@@ -97,6 +97,28 @@ test("a session's input total is new input + cache creation + cache read, not th
 	assert.equal(usage.contextTokens, 13_003);
 });
 
+test("a streamed assistant copy is replaced by the finalized one with the same message id", () => {
+	// Claude Code appends a streaming copy first, then a finalized copy. The
+	// streaming line can carry cumulative cache reads that make contextTokens
+	// look like totalInputTokens — the Conversation panel flickered at ~131%
+	// until a later turn moved lastContext on. The finalized copy has the real
+	// per-turn occupancy; it must win over the earlier line.
+	writeMain("s-stream", [
+		turn("msg-1", { input: 50_000, cacheCreation: 0, cacheRead: 0, output: 100 }),
+		// Streaming copy: cumulative totals masquerading as this turn's occupancy.
+		turn("msg-2", { input: 100, cacheCreation: 0, cacheRead: 1_249_900, output: 50 }),
+		// Finalized copy: the per-turn occupancy the /context panel reports.
+		turn("msg-2", { input: 80_000, cacheCreation: 5_000, cacheRead: 740_500, output: 200 }),
+	]);
+
+	const usage = readTokenUsage(workdir, "s-stream");
+
+	assert.equal(usage.turns, 2, "two assistant messages, not three lines");
+	assert.equal(usage.totalInputTokens, 50_000 + 825_500);
+	assert.equal(usage.contextTokens, 825_500, "occupancy is the LAST copy of msg-2, not the streaming one");
+	assert.notEqual(usage.contextTokens, usage.totalInputTokens, "context must not read as the session total");
+});
+
 test("subagent transcripts are folded into the totals and the session says so", () => {
 	writeMain("s-subs", [turn("m1", { input: 10, cacheCreation: 500, cacheRead: 2_000, output: 40 })]);
 	writeSubagent("s-subs", "agent-a1", [turn("a1", { input: 5, cacheCreation: 100, cacheRead: 9_000, output: 60 })]);
@@ -218,4 +240,18 @@ test("the meter quotes the total, in the client's own abbreviations", () => {
 	// The Conversation panel renders THIS component rather than its own copy of
 	// the markup, so the readout has one definition and one place on the page.
 	assert.match(read("ui/src/views/SessionPanel.tsx"), /<UsageMeter usage=\{usage\} \/>/);
+});
+
+test("the Conversation panel shows the meter whenever usage exists", () => {
+	const panel = read("ui/src/views/SessionPanel.tsx");
+	assert.doesNotMatch(panel, /usage\.turns > 0/, "a failed run with no assistant turn yet still shows Context 0 / window");
+	assert.match(panel, /\{usage && \(/);
+});
+
+test("canReadTokenUsage accepts free-code session paths without a workdir", async () => {
+	const { canReadTokenUsage } = await import("./transcript.ts");
+	const file = "/tmp/sessions/foo.jsonl";
+	assert.equal(canReadTokenUsage(null, file), true);
+	assert.equal(canReadTokenUsage(null, "sess-uuid"), false);
+	assert.equal(canReadTokenUsage("/work", "sess-uuid"), true);
 });

@@ -29,6 +29,16 @@
 export interface SelectableStep {
 	id: string;
 	status: string;
+	selected?: boolean;
+}
+
+/**
+ * Builds the checkbox selection from the server's `selected` flags. Used once
+ * when a workflow's steps first arrive (including after a page reload) — the
+ * poll must not re-run this every 2s or mid-run toggles would be overwritten.
+ */
+export function seedSelectionFromSteps(steps: readonly SelectableStep[]): Set<string> {
+	return new Set(steps.filter((step) => step.selected).map((step) => step.id));
 }
 
 /**

@@ -135,7 +135,7 @@ import {
 import { stepActivity } from "./progress.ts";
 import type { Logger } from "./runner.ts";
 import { openResumeTerminal } from "./terminal.ts";
-import { readTokenUsage } from "./transcript.ts";
+import { canReadTokenUsage, readTokenUsage } from "./transcript.ts";
 import {
 	abortStep,
 	addStep,
@@ -1846,7 +1846,10 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			harness: runtime.harness,
 			sandbox: runtime.sandbox?.kind ?? "host",
 			image: runtime.sandbox?.image ?? null,
-			usage: sessionId && runtime.workdir ? readTokenUsage(runtime.workdir, sessionId) : null,
+			usage:
+				sessionId && canReadTokenUsage(runtime.workdir, sessionId)
+					? readTokenUsage(runtime.workdir ?? "", sessionId)
+					: null,
 			lastCompactionAt: observed.lastCompactionAt,
 			/** True between observing a boundary and the next dispatch re-stating the conversation context. */
 			compactionPending: needsContextReinjection(observed),

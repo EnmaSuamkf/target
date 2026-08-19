@@ -306,7 +306,8 @@ function accumulateUsage(file: string): RawUsage {
 	} catch {
 		return acc;
 	}
-	const seen = new Set<string>();
+	/** Per-message billed totals; replaced when a later line carries the same id. */
+	const seen = new Map<string, { input: number; cacheCreation: number; cacheRead: number; output: number }>();
 	for (const line of raw.split("\n")) {
 		if (!line.trim()) continue;
 		try {
@@ -323,18 +324,27 @@ function accumulateUsage(file: string): RawUsage {
 			if (model) acc.lastModel = model;
 			const rec = usageOfLine(obj);
 			if (!rec) continue;
-			// Claude Code can write the same assistant message more than once (e.g. a
-			// streamed then finalized copy); key on the message id so its tokens are
-			// counted once.
+			// Claude Code can write the same assistant message more than once (a
+			// streamed then finalized copy). The first copy can carry cumulative
+			// totals that make `lastContext` look like `totalInputTokens` until the
+			// finalized line lands — so the LAST copy wins, same as compaction above.
 			const id = rec.id ?? line;
-			if (seen.has(id)) continue;
-			seen.add(id);
-			acc.input += rec.input;
-			acc.cacheCreation += rec.cacheCreation;
-			acc.cacheRead += rec.cacheRead;
-			acc.output += rec.output;
-			acc.turns += 1;
-			acc.lastContext = rec.input + rec.cacheCreation + rec.cacheRead;
+			const prev = seen.get(id);
+			if (prev) {
+				acc.input -= prev.input;
+				acc.cacheCreation -= prev.cacheCreation;
+				acc.cacheRead -= prev.cacheRead;
+				acc.output -= prev.output;
+			} else {
+				acc.turns += 1;
+			}
+			const billed = { input: rec.input, cacheCreation: rec.cacheCreation, cacheRead: rec.cacheRead, output: rec.output };
+			seen.set(id, billed);
+			acc.input += billed.input;
+			acc.cacheCreation += billed.cacheCreation;
+			acc.cacheRead += billed.cacheRead;
+			acc.output += billed.output;
+			acc.lastContext = billed.input + billed.cacheCreation + billed.cacheRead;
 		} catch {
 			// Skip a malformed/partial line — a partially-written last line while
 			// the process is still running is expected, not an error.
@@ -497,6 +507,14 @@ function subagentFiles(workdir: string, sessionId: string): string[] {
  * its real work to a subagent. All-zero if the session's transcript doesn't
  * exist yet.
  */
+/** True when `readTokenUsage` can resolve a transcript for this session id. */
+export function canReadTokenUsage(workdir: string | null, sessionId: string): boolean {
+	if (!sessionId) return false;
+	// free-code sessions ARE absolute .jsonl paths — no workdir slug applies.
+	if (sessionId.endsWith(".jsonl") && path.isAbsolute(sessionId)) return true;
+	return Boolean(workdir);
+}
+
 export function readTokenUsage(workdir: string, sessionId: string): TokenUsage {
 	// free-code sessions ARE .jsonl paths — read the transcript directly; there
 	// is no per-workdir project folder and no subagent-transcript convention.
