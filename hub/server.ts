@@ -1580,16 +1580,17 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					sendJson(res, 404, { error: "unknown_conversation" });
 					return;
 				}
-				const command = harnessResumeCommand(conversation.runner, conversation.sessionId);
-				if (!command) {
-					sendJson(res, 400, { error: "unknown_harness" });
-					return;
-				}
 				// No workdir in the transcript (an old or truncated one): fall back to
 				// home rather than refusing. For free-code the session id is an absolute
 				// path so the resume still finds it; for claude the resume may miss,
 				// which the harness reports in the terminal the operator is watching.
+				// Cursor needs the workdir to build `agent --resume … --workspace …`.
 				const workdir = conversation.workdir ?? os.homedir();
+				const command = harnessResumeCommand(conversation.runner, conversation.sessionId, null, workdir);
+				if (!command) {
+					sendJson(res, 400, { error: "unknown_harness" });
+					return;
+				}
 				void (async () => {
 					try {
 						await openResumeTerminal(workdir, command, harnessResumeEnv(conversation.runner));
