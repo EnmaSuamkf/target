@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Template, TemplateInput, TemplateStep } from "../api/types.ts";
+import type { Tcp, TcpSelection, Template, TemplateInput, TemplateStep } from "../api/types.ts";
+import { TcpSelectionEditor } from "./TcpSelectionEditor.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { Field } from "../components/Field.tsx";
@@ -24,6 +25,7 @@ import styles from "./TemplatesView.module.css";
  */
 export function TemplatesView({
 	templates,
+	tcps,
 	busy,
 	onCreate,
 	onUpdate,
@@ -33,6 +35,7 @@ export function TemplatesView({
 	onImport,
 }: {
 	templates: Template[];
+	tcps: Tcp[];
 	busy: boolean;
 	onCreate: (input: TemplateInput) => Promise<void>;
 	onUpdate: (id: string, input: TemplateInput) => Promise<void>;
@@ -242,6 +245,7 @@ export function TemplatesView({
 					<TemplateForm
 						key={editing?.id ?? "new"}
 						template={editing}
+						tcps={tcps}
 						busy={busy}
 						{...(isMobile ? { onBack: closeForm } : {})}
 						onCancel={closeForm}
@@ -278,6 +282,7 @@ export function TemplatesView({
 /** Create/edit form for a template and its ordered steps. */
 function TemplateForm({
 	template,
+	tcps,
 	busy,
 	onSubmit,
 	onCancel,
@@ -286,6 +291,7 @@ function TemplateForm({
 	onExport,
 }: {
 	template: Template | null;
+	tcps: Tcp[];
 	busy: boolean;
 	onSubmit: (input: TemplateInput) => Promise<void>;
 	onCancel: () => void;
@@ -298,6 +304,7 @@ function TemplateForm({
 	const [name, setName] = useState(template?.name ?? "");
 	const [tags, setTags] = useState(template?.tags.join(", ") ?? "");
 	const [steps, setSteps] = useState<TemplateStep[]>(template?.steps ?? []);
+	const [tcpSelections, setTcpSelections] = useState<TcpSelection[]>(template?.tcpSelections ?? []);
 	const [saving, setSaving] = useState(false);
 
 	const updateStep = (index: number, patch: Partial<TemplateStep>): void => {
@@ -327,6 +334,7 @@ function TemplateForm({
 					.split(",")
 					.map((t) => t.trim())
 					.filter(Boolean),
+				tcpSelections,
 				// Drop blank rows rather than persisting empty steps.
 				steps: steps
 					.map((step) => ({ ...step, description: step.description.trim() }))
@@ -396,6 +404,12 @@ function TemplateForm({
 					/>
 				)}
 			</Field>
+
+			<div className={styles.stepsBlock}>
+				<span className="label">TCP packs</span>
+				<p className="hint">Attached to the workflow when this template is used. Select a whole pack or individual tools.</p>
+				<TcpSelectionEditor tcps={tcps} selections={tcpSelections} onChange={setTcpSelections} />
+			</div>
 
 			<div className={styles.stepsBlock}>
 				<div className={styles.stepsHead}>

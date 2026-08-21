@@ -17,6 +17,7 @@ import { Modal } from "./Modal.tsx";
 export interface ConfirmOptions {
 	title: string;
 	description?: string;
+	body?: React.ReactNode;
 	confirmLabel?: string;
 	cancelLabel?: string;
 	danger?: boolean;
@@ -63,7 +64,9 @@ export function useConfirm(): {
 					</button>
 				</>
 			}
-		/>
+		>
+			{options.body}
+		</Modal>
 	) : null;
 
 	return { confirm, dialog };

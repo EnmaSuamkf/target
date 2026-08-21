@@ -132,6 +132,26 @@ import {
 	type Template,
 	type Workflow,
 } from "./db.ts";
+import { executeTcpTool } from "./tcp-executor.ts";
+import { findTcpTool } from "./tcp-catalog.ts";
+import {
+	deleteTcp,
+	getTcp,
+	importTcps,
+	insertTcp,
+	listTcps,
+	listWorkflowTcpIds,
+	listWorkflowTcpSelections,
+	tcpBundle,
+	TcpBundleError,
+	normalizeTcpSelections,
+	parseTcpBundle,
+	applyTemplateTcpsToWorkflow,
+	setWorkflowTcpSelections,
+	updateTcp,
+	type Tcp,
+} from "./tcp-store.ts";
+import { getTcpUsage } from "./tcp-usage.ts";
 import { stepActivity } from "./progress.ts";
 import type { Logger } from "./runner.ts";
 import { openResumeTerminal } from "./terminal.ts";
@@ -397,6 +417,8 @@ function publicWorkflow(workflow: Workflow): Record<string, unknown> {
 		// poll (see `reconcileStatus`).
 		statusManual: workflow.statusManual,
 		statusManualAt: workflow.statusManualAt,
+		tcpIds: listWorkflowTcpIds(workflow.id),
+		tcpSelections: listWorkflowTcpSelections(workflow.id),
 		createdAt: workflow.createdAt,
 		updatedAt: workflow.updatedAt,
 	};
@@ -448,12 +470,29 @@ function publicStep(step: Step, cfg: HubConfig): Record<string, unknown> {
 	};
 }
 
+function publicTcpUsage(usage: import("./tcp-usage.ts").TcpUsage): import("./tcp-usage.ts").TcpUsage {
+	return usage;
+}
+
+function publicTcp(tcp: Tcp): Record<string, unknown> {
+	return {
+		id: tcp.id,
+		name: tcp.name,
+		tags: tcp.tags,
+		tools: tcp.tools,
+		createdAt: tcp.createdAt,
+		updatedAt: tcp.updatedAt,
+	};
+}
+
 function publicTemplate(template: Template): Record<string, unknown> {
 	return {
 		id: template.id,
 		name: template.name,
 		tags: template.tags,
 		steps: template.steps,
+		tcpIds: template.tcpIds,
+		tcpSelections: template.tcpSelections,
 		createdAt: template.createdAt,
 		updatedAt: template.updatedAt,
 	};
@@ -971,7 +1010,13 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						sendJson(res, 400, { error: "name is required" });
 						return;
 					}
-					const template = insertTemplate({ name, tags: body.tags, steps: body.steps });
+					const template = insertTemplate({
+						name,
+						tags: body.tags,
+						steps: body.steps,
+						tcpIds: body.tcpIds,
+						tcpSelections: body.tcpSelections,
+					});
 					log(`template '${template.name}' (${template.id}) created`);
 					sendJson(res, 200, { template: publicTemplate(template) });
 				});
@@ -1051,7 +1096,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return;
 			}
 			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
-				const input: { name?: string; tags?: unknown; steps?: unknown } = {};
+				const input: { name?: string; tags?: unknown; steps?: unknown; tcpIds?: unknown; tcpSelections?: unknown } = {};
 				if (typeof body.name === "string") {
 					const trimmed = body.name.trim();
 					if (!trimmed) {
@@ -1062,6 +1107,8 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				}
 				if ("tags" in body) input.tags = body.tags;
 				if ("steps" in body) input.steps = body.steps;
+				if ("tcpSelections" in body) input.tcpSelections = body.tcpSelections;
+				else if ("tcpIds" in body) input.tcpIds = body.tcpIds;
 				const template = updateTemplate(templateId, input);
 				if (!template) {
 					sendJson(res, 404, { error: "unknown_template" });
@@ -1083,6 +1130,192 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return;
 			}
 			log(`template ${templateId} deleted`);
+			sendJson(res, 200, { ok: true });
+			return;
+		}
+
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
+	// --- /api/tcps ---
+
+	if (parts[1] === "tcps") {
+		if (!parts[2]) {
+			if (req.method === "GET") {
+				const q = (url.searchParams.get("q") ?? "").trim().toLowerCase();
+				let tcps = listTcps();
+				if (q) {
+					tcps = tcps.filter(
+						(m) => m.name.toLowerCase().includes(q) || m.tags.some((tag) => tag.toLowerCase().includes(q)),
+					);
+				}
+				sendJson(res, 200, { tcps: tcps.map(publicTcp) });
+				return;
+			}
+			if (req.method === "POST") {
+				if (!isAdmin(cfg, req.headers)) {
+					sendJson(res, 401, { error: "unauthorized" });
+					return;
+				}
+				readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+					const name = typeof body.name === "string" ? body.name.trim() : "";
+					if (!name) {
+						sendJson(res, 400, { error: "name is required" });
+						return;
+					}
+					const tcp = insertTcp({ name, tags: body.tags, tools: body.tools });
+					log(`tcp '${tcp.name}' (${tcp.id}) created`);
+					sendJson(res, 200, { tcp: publicTcp(tcp) });
+				});
+				return;
+			}
+			sendJson(res, 404, { error: "not_found" });
+			return;
+		}
+
+		if (parts[2] === "export" && !parts[3] && req.method === "GET") {
+			sendJson(res, 200, tcpBundle(listTcps()));
+			return;
+		}
+
+		if (parts[2] === "import" && !parts[3] && req.method === "POST") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				let entries;
+				try {
+					entries = parseTcpBundle(body);
+				} catch (err) {
+					if (err instanceof TcpBundleError) {
+						sendJson(res, 400, { error: err.code });
+						return;
+					}
+					throw err;
+				}
+				const created = importTcps(entries);
+				log(`imported ${created.length} tcp(s): ${created.map((m) => `'${m.name}' (${m.id})`).join(", ")}`);
+				sendJson(res, 200, { tcps: created.map(publicTcp) });
+			});
+			return;
+		}
+
+		if (parts[2] === "execute" && !parts[3] && req.method === "POST") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				void (async () => {
+					const tcpId = typeof body.tcpId === "string" ? body.tcpId : "";
+					const toolName = typeof body.toolName === "string" ? body.toolName : "";
+					if (!tcpId || !toolName) {
+						sendJson(res, 400, { error: "tcpId and toolName are required" });
+						return;
+					}
+					const found = findTcpTool(tcpId, toolName);
+					if (!found) {
+						sendJson(res, 404, { error: "unknown_tool" });
+						return;
+					}
+					const result = await executeTcpTool(found.tool, {
+						toolName,
+						inputs:
+							typeof body.inputs === "object" && body.inputs ? (body.inputs as Record<string, string>) : undefined,
+						input: typeof body.input === "string" ? body.input : undefined,
+					});
+					sendJson(res, 200, { result });
+				})().catch((err) => {
+					sendJson(res, 500, { error: String((err as Error).message ?? err) });
+				});
+			});
+			return;
+		}
+
+		const tcpId = parts[2];
+
+		if (parts[3] === "usage" && !parts[4] && req.method === "GET") {
+			const tcp = getTcp(tcpId);
+			if (!tcp) {
+				sendJson(res, 404, { error: "unknown_tcp" });
+				return;
+			}
+			const toolsRaw = url.searchParams.get("tools");
+			const toolNames = toolsRaw
+				? toolsRaw
+						.split(",")
+						.map((name) => name.trim())
+						.filter((name) => name !== "")
+				: undefined;
+			const usage = getTcpUsage(tcpId, toolNames);
+			if (!usage) {
+				sendJson(res, 404, { error: "unknown_tcp" });
+				return;
+			}
+			sendJson(res, 200, { usage: publicTcpUsage(usage) });
+			return;
+		}
+
+		if (parts[3] === "export" && !parts[4] && req.method === "GET") {
+			const tcp = getTcp(tcpId);
+			if (!tcp) {
+				sendJson(res, 404, { error: "unknown_tcp" });
+				return;
+			}
+			sendJson(res, 200, tcpBundle([tcp]));
+			return;
+		}
+
+		if (!parts[3] && req.method === "GET") {
+			const tcp = getTcp(tcpId);
+			if (!tcp) {
+				sendJson(res, 404, { error: "unknown_tcp" });
+				return;
+			}
+			sendJson(res, 200, { tcp: publicTcp(tcp) });
+			return;
+		}
+
+		if (!parts[3] && (req.method === "PATCH" || req.method === "PUT")) {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				const input: { name?: string; tags?: unknown; tools?: unknown } = {};
+				if (typeof body.name === "string") {
+					const trimmed = body.name.trim();
+					if (!trimmed) {
+						sendJson(res, 400, { error: "name is required" });
+						return;
+					}
+					input.name = trimmed;
+				}
+				if ("tags" in body) input.tags = body.tags;
+				if ("tools" in body) input.tools = body.tools;
+				const tcp = updateTcp(tcpId, input);
+				if (!tcp) {
+					sendJson(res, 404, { error: "unknown_tcp" });
+					return;
+				}
+				sendJson(res, 200, { tcp: publicTcp(tcp) });
+			});
+			return;
+		}
+
+		if (!parts[3] && req.method === "DELETE") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			const removed = deleteTcp(tcpId);
+			if (!removed) {
+				sendJson(res, 404, { error: "unknown_tcp" });
+				return;
+			}
+			log(`tcp ${tcpId} deleted`);
 			sendJson(res, 200, { ok: true });
 			return;
 		}
@@ -1577,6 +1810,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 								retryIntervalSeconds: step.retryIntervalSeconds,
 							});
 						}
+						if (template.tcpSelections.length > 0) applyTemplateTcpsToWorkflow(workflow.id, template.tcpSelections);
 					}
 					log(`workflow '${workflow.name}' (${workflow.id}) created — agent '${workflow.agentName}'`);
 					sendJson(res, 200, { workflow: publicWorkflow(workflow) });
@@ -1696,6 +1930,51 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// locks the field and disables Save). To change it, restart the workflow
 	// first (restart resets the flag and starts a fresh conversation). Send an
 	// empty string to clear it (only while still editable).
+
+	if (workflowId && parts[3] === "tcps" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		const workflow = getWorkflow(workflowId);
+		if (!workflow) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		if (workflow.contextInjected) {
+			sendJson(res, 400, { error: "context already injected" });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			let selections;
+			if ("tcpSelections" in body) {
+				if (!Array.isArray(body.tcpSelections)) {
+					sendJson(res, 400, { error: "tcpSelections must be an array" });
+					return;
+				}
+				selections = normalizeTcpSelections(body.tcpSelections);
+			} else if ("tcpIds" in body) {
+				const raw = body.tcpIds;
+				if (!Array.isArray(raw)) {
+					sendJson(res, 400, { error: "tcpIds must be an array" });
+					return;
+				}
+				selections = raw.map((id) => ({ tcpId: String(id) })).filter((s) => s.tcpId !== "");
+			} else {
+				sendJson(res, 400, { error: "tcpSelections or tcpIds is required" });
+				return;
+			}
+			try {
+				setWorkflowTcpSelections(workflowId, selections);
+				log(`workflow ${workflowId} TCP attachments updated (${selections.length})`);
+				sendJson(res, 200, { workflow: publicWorkflow(getWorkflow(workflowId)!) });
+			} catch (err) {
+				const message = String((err as Error).message ?? err);
+				sendJson(res, message.startsWith("unknown_tcp:") ? 404 : 400, { error: message });
+			}
+		});
+		return;
+	}
 
 	if (workflowId && parts[3] === "context" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
 		if (!isAdmin(cfg, req.headers)) {
@@ -1970,6 +2249,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					});
 					added++;
 				}
+				if (template.tcpSelections.length > 0) applyTemplateTcpsToWorkflow(workflowId, template.tcpSelections);
 				sendJson(res, 200, {
 					workflow: publicWorkflow(getWorkflow(workflowId) as Workflow),
 					steps: listSteps(workflowId).map((s) => publicStep(s, cfg)),

@@ -44,6 +44,7 @@ import type { HubConfig } from "./config.ts";
 import { CONTEXT_PRESSURE_PERCENT, shouldForceSubagent, workflowContextRatio } from "./context-pressure.ts";
 import type { Attachment, Step, Workflow } from "./db.ts";
 import { completeStep, getContextStep, markStepQueued } from "./db.ts";
+import { tcpCatalogPreamble } from "./tcp-catalog.ts";
 import { stepResultsNote } from "./step-results.ts";
 
 export type Logger = (message: string, type?: "info" | "warning" | "error") => void;
@@ -239,6 +240,8 @@ export function composeStepInput(
 		mode?: "exec" | "judge";
 		/** Prepend the conversation-context preamble (and its images). */
 		injectContext?: boolean;
+		/** Prepend attached TCP tool catalog (same timing as context injection). */
+		injectTcp?: boolean;
 		/**
 		 * This injection is a RE-injection forced by a detected compaction, not the
 		 * first one. Only changes the preamble's opening line — see
@@ -293,6 +296,7 @@ export function composeStepInput(
 				options.afterCompaction ?? false,
 			)
 		: "";
+	const tcpBlock = options.injectTcp ? tcpCatalogPreamble(workflow.id) : "";
 	// Straight after the description, so "do what this screenshot shows" reads as
 	// one instruction rather than a task and an unrelated file list.
 	const descriptionImages = attachmentSection(
@@ -304,7 +308,7 @@ export function composeStepInput(
 	// hub notices a boundary the agent has already lost the history, so the
 	// pointer has to have been given while the conversation was still intact.
 	const priorResults = stepResultsNote(workflow.agentName);
-	return `${preamble}${step.description}${descriptionImages}${criteriaNote(
+	return `${preamble}${tcpBlock}${step.description}${descriptionImages}${criteriaNote(
 		step.acceptanceCriteria,
 		acceptanceImages,
 	)}${priorResults}${subagentInstruction(step.useSubagent, options.forceSubagent ?? false)}${
@@ -424,6 +428,8 @@ export async function dispatchStep(
 	// step — one whose context was already injected before this feature existed,
 	// mid-run right now — behaves exactly as it always did.
 	const hasContextStep = getContextStep(workflow.id) !== null;
+	const injectCatalog =
+		mode === "exec" && ((freshConversation && !workflow.contextInjected && !hasContextStep) || afterCompaction);
 	const input = composeStepInput(step, observed, {
 		mode,
 		// Two independent reasons to inject: this is the conversation's first
@@ -433,8 +439,8 @@ export async function dispatchStep(
 		// mid-run, long after that step settled, so it is the only mechanism in play
 		// and re-arming the step instead would need `advance()` to learn about
 		// compaction, which happens here, after `advance()` has already chosen.
-		injectContext:
-			mode === "exec" && ((freshConversation && !workflow.contextInjected && !hasContextStep) || afterCompaction),
+		injectContext: injectCatalog,
+		injectTcp: injectCatalog,
 		afterCompaction,
 		retryReason: options.retryReason,
 		timedOut: options.timedOut,

@@ -18,6 +18,11 @@ import type {
 	StagedStepImages,
 	Step,
 	StepConfigInput,
+	Tcp,
+	TcpInput,
+	TcpSelection,
+	TcpTool,
+	TcpUsage,
 	Template,
 	TemplateInput,
 	Workflow,
@@ -33,12 +38,19 @@ import { useIsMobile } from "./hooks/useIsMobile.ts";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts.ts";
 import { usePolling } from "./hooks/usePolling.ts";
 import { downloadJson, jsonFilename } from "./lib/download.ts";
+import {
+	tcpToolChangeAction,
+	tcpToolNamesAtRisk,
+	tcpToolsForComparison,
+	tcpUsageConfirmOptions,
+} from "./tcpUsageAlert.ts";
 import { CreateWorkflowModal } from "./views/CreateWorkflowModal.tsx";
 import { LandingView } from "./views/LandingView.tsx";
 import { LoginView } from "./views/LoginView.tsx";
 import { ResetPasswordView } from "./views/ResetPasswordView.tsx";
 import { SettingsView } from "./views/SettingsView.tsx";
 import { SetupView } from "./views/SetupView.tsx";
+import { TcpsView } from "./views/TcpsView.tsx";
 import { TemplatesView } from "./views/TemplatesView.tsx";
 import { WorkflowDetail } from "./views/WorkflowDetail.tsx";
 import { AllWorkflowsPage, WorkflowList } from "./views/WorkflowList.tsx";
@@ -190,6 +202,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	const [view, setView] = useState<View>("workflows");
 	const [workflows, setWorkflows] = useState<Workflow[]>([]);
 	const [templates, setTemplates] = useState<Template[]>([]);
+	const [tcps, setTcps] = useState<Tcp[]>([]);
 	const [settings, setSettings] = useState<NotificationSettings | null>(null);
 	const [shortcutSettings, setShortcutSettings] = useState<ShortcutSettings | null>(null);
 	const [selectedId, setSelectedId] = useState<string | null>(readHashSelection);
@@ -276,6 +289,11 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		setTemplates(list);
 	}, []);
 
+	const refreshTcps = useCallback(async (): Promise<void> => {
+		const list = await api.listTcps();
+		setTcps(list);
+	}, []);
+
 	const refreshSettings = useCallback(async (): Promise<void> => {
 		setSettings(await api.getNotificationSettings());
 	}, []);
@@ -307,14 +325,14 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	useEffect(() => {
 		void (async () => {
 			try {
-				await Promise.all([refreshWorkflows(), refreshTemplates(), refreshSettings(), refreshShortcutSettings()]);
+				await Promise.all([refreshWorkflows(), refreshTemplates(), refreshTcps(), refreshSettings(), refreshShortcutSettings()]);
 			} catch (err) {
 				reportError(err, "Could not load data");
 			} finally {
 				setLoaded(true);
 			}
 		})();
-	}, [refreshWorkflows, refreshTemplates, refreshSettings, refreshShortcutSettings, reportError]);
+	}, [refreshWorkflows, refreshTemplates, refreshTcps, refreshSettings, refreshShortcutSettings, reportError]);
 
 	// Detail for the selected workflow, and clearing it when nothing is selected.
 	useEffect(() => {
@@ -559,6 +577,18 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 			async () => {
 				await api.setConversationContext(selectedId, context);
 				toast.success("Conversation context saved.");
+			},
+			refreshCurrent,
+		);
+	};
+
+	const handleSaveTcps = async (tcpSelections: TcpSelection[]): Promise<boolean> => {
+		if (!selectedId) return false;
+		return await act(
+			"Could not save TCP selection",
+			async () => {
+				await api.setWorkflowTcpSelections(selectedId, tcpSelections);
+				toast.success("TCP selection saved.");
 			},
 			refreshCurrent,
 		);
@@ -880,6 +910,137 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		);
 	};
 
+	// --- tcp actions ---
+
+	const confirmTcpChangeIfReferenced = async (
+		loadUsage: () => Promise<TcpUsage>,
+		buildOptions: (usage: TcpUsage) => ReturnType<typeof tcpUsageConfirmOptions>,
+	): Promise<boolean> => {
+		try {
+			const usage = await loadUsage();
+			const options = buildOptions(usage);
+			if (!options) return true;
+			return await confirm(options);
+		} catch {
+			return true;
+		}
+	};
+
+	const handleCreateTcp = async (input: TcpInput): Promise<void> => {
+		await act(
+			"Could not create the TCP",
+			async () => {
+				await api.createTcp(input);
+				toast.success("TCP created.");
+			},
+			refreshTcps,
+		);
+	};
+
+	const handleUpdateTcp = async (id: string, input: TcpInput, beforeTools: TcpTool[]): Promise<boolean> => {
+		const tcpName = tcps.find((m) => m.id === id)?.name ?? input.name.trim();
+		const atRisk = tcpToolNamesAtRisk(tcpToolsForComparison(beforeTools), tcpToolsForComparison(input.tools));
+		if (atRisk.length > 0) {
+			const action = tcpToolChangeAction(beforeTools, input.tools) ?? "remove";
+			const allowed = await confirmTcpChangeIfReferenced(
+				() => api.getTcpUsage(id, atRisk),
+				(usage) =>
+					tcpUsageConfirmOptions(tcpName, usage, {
+						type: "tool-change",
+						toolNames: atRisk,
+						action,
+						confirmLabel: "Save anyway",
+					}),
+			);
+			if (!allowed) return false;
+		}
+		return await act(
+			"Could not update the TCP",
+			async () => {
+				await api.updateTcp(id, input);
+				toast.success("TCP saved.");
+			},
+			refreshTcps,
+		);
+	};
+
+	const confirmTcpToolRemoval = async (id: string, toolName: string): Promise<boolean> => {
+		const trimmed = toolName.trim();
+		if (trimmed === "") return true;
+		const tcp = tcps.find((m) => m.id === id);
+		if (!tcp) return true;
+		return await confirmTcpChangeIfReferenced(
+			() => api.getTcpUsage(id, [trimmed]),
+			(usage) =>
+				tcpUsageConfirmOptions(tcp.name, usage, {
+					type: "tool-change",
+					toolNames: [trimmed],
+					action: "remove",
+					confirmLabel: "Remove tool",
+				}),
+		);
+	};
+
+	const handleDeleteTcp = async (id: string): Promise<void> => {
+		const tcp = tcps.find((m) => m.id === id);
+		const tcpName = tcp?.name ?? "this TCP";
+		let confirmOptions = {
+			title: `Delete "${tcpName}"?`,
+			description: "This pack will be removed from the hub.",
+			confirmLabel: "Delete TCP",
+			danger: true as const,
+		};
+		try {
+			const usage = await api.getTcpUsage(id);
+			const referenced = tcpUsageConfirmOptions(tcpName, usage, { type: "delete" });
+			if (referenced) confirmOptions = referenced;
+		} catch {
+			// Keep the generic confirmation if usage lookup fails.
+		}
+		const confirmed = await confirm(confirmOptions);
+		if (!confirmed) return;
+		await act(
+			"Could not delete the TCP",
+			async () => {
+				await api.deleteTcp(id);
+				toast.success("TCP deleted.");
+			},
+			refreshTcps,
+		);
+	};
+
+	const handleExportTcp = async (id: string): Promise<void> => {
+		await act("Could not export the TCP", async () => {
+			const name = tcps.find((m) => m.id === id)?.name ?? "tcp";
+			const bundle = await api.exportTcp(id);
+			downloadJson(jsonFilename(name, "tcp"), bundle);
+			toast.success("TCP exported.");
+		});
+	};
+
+	const handleExportAllTcps = async (): Promise<void> => {
+		await act("Could not export the TCP packs", async () => {
+			const bundle = await api.exportAllTcps();
+			downloadJson("target-tcps.json", bundle);
+			toast.success(`Exported ${bundle.tcps.length} TCP pack${bundle.tcps.length === 1 ? "" : "s"}.`);
+		});
+	};
+
+	const handleImportTcps = async (file: File): Promise<void> => {
+		await act(
+			"Could not import the TCP packs",
+			async () => {
+				const created = await api.importTcps(JSON.parse(await file.text()));
+				toast.success(
+					created.length === 1
+						? `Imported "${created[0]?.name}".`
+						: `Imported ${created.length} TCP packs: ${created.map((m) => m.name).join(", ")}.`,
+				);
+			},
+			refreshTcps,
+		);
+	};
+
 	// --- settings actions ---
 
 	// The response carries the stored values, so there's nothing to re-fetch —
@@ -947,6 +1108,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								steps={steps}
 								sessionInfo={sessionInfo}
 								templates={templates}
+								tcps={tcps}
 								busy={busy}
 								{...(isMobile ? { onBack: () => setSelectedId(null) } : {})}
 								onStart={handleStart}
@@ -956,6 +1118,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								onDelete={() => void handleDelete()}
 								onSetStatus={(status) => void handleSetWorkflowStatus(status)}
 								onSaveContext={handleSaveContext}
+								onSaveTcps={handleSaveTcps}
 								onAttachImages={handleAttachImages}
 								onRemoveAttachment={(id) => void handleRemoveAttachment(id)}
 								onOpenTerminal={handleOpenTerminal}
@@ -996,6 +1159,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 				) : view === "templates" ? (
 					<TemplatesView
 						templates={templates}
+						tcps={tcps}
 						busy={busy}
 						onCreate={handleCreateTemplate}
 						onUpdate={handleUpdateTemplate}
@@ -1004,7 +1168,19 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 						onExportAll={() => void handleExportAllTemplates()}
 						onImport={(file) => void handleImportTemplates(file)}
 					/>
-				) : settings && shortcutSettings ? (
+				) : view === "tcps" ? (
+					<TcpsView
+						tcps={tcps}
+						busy={busy}
+						onCreate={handleCreateTcp}
+						onUpdate={handleUpdateTcp}
+						onDelete={(id) => void handleDeleteTcp(id)}
+						onBeforeRemoveTool={confirmTcpToolRemoval}
+						onExport={(id) => void handleExportTcp(id)}
+						onExportAll={() => void handleExportAllTcps()}
+						onImport={(file) => void handleImportTcps(file)}
+					/>
+				) : view === "settings" && settings && shortcutSettings ? (
 					// Keyed on both save stamps: a successful save in either section re-seeds
 					// that form's local fields from what the hub actually stored.
 					<SettingsView

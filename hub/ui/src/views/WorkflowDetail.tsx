@@ -7,6 +7,8 @@ import type {
 	StagedStepImages,
 	Step,
 	StepConfigInput,
+	Tcp,
+	TcpSelection,
 	Template,
 	Workflow,
 } from "../api/types.ts";
@@ -21,6 +23,7 @@ import { prettyPath, relativeTime } from "../lib/format.ts";
 import { canMoveStep } from "../lib/stepMove.ts";
 import { seedSelectionFromSteps, selectionAfterPoll, stepStatuses } from "../lib/stepSelection.ts";
 import { ContextPanel } from "./ContextPanel.tsx";
+import { TcpPanel } from "./TcpPanel.tsx";
 import { RenameWorkflowModal } from "./RenameWorkflowModal.tsx";
 import { SessionPanel } from "./SessionPanel.tsx";
 import { StepItem } from "./StepItem.tsx";
@@ -81,6 +84,7 @@ export function WorkflowDetail({
 	steps,
 	sessionInfo,
 	templates,
+	tcps,
 	busy,
 	onBack,
 	onStart,
@@ -90,6 +94,7 @@ export function WorkflowDetail({
 	onDelete,
 	onSetStatus,
 	onSaveContext,
+	onSaveTcps,
 	onAttachImages,
 	onRemoveAttachment,
 	onOpenTerminal,
@@ -109,6 +114,7 @@ export function WorkflowDetail({
 	steps: Step[];
 	sessionInfo: SessionInfo | null;
 	templates: Template[];
+	tcps: Tcp[];
 	busy: boolean;
 	/** Only supplied when the list isn't on screen beside this pane. */
 	onBack?: () => void;
@@ -123,6 +129,7 @@ export function WorkflowDetail({
 	onSetStatus: (status: OverridableWorkflowStatus) => void;
 	/** Resolves true only when the server really stored the context. */
 	onSaveContext: (context: string) => Promise<boolean>;
+	onSaveTcps: (tcpSelections: TcpSelection[]) => Promise<boolean>;
 	/**
 	 * Pins images to one of this workflow's text inputs. `stepId` is null for the
 	 * conversation context and the step's id for its description / criteria.
@@ -487,6 +494,7 @@ export function WorkflowDetail({
 					onAttach={(files) => onAttachImages("context", null, files)}
 					onRemoveAttachment={onRemoveAttachment}
 				/>
+				<TcpPanel workflow={workflow} tcps={tcps} onSave={onSaveTcps} />
 
 				<div className={styles.stepsSection}>
 					<div className={styles.stepsHead}>

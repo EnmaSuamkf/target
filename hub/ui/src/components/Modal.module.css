@@ -62,6 +62,7 @@
 	font-size: var(--text-sm);
 	color: var(--text-muted);
 	overflow-wrap: anywhere;
+	white-space: pre-line;
 }
 
 .body {
