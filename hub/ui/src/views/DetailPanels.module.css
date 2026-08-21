@@ -42,6 +42,47 @@
 	margin-left: var(--space-5);
 }
 
+.tcpList {
+	display: grid;
+	gap: var(--space-2);
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.tcpRow {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-3);
+	padding: var(--space-2) var(--space-3);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--gray-50);
+}
+
+.tcpMain {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	min-width: 0;
+	cursor: pointer;
+}
+
+.tcpName {
+	font-weight: 500;
+	color: var(--gray-700);
+}
+
+.tcpActions {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: var(--space-2);
+	flex-shrink: 0;
+}
+
 .blockActions {
 	display: flex;
 	gap: var(--space-2);
@@ -152,5 +193,15 @@
 	.usageHead,
 	.usageTotals {
 		font-size: var(--text-sm);
+	}
+
+	.tcpRow {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.tcpActions {
+		justify-content: flex-start;
+		padding-left: calc(var(--space-5) + 1rem);
 	}
 }
