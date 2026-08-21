@@ -5,15 +5,16 @@ import { Field } from "./Field.tsx";
 import { Modal } from "./Modal.tsx";
 import styles from "./Header.module.css";
 
-export type View = "workflows" | "templates" | "settings";
+export type View = "workflows" | "templates" | "tcps" | "settings";
 
 const VIEW_LABELS: Record<View, string> = {
 	workflows: "Workflows",
 	templates: "Templates",
+	tcps: "TCP",
 	settings: "Settings",
 };
 
-const VIEWS = ["workflows", "templates", "settings"] as const;
+const VIEWS = ["workflows", "templates", "tcps", "settings"] as const;
 
 /**
  * Icons for the phone tab bar. A bottom bar with text alone reads as a row of
@@ -35,6 +36,12 @@ const VIEW_ICONS: Record<View, React.ReactNode> = {
 			<rect x="13" y="3" width="8" height="8" rx="2" />
 			<rect x="3" y="13" width="8" height="8" rx="2" />
 			<rect x="13" y="13" width="8" height="8" rx="2" />
+		</>
+	),
+	tcps: (
+		<>
+			<path d="M4 7h16M4 12h10M4 17h14" />
+			<circle cx="19" cy="12" r="2" />
 		</>
 	),
 	settings: (

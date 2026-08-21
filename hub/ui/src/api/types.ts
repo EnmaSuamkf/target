@@ -206,6 +206,9 @@ export interface Workflow {
 	progress: Progress;
 	conversationContext: string | null;
 	contextInjected: boolean;
+	/** TCP packs attached to this workflow's conversation. */
+	tcpIds: string[];
+	tcpSelections: TcpSelection[];
 	/** Images pinned to the conversation context (every `field` is "context"). */
 	attachments: Attachment[];
 	/**
@@ -302,6 +305,8 @@ export interface Template {
 	name: string;
 	tags: string[];
 	steps: TemplateStep[];
+	tcpIds: string[];
+	tcpSelections: TcpSelection[];
 	createdAt: string;
 	updatedAt: string;
 }
@@ -319,6 +324,8 @@ export interface TemplateBundleEntry {
 	name: string;
 	tags: string[];
 	steps: TemplateStep[];
+	tcpIds: string[];
+	tcpSelections: TcpSelection[];
 }
 
 export interface TemplateBundle {
@@ -326,6 +333,73 @@ export interface TemplateBundle {
 	schemaVersion: number;
 	exportedAt: string;
 	templates: TemplateBundleEntry[];
+}
+
+/** Which tools from an TCP pack are attached. Null/empty toolNames = all tools. */
+export interface TcpSelection {
+	tcpId: string;
+	toolNames?: string[] | null;
+}
+
+export interface TcpToolInput {
+	name: string;
+	placeholder: string;
+	description: string;
+	required?: boolean;
+}
+
+export interface TcpTool {
+	name: string;
+	description: string;
+	requestTemplate: string;
+	inputs: TcpToolInput[];
+	tokens: Record<string, string>;
+}
+
+export interface Tcp {
+	id: string;
+	name: string;
+	tags: string[];
+	tools: TcpTool[];
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface TcpBundleEntry {
+	name: string;
+	tags: string[];
+	tools: TcpTool[];
+}
+
+export interface TcpBundle {
+	kind: "target.tcps";
+	schemaVersion: number;
+	exportedAt: string;
+	tcps: TcpBundleEntry[];
+}
+
+export interface TcpInput {
+	name: string;
+	tags: string[];
+	tools: TcpTool[];
+}
+
+export interface TcpUsageWorkflow {
+	id: string;
+	name: string;
+	contextInjected: boolean;
+	toolNames: string[] | null;
+}
+
+export interface TcpUsageTemplate {
+	id: string;
+	name: string;
+	toolNames: string[] | null;
+}
+
+export interface TcpUsage {
+	workflows: TcpUsageWorkflow[];
+	templates: TcpUsageTemplate[];
 }
 
 /**
@@ -502,6 +576,8 @@ export interface TemplateInput {
 	name: string;
 	tags: string[];
 	steps: TemplateStep[];
+	tcpIds?: string[];
+	tcpSelections?: TcpSelection[];
 }
 
 /**

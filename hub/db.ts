@@ -13,6 +13,12 @@
 import * as crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import * as fs from "node:fs";
+import {
+	type TcpSelection,
+	tcpIdsToSelections,
+	normalizeTcpSelections,
+	selectionsToTcpIds,
+} from "./tcp-selection.ts";
 import * as path from "node:path";
 import { dbFile } from "./config.ts";
 import type { ProgressKind } from "./progress.ts";
@@ -284,6 +290,8 @@ export interface Template {
 	name: string;
 	tags: string[];
 	steps: TemplateStep[];
+	tcpIds: string[];
+	tcpSelections: TcpSelection[];
 	createdAt: string;
 	updatedAt: string;
 }
@@ -357,6 +365,8 @@ export function open(): DatabaseSync {
 			name TEXT NOT NULL,
 			tags TEXT NOT NULL DEFAULT '',
 			steps TEXT NOT NULL DEFAULT '[]',
+			tcp_ids TEXT NOT NULL DEFAULT '[]',
+			tcp_selections TEXT NOT NULL DEFAULT '[]',
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
@@ -479,6 +489,26 @@ export function open(): DatabaseSync {
 	addWorkflowColumn("completion_notified", "completion_notified INTEGER NOT NULL DEFAULT 0");
 	addWorkflowColumn("status_manual", "status_manual INTEGER NOT NULL DEFAULT 0");
 	addWorkflowColumn("status_manual_at", "status_manual_at TEXT");
+	const existingTemplateColumns = new Set(
+		(database.prepare("PRAGMA table_info(templates)").all() as Record<string, unknown>[]).map((c) => String(c.name)),
+	);
+	const addTemplateColumn = (name: string, ddl: string) => {
+		if (!existingTemplateColumns.has(name)) database.exec(`ALTER TABLE templates ADD COLUMN ${ddl};`);
+	};
+	addTemplateColumn("tcp_ids", "tcp_ids TEXT NOT NULL DEFAULT '[]'");
+	addTemplateColumn("tcp_selections", "tcp_selections TEXT NOT NULL DEFAULT '[]'");
+	if (existingTemplateColumns.has("mtp_ids") && !existingTemplateColumns.has("tcp_ids")) {
+		database.exec("ALTER TABLE templates RENAME COLUMN mtp_ids TO tcp_ids;");
+	} else if (existingTemplateColumns.has("mtp_ids") && existingTemplateColumns.has("tcp_ids")) {
+		database.exec("UPDATE templates SET tcp_ids = mtp_ids WHERE tcp_ids = '[]' AND mtp_ids != '[]';");
+	}
+	if (existingTemplateColumns.has("mtp_selections") && !existingTemplateColumns.has("tcp_selections")) {
+		database.exec("ALTER TABLE templates RENAME COLUMN mtp_selections TO tcp_selections;");
+	} else if (existingTemplateColumns.has("mtp_selections") && existingTemplateColumns.has("tcp_selections")) {
+		database.exec(
+			"UPDATE templates SET tcp_selections = mtp_selections WHERE tcp_selections = '[]' AND mtp_selections != '[]';",
+		);
+	}
 	return db;
 }
 
@@ -1600,6 +1630,29 @@ function normalizeTemplateSteps(steps: unknown): TemplateStep[] {
 		.filter((s) => s.description !== "");
 }
 
+function normalizeTemplateTcpIds(tcpIds: unknown): string[] {
+	if (!Array.isArray(tcpIds)) return [];
+	return [...new Set(tcpIds.map((id) => String(id).trim()).filter((id) => id !== ""))];
+}
+
+function readTemplateTcpSelections(row: Record<string, unknown>): TcpSelection[] {
+	try {
+		const parsed = JSON.parse(String(row.tcp_selections ?? row.mtp_selections ?? "[]"));
+		const selections = normalizeTcpSelections(parsed);
+		if (selections.length > 0) return selections;
+	} catch {
+		// fall through to legacy tcp_ids
+	}
+	let legacyIds: string[] = [];
+	try {
+		const parsed = JSON.parse(String(row.tcp_ids ?? row.mtp_ids ?? "[]"));
+		if (Array.isArray(parsed)) legacyIds = normalizeTemplateTcpIds(parsed);
+	} catch {
+		// tolerate malformed data
+	}
+	return tcpIdsToSelections(legacyIds);
+}
+
 function rowToTemplate(row: Record<string, unknown>): Template {
 	let tags: string[] = [];
 	try {
@@ -1615,33 +1668,52 @@ function rowToTemplate(row: Record<string, unknown>): Template {
 	} catch {
 		// Tolerate malformed/legacy data rather than blow up the whole list.
 	}
+	let tcpSelections = readTemplateTcpSelections(row);
 	return {
 		id: String(row.id),
 		name: String(row.name),
 		tags,
 		steps,
+		tcpIds: selectionsToTcpIds(tcpSelections),
+		tcpSelections,
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
 	};
 }
 
-export function insertTemplate(input: { name: string; tags?: unknown; steps?: unknown }): Template {
+export function insertTemplate(input: {
+	name: string;
+	tags?: unknown;
+	steps?: unknown;
+	tcpIds?: unknown;
+	tcpSelections?: unknown;
+}): Template {
 	const now = new Date().toISOString();
+	const tcpSelections =
+		input.tcpSelections !== undefined
+			? normalizeTcpSelections(input.tcpSelections)
+			: tcpIdsToSelections(normalizeTemplateTcpIds(input.tcpIds));
 	const template: Template = {
 		id: crypto.randomUUID(),
 		name: input.name,
 		tags: normalizeTemplateTags(input.tags),
 		steps: normalizeTemplateSteps(input.steps),
+		tcpIds: selectionsToTcpIds(tcpSelections),
+		tcpSelections,
 		createdAt: now,
 		updatedAt: now,
 	};
 	open()
-		.prepare(`INSERT INTO templates (id, name, tags, steps, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
+		.prepare(
+			`INSERT INTO templates (id, name, tags, steps, tcp_ids, tcp_selections, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		)
 		.run(
 			template.id,
 			template.name,
 			JSON.stringify(template.tags),
 			JSON.stringify(template.steps),
+			JSON.stringify(template.tcpIds),
+			JSON.stringify(template.tcpSelections),
 			template.createdAt,
 			template.updatedAt,
 		);
@@ -1662,18 +1734,22 @@ export function listTemplates(): Template[] {
 /** Partial update — only the fields present in `input` are changed. Returns null if the template doesn't exist. */
 export function updateTemplate(
 	id: string,
-	input: { name?: string; tags?: unknown; steps?: unknown },
+	input: { name?: string; tags?: unknown; steps?: unknown; tcpIds?: unknown; tcpSelections?: unknown },
 ): Template | null {
 	const existing = getTemplate(id);
 	if (!existing) return null;
 	const name = input.name !== undefined ? input.name : existing.name;
 	const tags = input.tags !== undefined ? normalizeTemplateTags(input.tags) : existing.tags;
 	const steps = input.steps !== undefined ? normalizeTemplateSteps(input.steps) : existing.steps;
+	let tcpSelections = existing.tcpSelections;
+	if (input.tcpSelections !== undefined) tcpSelections = normalizeTcpSelections(input.tcpSelections);
+	else if (input.tcpIds !== undefined) tcpSelections = tcpIdsToSelections(normalizeTemplateTcpIds(input.tcpIds));
+	const tcpIds = selectionsToTcpIds(tcpSelections);
 	const updatedAt = new Date().toISOString();
 	open()
-		.prepare("UPDATE templates SET name = ?, tags = ?, steps = ?, updated_at = ? WHERE id = ?")
-		.run(name, JSON.stringify(tags), JSON.stringify(steps), updatedAt, id);
-	return { ...existing, name, tags, steps, updatedAt };
+		.prepare("UPDATE templates SET name = ?, tags = ?, steps = ?, tcp_ids = ?, tcp_selections = ?, updated_at = ? WHERE id = ?")
+		.run(name, JSON.stringify(tags), JSON.stringify(steps), JSON.stringify(tcpIds), JSON.stringify(tcpSelections), updatedAt, id);
+	return { ...existing, name, tags, steps, tcpIds, tcpSelections, updatedAt };
 }
 
 export function deleteTemplate(id: string): boolean {
@@ -1712,6 +1788,8 @@ export interface TemplateBundleEntry {
 	name: string;
 	tags: string[];
 	steps: TemplateStep[];
+	tcpIds: string[];
+	tcpSelections: TcpSelection[];
 }
 
 export interface TemplateBundle {
@@ -1737,7 +1815,13 @@ export function templateBundle(templates: Template[]): TemplateBundle {
 		kind: TEMPLATE_BUNDLE_KIND,
 		schemaVersion: TEMPLATE_BUNDLE_SCHEMA_VERSION,
 		exportedAt: new Date().toISOString(),
-		templates: templates.map((t) => ({ name: t.name, tags: t.tags, steps: t.steps })),
+		templates: templates.map((t) => ({
+			name: t.name,
+			tags: t.tags,
+			steps: t.steps,
+			tcpIds: t.tcpIds,
+			tcpSelections: t.tcpSelections,
+		})),
 	};
 }
 
@@ -1791,7 +1875,24 @@ export function parseTemplateBundle(input: unknown): TemplateBundleEntry[] {
 		// row nobody can identify — and it's the clearest sign the file isn't one
 		// of ours, so it fails the whole import rather than being skipped quietly.
 		if (name === "") throw new TemplateBundleError("invalid_bundle");
-		entries.push({ name, tags: normalizeTemplateTags(obj.tags), steps: normalizeTemplateSteps(obj.steps) });
+		entries.push({
+			name,
+			tags: normalizeTemplateTags(obj.tags),
+			steps: normalizeTemplateSteps(obj.steps),
+			tcpSelections:
+				obj.tcpSelections !== undefined
+					? normalizeTcpSelections(obj.tcpSelections)
+					: obj.mtpSelections !== undefined
+						? normalizeTcpSelections(obj.mtpSelections)
+						: tcpIdsToSelections(normalizeTemplateTcpIds(obj.tcpIds ?? obj.mtpIds)),
+			tcpIds: selectionsToTcpIds(
+				obj.tcpSelections !== undefined
+					? normalizeTcpSelections(obj.tcpSelections)
+					: obj.mtpSelections !== undefined
+						? normalizeTcpSelections(obj.mtpSelections)
+						: tcpIdsToSelections(normalizeTemplateTcpIds(obj.tcpIds ?? obj.mtpIds)),
+			),
+		});
 	}
 	if (entries.length === 0) throw new TemplateBundleError("empty_bundle");
 	return entries;
@@ -1837,7 +1938,9 @@ export function importTemplates(entries: TemplateBundleEntry[]): Template[] {
 	for (const entry of entries) {
 		const name = uniqueTemplateName(entry.name, taken);
 		taken.add(name);
-		created.push(insertTemplate({ name, tags: entry.tags, steps: entry.steps }));
+		created.push(
+			insertTemplate({ name, tags: entry.tags, steps: entry.steps, tcpSelections: entry.tcpSelections }),
+		);
 	}
 	return created;
 }

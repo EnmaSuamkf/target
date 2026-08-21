@@ -125,7 +125,7 @@ test("templateBundle wraps templates in the versioned envelope, without ids or t
 	assert.equal(bundle.schemaVersion, TEMPLATE_BUNDLE_SCHEMA_VERSION);
 	assert.ok(!Number.isNaN(Date.parse(bundle.exportedAt)));
 	assert.equal(bundle.templates.length, 1);
-	assert.deepEqual(Object.keys(bundle.templates[0] ?? {}).sort(), ["name", "steps", "tags"]);
+	assert.deepEqual(Object.keys(bundle.templates[0] ?? {}).sort(), ["name", "steps", "tags", "tcpIds", "tcpSelections"]);
 	assert.equal(bundle.templates[0]?.name, "bundle me");
 	assert.deepEqual(bundle.templates[0]?.tags, ["ops"]);
 	assert.equal(bundle.templates[0]?.steps[0]?.acceptanceCriteria, "it is done");

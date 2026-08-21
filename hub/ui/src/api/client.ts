@@ -34,6 +34,11 @@ import type {
 	ShortcutSettingsInput,
 	Step,
 	StepConfigInput,
+	Tcp,
+	TcpBundle,
+	TcpInput,
+	TcpSelection,
+	TcpUsage,
 	Template,
 	TemplateBundle,
 	TemplateInput,
@@ -577,6 +582,67 @@ export async function importTemplates(bundle: unknown): Promise<Template[]> {
 		body: json(bundle),
 	});
 	return data.templates;
+}
+
+// --- tcps ---
+
+export async function listTcps(q?: string): Promise<Tcp[]> {
+	const query = q && q.trim() !== "" ? `?q=${encodeURIComponent(q.trim())}` : "";
+	const data = await request<{ tcps: Tcp[] }>(`/api/tcps${query}`);
+	return data.tcps;
+}
+
+export async function createTcp(input: TcpInput): Promise<Tcp> {
+	const data = await request<{ tcp: Tcp }>("/api/tcps", { method: "POST", admin: true, body: json(input) });
+	return data.tcp;
+}
+
+export async function updateTcp(id: string, input: TcpInput): Promise<Tcp> {
+	const data = await request<{ tcp: Tcp }>(`/api/tcps/${id}`, { method: "PATCH", admin: true, body: json(input) });
+	return data.tcp;
+}
+
+export async function getTcpUsage(id: string, toolNames?: string[]): Promise<TcpUsage> {
+	const query =
+		toolNames && toolNames.length > 0 ? `?tools=${encodeURIComponent(toolNames.join(","))}` : "";
+	const data = await request<{ usage: TcpUsage }>(`/api/tcps/${id}/usage${query}`);
+	return data.usage;
+}
+
+export function deleteTcp(id: string): Promise<{ ok: true }> {
+	return request<{ ok: true }>(`/api/tcps/${id}`, { method: "DELETE", admin: true });
+}
+
+export function exportTcp(id: string): Promise<TcpBundle> {
+	return request<TcpBundle>(`/api/tcps/${id}/export`);
+}
+
+export function exportAllTcps(): Promise<TcpBundle> {
+	return request<TcpBundle>("/api/tcps/export");
+}
+
+export async function importTcps(bundle: unknown): Promise<Tcp[]> {
+	const data = await request<{ tcps: Tcp[] }>("/api/tcps/import", { method: "POST", admin: true, body: json(bundle) });
+	return data.tcps;
+}
+
+export async function setWorkflowTcpSelections(workflowId: string, tcpSelections: TcpSelection[]): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${workflowId}/tcps`, {
+		method: "PATCH",
+		admin: true,
+		body: json({ tcpSelections }),
+	});
+	return data.workflow;
+}
+
+/** @deprecated Sends whole-pack selections only. Prefer setWorkflowTcpSelections. */
+export async function setWorkflowTcps(workflowId: string, tcpIds: string[]): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${workflowId}/tcps`, {
+		method: "PATCH",
+		admin: true,
+		body: json({ tcpIds }),
+	});
+	return data.workflow;
 }
 
 // --- settings ---
