@@ -1,14 +1,21 @@
+import { useState } from "react";
 import type { Tcp, TcpSelection } from "../api/types.ts";
 import {
+	describeTcpSelection,
 	isTcpFullySelected,
 	isTcpPartiallySelected,
-	isToolSelected,
 	toggleTcpAll,
-	toggleTcpTool,
 } from "../tcpSelection.ts";
 import styles from "./DetailPanels.module.css";
+import { TcpToolPickerModal } from "./TcpToolPickerModal.tsx";
 
-/** Checkbox tree for selecting whole TCP packs or individual tools. */
+function selectionLabel(summary: ReturnType<typeof describeTcpSelection>): string | null {
+	if (!summary.attached) return null;
+	if (summary.allTools) return "All tools";
+	return `${summary.count} selected`;
+}
+
+/** Compact TCP picker: one row per pack, with a modal for individual tools. */
 export function TcpSelectionEditor({
 	tcps,
 	selections,
@@ -20,52 +27,66 @@ export function TcpSelectionEditor({
 	disabled?: boolean;
 	onChange: (next: TcpSelection[]) => void;
 }): React.JSX.Element {
+	const [pickerTcpId, setPickerTcpId] = useState<string | null>(null);
+	const pickerTcp = pickerTcpId ? tcps.find((tcp) => tcp.id === pickerTcpId) : undefined;
+
 	if (tcps.length === 0) {
 		return <p className="hint">No TCP defined yet — create one in the TCP tab.</p>;
 	}
 
 	return (
-		<ul className={styles.checkList}>
-			{tcps.map((tcp) => {
-				const toolNames = tcp.tools.map((tool) => tool.name);
-				const fullySelected = isTcpFullySelected(selections, tcp.id);
-				const partiallySelected = isTcpPartiallySelected(selections, tcp.id);
-				return (
-					<li key={tcp.id}>
-						<label className={styles.checkRow}>
-							<input
-								type="checkbox"
-								checked={fullySelected}
-								ref={(el) => {
-									if (el) el.indeterminate = partiallySelected;
-								}}
-								disabled={disabled}
-								onChange={() => onChange(toggleTcpAll(selections, tcp.id))}
-							/>
-							<span>{tcp.name}</span>
-							<span className="hint">({tcp.tools.length} tool{tcp.tools.length === 1 ? "" : "s"})</span>
-						</label>
-						{tcp.tools.length > 0 && (
-							<ul className={`${styles.checkList} ${styles.checkNested}`}>
-								{tcp.tools.map((tool) => (
-									<li key={tool.name}>
-										<label className={styles.checkRow}>
-											<input
-												type="checkbox"
-												checked={isToolSelected(selections, tcp.id, tool.name)}
-												disabled={disabled}
-												onChange={() => onChange(toggleTcpTool(selections, tcp.id, tool.name, toolNames))}
-											/>
-											<span>{tool.name}</span>
-											{tool.description ? <span className="hint">— {tool.description}</span> : null}
-										</label>
-									</li>
-								))}
-							</ul>
-						)}
-					</li>
-				);
-			})}
-		</ul>
+		<>
+			<ul className={styles.tcpList}>
+				{tcps.map((tcp) => {
+					const fullySelected = isTcpFullySelected(selections, tcp.id);
+					const partiallySelected = isTcpPartiallySelected(selections, tcp.id);
+					const summary = describeTcpSelection(selections, tcp.id, tcp.tools.length);
+					const label = selectionLabel(summary);
+
+					return (
+						<li key={tcp.id} className={styles.tcpRow}>
+							<label className={styles.tcpMain}>
+								<input
+									type="checkbox"
+									checked={fullySelected}
+									ref={(el) => {
+										if (el) el.indeterminate = partiallySelected;
+									}}
+									disabled={disabled}
+									onChange={() => onChange(toggleTcpAll(selections, tcp.id))}
+								/>
+								<span className={styles.tcpName}>{tcp.name}</span>
+								<span className="hint">
+									({tcp.tools.length} tool{tcp.tools.length === 1 ? "" : "s"})
+								</span>
+							</label>
+							<div className={styles.tcpActions}>
+								{label ? <span className={`badge ${summary.allTools ? "badge--completed" : "badge--pending"}`}>{label}</span> : null}
+								{tcp.tools.length > 0 ? (
+									<button
+										type="button"
+										className="btn btn--sm btn--ghost"
+										disabled={disabled}
+										onClick={() => setPickerTcpId(tcp.id)}
+									>
+										Choose tools…
+									</button>
+								) : null}
+							</div>
+						</li>
+					);
+				})}
+			</ul>
+
+			{pickerTcp ? (
+				<TcpToolPickerModal
+					tcp={pickerTcp}
+					selections={selections}
+					{...(disabled !== undefined ? { disabled } : {})}
+					onChange={onChange}
+					onClose={() => setPickerTcpId(null)}
+				/>
+			) : null}
+		</>
 	);
 }

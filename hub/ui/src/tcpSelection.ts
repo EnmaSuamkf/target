@@ -47,6 +47,27 @@ export function toggleTcpAll(selections: TcpSelection[], tcpId: string): TcpSele
 	return [...selections, { tcpId }];
 }
 
+export function describeTcpSelection(
+	selections: TcpSelection[],
+	tcpId: string,
+	totalTools: number,
+): { attached: boolean; allTools: boolean; count: number } {
+	const sel = findSelection(selections, tcpId);
+	if (!sel) return { attached: false, allTools: false, count: 0 };
+	if (selectionAllTools(sel)) return { attached: true, allTools: true, count: totalTools };
+	return { attached: true, allTools: false, count: sel.toolNames?.length ?? 0 };
+}
+
+export function attachTcpAllTools(selections: TcpSelection[], tcpId: string): TcpSelection[] {
+	if (isTcpFullySelected(selections, tcpId)) return selections;
+	const without = selections.filter((s) => s.tcpId !== tcpId);
+	return [...without, { tcpId }];
+}
+
+export function detachTcp(selections: TcpSelection[], tcpId: string): TcpSelection[] {
+	return selections.filter((s) => s.tcpId !== tcpId);
+}
+
 export function toggleTcpTool(
 	selections: TcpSelection[],
 	tcpId: string,
