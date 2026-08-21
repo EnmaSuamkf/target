@@ -383,6 +383,12 @@ function stripNoise(text: string): string {
 	return out.trim();
 }
 
+/** Cursor wraps the human's words in `<user_query>`; pull them out for titles. */
+function extractUserQuery(text: string): string {
+	const match = /<user_query>\s*([\s\S]*?)\s*<\/user_query>/i.exec(text);
+	return match ? match[1].trim() : text;
+}
+
 /**
  * The prose of a message's content. Both harnesses use the same block shape,
  * and everything that isn't a `text` block — `tool_use`, `tool_result`,
@@ -421,9 +427,15 @@ export function turnOfLine(obj: Record<string, unknown>): Turn | null {
 	if (obj.isSidechain === true || obj.isMeta === true) return null;
 	const message = obj.message as Record<string, unknown> | undefined;
 	if (!message) return null;
-	const role = obj.type === "user" || obj.type === "assistant" ? obj.type : message.role;
+	// Claude/free-code put the role in `type`; Cursor Agent puts it at the top level.
+	const role =
+		obj.type === "user" || obj.type === "assistant"
+			? obj.type
+			: obj.role === "user" || obj.role === "assistant"
+				? obj.role
+				: message.role;
 	if (role !== "user" && role !== "assistant") return null;
-	const text = stripNoise(textOfContent(message.content));
+	const text = stripNoise(extractUserQuery(textOfContent(message.content)));
 	if (!text) return null;
 	return { role, text };
 }
@@ -513,12 +525,61 @@ function readHead(file: string): { workdir: string | null; title: string | null 
 	return head;
 }
 
+/** `~/.cursor/chats/<hash>/<chatId>/` for a transcript file or chat id. */
+function cursorChatDirFor(runner: PublishableRunner, file: string, sessionId: string): string | null {
+	if (runner !== "cursor") return null;
+	if (file.endsWith("store.db")) return path.dirname(file);
+	const parts = file.split(path.sep);
+	const idx = parts.lastIndexOf("agent-transcripts");
+	if (idx !== -1 && parts[idx + 1]) {
+		const chatId = parts[idx + 1] as string;
+		const fromTranscript = path.join(os.homedir(), ".cursor", "chats");
+		let projectDirs: fs.Dirent[];
+		try {
+			projectDirs = fs.readdirSync(fromTranscript, { withFileTypes: true });
+		} catch {
+			return null;
+		}
+		for (const project of projectDirs) {
+			if (!project.isDirectory()) continue;
+			const chatDir = path.join(fromTranscript, project.name, chatId);
+			try {
+				if (fs.statSync(chatDir).isDirectory()) return chatDir;
+			} catch {
+				// Not under this project hash.
+			}
+		}
+	}
+	// Fall back to a direct lookup by session id.
+	const root = path.join(os.homedir(), ".cursor", "chats");
+	let projectDirs: fs.Dirent[];
+	try {
+		projectDirs = fs.readdirSync(root, { withFileTypes: true });
+	} catch {
+		return null;
+	}
+	for (const project of projectDirs) {
+		if (!project.isDirectory()) continue;
+		const chatDir = path.join(root, project.name, sessionId);
+		try {
+			if (fs.statSync(chatDir).isDirectory()) return chatDir;
+		} catch {
+			// Not under this project hash.
+		}
+	}
+	return null;
+}
+
 function summarize(runner: PublishableRunner, entry: FileEntry): ConversationSummary {
 	let head = readHead(entry.file);
-	if (runner === "cursor" && entry.file.endsWith("store.db")) {
-		const meta = readCursorMeta(path.dirname(entry.file));
-		if (!head.workdir && meta.workdir) head = { ...head, workdir: meta.workdir };
-		if (!head.title && meta.title) head = { ...head, title: meta.title };
+	if (runner === "cursor") {
+		const sessionId = sessionIdOf(runner, entry.file);
+		const chatDir = cursorChatDirFor(runner, entry.file, sessionId);
+		if (chatDir) {
+			const meta = readCursorMeta(chatDir);
+			if (!head.workdir && meta.workdir) head = { ...head, workdir: meta.workdir };
+			if (!head.title && meta.title) head = { ...head, title: meta.title };
+		}
 	}
 	return {
 		runner,

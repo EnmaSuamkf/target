@@ -64,6 +64,19 @@ const claudeFile = path.join(claudeDir, `${CLAUDE_SESSION}.jsonl`);
 const freeCodeDir = path.join(tmpHome, ".free-code", "agent", "sessions", "--home-u-proj--");
 const freeCodeFile = path.join(freeCodeDir, "2026-08-01T10-00-00-000Z_bbbbbbbb-5555.jsonl");
 
+const CURSOR_SESSION = "cccccccc-dddd-eeee-ffff-111111111111";
+const cursorProjectHash = "390743aa0f12298f4c0ec413e047fd56";
+const cursorChatDir = path.join(tmpHome, ".cursor", "chats", cursorProjectHash, CURSOR_SESSION);
+const cursorTranscriptDir = path.join(
+	tmpHome,
+	".cursor",
+	"projects",
+	"home-u-proj",
+	"agent-transcripts",
+	CURSOR_SESSION,
+);
+const cursorTranscriptFile = path.join(cursorTranscriptDir, `${CURSOR_SESSION}.jsonl`);
+
 function write(file: string, lines: unknown[], mtimeSeconds: number): void {
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	fs.writeFileSync(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
@@ -129,6 +142,30 @@ write(
 	1_800_000_400,
 );
 
+// --- a Cursor Agent conversation (role at top level, cwd in meta.json) ---
+fs.mkdirSync(cursorChatDir, { recursive: true });
+fs.writeFileSync(
+	path.join(cursorChatDir, "meta.json"),
+	JSON.stringify({ schemaVersion: 1, cwd: projDir, title: "Arregla el picker de cursor" }),
+);
+fs.writeFileSync(path.join(cursorChatDir, "store.db"), "placeholder");
+write(
+	cursorTranscriptFile,
+	[
+		{
+			role: "user",
+			message: {
+				content: [{ type: "text", text: "<timestamp>2026</timestamp>\n<user_query>\nArregla el picker de cursor\n</user_query>" }],
+			},
+		},
+		{
+			role: "assistant",
+			message: { content: [{ type: "text", text: "Hecho." }] },
+		},
+	],
+	1_800_000_150,
+);
+
 const cfg = loadConfig();
 const silent = () => {};
 const server = createServer(cfg, silent);
@@ -166,11 +203,24 @@ test("a free-code conversation is listed under its .jsonl path, which is what --
 	assert.equal(conversation.title, "Arregla el bug del login");
 });
 
+test("a cursor conversation is listed under its chat uuid, with workdir from meta.json and title from the transcript", () => {
+	const { conversations: found } = listConversations("cursor");
+	assert.equal(found.length, 1);
+	const [conversation] = found;
+	assert.equal(conversation.sessionId, CURSOR_SESSION);
+	assert.equal(conversation.path, cursorTranscriptFile);
+	assert.equal(conversation.workdir, projDir);
+	assert.equal(conversation.title, "Arregla el picker de cursor");
+	assert.deepEqual(adoptability(conversation), { ok: true, workdir: projDir, reason: null });
+});
+
 test("the two harnesses' conversations are separate lists — picking the agent IS the filter", () => {
 	const claude = listConversations("claude").conversations.map((c) => c.sessionId);
 	const freeCode = listConversations("free-code").conversations.map((c) => c.sessionId);
+	const cursor = listConversations("cursor").conversations.map((c) => c.sessionId);
 	assert.deepEqual(claude, [CLAUDE_SESSION]);
 	assert.deepEqual(freeCode, [freeCodeFile]);
+	assert.deepEqual(cursor, [CURSOR_SESSION]);
 	assert.equal(
 		claude.some((id) => freeCode.includes(id)),
 		false,
@@ -452,6 +502,40 @@ test("POST /api/conversations/open-terminal reopens THAT conversation, in its ow
 	});
 	assert.equal(outsider.status, 404);
 	assert.equal(calls.length, 1, "no terminal was spawned for the unresolvable id");
+});
+
+test("POST /api/conversations/open-terminal for cursor passes workdir into agent --resume", async (t) => {
+	const calls: { bin: string; args: string[] }[] = [];
+	const original = { spawn: terminalImpl.spawn, platform: terminalImpl.platform };
+	t.after(() => {
+		terminalImpl.spawn = original.spawn;
+		terminalImpl.platform = original.platform;
+	});
+	terminalImpl.platform = () => "linux";
+	terminalImpl.spawn = ((bin: string, args: string[]) => {
+		calls.push({ bin, args });
+		return {
+			once(event: string, cb: () => void) {
+				if (event === "spawn") cb();
+			},
+			unref() {},
+		};
+	}) as unknown as typeof terminalImpl.spawn;
+
+	const res = await fetch(`${baseUrl}/api/conversations/open-terminal`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ runner: "cursor", sessionId: CURSOR_SESSION }),
+	});
+	assert.equal(res.status, 200);
+	const body = (await res.json()) as { workdir: string; sessionId: string };
+	assert.equal(body.sessionId, CURSOR_SESSION);
+	assert.equal(body.workdir, projDir);
+
+	assert.equal(calls.length, 1);
+	const shellCommand = calls[0].args.at(-1) ?? "";
+	assert.match(shellCommand, new RegExp(`cd '${projDir}'`));
+	assert.match(shellCommand, new RegExp(`agent --resume '${CURSOR_SESSION}' --trust --approve-mcps --workspace '${projDir}'`));
 });
 
 test("a workflow created from a conversation ADOPTS it: same session, same directory, no summary", async () => {
