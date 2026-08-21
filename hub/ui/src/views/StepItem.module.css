@@ -162,8 +162,17 @@
 }
 
 .criteriaLabel {
+	display: block;
+	margin-bottom: 2px;
 	font-weight: 600;
 	color: var(--gray-700);
+}
+
+/* The criteria text itself (Markdown.tsx). The box above owns size and colour;
+   this only keeps the block spacing tight enough for a one-line criterion to
+   still read as one line. */
+.criteriaBody {
+	gap: var(--space-1);
 }
 
 /* Both halves of a step's resolution — what it failed with, and what it

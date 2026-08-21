@@ -344,10 +344,22 @@ export function StepItem({
 				</div>
 			)}
 
+			{/* The acceptance criteria, rendered the same way as the panes below it.
+			    It used to be interpolated into a single <p>, which collapsed every
+			    newline into a space: a criterion written as "1. … 2. … - epic … -
+			    stories …" in the editor came back as one unbroken line, while the
+			    task description right above it — the same kind of operator-written
+			    text — kept its shape. The editor that writes this field SAVES
+			    Markdown (its toolbar is bold/lists/headings), so parsing it is what
+			    the stored text already is; and plain multi-line text still comes out
+			    right, because a Markdown paragraph keeps the breaks that were typed
+			    inside it. The label is its own line rather than a run-in prefix, so a
+			    leading list or heading starts at the left edge like the rest. */}
 			{step.acceptanceCriteria && (
-				<p className={styles.criteria}>
-					<span className={styles.criteriaLabel}>Accepts if:</span> {step.acceptanceCriteria}
-				</p>
+				<div className={styles.criteria}>
+					<span className={styles.criteriaLabel}>Accepts if:</span>
+					<Markdown text={step.acceptanceCriteria} className={styles.criteriaBody} />
+				</div>
 			)}
 
 			{/* The failed resolution, in the same collapsing pane as a successful
