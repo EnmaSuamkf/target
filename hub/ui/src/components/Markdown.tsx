@@ -20,7 +20,13 @@ import styles from "./Markdown.module.css";
  * keeps owning the box — StepItem passes the collapsing, scrolling result pane
  * it already had, and this only decides what the text inside it looks like.
  */
-export function Markdown({ text, className }: { text: string; className?: string }): React.JSX.Element {
+// `className` is optional-or-undefined rather than merely optional, so a caller
+// can pass a CSS-module class straight through (those are typed `string |
+// undefined` under noUncheckedIndexedAccess) without wrapping it in a template.
+export function Markdown({
+	text,
+	className,
+}: { text: string; className?: string | undefined }): React.JSX.Element {
 	const blocks = useMemo(() => parseMarkdown(text), [text]);
 	return (
 		<div className={className ? `${styles.markdown} ${className}` : styles.markdown}>
