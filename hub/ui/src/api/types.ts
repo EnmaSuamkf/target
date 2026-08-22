@@ -209,6 +209,8 @@ export interface Workflow {
 	/** TCP packs attached to this workflow's conversation. */
 	tcpIds: string[];
 	tcpSelections: TcpSelection[];
+	/** Resource Sets (RCI) whose resources are injected into this workflow's conversation. */
+	resourceSelections: ResourceSelection[];
 	/** Images pinned to the conversation context (every `field` is "context"). */
 	attachments: Attachment[];
 	/**
@@ -336,6 +338,7 @@ export interface Template {
 	steps: TemplateStep[];
 	tcpIds: string[];
 	tcpSelections: TcpSelection[];
+	resourceSelections: ResourceSelection[];
 	createdAt: string;
 	updatedAt: string;
 }
@@ -355,6 +358,7 @@ export interface TemplateBundleEntry {
 	steps: TemplateStep[];
 	tcpIds: string[];
 	tcpSelections: TcpSelection[];
+	resourceSelections: ResourceSelection[];
 }
 
 export interface TemplateBundle {
@@ -429,6 +433,73 @@ export interface TcpUsageTemplate {
 export interface TcpUsage {
 	workflows: TcpUsageWorkflow[];
 	templates: TcpUsageTemplate[];
+}
+
+// --- RCI (Resources Context Injection) ---
+//
+// A Resource Set is to resources what a TCP pack is to tools: the unit an operator
+// attaches to a workflow or a template. The shapes mirror the TCP ones on
+// purpose — the panels, pickers and confirm dialogs are the same interactions.
+//
+// A resource is Markdown: a skill, an agent definition, or a reference
+// document. The kind is a label — all three are injected the same way.
+
+/** Which resources from a set are attached. Null/empty resourceNames = all resources. */
+export interface ResourceSelection {
+	resourceSetId: string;
+	resourceNames?: string[] | null;
+}
+
+/** A file that ships inside a resource folder (references/, evals/, scripts/…). */
+export interface ResourceFile {
+	path: string;
+	content: string;
+}
+
+export type ResourceKind = "skill" | "agent" | "doc";
+
+export interface Resource {
+	name: string;
+	description: string;
+	kind: ResourceKind;
+	/** File name the body is written back as: SKILL.md, code-reviewer.md, … */
+	entryFile: string;
+	/** The Markdown file, frontmatter included — this is what gets injected. */
+	content: string;
+	files: ResourceFile[];
+}
+
+export interface ResourceSet {
+	id: string;
+	name: string;
+	tags: string[];
+	resources: Resource[];
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface ResourceSetInput {
+	name: string;
+	tags: string[];
+	resources: Resource[];
+}
+
+export interface ResourceSetUsageWorkflow {
+	id: string;
+	name: string;
+	contextInjected: boolean;
+	resourceNames: string[] | null;
+}
+
+export interface ResourceSetUsageTemplate {
+	id: string;
+	name: string;
+	resourceNames: string[] | null;
+}
+
+export interface ResourceSetUsage {
+	workflows: ResourceSetUsageWorkflow[];
+	templates: ResourceSetUsageTemplate[];
 }
 
 /**
@@ -519,6 +590,8 @@ export interface DirListing {
 	home: string;
 	/** Subdirectory names (visible first, then hidden, both sorted). */
 	dirs: string[];
+	/** File names, same ordering — only present when the caller asked for them. */
+	files?: string[];
 }
 
 /** Payload accepted by POST /api/workflows. */
@@ -607,6 +680,7 @@ export interface TemplateInput {
 	steps: TemplateStep[];
 	tcpIds?: string[];
 	tcpSelections?: TcpSelection[];
+	resourceSelections?: ResourceSelection[];
 }
 
 /**

@@ -45,6 +45,7 @@ import { CONTEXT_PRESSURE_PERCENT, shouldForceSubagent, workflowContextRatio } f
 import type { Attachment, Step, Workflow } from "./db.ts";
 import { completeStep, getContextStep, markStepQueued } from "./db.ts";
 import { tcpCatalogPreamble } from "./tcp-catalog.ts";
+import { resourcesCatalogPreamble } from "./rci-catalog.ts";
 import { stepResultsNote } from "./step-results.ts";
 
 export type Logger = (message: string, type?: "info" | "warning" | "error") => void;
@@ -243,6 +244,13 @@ export function composeStepInput(
 		/** Prepend attached TCP tool catalog (same timing as context injection). */
 		injectTcp?: boolean;
 		/**
+		 * Prepend attached Resource Sets (RCI), same timing again. Separate flag from
+		 * `injectTcp` because the two are independent attachments — a workflow can
+		 * carry resources and no tools, or the reverse — even though today's caller
+		 * decides both from the same condition.
+		 */
+		injectResources?: boolean;
+		/**
 		 * This injection is a RE-injection forced by a detected compaction, not the
 		 * first one. Only changes the preamble's opening line — see
 		 * `contextPreamble` — but that line is the difference between the agent
@@ -297,6 +305,7 @@ export function composeStepInput(
 			)
 		: "";
 	const tcpBlock = options.injectTcp ? tcpCatalogPreamble(workflow.id) : "";
+	const resourcesBlock = options.injectResources ? resourcesCatalogPreamble(workflow.id) : "";
 	// Straight after the description, so "do what this screenshot shows" reads as
 	// one instruction rather than a task and an unrelated file list.
 	const descriptionImages = attachmentSection(
@@ -308,7 +317,7 @@ export function composeStepInput(
 	// hub notices a boundary the agent has already lost the history, so the
 	// pointer has to have been given while the conversation was still intact.
 	const priorResults = stepResultsNote(workflow.agentName);
-	return `${preamble}${tcpBlock}${step.description}${descriptionImages}${criteriaNote(
+	return `${preamble}${tcpBlock}${resourcesBlock}${step.description}${descriptionImages}${criteriaNote(
 		step.acceptanceCriteria,
 		acceptanceImages,
 	)}${priorResults}${subagentInstruction(step.useSubagent, options.forceSubagent ?? false)}${
@@ -441,6 +450,7 @@ export async function dispatchStep(
 		// compaction, which happens here, after `advance()` has already chosen.
 		injectContext: injectCatalog,
 		injectTcp: injectCatalog,
+		injectResources: injectCatalog,
 		afterCompaction,
 		retryReason: options.retryReason,
 		timedOut: options.timedOut,

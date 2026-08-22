@@ -19,6 +19,7 @@ import {
 	normalizeTcpSelections,
 	selectionsToTcpIds,
 } from "./tcp-selection.ts";
+import { type ResourceSelection, normalizeResourceSelections } from "./rci-selection.ts";
 import * as path from "node:path";
 import { dbFile } from "./config.ts";
 import type { ProgressKind } from "./progress.ts";
@@ -320,6 +321,7 @@ export interface Template {
 	steps: TemplateStep[];
 	tcpIds: string[];
 	tcpSelections: TcpSelection[];
+	resourceSelections: ResourceSelection[];
 	createdAt: string;
 	updatedAt: string;
 }
@@ -395,6 +397,7 @@ export function open(): DatabaseSync {
 			steps TEXT NOT NULL DEFAULT '[]',
 			tcp_ids TEXT NOT NULL DEFAULT '[]',
 			tcp_selections TEXT NOT NULL DEFAULT '[]',
+			resource_selections TEXT NOT NULL DEFAULT '[]',
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
@@ -535,6 +538,14 @@ export function open(): DatabaseSync {
 	};
 	addTemplateColumn("tcp_ids", "tcp_ids TEXT NOT NULL DEFAULT '[]'");
 	addTemplateColumn("tcp_selections", "tcp_selections TEXT NOT NULL DEFAULT '[]'");
+	addTemplateColumn("resource_selections", "resource_selections TEXT NOT NULL DEFAULT '[]'");
+	// RCI was first shipped as SCI, storing the same value in `skill_selections`.
+	// Carry it across so a template built then still attaches its set.
+	if (existingTemplateColumns.has("skill_selections")) {
+		database.exec(
+			"UPDATE templates SET resource_selections = skill_selections WHERE resource_selections = '[]' AND skill_selections != '[]';",
+		);
+	}
 	if (existingTemplateColumns.has("mtp_ids") && !existingTemplateColumns.has("tcp_ids")) {
 		database.exec("ALTER TABLE templates RENAME COLUMN mtp_ids TO tcp_ids;");
 	} else if (existingTemplateColumns.has("mtp_ids") && existingTemplateColumns.has("tcp_ids")) {
@@ -1813,6 +1824,12 @@ function rowToTemplate(row: Record<string, unknown>): Template {
 		// Tolerate malformed/legacy data rather than blow up the whole list.
 	}
 	let tcpSelections = readTemplateTcpSelections(row);
+	let resourceSelections: ResourceSelection[] = [];
+	try {
+		resourceSelections = normalizeResourceSelections(JSON.parse(String(row.resource_selections ?? "[]")));
+	} catch {
+		// Tolerate malformed/legacy data rather than blow up the whole list.
+	}
 	return {
 		id: String(row.id),
 		name: String(row.name),
@@ -1820,6 +1837,7 @@ function rowToTemplate(row: Record<string, unknown>): Template {
 		steps,
 		tcpIds: selectionsToTcpIds(tcpSelections),
 		tcpSelections,
+		resourceSelections,
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
 	};
@@ -1831,6 +1849,7 @@ export function insertTemplate(input: {
 	steps?: unknown;
 	tcpIds?: unknown;
 	tcpSelections?: unknown;
+	resourceSelections?: unknown;
 }): Template {
 	const now = new Date().toISOString();
 	const tcpSelections =
@@ -1844,12 +1863,13 @@ export function insertTemplate(input: {
 		steps: normalizeTemplateSteps(input.steps),
 		tcpIds: selectionsToTcpIds(tcpSelections),
 		tcpSelections,
+		resourceSelections: normalizeResourceSelections(input.resourceSelections),
 		createdAt: now,
 		updatedAt: now,
 	};
 	open()
 		.prepare(
-			`INSERT INTO templates (id, name, tags, steps, tcp_ids, tcp_selections, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO templates (id, name, tags, steps, tcp_ids, tcp_selections, resource_selections, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			template.id,
@@ -1858,6 +1878,7 @@ export function insertTemplate(input: {
 			JSON.stringify(template.steps),
 			JSON.stringify(template.tcpIds),
 			JSON.stringify(template.tcpSelections),
+			JSON.stringify(template.resourceSelections),
 			template.createdAt,
 			template.updatedAt,
 		);
@@ -1878,7 +1899,14 @@ export function listTemplates(): Template[] {
 /** Partial update — only the fields present in `input` are changed. Returns null if the template doesn't exist. */
 export function updateTemplate(
 	id: string,
-	input: { name?: string; tags?: unknown; steps?: unknown; tcpIds?: unknown; tcpSelections?: unknown },
+	input: {
+		name?: string;
+		tags?: unknown;
+		steps?: unknown;
+		tcpIds?: unknown;
+		tcpSelections?: unknown;
+		resourceSelections?: unknown;
+	},
 ): Template | null {
 	const existing = getTemplate(id);
 	if (!existing) return null;
@@ -1889,11 +1917,24 @@ export function updateTemplate(
 	if (input.tcpSelections !== undefined) tcpSelections = normalizeTcpSelections(input.tcpSelections);
 	else if (input.tcpIds !== undefined) tcpSelections = tcpIdsToSelections(normalizeTemplateTcpIds(input.tcpIds));
 	const tcpIds = selectionsToTcpIds(tcpSelections);
+	const resourceSelections =
+		input.resourceSelections !== undefined ? normalizeResourceSelections(input.resourceSelections) : existing.resourceSelections;
 	const updatedAt = new Date().toISOString();
 	open()
-		.prepare("UPDATE templates SET name = ?, tags = ?, steps = ?, tcp_ids = ?, tcp_selections = ?, updated_at = ? WHERE id = ?")
-		.run(name, JSON.stringify(tags), JSON.stringify(steps), JSON.stringify(tcpIds), JSON.stringify(tcpSelections), updatedAt, id);
-	return { ...existing, name, tags, steps, tcpIds, tcpSelections, updatedAt };
+		.prepare(
+			"UPDATE templates SET name = ?, tags = ?, steps = ?, tcp_ids = ?, tcp_selections = ?, resource_selections = ?, updated_at = ? WHERE id = ?",
+		)
+		.run(
+			name,
+			JSON.stringify(tags),
+			JSON.stringify(steps),
+			JSON.stringify(tcpIds),
+			JSON.stringify(tcpSelections),
+			JSON.stringify(resourceSelections),
+			updatedAt,
+			id,
+		);
+	return { ...existing, name, tags, steps, tcpIds, tcpSelections, resourceSelections, updatedAt };
 }
 
 export function deleteTemplate(id: string): boolean {
@@ -1934,6 +1975,7 @@ export interface TemplateBundleEntry {
 	steps: TemplateStep[];
 	tcpIds: string[];
 	tcpSelections: TcpSelection[];
+	resourceSelections: ResourceSelection[];
 }
 
 export interface TemplateBundle {
@@ -1965,6 +2007,7 @@ export function templateBundle(templates: Template[]): TemplateBundle {
 			steps: t.steps,
 			tcpIds: t.tcpIds,
 			tcpSelections: t.tcpSelections,
+			resourceSelections: t.resourceSelections,
 		})),
 	};
 }
@@ -2036,6 +2079,12 @@ export function parseTemplateBundle(input: unknown): TemplateBundleEntry[] {
 						? normalizeTcpSelections(obj.mtpSelections)
 						: tcpIdsToSelections(normalizeTemplateTcpIds(obj.tcpIds ?? obj.mtpIds)),
 			),
+			// Absent in every bundle exported before RCI existed, which reads as
+			// "this template attaches no resources" — the same defaults-on-absence rule
+			// the step normalizers rely on, so old bundles stay importable.
+			// `skillSelections` is the same field under the name RCI shipped with
+			// before it grew past skills.
+			resourceSelections: normalizeResourceSelections(obj.resourceSelections ?? obj.skillSelections),
 		});
 	}
 	if (entries.length === 0) throw new TemplateBundleError("empty_bundle");
@@ -2083,7 +2132,13 @@ export function importTemplates(entries: TemplateBundleEntry[]): Template[] {
 		const name = uniqueTemplateName(entry.name, taken);
 		taken.add(name);
 		created.push(
-			insertTemplate({ name, tags: entry.tags, steps: entry.steps, tcpSelections: entry.tcpSelections }),
+			insertTemplate({
+				name,
+				tags: entry.tags,
+				steps: entry.steps,
+				tcpSelections: entry.tcpSelections,
+				resourceSelections: entry.resourceSelections,
+			}),
 		);
 	}
 	return created;

@@ -224,7 +224,31 @@ test("readTokenUsage reads cursor usage from awb run logs when the session id is
 	assert.equal(usage.totalInputTokens, 11600);
 	// Occupancy is the last step's input + cache.
 	assert.equal(usage.contextTokens, 8500);
-	assert.equal(usage.contextWindow, 1_000_000);
+	assert.equal(usage.contextWindow, 200_000);
+	assert.equal(usage.includesSubagents, false);
+});
+
+test("readTokenUsage corrects inflated Cursor cache reads from multi-tool headless runs", (t) => {
+	const sessionId = "cursor-chat-cumulative";
+	const logsDir = path.join(tmpHome, "logs");
+	fs.mkdirSync(logsDir, { recursive: true });
+	t.after(() => fs.rmSync(logsDir, { recursive: true, force: true }));
+	fs.writeFileSync(
+		path.join(logsDir, "wf-heavy.log"),
+		`${JSON.stringify({
+			type: "result",
+			subtype: "success",
+			session_id: sessionId,
+			model: "Composer 2.5 Fast",
+			usage: { inputTokens: 59230, outputTokens: 6953, cacheReadTokens: 761920, cacheWriteTokens: 0 },
+		})}\n`,
+	);
+
+	const usage = readTokenUsage("/irrelevant/workdir", sessionId);
+	assert.equal(usage.contextWindow, 200_000);
+	// Cumulative billing would read 821k (410%); corrected occupancy ~80k (~40%).
+	assert.ok(Math.abs(usage.contextTokens - 80_000) <= 50, `expected ~80000 occupancy, got ${usage.contextTokens}`);
+	assert.ok(Math.abs(usage.contextTokens / usage.contextWindow - 0.4) < 0.01);
 	assert.equal(usage.includesSubagents, false);
 });
 

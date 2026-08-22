@@ -8,6 +8,8 @@ import type {
 	Step,
 	StepConfigInput,
 	StepNoteTheme,
+	ResourceSelection,
+	ResourceSet,
 	Tcp,
 	TcpSelection,
 	Template,
@@ -24,6 +26,7 @@ import { prettyPath, relativeTime } from "../lib/format.ts";
 import { canMoveStep } from "../lib/stepMove.ts";
 import { seedSelectionFromSteps, selectionAfterPoll, stepStatuses } from "../lib/stepSelection.ts";
 import { ContextPanel } from "./ContextPanel.tsx";
+import { RciPanel } from "./RciPanel.tsx";
 import { TcpPanel } from "./TcpPanel.tsx";
 import { RenameWorkflowModal } from "./RenameWorkflowModal.tsx";
 import { SessionPanel } from "./SessionPanel.tsx";
@@ -86,6 +89,7 @@ export function WorkflowDetail({
 	sessionInfo,
 	templates,
 	tcps,
+	resourceSets,
 	busy,
 	onBack,
 	onStart,
@@ -96,6 +100,7 @@ export function WorkflowDetail({
 	onSetStatus,
 	onSaveContext,
 	onSaveTcps,
+	onSaveResources,
 	onAttachImages,
 	onRemoveAttachment,
 	onOpenTerminal,
@@ -119,6 +124,7 @@ export function WorkflowDetail({
 	sessionInfo: SessionInfo | null;
 	templates: Template[];
 	tcps: Tcp[];
+	resourceSets: ResourceSet[];
 	busy: boolean;
 	/** Only supplied when the list isn't on screen beside this pane. */
 	onBack?: () => void;
@@ -134,6 +140,7 @@ export function WorkflowDetail({
 	/** Resolves true only when the server really stored the context. */
 	onSaveContext: (context: string) => Promise<boolean>;
 	onSaveTcps: (tcpSelections: TcpSelection[]) => Promise<boolean>;
+	onSaveResources: (resourceSelections: ResourceSelection[]) => Promise<boolean>;
 	/**
 	 * Pins images to one of this workflow's text inputs. `stepId` is null for the
 	 * conversation context and the step's id for its description / criteria.
@@ -502,6 +509,7 @@ export function WorkflowDetail({
 					onRemoveAttachment={onRemoveAttachment}
 				/>
 				<TcpPanel workflow={workflow} tcps={tcps} onSave={onSaveTcps} />
+				<RciPanel workflow={workflow} resourceSets={resourceSets} onSave={onSaveResources} />
 
 				<div className={styles.stepsSection}>
 					<div className={styles.stepsHead}>

@@ -42,7 +42,7 @@
  *   GET    /api/templates                              → list templates (optional ?q= filters by name/tag)
  *   POST   /api/templates                               → create a template (admin token)
  *   GET    /api/templates/:id                            → template detail
- *   GET    /api/fs/dirs?path=<dir>                        → list subdirectories (admin token; for the UI's directory picker)
+ *   GET    /api/fs/dirs?path=<dir>&files=1                → list subdirectories (+files with files=1; admin token; for the UI's pickers)
  *   PATCH  /api/templates/:id                            → update a template (admin token)
  *   DELETE /api/templates/:id                            → remove a template (admin token)
  *   GET    /api/settings/notifications                     → notification preferences (master switch + per-channel config)
@@ -155,6 +155,20 @@ import {
 	type Tcp,
 } from "./tcp-store.ts";
 import { getTcpUsage } from "./tcp-usage.ts";
+import {
+	applyTemplateResourcesToWorkflow,
+	deleteResourceSet,
+	getResourceSet,
+	insertResourceSet,
+	listResourceSets,
+	listWorkflowResourceSelections,
+	normalizeResourceSelections,
+	setWorkflowResourceSelections,
+	updateResourceSet,
+	type ResourceSet,
+} from "./rci-store.ts";
+import { getResourceSetUsage } from "./rci-usage.ts";
+import { importResourcesFromFolder, MAX_RESOURCE_SET_BYTES, ResourceImportError } from "./rci-import.ts";
 import { stepActivity } from "./progress.ts";
 import type { Logger } from "./runner.ts";
 import { openResumeTerminal } from "./terminal.ts";
@@ -423,6 +437,7 @@ function publicWorkflow(workflow: Workflow): Record<string, unknown> {
 		statusManualAt: workflow.statusManualAt,
 		tcpIds: listWorkflowTcpIds(workflow.id),
 		tcpSelections: listWorkflowTcpSelections(workflow.id),
+		resourceSelections: listWorkflowResourceSelections(workflow.id),
 		createdAt: workflow.createdAt,
 		updatedAt: workflow.updatedAt,
 	};
@@ -496,6 +511,17 @@ function publicTcp(tcp: Tcp): Record<string, unknown> {
 	};
 }
 
+function publicResourceSet(set: ResourceSet): Record<string, unknown> {
+	return {
+		id: set.id,
+		name: set.name,
+		tags: set.tags,
+		resources: set.resources,
+		createdAt: set.createdAt,
+		updatedAt: set.updatedAt,
+	};
+}
+
 function publicTemplate(template: Template): Record<string, unknown> {
 	return {
 		id: template.id,
@@ -504,6 +530,7 @@ function publicTemplate(template: Template): Record<string, unknown> {
 		steps: template.steps,
 		tcpIds: template.tcpIds,
 		tcpSelections: template.tcpSelections,
+		resourceSelections: template.resourceSelections,
 		createdAt: template.createdAt,
 		updatedAt: template.updatedAt,
 	};
@@ -1027,6 +1054,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						steps: body.steps,
 						tcpIds: body.tcpIds,
 						tcpSelections: body.tcpSelections,
+						resourceSelections: body.resourceSelections,
 					});
 					log(`template '${template.name}' (${template.id}) created`);
 					sendJson(res, 200, { template: publicTemplate(template) });
@@ -1107,7 +1135,14 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return;
 			}
 			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
-				const input: { name?: string; tags?: unknown; steps?: unknown; tcpIds?: unknown; tcpSelections?: unknown } = {};
+				const input: {
+					name?: string;
+					tags?: unknown;
+					steps?: unknown;
+					tcpIds?: unknown;
+					tcpSelections?: unknown;
+					resourceSelections?: unknown;
+				} = {};
 				if (typeof body.name === "string") {
 					const trimmed = body.name.trim();
 					if (!trimmed) {
@@ -1120,6 +1155,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				if ("steps" in body) input.steps = body.steps;
 				if ("tcpSelections" in body) input.tcpSelections = body.tcpSelections;
 				else if ("tcpIds" in body) input.tcpIds = body.tcpIds;
+				if ("resourceSelections" in body) input.resourceSelections = body.resourceSelections;
 				const template = updateTemplate(templateId, input);
 				if (!template) {
 					sendJson(res, 404, { error: "unknown_template" });
@@ -1335,6 +1371,164 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		return;
 	}
 
+	// --- /api/resourcesets (RCI) ---
+	//
+	// Mostly the same route shape as /api/tcps — list, create, per-id
+	// get/patch/delete, usage — because the two are the same kind of thing from
+	// the operator's side. The deliberate divergences: a set has no export and
+	// no bundle import (a Resource Set is made here or not at all), and `scan`
+	// has no TCP counterpart, because resources live on disk as Markdown files
+	// and folders, and importing one means reading it into the set being edited.
+
+	// A Resource Set body carries whole file contents — a SKILL.md plus its
+	// references and evals — so `maxInputBytes` (sized for a step description)
+	// would reject any real set. These routes get the same ceiling the folder
+	// importer enforces, which is the actual limit on how big a set can be.
+	const resourceSetMaxBytes = Math.max(cfg.maxInputBytes, MAX_RESOURCE_SET_BYTES);
+
+	if (parts[1] === "resourcesets") {
+		if (!parts[2]) {
+			if (req.method === "GET") {
+				const q = (url.searchParams.get("q") ?? "").trim().toLowerCase();
+				let sets = listResourceSets();
+				if (q) {
+					sets = sets.filter(
+						(s) => s.name.toLowerCase().includes(q) || s.tags.some((tag) => tag.toLowerCase().includes(q)),
+					);
+				}
+				sendJson(res, 200, { resourceSets: sets.map(publicResourceSet) });
+				return;
+			}
+			if (req.method === "POST") {
+				if (!isAdmin(cfg, req.headers)) {
+					sendJson(res, 401, { error: "unauthorized" });
+					return;
+				}
+				readJsonBody(req, res, resourceSetMaxBytes, (body) => {
+					const name = typeof body.name === "string" ? body.name.trim() : "";
+					if (!name) {
+						sendJson(res, 400, { error: "name is required" });
+						return;
+					}
+					const set = insertResourceSet({ name, tags: body.tags, resources: body.resources });
+					log(`resources set '${set.name}' (${set.id}) created`);
+					sendJson(res, 200, { resourceSet: publicResourceSet(set) });
+				});
+				return;
+			}
+			sendJson(res, 404, { error: "not_found" });
+			return;
+		}
+
+		// Reads resources off this machine's disk — a tree of them, one skill or
+		// agent folder, or a single `.md` — and hands them back *without* storing
+		// anything. Import belongs to a set now: the editor drops what comes back
+		// into the set being written and the operator saves it like any other
+		// edit, so there is no way to conjure a set out of a file. The folder on
+		// disk is left untouched either way: RCI copies the resource in, it never
+		// installs it.
+		if (parts[2] === "scan" && !parts[3] && req.method === "POST") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, resourceSetMaxBytes, (body) => {
+				const target = typeof body.path === "string" ? body.path.trim() : "";
+				if (!target) {
+					sendJson(res, 400, { error: "path is required" });
+					return;
+				}
+				let imported;
+				try {
+					imported = importResourcesFromFolder(target);
+				} catch (err) {
+					if (err instanceof ResourceImportError) {
+						sendJson(res, 400, { error: err.code });
+						return;
+					}
+					throw err;
+				}
+				log(`scanned ${target} — ${imported.resources.length} resource(s)`);
+				sendJson(res, 200, { suggestedName: imported.suggestedName, resources: imported.resources });
+			});
+			return;
+		}
+
+		const resourceSetId = parts[2];
+
+		if (parts[3] === "usage" && !parts[4] && req.method === "GET") {
+			const resourcesRaw = url.searchParams.get("resources");
+			const resourceNames = resourcesRaw
+				? resourcesRaw
+						.split(",")
+						.map((name) => name.trim())
+						.filter((name) => name !== "")
+				: undefined;
+			const usage = getResourceSetUsage(resourceSetId, resourceNames);
+			if (!usage) {
+				sendJson(res, 404, { error: "unknown_resource_set" });
+				return;
+			}
+			sendJson(res, 200, { usage });
+			return;
+		}
+
+		if (!parts[3] && req.method === "GET") {
+			const set = getResourceSet(resourceSetId);
+			if (!set) {
+				sendJson(res, 404, { error: "unknown_resource_set" });
+				return;
+			}
+			sendJson(res, 200, { resourceSet: publicResourceSet(set) });
+			return;
+		}
+
+		if (!parts[3] && (req.method === "PATCH" || req.method === "PUT")) {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, resourceSetMaxBytes, (body) => {
+				const input: { name?: string; tags?: unknown; resources?: unknown } = {};
+				if (typeof body.name === "string") {
+					const trimmed = body.name.trim();
+					if (!trimmed) {
+						sendJson(res, 400, { error: "name is required" });
+						return;
+					}
+					input.name = trimmed;
+				}
+				if ("tags" in body) input.tags = body.tags;
+				if ("resources" in body) input.resources = body.resources;
+				const set = updateResourceSet(resourceSetId, input);
+				if (!set) {
+					sendJson(res, 404, { error: "unknown_resource_set" });
+					return;
+				}
+				sendJson(res, 200, { resourceSet: publicResourceSet(set) });
+			});
+			return;
+		}
+
+		if (!parts[3] && req.method === "DELETE") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			const removed = deleteResourceSet(resourceSetId);
+			if (!removed) {
+				sendJson(res, 404, { error: "unknown_resource_set" });
+				return;
+			}
+			log(`resources set ${resourceSetId} deleted`);
+			sendJson(res, 200, { ok: true });
+			return;
+		}
+
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
 	// --- /api/settings/notifications ---
 	//
 	// The notification preferences behind the UI's Settings view: one master
@@ -1443,6 +1637,11 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// to type the workdir by hand. Exposes filesystem structure, so it's
 	// admin-gated like every other route that touches the operator's machine.
 	// `~` expands to the hub user's home; an empty/missing path starts there.
+	//
+	// `?files=1` adds the directory's regular files. Off by default because the
+	// workdir picker only ever wants directories, and a node_modules listing
+	// would be thousands of names it has no use for; RCI's resource picker asks
+	// for them because a SKILL.md is one of the things it can import.
 
 	if (parts[1] === "fs" && parts[2] === "dirs" && !parts[3] && req.method === "GET") {
 		if (!isAdmin(cfg, req.headers)) {
@@ -1489,12 +1688,24 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return a.localeCompare(b);
 			});
 		const parent = path.dirname(resolved);
-		sendJson(res, 200, {
+		const body: { path: string; parent: string | null; home: string; dirs: string[]; files?: string[] } = {
 			path: resolved,
 			parent: parent === resolved ? null : parent,
 			home: os.homedir(),
 			dirs,
-		});
+		};
+		if (url.searchParams.get("files") === "1") {
+			body.files = entries
+				.filter((entry) => entry.isFile())
+				.map((entry) => entry.name)
+				.sort((a, b) => {
+					const aHidden = a.startsWith(".");
+					const bHidden = b.startsWith(".");
+					if (aHidden !== bHidden) return aHidden ? 1 : -1;
+					return a.localeCompare(b);
+				});
+		}
+		sendJson(res, 200, body);
 		return;
 	}
 
@@ -1824,6 +2035,8 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 							});
 						}
 						if (template.tcpSelections.length > 0) applyTemplateTcpsToWorkflow(workflow.id, template.tcpSelections);
+						if (template.resourceSelections.length > 0)
+							applyTemplateResourcesToWorkflow(workflow.id, template.resourceSelections);
 					}
 					log(`workflow '${workflow.name}' (${workflow.id}) created — agent '${workflow.agentName}'`);
 					sendJson(res, 200, { workflow: publicWorkflow(workflow) });
@@ -1984,6 +2197,45 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			} catch (err) {
 				const message = String((err as Error).message ?? err);
 				sendJson(res, message.startsWith("unknown_tcp:") ? 404 : 400, { error: message });
+			}
+		});
+		return;
+	}
+
+	if (workflowId && parts[3] === "resourcesets" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		const workflow = getWorkflow(workflowId);
+		if (!workflow) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		// Same lock as TCP: once the context has been injected the agent is already
+		// running under whatever was attached, so changing the attachment would
+		// describe a conversation that doesn't exist.
+		if (workflow.contextInjected) {
+			sendJson(res, 400, { error: "context already injected" });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			if (!("resourceSelections" in body)) {
+				sendJson(res, 400, { error: "resourceSelections is required" });
+				return;
+			}
+			if (!Array.isArray(body.resourceSelections)) {
+				sendJson(res, 400, { error: "resourceSelections must be an array" });
+				return;
+			}
+			const selections = normalizeResourceSelections(body.resourceSelections);
+			try {
+				setWorkflowResourceSelections(workflowId, selections);
+				log(`workflow ${workflowId} RCI attachments updated (${selections.length})`);
+				sendJson(res, 200, { workflow: publicWorkflow(getWorkflow(workflowId)!) });
+			} catch (err) {
+				const message = String((err as Error).message ?? err);
+				sendJson(res, message.startsWith("unknown_resource_set:") ? 404 : 400, { error: message });
 			}
 		});
 		return;
@@ -2264,6 +2516,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					added++;
 				}
 				if (template.tcpSelections.length > 0) applyTemplateTcpsToWorkflow(workflowId, template.tcpSelections);
+				if (template.resourceSelections.length > 0) applyTemplateResourcesToWorkflow(workflowId, template.resourceSelections);
 				sendJson(res, 200, {
 					workflow: publicWorkflow(getWorkflow(workflowId) as Workflow),
 					steps: listSteps(workflowId).map((s) => publicStep(s, cfg)),
