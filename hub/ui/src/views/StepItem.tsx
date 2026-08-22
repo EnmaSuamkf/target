@@ -5,11 +5,13 @@ import type {
 	StagedStepImages,
 	Step,
 	StepConfigInput,
+	StepNoteTheme,
 } from "../api/types.ts";
 import { OVERRIDABLE_STEP_STATUSES } from "../api/types.ts";
 import { Badge } from "../components/Badge.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { Markdown } from "../components/Markdown.tsx";
+import { StepNotes } from "../components/StepNotes.tsx";
 import { Switch } from "../components/Switch.tsx";
 import { activityLabel, duration } from "../lib/format.ts";
 import { AddStepModal } from "./AddStepModal.tsx";
@@ -92,6 +94,9 @@ export function StepItem({
 	canMoveDown,
 	onAttachImages,
 	onRemoveAttachment,
+	onAddNote,
+	onEditNote,
+	onRemoveNote,
 	busy,
 }: {
 	step: Step;
@@ -116,6 +121,9 @@ export function StepItem({
 	/** Pins images to one of this step's two text inputs. */
 	onAttachImages: (field: AttachmentField, stepId: string | null, files: File[]) => Promise<boolean>;
 	onRemoveAttachment: (id: string) => void;
+	onAddNote?: (stepId: string, content: string, theme: StepNoteTheme) => Promise<void>;
+	onEditNote?: (stepId: string, noteId: string, content: string, theme: StepNoteTheme) => Promise<void>;
+	onRemoveNote?: (stepId: string, noteId: string) => Promise<void>;
 	busy: boolean;
 }): React.JSX.Element {
 	const [editing, setEditing] = useState(false);
@@ -361,6 +369,20 @@ export function StepItem({
 					<Markdown text={step.acceptanceCriteria} className={styles.criteriaBody} />
 				</div>
 			)}
+
+			{!isContext && (step.notes?.length || onAddNote) ? (
+				<StepNotes
+					notes={step.notes ?? []}
+					busy={busy}
+					{...(onAddNote
+						? { onAdd: (content, theme) => onAddNote(step.id, content, theme) }
+						: {})}
+					{...(onEditNote
+						? { onEdit: (noteId, content, theme) => onEditNote(step.id, noteId, content, theme) }
+						: {})}
+					{...(onRemoveNote ? { onRemove: (noteId) => onRemoveNote(step.id, noteId) } : {})}
+				/>
+			) : null}
 
 			{/* The failed resolution, in the same collapsing pane as a successful
 			    one and rendered the same way — an agent writes its failure in

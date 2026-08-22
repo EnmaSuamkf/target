@@ -38,6 +38,7 @@ import {
 	CLONE_NAME_PREFIX,
 	completeStep,
 	CONTEXT_STEP_ORDER_INDEX,
+	copyTemplateNotesToStep,
 	deleteStep,
 	deleteWorkflow,
 	failRunningStep,
@@ -81,6 +82,7 @@ import {
 	type OverridableWorkflowStatus,
 	type Step,
 	type StepPhase,
+	type TemplateStepNote,
 	type TimeoutReason,
 	type Workflow,
 	type WorkflowStatus,
@@ -1234,6 +1236,8 @@ export function addStep(
 		retryIntervalSeconds?: number;
 		/** Insert directly after this step instead of appending at the end. */
 		afterStepId?: string | null;
+		/** Sticky notes copied from a template step when seeding. */
+		templateNotes?: TemplateStepNote[];
 	} = {},
 ): Step {
 	const trimmed = description.trim();
@@ -1282,6 +1286,9 @@ export function addStep(
 			has_acceptance_criteria: !!step.acceptanceCriteria,
 		},
 	});
+	if (options.templateNotes?.length) {
+		copyTemplateNotesToStep(step.id, workflowId, options.templateNotes);
+	}
 	// A workflow that had already reached a terminal state gets a fresh
 	// pending step here — back to draft so the badge/progress stay honest and
 	// "Start" dispatches just the new step, instead of leaving it stuck

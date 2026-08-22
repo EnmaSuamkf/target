@@ -7,6 +7,7 @@ import type {
 	StagedStepImages,
 	Step,
 	StepConfigInput,
+	StepNoteTheme,
 	Tcp,
 	TcpSelection,
 	Template,
@@ -109,6 +110,9 @@ export function WorkflowDetail({
 	onMoveStep,
 	onAddStepsFromTemplate,
 	onSelectionChange,
+	onAddNote,
+	onEditNote,
+	onRemoveNote,
 }: {
 	workflow: Workflow;
 	steps: Step[];
@@ -158,6 +162,9 @@ export function WorkflowDetail({
 	/** Swaps a step with its neighbour, so it runs one place earlier or later. */
 	onMoveStep: (id: string, direction: "up" | "down") => void;
 	onAddStepsFromTemplate: (templateId: string) => Promise<void>;
+	onAddNote: (stepId: string, content: string, theme: StepNoteTheme) => Promise<void>;
+	onEditNote: (stepId: string, noteId: string, content: string, theme: StepNoteTheme) => Promise<void>;
+	onRemoveNote: (stepId: string, noteId: string) => Promise<void>;
 }): React.JSX.Element {
 	// Which steps the next run should dispatch. Seeded from the server's
 	// `selected` flag and re-seeded when switching workflows.
@@ -568,6 +575,9 @@ export function WorkflowDetail({
 									canMoveDown={false}
 									onAttachImages={onAttachImages}
 									onRemoveAttachment={onRemoveAttachment}
+									onAddNote={onAddNote}
+									onEditNote={onEditNote}
+									onRemoveNote={onRemoveNote}
 									busy={busy}
 								/>
 							</ul>
@@ -601,6 +611,9 @@ export function WorkflowDetail({
 										canMoveDown={canMoveStep(taskSteps, i, "down")}
 										onAttachImages={onAttachImages}
 										onRemoveAttachment={onRemoveAttachment}
+										onAddNote={onAddNote}
+										onEditNote={onEditNote}
+										onRemoveNote={onRemoveNote}
 										busy={busy}
 									/>
 								))}
