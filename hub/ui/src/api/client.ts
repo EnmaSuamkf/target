@@ -34,6 +34,8 @@ import type {
 	ShortcutSettingsInput,
 	Step,
 	StepConfigInput,
+	StepNote,
+	StepNoteInput,
 	Tcp,
 	TcpBundle,
 	TcpInput,
@@ -354,6 +356,40 @@ export async function editStep(workflowId: string, stepId: string, input: StepCo
 		body: json(input),
 	});
 	return data.step;
+}
+
+export async function addStepNote(
+	workflowId: string,
+	stepId: string,
+	input: StepNoteInput,
+): Promise<StepNote> {
+	const data = await request<{ note: StepNote }>(`/api/workflows/${workflowId}/steps/${stepId}/notes`, {
+		method: "POST",
+		admin: true,
+		body: json(input),
+	});
+	return data.note;
+}
+
+export async function editStepNote(
+	workflowId: string,
+	stepId: string,
+	noteId: string,
+	input: StepNoteInput,
+): Promise<StepNote> {
+	const data = await request<{ note: StepNote }>(`/api/workflows/${workflowId}/steps/${stepId}/notes/${noteId}`, {
+		method: "PATCH",
+		admin: true,
+		body: json(input),
+	});
+	return data.note;
+}
+
+export function removeStepNote(workflowId: string, stepId: string, noteId: string): Promise<{ ok: true }> {
+	return request<{ ok: true }>(`/api/workflows/${workflowId}/steps/${stepId}/notes/${noteId}`, {
+		method: "DELETE",
+		admin: true,
+	});
 }
 
 export function removeStep(workflowId: string, stepId: string): Promise<{ ok: true }> {

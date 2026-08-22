@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Tcp, TcpSelection, Template, TemplateInput, TemplateStep } from "../api/types.ts";
+import type { Tcp, TcpSelection, Template, TemplateInput, TemplateStep, TemplateStepNote } from "../api/types.ts";
+import { StepNotes } from "../components/StepNotes.tsx";
 import { TcpSelectionEditor } from "./TcpSelectionEditor.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
@@ -525,6 +526,24 @@ function TemplateForm({
 									label={`Step ${index + 1} use subagent`}
 								/>
 							</div>
+
+							<StepNotes
+								notes={step.notes ?? []}
+								onAdd={async (content, theme) => {
+									const note: TemplateStepNote = { id: crypto.randomUUID(), content, theme };
+									updateStep(index, { notes: [...(step.notes ?? []), note] });
+								}}
+								onEdit={async (noteId, content, theme) => {
+									updateStep(index, {
+										notes: (step.notes ?? []).map((n) =>
+											n.id === noteId ? { ...n, content, theme } : n,
+										),
+									});
+								}}
+								onRemove={async (noteId) => {
+									updateStep(index, { notes: (step.notes ?? []).filter((n) => n.id !== noteId) });
+								}}
+							/>
 						</div>
 					))}
 				</div>

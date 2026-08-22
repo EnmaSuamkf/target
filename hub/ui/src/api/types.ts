@@ -231,6 +231,25 @@ export interface Workflow {
  */
 export type StepKind = "task" | "context";
 
+/** Theme colours for sticky notes on steps. */
+export const STEP_NOTE_THEMES = ["warning", "success", "neutral"] as const;
+export type StepNoteTheme = (typeof STEP_NOTE_THEMES)[number];
+
+export interface StepNote {
+	id: string;
+	content: string;
+	theme: StepNoteTheme;
+	createdAt: string;
+	updatedAt: string;
+}
+
+/** Inline note on a template step (no timestamps — copied when the template is used). */
+export interface TemplateStepNote {
+	id: string;
+	content: string;
+	theme: StepNoteTheme;
+}
+
 export interface Step {
 	id: string;
 	workflowId: string;
@@ -269,6 +288,14 @@ export interface Step {
 	lastProgressKind: ProgressKind | null;
 	/** Derived watchdog state — null for anything that isn't `running`. */
 	activity: StepActivity | null;
+	/** Sticky notes attached to this step. */
+	notes: StepNote[];
+}
+
+/** Input for creating or editing a step note. */
+export interface StepNoteInput {
+	content: string;
+	theme?: StepNoteTheme;
 }
 
 /** Where the hub saw the agent's last sign of life (see the hub's progress.ts). */
@@ -298,6 +325,8 @@ export interface TemplateStep {
 	useSubagent: boolean;
 	maxRetries: number;
 	retryIntervalSeconds: number;
+	/** Sticky notes copied onto workflow steps when this template is used. */
+	notes?: TemplateStepNote[];
 }
 
 export interface Template {

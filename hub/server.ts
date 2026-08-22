@@ -22,6 +22,9 @@
  *   POST   /api/workflows/:id/steps                    → add a step (admin token); optional afterStepId inserts it right after that step
  *   POST   /api/workflows/:id/steps/from-template       → append a template's steps (admin token)
  *   PATCH  /api/workflows/:id/steps/:stepId             → edit a step's description (admin token)
+ *   POST   /api/workflows/:id/steps/:stepId/notes        → add a sticky note (admin token)
+ *   PATCH  /api/workflows/:id/steps/:stepId/notes/:noteId → edit a sticky note (admin token)
+ *   DELETE /api/workflows/:id/steps/:stepId/notes/:noteId → remove a sticky note (admin token)
  *   DELETE /api/workflows/:id/steps/:stepId             → remove a pending step (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/run         → run one step now, outside the sequential order (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/abort        → abort a step stuck running, or reject one waiting for its review (admin token)
@@ -183,7 +186,8 @@ import {
 	WorkflowError,
 	type CloneOverrides,
 } from "./workflow.ts";
-import { getStep } from "./db.ts";
+import { getStep, listStepNotes, normalizeStepNoteTheme, type StepNoteTheme } from "./db.ts";
+import { addStepNote, editStepNote, removeStepNote, StepNoteError } from "./step-notes.ts";
 
 /**
  * The UI is a React app (hub/ui) built by Vite into hub/ui/dist. The hub only
@@ -467,6 +471,13 @@ function publicStep(step: Step, cfg: HubConfig): Record<string, unknown> {
 		lastProgressAt: step.lastProgressAt,
 		lastProgressKind: step.lastProgressKind,
 		activity: stepActivity(step, cfg),
+		notes: listStepNotes(step.id).map((n) => ({
+			id: n.id,
+			content: n.content,
+			theme: n.theme,
+			createdAt: n.createdAt,
+			updatedAt: n.updatedAt,
+		})),
 	};
 }
 
@@ -1809,6 +1820,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 								useSubagent: step.useSubagent,
 								maxRetries: step.maxRetries,
 								retryIntervalSeconds: step.retryIntervalSeconds,
+								templateNotes: step.notes,
 							});
 						}
 						if (template.tcpSelections.length > 0) applyTemplateTcpsToWorkflow(workflow.id, template.tcpSelections);
@@ -2247,6 +2259,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						useSubagent: step.useSubagent,
 						maxRetries: step.maxRetries,
 						retryIntervalSeconds: step.retryIntervalSeconds,
+						templateNotes: step.notes,
 					});
 					added++;
 				}
@@ -2258,6 +2271,61 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				});
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		});
+		return;
+	}
+
+	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "notes" && parts[6] && req.method === "PATCH") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		const stepId = parts[4];
+		const noteId = parts[6];
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const content = typeof body.content === "string" ? body.content : "";
+			const theme = "theme" in body ? normalizeStepNoteTheme(body.theme) : undefined;
+			try {
+				const note = editStepNote(workflowId, stepId, noteId, content, theme);
+				sendJson(res, 200, { note });
+			} catch (err) {
+				sendJson(res, err instanceof StepNoteError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		});
+		return;
+	}
+
+	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "notes" && parts[6] && req.method === "DELETE") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		const stepId = parts[4];
+		const noteId = parts[6];
+		try {
+			removeStepNote(workflowId, stepId, noteId);
+			sendJson(res, 200, { ok: true });
+		} catch (err) {
+			sendJson(res, err instanceof StepNoteError ? 400 : 500, { error: String((err as Error).message ?? err) });
+		}
+		return;
+	}
+
+	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "notes" && !parts[6] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		const stepId = parts[4];
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const content = typeof body.content === "string" ? body.content : "";
+			const theme = normalizeStepNoteTheme(body.theme);
+			try {
+				const note = addStepNote(workflowId, stepId, content, theme);
+				sendJson(res, 200, { note });
+			} catch (err) {
+				sendJson(res, err instanceof StepNoteError ? 400 : 500, { error: String((err as Error).message ?? err) });
 			}
 		});
 		return;

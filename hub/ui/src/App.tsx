@@ -18,6 +18,7 @@ import type {
 	StagedStepImages,
 	Step,
 	StepConfigInput,
+	StepNoteTheme,
 	Tcp,
 	TcpInput,
 	TcpSelection,
@@ -664,6 +665,21 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		await act("Could not edit the step", () => api.editStep(selectedId, stepId, input), refreshCurrent);
 	};
 
+	const handleAddNote = async (stepId: string, content: string, theme: StepNoteTheme): Promise<void> => {
+		if (!selectedId) return;
+		await act("Could not add the note", () => api.addStepNote(selectedId, stepId, { content, theme }), refreshCurrent);
+	};
+
+	const handleEditNote = async (stepId: string, noteId: string, content: string, theme: StepNoteTheme): Promise<void> => {
+		if (!selectedId) return;
+		await act("Could not edit the note", () => api.editStepNote(selectedId, stepId, noteId, { content, theme }), refreshCurrent);
+	};
+
+	const handleRemoveNote = async (stepId: string, noteId: string): Promise<void> => {
+		if (!selectedId) return;
+		await act("Could not delete the note", () => api.removeStepNote(selectedId, stepId, noteId), refreshCurrent);
+	};
+
 	const handleRemoveStep = async (stepId: string): Promise<void> => {
 		if (!selectedId) return;
 		const confirmed = await confirm({
@@ -1133,6 +1149,9 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								onMoveStep={(id, direction) => void handleMoveStep(id, direction)}
 								onAddStepsFromTemplate={handleAddStepsFromTemplate}
 								onSelectionChange={handleSelectionChange}
+								onAddNote={handleAddNote}
+								onEditNote={handleEditNote}
+								onRemoveNote={handleRemoveNote}
 							/>
 						) : (
 							// The "pick something" placeholder is a two-pane idea: with only

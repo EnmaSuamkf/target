@@ -267,6 +267,32 @@ export interface Step {
 	statusManualAt: string | null;
 }
 
+/** Theme colours for a step sticky note — warning (amber), success (green), neutral (grey). */
+export const STEP_NOTE_THEMES = ["warning", "success", "neutral"] as const;
+export type StepNoteTheme = (typeof STEP_NOTE_THEMES)[number];
+
+/** A sticky note attached to a workflow step, persisted in `step_notes`. */
+export interface StepNote {
+	id: string;
+	stepId: string;
+	workflowId: string;
+	content: string;
+	theme: StepNoteTheme;
+	createdAt: string;
+	updatedAt: string;
+}
+
+/**
+ * A note stored inline on a template step (JSON inside `templates.steps`).
+ * Templates never execute, so notes live with the step definition and are
+ * copied onto real steps when the template is used.
+ */
+export interface TemplateStepNote {
+	id: string;
+	content: string;
+	theme: StepNoteTheme;
+}
+
 /**
  * A single step within a `Template`, mirroring the fields the "+ Add step"
  * form on a workflow collects (see `insertStep`'s options) — a template just
@@ -283,6 +309,8 @@ export interface TemplateStep {
 	useSubagent: boolean;
 	maxRetries: number;
 	retryIntervalSeconds: number;
+	/** Optional sticky notes copied onto workflow steps when this template is used. */
+	notes?: TemplateStepNote[];
 }
 
 export interface Template {
@@ -429,6 +457,16 @@ export function open(): DatabaseSync {
 			next_try_at  TEXT
 		);
 		CREATE INDEX IF NOT EXISTS idx_report_pending ON report_events(delivered_at, next_try_at);
+		CREATE TABLE IF NOT EXISTS step_notes (
+			id TEXT PRIMARY KEY,
+			step_id TEXT NOT NULL,
+			workflow_id TEXT NOT NULL,
+			content TEXT NOT NULL,
+			theme TEXT NOT NULL DEFAULT 'neutral',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_step_notes_step ON step_notes(step_id, created_at);
 	`);
 	// `CREATE TABLE IF NOT EXISTS` above is a no-op on a `steps` table that
 	// already existed before these columns were added — add any that are missing
@@ -790,6 +828,7 @@ export function setWorkflowConversationContext(id: string, context: string | nul
 
 export function deleteWorkflow(id: string): boolean {
 	const database = open();
+	database.prepare("DELETE FROM step_notes WHERE workflow_id = ?").run(id);
 	database.prepare("DELETE FROM steps WHERE workflow_id = ?").run(id);
 	return database.prepare("DELETE FROM workflows WHERE id = ?").run(id).changes > 0;
 }
@@ -1040,7 +1079,103 @@ export function updateStepConfig(
 }
 
 export function deleteStep(id: string): boolean {
-	return open().prepare("DELETE FROM steps WHERE id = ?").run(id).changes > 0;
+	const database = open();
+	database.prepare("DELETE FROM step_notes WHERE step_id = ?").run(id);
+	return database.prepare("DELETE FROM steps WHERE id = ?").run(id).changes > 0;
+}
+
+function rowToStepNote(row: Record<string, unknown>): StepNote {
+	return {
+		id: String(row.id),
+		stepId: String(row.step_id),
+		workflowId: String(row.workflow_id),
+		content: String(row.content),
+		theme: normalizeStepNoteTheme(row.theme),
+		createdAt: String(row.created_at),
+		updatedAt: String(row.updated_at),
+	};
+}
+
+export function normalizeStepNoteTheme(value: unknown): StepNoteTheme {
+	return STEP_NOTE_THEMES.includes(value as StepNoteTheme) ? (value as StepNoteTheme) : "neutral";
+}
+
+export function normalizeTemplateStepNotes(notes: unknown): TemplateStepNote[] {
+	if (!Array.isArray(notes)) return [];
+	return notes
+		.map((n) => {
+			const obj = (n ?? {}) as Record<string, unknown>;
+			const content = typeof obj.content === "string" ? obj.content.trim() : "";
+			if (content === "") return null;
+			const id = typeof obj.id === "string" && obj.id !== "" ? obj.id : crypto.randomUUID();
+			return { id, content, theme: normalizeStepNoteTheme(obj.theme) };
+		})
+		.filter((n): n is TemplateStepNote => n !== null);
+}
+
+export function listStepNotes(stepId: string): StepNote[] {
+	const rows = open()
+		.prepare("SELECT * FROM step_notes WHERE step_id = ? ORDER BY created_at ASC, rowid ASC")
+		.all(stepId) as Record<string, unknown>[];
+	return rows.map(rowToStepNote);
+}
+
+export function getStepNote(id: string): StepNote | null {
+	const row = open().prepare("SELECT * FROM step_notes WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+	return row ? rowToStepNote(row) : null;
+}
+
+export function insertStepNote(
+	stepId: string,
+	workflowId: string,
+	content: string,
+	theme: StepNoteTheme = "neutral",
+): StepNote {
+	const trimmed = content.trim();
+	if (trimmed === "") throw new Error("note content is required");
+	const now = new Date().toISOString();
+	const note: StepNote = {
+		id: crypto.randomUUID(),
+		stepId,
+		workflowId,
+		content: trimmed,
+		theme: normalizeStepNoteTheme(theme),
+		createdAt: now,
+		updatedAt: now,
+	};
+	open()
+		.prepare(
+			"INSERT INTO step_notes (id, step_id, workflow_id, content, theme, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		)
+		.run(note.id, note.stepId, note.workflowId, note.content, note.theme, note.createdAt, note.updatedAt);
+	return note;
+}
+
+export function updateStepNote(id: string, content: string, theme?: StepNoteTheme): StepNote | null {
+	const existing = getStepNote(id);
+	if (!existing) return null;
+	const trimmed = content.trim();
+	if (trimmed === "") throw new Error("note content is required");
+	const updatedAt = new Date().toISOString();
+	const nextTheme = theme === undefined ? existing.theme : normalizeStepNoteTheme(theme);
+	open()
+		.prepare("UPDATE step_notes SET content = ?, theme = ?, updated_at = ? WHERE id = ?")
+		.run(trimmed, nextTheme, updatedAt, id);
+	return { ...existing, content: trimmed, theme: nextTheme, updatedAt };
+}
+
+export function deleteStepNote(id: string): boolean {
+	return open().prepare("DELETE FROM step_notes WHERE id = ?").run(id).changes > 0;
+}
+
+/** Copies template step notes onto a newly created workflow step. */
+export function copyTemplateNotesToStep(
+	stepId: string,
+	workflowId: string,
+	notes: TemplateStepNote[] | undefined,
+): StepNote[] {
+	if (!notes?.length) return [];
+	return notes.map((n) => insertStepNote(stepId, workflowId, n.content, n.theme));
 }
 
 /**
@@ -1625,7 +1760,16 @@ function normalizeTemplateSteps(steps: unknown): TemplateStep[] {
 			const useSubagent = obj.useSubagent !== false;
 			const maxRetries = Math.max(0, Math.floor(Number(obj.maxRetries ?? 0)) || 0);
 			const retryIntervalSeconds = Math.max(0, Math.floor(Number(obj.retryIntervalSeconds ?? 0)) || 0);
-			return { description, acceptanceCriteria, manualReview, useSubagent, maxRetries, retryIntervalSeconds };
+			const notes = normalizeTemplateStepNotes(obj.notes);
+			return {
+				description,
+				acceptanceCriteria,
+				manualReview,
+				useSubagent,
+				maxRetries,
+				retryIntervalSeconds,
+				...(notes.length > 0 ? { notes } : {}),
+			};
 		})
 		.filter((s) => s.description !== "");
 }
