@@ -36,6 +36,11 @@ import type {
 	StepConfigInput,
 	StepNote,
 	StepNoteInput,
+	Resource,
+	ResourceSelection,
+	ResourceSet,
+	ResourceSetInput,
+	ResourceSetUsage,
 	Tcp,
 	TcpBundle,
 	TcpInput,
@@ -548,9 +553,15 @@ export function deleteAttachment(id: string): Promise<{ ok: true }> {
  * Lists the subdirectories of `path` on the hub's machine. Empty path (or
  * "~") starts at the hub user's home. Admin-gated: it exposes filesystem
  * structure, so it needs the same token as every mutating route.
+ *
+ * `withFiles` adds the directory's regular files — what RCI's resource picker
+ * needs to show a SKILL.md, and what the workdir picker has no use for.
  */
-export function listDirs(path?: string): Promise<DirListing> {
-	const query = path && path.trim() !== "" ? `?path=${encodeURIComponent(path.trim())}` : "";
+export function listDirs(path?: string, withFiles = false): Promise<DirListing> {
+	const params = new URLSearchParams();
+	if (path && path.trim() !== "") params.set("path", path.trim());
+	if (withFiles) params.set("files", "1");
+	const query = params.size > 0 ? `?${params.toString()}` : "";
 	return request<DirListing>(`/api/fs/dirs${query}`, { admin: true });
 }
 
@@ -677,6 +688,63 @@ export async function setWorkflowTcps(workflowId: string, tcpIds: string[]): Pro
 		method: "PATCH",
 		admin: true,
 		body: json({ tcpIds }),
+	});
+	return data.workflow;
+}
+
+// --- resource sets (RCI) ---
+
+export async function listResourceSets(q?: string): Promise<ResourceSet[]> {
+	const query = q ? `?q=${encodeURIComponent(q)}` : "";
+	const data = await request<{ resourceSets: ResourceSet[] }>(`/api/resourcesets${query}`);
+	return data.resourceSets;
+}
+
+export async function createResourceSet(input: ResourceSetInput): Promise<ResourceSet> {
+	const data = await request<{ resourceSet: ResourceSet }>("/api/resourcesets", { method: "POST", admin: true, body: json(input) });
+	return data.resourceSet;
+}
+
+export async function updateResourceSet(id: string, input: ResourceSetInput): Promise<ResourceSet> {
+	const data = await request<{ resourceSet: ResourceSet }>(`/api/resourcesets/${id}`, {
+		method: "PATCH",
+		admin: true,
+		body: json(input),
+	});
+	return data.resourceSet;
+}
+
+export async function getResourceSetUsage(id: string, resourceNames?: string[]): Promise<ResourceSetUsage> {
+	const query = resourceNames && resourceNames.length > 0 ? `?resources=${encodeURIComponent(resourceNames.join(","))}` : "";
+	const data = await request<{ usage: ResourceSetUsage }>(`/api/resourcesets/${id}/usage${query}`);
+	return data.usage;
+}
+
+export function deleteResourceSet(id: string): Promise<{ ok: true }> {
+	return request<{ ok: true }>(`/api/resourcesets/${id}`, { method: "DELETE", admin: true });
+}
+
+/**
+ * Reads resources off the hub's machine — a folder of resources, one resource folder, or
+ * a SKILL.md — and returns them without storing anything. The set editor merges
+ * what comes back into the set it is editing; saving that set is the only write.
+ */
+export async function scanResources(path: string): Promise<{ suggestedName: string; resources: Resource[] }> {
+	return request<{ suggestedName: string; resources: Resource[] }>("/api/resourcesets/scan", {
+		method: "POST",
+		admin: true,
+		body: json({ path }),
+	});
+}
+
+export async function setWorkflowResourceSelections(
+	workflowId: string,
+	resourceSelections: ResourceSelection[],
+): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${workflowId}/resourcesets`, {
+		method: "PATCH",
+		admin: true,
+		body: json({ resourceSelections }),
 	});
 	return data.workflow;
 }

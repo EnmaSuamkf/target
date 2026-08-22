@@ -1,6 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Tcp, TcpSelection, Template, TemplateInput, TemplateStep, TemplateStepNote } from "../api/types.ts";
+import type {
+	ResourceSelection,
+	ResourceSet,
+	Tcp,
+	TcpSelection,
+	Template,
+	TemplateInput,
+	TemplateStep,
+	TemplateStepNote,
+} from "../api/types.ts";
 import { StepNotes } from "../components/StepNotes.tsx";
+import { ResourceSelectionEditor } from "./ResourceSelectionEditor.tsx";
 import { TcpSelectionEditor } from "./TcpSelectionEditor.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
@@ -27,6 +37,7 @@ import styles from "./TemplatesView.module.css";
 export function TemplatesView({
 	templates,
 	tcps,
+	resourceSets,
 	busy,
 	onCreate,
 	onUpdate,
@@ -37,6 +48,7 @@ export function TemplatesView({
 }: {
 	templates: Template[];
 	tcps: Tcp[];
+	resourceSets: ResourceSet[];
 	busy: boolean;
 	onCreate: (input: TemplateInput) => Promise<void>;
 	onUpdate: (id: string, input: TemplateInput) => Promise<void>;
@@ -247,6 +259,7 @@ export function TemplatesView({
 						key={editing?.id ?? "new"}
 						template={editing}
 						tcps={tcps}
+						resourceSets={resourceSets}
 						busy={busy}
 						{...(isMobile ? { onBack: closeForm } : {})}
 						onCancel={closeForm}
@@ -284,6 +297,7 @@ export function TemplatesView({
 function TemplateForm({
 	template,
 	tcps,
+	resourceSets,
 	busy,
 	onSubmit,
 	onCancel,
@@ -293,6 +307,7 @@ function TemplateForm({
 }: {
 	template: Template | null;
 	tcps: Tcp[];
+	resourceSets: ResourceSet[];
 	busy: boolean;
 	onSubmit: (input: TemplateInput) => Promise<void>;
 	onCancel: () => void;
@@ -306,6 +321,7 @@ function TemplateForm({
 	const [tags, setTags] = useState(template?.tags.join(", ") ?? "");
 	const [steps, setSteps] = useState<TemplateStep[]>(template?.steps ?? []);
 	const [tcpSelections, setTcpSelections] = useState<TcpSelection[]>(template?.tcpSelections ?? []);
+	const [resourceSelections, setResourceSelections] = useState<ResourceSelection[]>(template?.resourceSelections ?? []);
 	const [saving, setSaving] = useState(false);
 
 	const updateStep = (index: number, patch: Partial<TemplateStep>): void => {
@@ -336,6 +352,7 @@ function TemplateForm({
 					.map((t) => t.trim())
 					.filter(Boolean),
 				tcpSelections,
+				resourceSelections,
 				// Drop blank rows rather than persisting empty steps.
 				steps: steps
 					.map((step) => ({ ...step, description: step.description.trim() }))
@@ -410,6 +427,15 @@ function TemplateForm({
 				<span className="label">TCP packs</span>
 				<p className="hint">Attached to the workflow when this template is used. Select a whole pack or individual tools.</p>
 				<TcpSelectionEditor tcps={tcps} selections={tcpSelections} onChange={setTcpSelections} />
+			</div>
+
+			<div className={styles.stepsBlock}>
+				<span className="label">Resource Sets (RCI)</span>
+				<p className="hint">
+					Injected into the workflow's conversation when this template is used — nothing is installed in the agent.
+					Select a whole set or individual resources.
+				</p>
+				<ResourceSelectionEditor resourceSets={resourceSets} selections={resourceSelections} onChange={setResourceSelections} />
 			</div>
 
 			<div className={styles.stepsBlock}>

@@ -19,6 +19,11 @@ import type {
 	Step,
 	StepConfigInput,
 	StepNoteTheme,
+	Resource,
+	ResourceSelection,
+	ResourceSet,
+	ResourceSetInput,
+	ResourceSetUsage,
 	Tcp,
 	TcpInput,
 	TcpSelection,
@@ -45,12 +50,14 @@ import {
 	tcpToolsForComparison,
 	tcpUsageConfirmOptions,
 } from "./tcpUsageAlert.ts";
+import { resourceNamesAtRisk, resourceUsageConfirmOptions } from "./rciUsageAlert.ts";
 import { CreateWorkflowModal } from "./views/CreateWorkflowModal.tsx";
 import { LandingView } from "./views/LandingView.tsx";
 import { LoginView } from "./views/LoginView.tsx";
 import { ResetPasswordView } from "./views/ResetPasswordView.tsx";
 import { SettingsView } from "./views/SettingsView.tsx";
 import { SetupView } from "./views/SetupView.tsx";
+import { ResourceSetsView } from "./views/ResourceSetsView.tsx";
 import { TcpsView } from "./views/TcpsView.tsx";
 import { TemplatesView } from "./views/TemplatesView.tsx";
 import { WorkflowDetail } from "./views/WorkflowDetail.tsx";
@@ -204,6 +211,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	const [workflows, setWorkflows] = useState<Workflow[]>([]);
 	const [templates, setTemplates] = useState<Template[]>([]);
 	const [tcps, setTcps] = useState<Tcp[]>([]);
+	const [resourceSets, setResourceSets] = useState<ResourceSet[]>([]);
 	const [settings, setSettings] = useState<NotificationSettings | null>(null);
 	const [shortcutSettings, setShortcutSettings] = useState<ShortcutSettings | null>(null);
 	const [selectedId, setSelectedId] = useState<string | null>(readHashSelection);
@@ -295,6 +303,11 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		setTcps(list);
 	}, []);
 
+	const refreshResourceSets = useCallback(async (): Promise<void> => {
+		const list = await api.listResourceSets();
+		setResourceSets(list);
+	}, []);
+
 	const refreshSettings = useCallback(async (): Promise<void> => {
 		setSettings(await api.getNotificationSettings());
 	}, []);
@@ -326,14 +339,29 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	useEffect(() => {
 		void (async () => {
 			try {
-				await Promise.all([refreshWorkflows(), refreshTemplates(), refreshTcps(), refreshSettings(), refreshShortcutSettings()]);
+				await Promise.all([
+					refreshWorkflows(),
+					refreshTemplates(),
+					refreshTcps(),
+					refreshResourceSets(),
+					refreshSettings(),
+					refreshShortcutSettings(),
+				]);
 			} catch (err) {
 				reportError(err, "Could not load data");
 			} finally {
 				setLoaded(true);
 			}
 		})();
-	}, [refreshWorkflows, refreshTemplates, refreshTcps, refreshSettings, refreshShortcutSettings, reportError]);
+	}, [
+		refreshWorkflows,
+		refreshTemplates,
+		refreshTcps,
+		refreshResourceSets,
+		refreshSettings,
+		refreshShortcutSettings,
+		reportError,
+	]);
 
 	// Detail for the selected workflow, and clearing it when nothing is selected.
 	useEffect(() => {
@@ -590,6 +618,18 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 			async () => {
 				await api.setWorkflowTcpSelections(selectedId, tcpSelections);
 				toast.success("TCP selection saved.");
+			},
+			refreshCurrent,
+		);
+	};
+
+	const handleSaveResources = async (resourceSelections: ResourceSelection[]): Promise<boolean> => {
+		if (!selectedId) return false;
+		return await act(
+			"Could not save RCI selection",
+			async () => {
+				await api.setWorkflowResourceSelections(selectedId, resourceSelections);
+				toast.success("RCI selection saved.");
 			},
 			refreshCurrent,
 		);
@@ -1057,6 +1097,114 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		);
 	};
 
+	// --- rci actions ---
+
+	const confirmResourceChangeIfReferenced = async (
+		loadUsage: () => Promise<ResourceSetUsage>,
+		buildOptions: (usage: ResourceSetUsage) => ReturnType<typeof resourceUsageConfirmOptions>,
+	): Promise<boolean> => {
+		try {
+			const options = buildOptions(await loadUsage());
+			if (!options) return true;
+			return await confirm(options);
+		} catch {
+			return true;
+		}
+	};
+
+	const handleCreateResourceSet = async (input: ResourceSetInput): Promise<void> => {
+		await act(
+			"Could not create the Resource Set",
+			async () => {
+				await api.createResourceSet(input);
+				toast.success("Resource Set created.");
+			},
+			refreshResourceSets,
+		);
+	};
+
+	const handleUpdateResourceSet = async (id: string, input: ResourceSetInput, beforeResources: Resource[]): Promise<boolean> => {
+		const setName = resourceSets.find((s) => s.id === id)?.name ?? input.name.trim();
+		const atRisk = resourceNamesAtRisk(beforeResources, input.resources);
+		if (atRisk.length > 0) {
+			const allowed = await confirmResourceChangeIfReferenced(
+				() => api.getResourceSetUsage(id, atRisk),
+				(usage) =>
+					resourceUsageConfirmOptions(setName, usage, {
+						type: "resource-change",
+						resourceNames: atRisk,
+						confirmLabel: "Save anyway",
+					}),
+			);
+			if (!allowed) return false;
+		}
+		return await act(
+			"Could not update the Resource Set",
+			async () => {
+				await api.updateResourceSet(id, input);
+				toast.success("Resource Set saved.");
+			},
+			refreshResourceSets,
+		);
+	};
+
+	const confirmResourceRemoval = async (id: string, resourceName: string): Promise<boolean> => {
+		const trimmed = resourceName.trim();
+		if (trimmed === "") return true;
+		const set = resourceSets.find((s) => s.id === id);
+		if (!set) return true;
+		return await confirmResourceChangeIfReferenced(
+			() => api.getResourceSetUsage(id, [trimmed]),
+			(usage) =>
+				resourceUsageConfirmOptions(set.name, usage, {
+					type: "resource-change",
+					resourceNames: [trimmed],
+					confirmLabel: "Remove resource",
+				}),
+		);
+	};
+
+	const handleDeleteResourceSet = async (id: string): Promise<void> => {
+		const set = resourceSets.find((s) => s.id === id);
+		const setName = set?.name ?? "this Resource Set";
+		let confirmOptions = {
+			title: `Delete "${setName}"?`,
+			description: "This set will be removed from the hub.",
+			confirmLabel: "Delete Resource Set",
+			danger: true as const,
+		};
+		try {
+			const referenced = resourceUsageConfirmOptions(setName, await api.getResourceSetUsage(id), { type: "delete" });
+			if (referenced) confirmOptions = referenced;
+		} catch {
+			// Keep the generic confirmation if usage lookup fails.
+		}
+		if (!(await confirm(confirmOptions))) return;
+		await act(
+			"Could not delete the Resource Set",
+			async () => {
+				await api.deleteResourceSet(id);
+				toast.success("Resource Set deleted.");
+			},
+			refreshResourceSets,
+		);
+	};
+
+	/**
+	 * Reads resources off the hub's disk for the set editor. Nothing is written —
+	 * the editor merges them into the set it's editing and the operator saves —
+	 * so there's no refresh to run, and the resources come back to the caller
+	 * instead of the plain boolean the write handlers return.
+	 */
+	const handleScanResources = async (path: string): Promise<{ suggestedName: string; resources: Resource[] } | null> => {
+		let found: { suggestedName: string; resources: Resource[] } | null = null;
+		await act("Could not read the resources", async () => {
+			found = await api.scanResources(path);
+			toast.success(`Imported ${found.resources.length} resource${found.resources.length === 1 ? "" : "s"}.`);
+		});
+		return found;
+	};
+
 	// --- settings actions ---
 
 	// The response carries the stored values, so there's nothing to re-fetch —
@@ -1125,6 +1273,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								sessionInfo={sessionInfo}
 								templates={templates}
 								tcps={tcps}
+								resourceSets={resourceSets}
 								busy={busy}
 								{...(isMobile ? { onBack: () => setSelectedId(null) } : {})}
 								onStart={handleStart}
@@ -1135,6 +1284,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								onSetStatus={(status) => void handleSetWorkflowStatus(status)}
 								onSaveContext={handleSaveContext}
 								onSaveTcps={handleSaveTcps}
+								onSaveResources={handleSaveResources}
 								onAttachImages={handleAttachImages}
 								onRemoveAttachment={(id) => void handleRemoveAttachment(id)}
 								onOpenTerminal={handleOpenTerminal}
@@ -1179,6 +1329,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 					<TemplatesView
 						templates={templates}
 						tcps={tcps}
+						resourceSets={resourceSets}
 						busy={busy}
 						onCreate={handleCreateTemplate}
 						onUpdate={handleUpdateTemplate}
@@ -1198,6 +1349,16 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 						onExport={(id) => void handleExportTcp(id)}
 						onExportAll={() => void handleExportAllTcps()}
 						onImport={(file) => void handleImportTcps(file)}
+					/>
+				) : view === "rci" ? (
+					<ResourceSetsView
+						resourceSets={resourceSets}
+						busy={busy}
+						onCreate={handleCreateResourceSet}
+						onUpdate={handleUpdateResourceSet}
+						onDelete={(id) => void handleDeleteResourceSet(id)}
+						onBeforeRemoveResource={confirmResourceRemoval}
+						onScan={handleScanResources}
 					/>
 				) : view === "settings" && settings && shortcutSettings ? (
 					// Keyed on both save stamps: a successful save in either section re-seeds

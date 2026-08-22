@@ -74,6 +74,17 @@ export const MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
 	// free-code's non-Anthropic model here. Measured 219,145, so its window is
 	// at least that; 256k is the tier it's published at.
 	"accounts/fireworks/models/glm-5p2": 256_000,
+	// Cursor Agent Composer models — the CLI /context bar uses a 200k window for
+	// these (e.g. "Composer 2.5 Fast · 39.9%" reads as 79.8k / 200k). Prefix
+	// matching covers dated ids like `composer-2.5-fast`.
+	"composer-2.5": 200_000,
+	"composer-2": 200_000,
+	// Cursor-branded models with an explicit 1M tier in the picker name.
+	"claude-opus-5-thinking": 1_000_000,
+	"claude-sonnet-5-thinking": 1_000_000,
+	"claude-fable-5-thinking": 1_000_000,
+	"gpt-5.6-sol": 1_000_000,
+	"gpt-5.6-luna": 1_000_000,
 	// Claude Code sometimes writes the bare alias instead of the full id (e.g.
 	// on synthetic turns). Same windows as the ids they stand for.
 	opus: 1_000_000,

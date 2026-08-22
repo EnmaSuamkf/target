@@ -33,16 +33,16 @@
  *   JSONL for turns, but those lines carry no per-message usage. Each headless
  *   `agent -p` run instead writes a one-line JSON result (with `usage.inputTokens`,
  *   `cacheReadTokens`, …) into the awb run log under
- *   `~/.agent-webhook-bridge/logs/`; that is what the hub sums.
+ *   `~/.agent-webhook-bridge/logs/`; that is what the hub sums. Occupancy is
+ *   derived from that result with a correction when cache reads are cumulative
+ *   across a multi-tool run (see `cursorContextOccupancy`), and the window
+ *   comes from `models.ts` (Composer models are 200k, not 1M).
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { awbDir } from "./awb.ts";
 import { contextWindowForModel } from "./models.ts";
-
-/** Context window assumed for Cursor when a run log names no model (extended tier). */
-const CURSOR_FALLBACK_CONTEXT_WINDOW = 1_000_000;
 
 /**
  * Directory Claude Code keeps a workdir's session transcripts in. Exported for
@@ -167,6 +167,11 @@ interface RawUsage {
 	turns: number;
 	/** Occupancy (input+cache) at the last turn seen in this file. */
 	lastContext: number;
+	/** Cursor-only: billing fields of the last headless `agent -p` result (for occupancy correction). */
+	lastBillingInput: number;
+	lastBillingCacheCreation: number;
+	lastBillingCacheRead: number;
+	lastBillingOutput: number;
 	/** Model id of the last turn / `model_change` record seen, for the window lookup. */
 	lastModel: string | null;
 	/** Latest compaction boundary in this file, and how many there were. */
@@ -296,6 +301,10 @@ function accumulateUsage(file: string): RawUsage {
 		output: 0,
 		turns: 0,
 		lastContext: 0,
+		lastBillingInput: 0,
+		lastBillingCacheCreation: 0,
+		lastBillingCacheRead: 0,
+		lastBillingOutput: 0,
 		lastModel: null,
 		lastCompaction: null,
 		compactions: 0,
@@ -353,6 +362,76 @@ function accumulateUsage(file: string): RawUsage {
 	return acc;
 }
 
+/** Normalises a Cursor model label from JSON (`Composer 2.5 Fast`) to a lookup id. */
+function normalizeCursorModelId(model: string): string {
+	return model
+		.trim()
+		.toLowerCase()
+		.replace(/\s+/g, "-");
+}
+
+/**
+ * Reads the model Cursor stamped on assistant turns in the agent-transcript
+ * JSONL (`providerOptions.cursor.modelName`), since headless `agent -p` result
+ * JSON often omits it.
+ */
+export function cursorModelFromTranscript(sessionId: string): string | null {
+	const file = cursorTranscriptPath(sessionId);
+	if (!file) return null;
+	let raw: string;
+	try {
+		raw = fs.readFileSync(file, "utf8");
+	} catch {
+		return null;
+	}
+	let last: string | null = null;
+	for (const line of raw.split("\n")) {
+		if (!line.trim()) continue;
+		try {
+			const obj = JSON.parse(line) as Record<string, unknown>;
+			const message = obj.message as Record<string, unknown> | undefined;
+			const content = message?.content;
+			if (!Array.isArray(content)) continue;
+			for (const part of content) {
+				if (!part || typeof part !== "object") continue;
+				const provider = (part as Record<string, unknown>).providerOptions as Record<string, unknown> | undefined;
+				const cursor = provider?.cursor as Record<string, unknown> | undefined;
+				const modelName = cursor?.modelName;
+				if (typeof modelName === "string" && modelName !== "") last = normalizeCursorModelId(modelName);
+			}
+		} catch {
+			// Skip malformed lines.
+		}
+	}
+	return last;
+}
+
+/**
+ * Context occupancy for a Cursor headless run, aligned with the CLI /context
+ * bar. Single-turn usage (input + cache creation + cache read) fits in the
+ * model window and is taken as-is. Multi-tool runs report cumulative cache
+ * reads summed across every API round in one `agent -p` invocation — those are
+ * billing totals, not window occupancy; scale them back with the run's billed
+ * output (measured on session 20a54c9d…: cacheRead×output÷(input+output) matches
+ * the CLI bar to the token).
+ */
+export function cursorContextOccupancy(
+	input: number,
+	cacheCreation: number,
+	cacheRead: number,
+	output: number,
+	contextWindow: number,
+): number {
+	const billed = input + cacheCreation + cacheRead;
+	if (contextWindow <= 0) return billed;
+	if (billed <= contextWindow) return billed;
+	const billedTurn = input + output;
+	if (cacheRead > 0 && output > 0 && billedTurn > 0) {
+		return Math.min(contextWindow, Math.round((cacheRead * output) / billedTurn));
+	}
+	return Math.min(contextWindow, input + cacheCreation);
+}
+
 /** Normalises Cursor Agent's JSON `usage` block from a headless run result. */
 function cursorUsageOfResult(obj: Record<string, unknown>): {
 	input: number;
@@ -365,7 +444,7 @@ function cursorUsageOfResult(obj: Record<string, unknown>): {
 	const usage = obj.usage as Record<string, number> | undefined;
 	if (!usage || usage.inputTokens === undefined) return null;
 	let model: string | null = null;
-	if (typeof obj.model === "string" && obj.model !== "") model = obj.model;
+	if (typeof obj.model === "string" && obj.model !== "") model = normalizeCursorModelId(obj.model);
 	const modelUsage = obj.modelUsage as Record<string, Record<string, unknown>> | undefined;
 	if (modelUsage) {
 		const ids = Object.keys(modelUsage);
@@ -393,6 +472,10 @@ function accumulateCursorUsageFromLogs(sessionId: string): RawUsage {
 		output: 0,
 		turns: 0,
 		lastContext: 0,
+		lastBillingInput: 0,
+		lastBillingCacheCreation: 0,
+		lastBillingCacheRead: 0,
+		lastBillingOutput: 0,
 		lastModel: null,
 		lastCompaction: null,
 		compactions: 0,
@@ -446,8 +529,12 @@ function accumulateCursorUsageFromLogs(sessionId: string): RawUsage {
 				acc.cacheRead += rec.cacheRead;
 				acc.output += rec.output;
 				acc.turns += 1;
+				acc.lastBillingInput = rec.input;
+				acc.lastBillingCacheCreation = rec.cacheCreation;
+				acc.lastBillingCacheRead = rec.cacheRead;
+				acc.lastBillingOutput = rec.output;
 				acc.lastContext = rec.input + rec.cacheCreation + rec.cacheRead;
-				if (rec.model) acc.lastModel = rec.model;
+				if (rec.model) acc.lastModel = normalizeCursorModelId(rec.model);
 			} catch {
 				// Malformed/partial line in a growing log — skip.
 			}
@@ -465,13 +552,18 @@ function tokenUsageFromRaw(main: RawUsage, subs: RawUsage[], cursorSession: bool
 		output += sub.output;
 		turns += sub.turns;
 	}
-	const contextWindow = main.lastModel
-		? contextWindowForModel(main.lastModel)
-		: cursorSession
-			? CURSOR_FALLBACK_CONTEXT_WINDOW
-			: contextWindowForModel(null);
+	const contextWindow = contextWindowForModel(main.lastModel);
+	const contextTokens = cursorSession
+		? cursorContextOccupancy(
+				main.lastBillingInput,
+				main.lastBillingCacheCreation,
+				main.lastBillingCacheRead,
+				main.lastBillingOutput,
+				contextWindow,
+			)
+		: main.lastContext;
 	return {
-		contextTokens: main.lastContext,
+		contextTokens,
 		contextWindow,
 		model: main.lastModel,
 		lastCompactionAt: main.lastCompaction?.at ?? null,
@@ -553,10 +645,18 @@ export function readTokenUsage(workdir: string, sessionId: string): TokenUsage {
 							output: 0,
 							turns: 0,
 							lastContext: 0,
+							lastBillingInput: 0,
+							lastBillingCacheCreation: 0,
+							lastBillingCacheRead: 0,
+							lastBillingOutput: 0,
 							lastModel: null,
 							lastCompaction: null,
 							compactions: 0,
 						});
+		if (!main.lastModel) {
+			const fromTranscript = cursorModelFromTranscript(sessionId);
+			if (fromTranscript) main.lastModel = fromTranscript;
+		}
 		return tokenUsageFromRaw(main, [], true);
 	}
 
