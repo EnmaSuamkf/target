@@ -149,6 +149,11 @@
 
 .meterFill {
 	height: 100%;
+	/* Base width, so the ONLY way this bar reads "full" is an inline width that
+	   really says 100%. Without it the fill is a plain block: any inline width
+	   the browser rejects leaves it auto-sized, i.e. stretched across the whole
+	   meter — an unmeasurable context would look like a full one. */
+	width: 0;
 	border-radius: inherit;
 	background: var(--info-500);
 	transition: width 400ms cubic-bezier(0.4, 0, 0.2, 1);
