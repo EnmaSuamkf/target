@@ -239,9 +239,13 @@ function existingPaths(paths: string[]): string[] {
  *    container the operator's whole home), and the `$HOME` docker synthesises
  *    to hold these mounts is root-owned, so every directory the harness writes
  *    to has to be named here.
- *  - `~/.cursor` — Cursor Agent's config, credentials, chat databases and MCP
- *    settings. Sessions resume by uuid scoped to `--workspace`, so the chats
- *    tree must be visible at the same absolute path inside the container.
+ *  - `~/.cursor` — Cursor Agent's config, chat databases and MCP settings.
+ *    Sessions resume by uuid scoped to `--workspace`, so the chats tree must
+ *    be visible at the same absolute path inside the container.
+ *  - `~/.config/cursor` — Cursor Agent CLI OAuth tokens (`auth.json`). Unlike
+ *    Claude's credentials (under `~/.claude`), the CLI stores login state here;
+ *    mounting only `~/.cursor` leaves docker runs failing with "Authentication
+ *    required" even when the operator is logged in on the host.
  *  - `<awbDir>/sessions` — free-code resumes by absolute `.jsonl` path, so that
  *    path has to resolve inside the container too. Only the sessions
  *    subdirectory: the awb dir itself holds `hooks.json`, i.e. every hook's
@@ -260,6 +264,7 @@ function harnessStateMounts(): string[] {
 		path.join(os.homedir(), ".claude.json"),
 		path.join(os.homedir(), ".free-code"),
 		path.join(os.homedir(), ".cursor"),
+		path.join(os.homedir(), ".config", "cursor"),
 		path.join(awbDir(), "sessions"),
 	]);
 }
