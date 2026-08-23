@@ -17,11 +17,21 @@ USER root
 ARG AGENT_UID=1000
 ARG AGENT_GID=1000
 
-# Install the Cursor Agent CLI to /usr/local/bin/agent.
+# Install the Cursor Agent CLI. The official installer puts a versioned bundle
+# (wrapper + bundled node + index.js) under ~/.local/share/cursor-agent and a
+# symlink at ~/.local/bin/agent. Copying only the wrapper to /usr/local/bin, as
+# the old Dockerfile did, breaks it: the wrapper resolves node/index.js relative
+# to its own directory. Install under /opt so the container user (AGENT_UID) can
+# read it — /root/.local is root-only and the broker runs as the operator's uid.
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends curl ca-certificates \
 	&& curl -fsS https://cursor.com/install | bash \
-	&& if [ -x /root/.local/bin/agent ]; then install -m 0755 /root/.local/bin/agent /usr/local/bin/agent; fi \
+	&& AGENT_REAL="$(readlink -f /root/.local/bin/agent)" \
+	&& AGENT_DIR="$(dirname "$AGENT_REAL")" \
+	&& install -d /opt/cursor-agent \
+	&& cp -a "$AGENT_DIR" "/opt/cursor-agent/$(basename "$AGENT_DIR")" \
+	&& ln -sf "/opt/cursor-agent/$(basename "$AGENT_DIR")/cursor-agent" /usr/local/bin/agent \
+	&& chmod -R a+rX /opt/cursor-agent \
 	&& apt-get purge -y curl \
 	&& apt-get autoremove -y \
 	&& rm -rf /var/lib/apt/lists/*
