@@ -10,7 +10,13 @@ import styles from "./DetailPanels.module.css";
  * nothing at all.
  */
 export function contextPercent(usage: TokenUsage): number {
-	return usage.contextWindow > 0 ? (100 * usage.contextTokens) / usage.contextWindow : 0;
+	const pct = usage.contextWindow > 0 ? (100 * usage.contextTokens) / usage.contextWindow : 0;
+	// A percentage that isn't a number must never reach the bar below. `width:
+	// NaN%` is not a valid CSS length, so the browser drops the declaration and
+	// the fill — which has no width of its own — stretches to its parent, i.e. a
+	// bar that reads as a COMPLETELY FULL context window. Zero is the honest
+	// rendering of "we could not measure this".
+	return Number.isFinite(pct) ? pct : 0;
 }
 
 /**

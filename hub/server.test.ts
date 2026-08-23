@@ -567,11 +567,16 @@ test("GET /api/workflows/:id/session-info during judging uses finalized usage, n
 	const file = transcriptPath(detail.workflow.workdir, sessionId);
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	t.after(() => fs.rmSync(path.dirname(file), { recursive: true, force: true }));
+	// The model matters to the numbers below: occupancy is only believed up to the
+	// window it is measured against (`plausibleOccupancy` in transcript.ts), and
+	// 825k tokens is a real reading on opus-5's 1M window but an impossible one on
+	// the 200k fallback an unnamed model gets.
 	const line = (id: string, usage: { input: number; cacheCreation: number; cacheRead: number; output: number }) =>
 		JSON.stringify({
 			message: {
 				id,
 				role: "assistant",
+				model: "claude-opus-5",
 				usage: {
 					input_tokens: usage.input,
 					cache_creation_input_tokens: usage.cacheCreation,

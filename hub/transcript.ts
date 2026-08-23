@@ -167,6 +167,13 @@ interface RawUsage {
 	turns: number;
 	/** Occupancy (input+cache) at the last turn seen in this file. */
 	lastContext: number;
+	/**
+	 * The last few occupancy readings, oldest first, so the caller can fall back
+	 * to an earlier one when the newest is impossible against the model's window
+	 * (which is only known once the whole file has been read). Kept short: this
+	 * is a "what did the previous turn say" buffer, not a history.
+	 */
+	recentContexts: number[];
 	/** Cursor-only: billing fields of the last headless `agent -p` result (for occupancy correction). */
 	lastBillingInput: number;
 	lastBillingCacheCreation: number;
@@ -301,6 +308,7 @@ function accumulateUsage(file: string): RawUsage {
 		output: 0,
 		turns: 0,
 		lastContext: 0,
+		recentContexts: [],
 		lastBillingInput: 0,
 		lastBillingCacheCreation: 0,
 		lastBillingCacheRead: 0,
@@ -353,7 +361,24 @@ function accumulateUsage(file: string): RawUsage {
 			acc.cacheCreation += billed.cacheCreation;
 			acc.cacheRead += billed.cacheRead;
 			acc.output += billed.output;
-			acc.lastContext = billed.input + billed.cacheCreation + billed.cacheRead;
+			// Occupancy comes ONLY from a turn that actually sent a prompt.
+			//
+			// Both harnesses write turns that carry a `usage` block of all zeros for a
+			// turn that never reached the model: Claude Code's `<synthetic>` error
+			// notices, and free-code's aborted turns (`"stopReason":"aborted"`, empty
+			// content — one such line was appended to a real judged session here on
+			// 2026-08-19, right after a questionnaire was cancelled). Those bill
+			// nothing, so they belong in the totals above, but they say NOTHING about
+			// how full the window is. Letting one set `lastContext` made the meter
+			// read `0 / 200k · 0.0%` on a conversation that was 43% full, until the
+			// next real turn landed and it jumped back — the "context does something
+			// odd and then corrects itself" this guard exists to stop.
+			const occupancy = billed.input + billed.cacheCreation + billed.cacheRead;
+			if (occupancy > 0) {
+				acc.lastContext = occupancy;
+				acc.recentContexts.push(occupancy);
+				if (acc.recentContexts.length > 8) acc.recentContexts.shift();
+			}
 		} catch {
 			// Skip a malformed/partial line — a partially-written last line while
 			// the process is still running is expected, not an error.
@@ -472,6 +497,7 @@ function accumulateCursorUsageFromLogs(sessionId: string): RawUsage {
 		output: 0,
 		turns: 0,
 		lastContext: 0,
+		recentContexts: [],
 		lastBillingInput: 0,
 		lastBillingCacheCreation: 0,
 		lastBillingCacheRead: 0,
@@ -543,6 +569,31 @@ function accumulateCursorUsageFromLogs(sessionId: string): RawUsage {
 	return acc;
 }
 
+/**
+ * The newest occupancy reading that a window that size could actually hold.
+ *
+ * A turn cannot occupy more of the window than the window has: a reading above
+ * it is not occupancy at all, it's a billing total or a half-written line that
+ * the harness has not finalised yet. The hub polls a transcript WHILE the agent
+ * writes it — most visibly during a judge pass, which appends turns to a
+ * conversation the operator is watching — so one such line would otherwise be
+ * published as "the session is full", and the meter (whose fill is clamped at
+ * 100%) would paint a completely full bar until the next turn corrected it.
+ *
+ * Falling back to the previous reading is deliberate: occupancy moves by a turn
+ * at a time, so the last plausible one is a far better answer than a number that
+ * is impossible on its face. When nothing in the buffer fits — a genuinely
+ * unmeasurable file — the window itself is the honest ceiling.
+ */
+function plausibleOccupancy(recent: number[], last: number, contextWindow: number): number {
+	if (contextWindow <= 0 || last <= contextWindow) return last;
+	for (let i = recent.length - 1; i >= 0; i--) {
+		const value = recent[i] ?? 0;
+		if (value <= contextWindow) return value;
+	}
+	return contextWindow;
+}
+
 function tokenUsageFromRaw(main: RawUsage, subs: RawUsage[], cursorSession: boolean): TokenUsage {
 	let { input, cacheCreation, cacheRead, output, turns } = main;
 	for (const sub of subs) {
@@ -561,7 +612,7 @@ function tokenUsageFromRaw(main: RawUsage, subs: RawUsage[], cursorSession: bool
 				main.lastBillingOutput,
 				contextWindow,
 			)
-		: main.lastContext;
+		: plausibleOccupancy(main.recentContexts, main.lastContext, contextWindow);
 	return {
 		contextTokens,
 		contextWindow,
@@ -645,6 +696,7 @@ export function readTokenUsage(workdir: string, sessionId: string): TokenUsage {
 							output: 0,
 							turns: 0,
 							lastContext: 0,
+							recentContexts: [],
 							lastBillingInput: 0,
 							lastBillingCacheCreation: 0,
 							lastBillingCacheRead: 0,
