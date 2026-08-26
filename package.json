@@ -13,6 +13,14 @@
     "test": "npm --prefix hub test",
     "typecheck": "npm --prefix hub run typecheck && npm --prefix hub/ui run typecheck",
     "ui:dev": "npm --prefix hub/ui run dev",
-    "ui:build": "npm --prefix hub/ui run build"
+    "ui:build": "npm --prefix hub/ui run build",
+    "desktop:install": "npm --prefix desktop/linux install && npm --prefix desktop/mac install && npm --prefix desktop/windows install",
+    "desktop:dev:mac": "npm --prefix desktop/mac run dev",
+    "desktop:dev:linux": "npm --prefix desktop/linux run dev",
+    "desktop:dev:windows": "npm --prefix desktop/windows run dev",
+    "desktop:build:mac": "npm --prefix desktop/mac run build",
+    "desktop:build:linux": "npm --prefix desktop/linux run build",
+    "desktop:build:windows": "npm --prefix desktop/windows run build",
+    "desktop:build:all": "npm run desktop:build:linux && npm run desktop:build:mac && npm run desktop:build:windows"
   }
 }

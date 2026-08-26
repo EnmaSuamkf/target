@@ -14,6 +14,20 @@ vendor___/
 # Built web UI (produced by `npm run target:install` / `npm run ui:build`).
 hub/ui/dist/
 
+# Electron desktop wrapper build output, copied shared, and dependencies.
+desktop/linux/node_modules/
+desktop/linux/dist/
+desktop/linux/shared/
+desktop/mac/node_modules/
+desktop/mac/dist/
+desktop/mac/shared/
+desktop/windows/node_modules/
+desktop/windows/dist/
+desktop/windows/shared/
+# Legacy single-wrapper paths (removed).
+desktop/node_modules/
+desktop/dist/
+
 # Claude Code's per-machine permission allowlist: absolute paths, PIDs and
 # personal directories from whoever's machine it was written on. The shared
 # `.claude/settings.json` (if one is ever added) is source; this one is not.

@@ -4,10 +4,10 @@
  * Two things it centralises, because getting them wrong is the main source of
  * confusing UI bugs:
  *
- * - **Auth.** Mutating routes are gated on `Authorization: Bearer <adminToken>`
- *   and answer `401 {"error":"unauthorized"}` without it. The token lives in
- *   localStorage under `targetAdminToken` (the key the previous UI used, so an
- *   existing browser keeps working after the rewrite).
+ * - **Auth.** Mutating routes accept either `Authorization: Bearer <adminToken>`
+ *   or the login session cookie. When a token is stored in localStorage under
+ *   `targetAdminToken` it is sent as Bearer (automation / legacy path); otherwise
+ *   the session cookie from setup/login is used (desktop and browser after login).
  * - **Errors.** Every failure is normalised into `ApiError` carrying the
  *   server's `error` string, so callers show the real reason ("context already
  *   injected", "no_session_yet") instead of a bare status code.
@@ -120,10 +120,9 @@ async function request<T>(path: string, init: RequestInit & { admin?: boolean } 
 	if (body !== undefined) finalHeaders.set("content-type", "application/json");
 	if (admin) {
 		const token = getAdminToken();
-		// Fail fast rather than firing a request we know the server rejects —
-		// the caller turns this into the "enter your admin token" prompt.
-		if (!token) throw new ApiError(401, "unauthorized");
-		finalHeaders.set("authorization", `Bearer ${token}`);
+		// Bearer when present; otherwise rely on the login session cookie
+		// (credentials: "same-origin" below). Server isAdmin() accepts either.
+		if (token) finalHeaders.set("authorization", `Bearer ${token}`);
 	}
 
 	let res: Response;
