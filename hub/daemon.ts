@@ -4,6 +4,8 @@
  * `target start`; stays alive serving the API + UI and receiving awb's
  * step-result callbacks.
  */
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { isInsecureReportUrl, loadConfig, loadReportConfig } from "./config.ts";
 import { listWorkflows } from "./db.ts";
 import { emitHeartbeat, flush } from "./reporter.ts";
@@ -82,6 +84,6 @@ export function startHub(): void {
 	});
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
 	startHub();
 }

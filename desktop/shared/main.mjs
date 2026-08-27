@@ -60,18 +60,65 @@ export function registerTargetShell({
 
 	/**
 	 * Node >= 24 runs the repo's .ts entrypoints natively. Prefer TARGET_NODE,
-	 * then `which node`, then plain `node` on PATH. Electron's binary only runs
-	 * JS when ELECTRON_RUN_AS_NODE is set — not .ts — so it is not used here.
+	 * then any `node` on PATH, then common version-manager installs (GUI launches
+	 * often have a minimal PATH and only see the distro's older node).
 	 */
-	function resolveNodeExecutable() {
-		const override = process.env.TARGET_NODE?.trim();
-		if (override) return override;
-		const which = spawnSync("which", ["node"], { encoding: "utf8" });
-		if (which.status === 0) {
-			const found = which.stdout.trim();
-			if (found) return found;
+	function nodeMajorVersion(nodePath) {
+		const probe = spawnSync(nodePath, ["-p", "process.versions.node.split('.')[0]"], { encoding: "utf8" });
+		if (probe.status !== 0) return 0;
+		return Number.parseInt(probe.stdout.trim(), 10) || 0;
+	}
+
+	function nodeCandidates() {
+		const seen = new Set();
+		const out = [];
+		const add = (candidate) => {
+			const trimmed = candidate?.trim();
+			if (!trimmed || seen.has(trimmed)) return;
+			seen.add(trimmed);
+			out.push(trimmed);
+		};
+
+		add(process.env.TARGET_NODE);
+		const pathEnv = process.env.PATH ?? "";
+		for (const dir of pathEnv.split(path.delimiter)) {
+			if (dir) add(path.join(dir, "node"));
 		}
-		return "node";
+		const which = spawnSync("which", ["node"], { encoding: "utf8", env: process.env });
+		if (which.status === 0) add(which.stdout);
+
+		const home = os.homedir();
+		const versionDirs = [
+			path.join(home, ".nvm", "versions", "node"),
+			path.join(home, ".local", "share", "fnm", "node-versions"),
+			path.join(home, ".local", "share", "cursor-agent", "versions"),
+		];
+		for (const root of versionDirs) {
+			let entries = [];
+			try {
+				entries = fs.readdirSync(root);
+			} catch {
+				continue;
+			}
+			for (const entry of entries.sort().reverse()) {
+				add(path.join(root, entry, "bin", "node"));
+				add(path.join(root, entry, "node"));
+			}
+		}
+		add("/usr/local/bin/node");
+		add("node");
+		return out;
+	}
+
+	function resolveNodeExecutable() {
+		const candidates = nodeCandidates();
+		for (const candidate of candidates) {
+			if (nodeMajorVersion(candidate) >= 24) return candidate;
+		}
+		console.error(
+			`${logPrefix} Node.js >= 24 is required to run the backend. Install it (https://nodejs.org) or set TARGET_NODE to a Node 24+ binary.`,
+		);
+		return candidates[0] ?? "node";
 	}
 
 	function nodeSpawn(scriptPath) {
@@ -124,6 +171,8 @@ export function registerTargetShell({
 	let backend = null;
 	/** @type {BrowserWindow | null} */
 	let mainWindow = null;
+	let booting = false;
+	let bootFailed = false;
 
 	function startBackend() {
 		const root = repoDir();
@@ -172,24 +221,35 @@ export function registerTargetShell({
 	}
 
 	async function boot() {
-		const root = repoDir();
-		const missing = prerequisitesOk(root);
-		if (missing.length > 0) {
-			console.error(`${logPrefix} Missing prerequisites:\n  - ${missing.join("\n  - ")}`);
+		if (booting || bootFailed) return;
+		booting = true;
+		try {
+			const root = repoDir();
+			const missing = prerequisitesOk(root);
+			if (missing.length > 0) {
+				console.error(`${logPrefix} Missing prerequisites:\n  - ${missing.join("\n  - ")}`);
+				bootFailed = true;
+				app.exit(1);
+				return;
+			}
+
+			const { host, port } = hubEndpoint();
+			if (await isListening(host, port)) {
+				console.log(`${logPrefix} Hub already listening on ${hubUrl()} — reusing it.`);
+			} else {
+				console.log(`${logPrefix} Starting The Target Project backend…`);
+				startBackend();
+			}
+
+			await waitForHub();
+			createWindow();
+		} catch (err) {
+			console.error(logPrefix, err);
+			bootFailed = true;
 			app.exit(1);
-			return;
+		} finally {
+			booting = false;
 		}
-
-		const { host, port } = hubEndpoint();
-		if (await isListening(host, port)) {
-			console.log(`${logPrefix} Hub already listening on ${hubUrl()} — reusing it.`);
-		} else {
-			console.log(`${logPrefix} Starting The Target Project backend…`);
-			startBackend();
-		}
-
-		await waitForHub();
-		createWindow();
 	}
 
 	app.isQuitting = false;
@@ -211,6 +271,7 @@ export function registerTargetShell({
 	});
 
 	app.on("activate", () => {
+		if (bootFailed) return;
 		if (BrowserWindow.getAllWindows().length === 0 && app.isReady()) {
 			void boot();
 		}

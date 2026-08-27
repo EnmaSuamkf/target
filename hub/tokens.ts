@@ -15,6 +15,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { hookRuntime } from "./awb.ts";
 import { getWorkflow, latestStepSession, listWorkflows } from "./db.ts";
 import { readTokenUsage, transcriptPath, type TokenUsage } from "./transcript.ts";
@@ -112,6 +113,6 @@ function main(): void {
 	print(resolved.label, usage);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
 	main();
 }
