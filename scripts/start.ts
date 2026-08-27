@@ -253,7 +253,9 @@ async function main(): Promise<void> {
 		throw err;
 	}
 
-	openBrowser(urlOf(hub.endpoint));
+	if (process.env.TARGET_NO_BROWSER !== "1") {
+		openBrowser(urlOf(hub.endpoint));
+	}
 
 	const token = adminToken();
 	const reusedAny = components.some((c) => c.reused);
@@ -262,7 +264,9 @@ async function main(): Promise<void> {
 Ready.
 
   awb broker:  ${urlOf(broker.endpoint)}${broker.reused ? "   (reused)" : ""}
-  The Target Project hub:  ${urlOf(hub.endpoint)}   (UI opened in your browser)${hub.reused ? "   (reused)" : ""}
+  The Target Project hub:  ${urlOf(hub.endpoint)}   (${
+		process.env.TARGET_NO_BROWSER === "1" ? "UI not opened — desktop shell will load it" : "UI opened in your browser"
+	})${hub.reused ? "   (reused)" : ""}
 
   admin token: ${token ?? "(unavailable — see ~/.target/config.json)"}
 

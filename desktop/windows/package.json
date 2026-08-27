@@ -1,0 +1,71 @@
+{
+  "name": "target-desktop-windows",
+  "version": "0.2.0",
+  "description": "Windows desktop shell for The Target Project — embeds the React hub UI in Electron.",
+  "author": "The Target Project",
+  "homepage": "https://github.com/EnmaSuamkf/target",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "predev": "node link-shared.mjs",
+    "prestart": "node link-shared.mjs",
+    "prebuild": "node link-shared.mjs",
+    "start": "node run.mjs",
+    "dev": "node run.mjs",
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "electron": "^35.1.5",
+    "electron-builder": "^26.0.12"
+  },
+  "allowScripts": {
+    "electron@35.7.5": true,
+    "electron-winstaller@5.4.0": true
+  },
+  "build": {
+    "appId": "com.target.project.windows",
+    "productName": "Target for Windows",
+    "copyright": "Copyright © The Target Project",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.mjs",
+      "run.mjs",
+      "shared/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../../",
+        "to": "target",
+        "filter": [
+          "hub/**/*",
+          "hub/node_modules/**/*",
+          "scripts/**/*",
+          "package.json",
+          "vendor/**/*",
+          "!hub/ui/node_modules/**",
+          "!**/.git/**"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Target for Windows"
+    }
+  }
+}
