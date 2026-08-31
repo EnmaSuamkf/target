@@ -48,6 +48,7 @@ import { listWorkflowTcpSelections } from "./tcp-store.ts";
 import { listWorkflowResourceSelections } from "./rci-store.ts";
 import { tcpCatalogPreamble } from "./tcp-catalog.ts";
 import { resourcesCatalogPreamble } from "./rci-catalog.ts";
+import { hubHostForStep, hubReachableFromSandbox } from "./sandbox-net.ts";
 import { stepResultsNote } from "./step-results.ts";
 
 export type Logger = (message: string, type?: "info" | "warning" | "error") => void;
@@ -445,13 +446,33 @@ export async function dispatchStep(
 			: (options.resumeSession ?? true)
 				? workflow.lastSessionId
 				: null;
-	const callbackUrl = `http://${cfg.host}:${cfg.port}/api/steps/${step.id}/result?token=${step.callbackToken}`;
+	// Every hub url this dispatch hands out is built on this host. For a step on
+	// the host that is `cfg.host`, exactly as before; for one in a docker sandbox
+	// `cfg.host` would be the CONTAINER, so the container-visible address of the
+	// host is used instead (sandbox-net.ts). The agent's TCP calls and the
+	// broker's callbacks all have to survive the same network boundary, so they
+	// are built from one answer rather than three.
+	const sandboxed = hookRuntime(workflow.hookUrl).sandbox != null;
+	const hubHost = hubHostForStep(cfg, sandboxed);
+	const hubOrigin = `http://${hubHost}:${cfg.port}`;
+	// A url naming the right host still fails if the hub is only LISTENING on
+	// loopback, and it fails as a bare connection refused that the agent reads as
+	// "the hub isn't running". Said once, here, with the fix in it.
+	if (sandboxed && !hubReachableFromSandbox(cfg)) {
+		log(
+			`step ${step.id} (workflow ${workflow.id}) runs in a docker sandbox, but the hub is bound to ${cfg.host} — ` +
+				`a container cannot reach that. Its TCP tools and the run callbacks will be refused. ` +
+				`Set "host" in ~/.target/config.json to an address the bridge can reach (0.0.0.0, or ${hubHost}) and restart the hub.`,
+			"warning",
+		);
+	}
+	const callbackUrl = `${hubOrigin}/api/steps/${step.id}/result?token=${step.callbackToken}`;
 	// The broker POSTs `{started: true}` here the instant the run actually
 	// begins (after the workdir `flock` is acquired — see awb's runHidden).
 	// That flips the step `queued → running` and starts its timeout clock at the
 	// true run start, so a step queued behind another on the same workdir isn't
 	// timed out while still waiting its turn.
-	const startedCallbackUrl = `http://${cfg.host}:${cfg.port}/api/steps/${step.id}/started?token=${step.callbackToken}`;
+	const startedCallbackUrl = `${hubOrigin}/api/steps/${step.id}/started?token=${step.callbackToken}`;
 	// Inject the conversation context ONLY on the first dispatch of a fresh
 	// conversation: exec mode, no session to resume (awb starts a fresh
 	// `claude`), and the workflow's `context_injected` guard still false. Later
@@ -522,7 +543,7 @@ export async function dispatchStep(
 	// trust boundary as the two callbacks above — it identifies this running step
 	// and nothing else — and deliberately NOT the admin token: scoped this way the
 	// worst a leaked prompt can do is run tools this workflow already attached.
-	const tcpExecuteUrl = `http://${cfg.host}:${cfg.port}/api/tcps/execute?stepId=${step.id}&token=${step.callbackToken}`;
+	const tcpExecuteUrl = `${hubOrigin}/api/tcps/execute?stepId=${step.id}&token=${step.callbackToken}`;
 	const input = composeStepInput(step, observed, {
 		mode,
 		// Two independent reasons to inject: this is the conversation's first

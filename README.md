@@ -575,6 +575,27 @@ Like the runner, the sandbox is fixed at creation (it's a block in the hook);
 workflows created before this existed carry no block at all and keep spawning
 on the host exactly as they did.
 
+**A sandboxed workflow needs the hub bound where a container can reach it.**
+The container runs on docker's default bridge, so `127.0.0.1` in there is the
+container, not your machine — and the hub binds to `127.0.0.1` by default. The
+hub already rewrites the urls it hands a sandboxed step (its TCP execution
+endpoint and the run callbacks) to the bridge gateway, but it cannot rewrite
+what it is *listening* on: bound to loopback it refuses
+the connection however right the address is, and the agent reads that as "the
+hub isn't running" and improvises. Set `host` in `~/.target/config.json` and
+restart:
+
+```json
+{ "host": "0.0.0.0" }
+```
+
+That exposes the hub on your LAN, so it's opt-in rather than the default —
+every mutating route still needs the admin token, but treat it as you would
+any bound port. Set `sandboxHost` alongside it for anything the bridge lookup
+can't guess (rootless docker, podman, a custom bridge, or a hub reached by
+name). A sandboxed dispatch onto a loopback-bound hub logs a warning saying
+exactly this, so you find out from the log rather than from a confused agent.
+
 ### Activity reporting (`.env`)
 
 Each instance can report its activity to a central server for monitoring —
