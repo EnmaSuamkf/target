@@ -70,6 +70,46 @@ to boot until `hub/ui/dist` exists. Rebuild it on its own with:
 npm run ui:build
 ```
 
+### Desktop app (optional)
+
+`npm start` + the browser is the normal way to run this. The repo also ships
+Electron wrappers that package the hub, the broker and the UI into one
+double-clickable app, for when you'd rather not keep a terminal open.
+
+**These are not published anywhere — no releases, no downloads.** You build
+your own, and you can only build for the machine you are on: a `.dmg` needs
+macOS, the Windows installer needs Windows.
+
+```bash
+npm run target:install       # first — see below, this one is not optional
+npm --prefix desktop/linux install
+npm run desktop:build:linux
+```
+
+Swap `linux` for `mac` or `windows`. (`npm run desktop:install` does all three
+at once, but that downloads Electron three times — install just the one you
+need.) What comes out lands in `desktop/<platform>/dist`:
+
+| Platform | Artifacts |
+|---|---|
+| Linux | `Target for Linux-<version>.AppImage`, `.deb` |
+| macOS | `Target for Mac-<version>.dmg` |
+| Windows | `Target for Windows Setup <version>.exe` (installer), `Target for Windows <version>.exe` (portable) |
+
+**`npm run target:install` has to come first.** The packager copies `vendor/`
+and `hub/node_modules/` into the app, and those are what that command creates —
+build without it and you get an app that starts and then fails looking for the
+broker. Building on the wrong OS fails quietly the same way: ask for a `.dmg`
+from Linux and electron-builder hands you a `.zip` instead.
+
+**The app bundles a snapshot of `hub/`, taken when you build.** It does not
+track the repo afterwards, so an app built before a change keeps running the
+old hub until you rebuild it. If you are testing a change you just made, use
+`npm start` — same hub, current code, no packaging step.
+
+macOS builds are unsigned (`"identity": null`), so Gatekeeper will refuse the
+first launch: right-click the app → **Open** to get the one-time override.
+
 ## Usage
 
 ```bash
@@ -534,6 +574,27 @@ picked up without restarting the hub.
 Like the runner, the sandbox is fixed at creation (it's a block in the hook);
 workflows created before this existed carry no block at all and keep spawning
 on the host exactly as they did.
+
+**A sandboxed workflow needs the hub bound where a container can reach it.**
+The container runs on docker's default bridge, so `127.0.0.1` in there is the
+container, not your machine — and the hub binds to `127.0.0.1` by default. The
+hub already rewrites the urls it hands a sandboxed step (its TCP execution
+endpoint and the run callbacks) to the bridge gateway, but it cannot rewrite
+what it is *listening* on: bound to loopback it refuses
+the connection however right the address is, and the agent reads that as "the
+hub isn't running" and improvises. Set `host` in `~/.target/config.json` and
+restart:
+
+```json
+{ "host": "0.0.0.0" }
+```
+
+That exposes the hub on your LAN, so it's opt-in rather than the default —
+every mutating route still needs the admin token, but treat it as you would
+any bound port. Set `sandboxHost` alongside it for anything the bridge lookup
+can't guess (rootless docker, podman, a custom bridge, or a hub reached by
+name). A sandboxed dispatch onto a loopback-bound hub logs a warning saying
+exactly this, so you find out from the log rather than from a confused agent.
 
 ### Activity reporting (`.env`)
 

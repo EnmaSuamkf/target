@@ -41,7 +41,7 @@ test("acceptance: github TCP get_me on dummy workflow", async (t) => {
 		tools: [
 			{
 				name: "get_me",
-				description: "Obtiene el perfil del usuario autenticado en GitHub",
+				description: "Gets the authenticated GitHub user profile",
 				requestTemplate:
 					"curl -X GET https://api.github.com/user -H 'Authorization: Bearer $TOKEN_1' -H 'Accept: application/vnd.github+json'",
 				inputs: [],
@@ -62,14 +62,15 @@ test("acceptance: github TCP get_me on dummy workflow", async (t) => {
 	});
 	setWorkflowTcps(workflow.id, [tcp.id]);
 
-	const step = insertStep(workflow.id, "Usa la herramienta TCP get_me y devuelve el login de GitHub.", {
+	const step = insertStep(workflow.id, "Use the get_me TCP tool and return the GitHub login.", {
 		useSubagent: false,
-		acceptanceCriteria: "La respuesta incluye el login del usuario de GitHub",
+		acceptanceCriteria: "The answer includes the GitHub user's login",
 	});
 
-	const catalog = tcpCatalogPreamble(workflow.id);
+	const catalog = tcpCatalogPreamble(workflow.id, "http://127.0.0.1:9/api/tcps/execute?stepId=s&token=t");
 	assert.match(catalog, /get_me/);
-	assert.match(catalog, /tcpExecute/);
+	assert.match(catalog, /POST http:\/\/127\.0\.0\.1:9\/api\/tcps\/execute/);
+	assert.match(catalog, new RegExp(`"tcpId":"${tcp.id}"`));
 
 	const prompt = composeStepInput(step, workflow, { injectTcp: true, injectContext: false });
 	assert.match(prompt, /get_me/);

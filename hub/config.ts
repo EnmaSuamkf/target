@@ -17,6 +17,14 @@ import { fileURLToPath } from "node:url";
 
 export interface HubConfig {
 	host: string;
+	/**
+	 * Address a step running in a docker sandbox should use to reach this hub.
+	 * Unset, it's worked out from the docker bridge — see sandbox-net.ts. Set it
+	 * for anything that can't be guessed: rootless docker, a custom bridge,
+	 * podman, or a hub reached through a hostname. Ignored by steps that run on
+	 * the host, which keep using `host`.
+	 */
+	sandboxHost?: string;
 	port: number;
 	/** Bearer token required by every mutating /api route. */
 	adminToken: string;

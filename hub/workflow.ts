@@ -30,6 +30,8 @@ import {
 } from "./awb.ts";
 import { loadReportConfig, targetDir, type HubConfig } from "./config.ts";
 import { emit as reportEmit } from "./reporter.ts";
+import { listWorkflowResourceSelections, setWorkflowResourceSelections } from "./rci-store.ts";
+import { listWorkflowTcpSelections, setWorkflowTcpSelections } from "./tcp-store.ts";
 import { readTokenUsage, usageSnapshot } from "./transcript.ts";
 import {
 	beginRetry,
@@ -986,6 +988,14 @@ export function cloneWorkflow(workflowId: string, overrides: CloneOverrides = {}
 		copyAttachment(attachment, clone.id, null);
 	}
 	reconcileContextStep(clone.id);
+	// The attached TCP packs and Resource Sets come across too — with the exact
+	// per-tool / per-resource subset the operator picked, not just the pack ids.
+	// A clone that dropped them looked like it had worked (same steps, same
+	// context, same name) and then failed in a way nothing pointed at: its agent
+	// simply never received the tool catalog, because from the hub's side the
+	// clone genuinely had no tools attached.
+	setWorkflowTcpSelections(clone.id, listWorkflowTcpSelections(workflowId));
+	setWorkflowResourceSelections(clone.id, listWorkflowResourceSelections(workflowId));
 	// `listSteps` is ordered, and `addStep` appends, so the clone's steps come out
 	// in the original's order. The context step is skipped: it is hub-owned and
 	// was just re-materialised from the copied context above.

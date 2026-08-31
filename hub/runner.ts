@@ -43,9 +43,12 @@ import { markContextReinjected, needsContextReinjection, observeCompaction } fro
 import type { HubConfig } from "./config.ts";
 import { CONTEXT_PRESSURE_PERCENT, shouldForceSubagent, workflowContextRatio } from "./context-pressure.ts";
 import type { Attachment, Step, Workflow } from "./db.ts";
-import { completeStep, getContextStep, markStepQueued } from "./db.ts";
+import { completeStep, getContextStep, listSteps, markStepQueued } from "./db.ts";
+import { listWorkflowTcpSelections } from "./tcp-store.ts";
+import { listWorkflowResourceSelections } from "./rci-store.ts";
 import { tcpCatalogPreamble } from "./tcp-catalog.ts";
 import { resourcesCatalogPreamble } from "./rci-catalog.ts";
+import { hubHostForStep, hubReachableFromSandbox } from "./sandbox-net.ts";
 import { stepResultsNote } from "./step-results.ts";
 
 export type Logger = (message: string, type?: "info" | "warning" | "error") => void;
@@ -85,6 +88,32 @@ export const CONTEXT_PRESSURE_SUFFIX =
 export function subagentInstruction(useSubagent: boolean, forced = false): string {
 	if (useSubagent) return SUBAGENT_SUFFIX;
 	return forced ? CONTEXT_PRESSURE_SUFFIX : INLINE_SUFFIX;
+}
+
+/**
+ * Told to a step that BOTH delegates and carries attached TCP tools or Resource
+ * Sets. A subagent is a fresh context: it inherits nothing from this thread, so
+ * a catalog injected here reaches the agent that delegates and never the agent
+ * that does the work. Without this the tools silently do not exist for the step
+ * — and since `useSubagent` defaults ON, that is the normal case, not the edge
+ * one.
+ *
+ * The hub cannot put the material in the subagent itself (it never sees the
+ * Task call), so the only seam is to hand the delegating agent the catalog and
+ * tell it to carry it down. Verbatim matters: a summarised catalog loses the
+ * POST url, the tcpId or the exact input names, and a call missing any of them
+ * is not executable.
+ */
+export const SUBAGENT_ATTACHMENTS_SUFFIX =
+	"\n\nImportant: the TCP tools and Resource Sets above were given to THIS thread. A subagent starts from a fresh context and inherits none of it, so when you delegate this step you must copy those blocks into the subagent's prompt verbatim — the POST url and its token, the tool ids, the input names and the resource file paths exactly as written. A subagent that never received them cannot use the tools or the resources at all.";
+
+/**
+ * Whether that instruction applies: only for a delegated step that actually had
+ * something injected. A step with no attachments has nothing to carry down, and
+ * saying so anyway would send the agent looking for blocks that aren't there.
+ */
+export function subagentAttachmentsInstruction(delegated: boolean, hasAttachmentBlocks: boolean): string {
+	return delegated && hasAttachmentBlocks ? SUBAGENT_ATTACHMENTS_SUFFIX : "";
 }
 
 /**
@@ -266,6 +295,13 @@ export function composeStepInput(
 		 * the rule is about.
 		 */
 		forceSubagent?: boolean;
+		/**
+		 * Where the agent POSTs to run an attached TCP tool, token included — built
+		 * by `dispatchStep`, which is the only caller that knows both the hub's
+		 * address and this step's credential. Without it the catalog still lists the
+		 * tools but can't offer a way to call them.
+		 */
+		tcpExecuteUrl?: string;
 	} = {},
 ): string {
 	// The hub-owned context step: the background, and nothing else. Deliberately
@@ -304,7 +340,7 @@ export function composeStepInput(
 				options.afterCompaction ?? false,
 			)
 		: "";
-	const tcpBlock = options.injectTcp ? tcpCatalogPreamble(workflow.id) : "";
+	const tcpBlock = options.injectTcp ? tcpCatalogPreamble(workflow.id, options.tcpExecuteUrl) : "";
 	const resourcesBlock = options.injectResources ? resourcesCatalogPreamble(workflow.id) : "";
 	// Straight after the description, so "do what this screenshot shows" reads as
 	// one instruction rather than a task and an unrelated file list.
@@ -321,8 +357,51 @@ export function composeStepInput(
 		step.acceptanceCriteria,
 		acceptanceImages,
 	)}${priorResults}${subagentInstruction(step.useSubagent, options.forceSubagent ?? false)}${
-		options.retryReason ? retryNote(options.retryReason) : ""
-	}${options.timedOut ? TIMEOUT_NOTE : ""}`;
+		// After the delegate/inline instruction, because it only qualifies THAT: it
+		// tells an agent already told to delegate what it has to take along.
+		subagentAttachmentsInstruction(delegated, tcpBlock !== "" || resourcesBlock !== "")
+	}${options.retryReason ? retryNote(options.retryReason) : ""}${options.timedOut ? TIMEOUT_NOTE : ""}`;
+}
+
+/**
+ * When to prepend the attached TCP / Resource Set catalogs: on every exec
+ * dispatch of a step whose workflow has something attached. That is the whole
+ * rule.
+ *
+ * It used to be conditional — first dispatch of a fresh conversation, or after a
+ * compaction, or the first task step when a context step exists — by analogy
+ * with the conversation context, which is background stated once. The analogy is
+ * wrong, and it is why tools kept mysteriously not being there:
+ *
+ *  - a workflow with a materialised context step never satisfied the "fresh
+ *    conversation" test at all, so its tools were injected NEVER, on any step;
+ *  - a workflow whose context was injected before context steps existed hit the
+ *    same dead end;
+ *  - any step after the first, any retry, and any re-run got nothing, because
+ *    the once-only window had closed;
+ *  - and a delegated step needs the catalog in ITS OWN prompt regardless, since
+ *    a subagent inherits nothing from the thread.
+ *
+ * Background is a fact stated once. A tool catalog is a capability the step
+ * either has in hand or does not, and the per-step execute url carries that
+ * step's own credential — so it is re-stated every time rather than remembered.
+ * The cost is bounded by the SELECTION, not by the pack behind it: a workflow
+ * injects the handful of tools and resources the operator picked, never a
+ * 200-tool import.
+ */
+export function shouldInjectAttachmentCatalog(
+	step: Step,
+	workflow: Workflow,
+	options: { mode?: "exec" | "judge" } = {},
+): boolean {
+	// The judge grades what already happened; it runs no tools.
+	if ((options.mode ?? "exec") !== "exec") return false;
+	// The context step carries the background and nothing else — `composeStepInput`
+	// returns early for it, so this only avoids the pointless lookup.
+	if (step.kind === "context") return false;
+	return (
+		listWorkflowTcpSelections(workflow.id).length > 0 || listWorkflowResourceSelections(workflow.id).length > 0
+	);
 }
 
 /**
@@ -367,13 +446,33 @@ export async function dispatchStep(
 			: (options.resumeSession ?? true)
 				? workflow.lastSessionId
 				: null;
-	const callbackUrl = `http://${cfg.host}:${cfg.port}/api/steps/${step.id}/result?token=${step.callbackToken}`;
+	// Every hub url this dispatch hands out is built on this host. For a step on
+	// the host that is `cfg.host`, exactly as before; for one in a docker sandbox
+	// `cfg.host` would be the CONTAINER, so the container-visible address of the
+	// host is used instead (sandbox-net.ts). The agent's TCP calls and the
+	// broker's callbacks all have to survive the same network boundary, so they
+	// are built from one answer rather than three.
+	const sandboxed = hookRuntime(workflow.hookUrl).sandbox != null;
+	const hubHost = hubHostForStep(cfg, sandboxed);
+	const hubOrigin = `http://${hubHost}:${cfg.port}`;
+	// A url naming the right host still fails if the hub is only LISTENING on
+	// loopback, and it fails as a bare connection refused that the agent reads as
+	// "the hub isn't running". Said once, here, with the fix in it.
+	if (sandboxed && !hubReachableFromSandbox(cfg)) {
+		log(
+			`step ${step.id} (workflow ${workflow.id}) runs in a docker sandbox, but the hub is bound to ${cfg.host} — ` +
+				`a container cannot reach that. Its TCP tools and the run callbacks will be refused. ` +
+				`Set "host" in ~/.target/config.json to an address the bridge can reach (0.0.0.0, or ${hubHost}) and restart the hub.`,
+			"warning",
+		);
+	}
+	const callbackUrl = `${hubOrigin}/api/steps/${step.id}/result?token=${step.callbackToken}`;
 	// The broker POSTs `{started: true}` here the instant the run actually
 	// begins (after the workdir `flock` is acquired — see awb's runHidden).
 	// That flips the step `queued → running` and starts its timeout clock at the
 	// true run start, so a step queued behind another on the same workdir isn't
 	// timed out while still waiting its turn.
-	const startedCallbackUrl = `http://${cfg.host}:${cfg.port}/api/steps/${step.id}/started?token=${step.callbackToken}`;
+	const startedCallbackUrl = `${hubOrigin}/api/steps/${step.id}/started?token=${step.callbackToken}`;
 	// Inject the conversation context ONLY on the first dispatch of a fresh
 	// conversation: exec mode, no session to resume (awb starts a fresh
 	// `claude`), and the workflow's `context_injected` guard still false. Later
@@ -437,8 +536,14 @@ export async function dispatchStep(
 	// step — one whose context was already injected before this feature existed,
 	// mid-run right now — behaves exactly as it always did.
 	const hasContextStep = getContextStep(workflow.id) !== null;
-	const injectCatalog =
+	const injectContext =
 		mode === "exec" && ((freshConversation && !workflow.contextInjected && !hasContextStep) || afterCompaction);
+	const injectAttachments = shouldInjectAttachmentCatalog(step, observed, { mode });
+	// The step's own callback token, reused as the execution credential. Same
+	// trust boundary as the two callbacks above — it identifies this running step
+	// and nothing else — and deliberately NOT the admin token: scoped this way the
+	// worst a leaked prompt can do is run tools this workflow already attached.
+	const tcpExecuteUrl = `${hubOrigin}/api/tcps/execute?stepId=${step.id}&token=${step.callbackToken}`;
 	const input = composeStepInput(step, observed, {
 		mode,
 		// Two independent reasons to inject: this is the conversation's first
@@ -448,13 +553,14 @@ export async function dispatchStep(
 		// mid-run, long after that step settled, so it is the only mechanism in play
 		// and re-arming the step instead would need `advance()` to learn about
 		// compaction, which happens here, after `advance()` has already chosen.
-		injectContext: injectCatalog,
-		injectTcp: injectCatalog,
-		injectResources: injectCatalog,
+		injectContext,
+		injectTcp: injectAttachments,
+		injectResources: injectAttachments,
 		afterCompaction,
 		retryReason: options.retryReason,
 		timedOut: options.timedOut,
 		forceSubagent,
+		tcpExecuteUrl,
 	});
 	// A contained workflow can only run if its image exists on this machine. The
 	// broker's `docker run` would otherwise try to PULL it, and the default

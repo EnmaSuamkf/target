@@ -152,6 +152,7 @@ import {
 	applyTemplateTcpsToWorkflow,
 	setWorkflowTcpSelections,
 	updateTcp,
+	workflowMayExecuteTool,
 	type Tcp,
 } from "./tcp-store.ts";
 import { getTcpUsage } from "./tcp-usage.ts";
@@ -219,6 +220,21 @@ const UI_FILE = path.join(UI_DIR, "index.html");
  * this only stops the server buffering an absurd request before it can.
  */
 const MAX_ATTACHMENT_BODY_BYTES = Math.ceil((MAX_ATTACHMENT_BYTES * 4) / 3) + 64 * 1024;
+
+/**
+ * Body limit for the routes that carry a whole catalogue rather than the
+ * handful of operator-typed fields `maxInputBytes` was sized for (64 KiB — a
+ * step description). A TCP pack is the tool list of a real MCP server, and one
+ * of those (Atlassian, GitHub, …) is hundreds of KiB of JSON schema on its own;
+ * a template bundle carries steps plus the TCP and resource selections behind
+ * them. Under the old ceiling every one of those imports came back
+ * `payload_too_large`.
+ *
+ * Deliberately the same number the folder importer already enforces on a
+ * Resource Set, so the three importable things share one ceiling instead of
+ * each having a limit the operator has to learn separately.
+ */
+const MAX_CATALOG_BODY_BYTES = MAX_RESOURCE_SET_BYTES;
 
 const CONTENT_TYPES: Record<string, string> = {
 	".html": "text/html; charset=utf-8",
@@ -956,12 +972,72 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		return;
 	}
 
+	// --- /api/tcps/execute (run an attached tool) ---
+	//
+	// Above the access gate because one of its two callers is not the operator.
+	//
+	// The operator is one: the UI's "execute" button, `isAdmin`, unscoped — they
+	// may run any tool on their own machine. The other is a RUNNING STEP's agent,
+	// through the url the TCP catalog in its prompt was built with. That caller is
+	// the whole reason this route can't sit below the gate: the agent holds no
+	// login session and must never be handed the admin token, so it authenticates
+	// the same way awb's callbacks do — the per-step `callbackToken` — and is
+	// scoped to the tools its own workflow attached. The blast radius of a leaked
+	// prompt is therefore that workflow's own selection and nothing else.
+	//
+	// This is also the only path by which a tool call can happen at all: the hub
+	// never reads the agent's output, so an agent that merely *writes* a call has
+	// not made one. It has to send this request itself.
+	if (parts[1] === "tcps" && parts[2] === "execute" && !parts[3] && req.method === "POST") {
+		const stepId = url.searchParams.get("stepId") ?? "";
+		const stepToken = url.searchParams.get("token") ?? "";
+		const callingStep = stepId ? getStep(stepId) : null;
+		const viaStep =
+			callingStep !== null && stepToken !== "" && timingSafeEqualStr(stepToken, callingStep.callbackToken);
+		if (!viaStep && !isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			void (async () => {
+				const tcpId = typeof body.tcpId === "string" ? body.tcpId : "";
+				const toolName = typeof body.toolName === "string" ? body.toolName : "";
+				if (!tcpId || !toolName) {
+					sendJson(res, 400, { error: "tcpId and toolName are required" });
+					return;
+				}
+				// The scope of a step's credential. Checked before the tool is even
+				// looked up, so an agent can't probe which tcpIds exist on this machine
+				// by telling 404 and 403 apart.
+				if (viaStep && callingStep && !workflowMayExecuteTool(callingStep.workflowId, tcpId, toolName)) {
+					sendJson(res, 403, { error: "tool_not_attached_to_workflow" });
+					return;
+				}
+				const found = findTcpTool(tcpId, toolName);
+				if (!found) {
+					sendJson(res, 404, { error: "unknown_tool" });
+					return;
+				}
+				const result = await executeTcpTool(found.tool, {
+					toolName,
+					inputs: typeof body.inputs === "object" && body.inputs ? (body.inputs as Record<string, string>) : undefined,
+					input: typeof body.input === "string" ? body.input : undefined,
+				});
+				sendJson(res, 200, { result });
+			})().catch((err) => {
+				sendJson(res, 500, { error: String((err as Error).message ?? err) });
+			});
+		});
+		return;
+	}
+
 	// --- the access gate ---
 	//
 	// Everything below serves or mutates this machine's data, so it requires the
 	// operator: a valid login session OR the admin bearer token (isAdmin covers
-	// both). The only routes above this line are the auth stack and the awb
-	// per-step-token callbacks, which authenticate on their own.
+	// both). The only routes above this line are the auth stack, the awb
+	// per-step-token callbacks, and TCP execution — all of which authenticate on
+	// their own.
 	if (!isAdmin(cfg, req.headers)) {
 		sendJson(res, 401, { error: "login_required" });
 		return;
@@ -1022,6 +1098,11 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		return;
 	}
 
+	// Templates, TCP packs and Resource Sets all move around as whole documents
+	// — an export bundle, a pack of tool schemas, a set of file contents — so
+	// they get the catalogue ceiling rather than the step-description one.
+	const catalogMaxBytes = Math.max(cfg.maxInputBytes, MAX_CATALOG_BODY_BYTES);
+
 	// --- /api/templates ---
 
 	if (parts[1] === "templates") {
@@ -1042,7 +1123,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					sendJson(res, 401, { error: "unauthorized" });
 					return;
 				}
-				readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				readJsonBody(req, res, catalogMaxBytes, (body) => {
 					const name = typeof body.name === "string" ? body.name.trim() : "";
 					if (!name) {
 						sendJson(res, 400, { error: "name is required" });
@@ -1086,7 +1167,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, 401, { error: "unauthorized" });
 				return;
 			}
-			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			readJsonBody(req, res, catalogMaxBytes, (body) => {
 				let entries;
 				try {
 					entries = parseTemplateBundle(body);
@@ -1134,7 +1215,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, 401, { error: "unauthorized" });
 				return;
 			}
-			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			readJsonBody(req, res, catalogMaxBytes, (body) => {
 				const input: {
 					name?: string;
 					tags?: unknown;
@@ -1205,7 +1286,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					sendJson(res, 401, { error: "unauthorized" });
 					return;
 				}
-				readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				readJsonBody(req, res, catalogMaxBytes, (body) => {
 					const name = typeof body.name === "string" ? body.name.trim() : "";
 					if (!name) {
 						sendJson(res, 400, { error: "name is required" });
@@ -1231,7 +1312,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, 401, { error: "unauthorized" });
 				return;
 			}
-			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			readJsonBody(req, res, catalogMaxBytes, (body) => {
 				let entries;
 				try {
 					entries = parseTcpBundle(body);
@@ -1245,38 +1326,6 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				const created = importTcps(entries);
 				log(`imported ${created.length} tcp(s): ${created.map((m) => `'${m.name}' (${m.id})`).join(", ")}`);
 				sendJson(res, 200, { tcps: created.map(publicTcp) });
-			});
-			return;
-		}
-
-		if (parts[2] === "execute" && !parts[3] && req.method === "POST") {
-			if (!isAdmin(cfg, req.headers)) {
-				sendJson(res, 401, { error: "unauthorized" });
-				return;
-			}
-			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
-				void (async () => {
-					const tcpId = typeof body.tcpId === "string" ? body.tcpId : "";
-					const toolName = typeof body.toolName === "string" ? body.toolName : "";
-					if (!tcpId || !toolName) {
-						sendJson(res, 400, { error: "tcpId and toolName are required" });
-						return;
-					}
-					const found = findTcpTool(tcpId, toolName);
-					if (!found) {
-						sendJson(res, 404, { error: "unknown_tool" });
-						return;
-					}
-					const result = await executeTcpTool(found.tool, {
-						toolName,
-						inputs:
-							typeof body.inputs === "object" && body.inputs ? (body.inputs as Record<string, string>) : undefined,
-						input: typeof body.input === "string" ? body.input : undefined,
-					});
-					sendJson(res, 200, { result });
-				})().catch((err) => {
-					sendJson(res, 500, { error: String((err as Error).message ?? err) });
-				});
 			});
 			return;
 		}
@@ -1330,7 +1379,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, 401, { error: "unauthorized" });
 				return;
 			}
-			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			readJsonBody(req, res, catalogMaxBytes, (body) => {
 				const input: { name?: string; tags?: unknown; tools?: unknown } = {};
 				if (typeof body.name === "string") {
 					const trimmed = body.name.trim();
@@ -1381,10 +1430,10 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// and folders, and importing one means reading it into the set being edited.
 
 	// A Resource Set body carries whole file contents — a SKILL.md plus its
-	// references and evals — so `maxInputBytes` (sized for a step description)
-	// would reject any real set. These routes get the same ceiling the folder
-	// importer enforces, which is the actual limit on how big a set can be.
-	const resourceSetMaxBytes = Math.max(cfg.maxInputBytes, MAX_RESOURCE_SET_BYTES);
+	// references and evals — so it takes `catalogMaxBytes` for the same reason a
+	// TCP pack does: `maxInputBytes` (sized for a step description) would reject
+	// any real set. That ceiling is the folder importer's own, which is the
+	// actual limit on how big a set can be.
 
 	if (parts[1] === "resourcesets") {
 		if (!parts[2]) {
@@ -1404,7 +1453,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					sendJson(res, 401, { error: "unauthorized" });
 					return;
 				}
-				readJsonBody(req, res, resourceSetMaxBytes, (body) => {
+				readJsonBody(req, res, catalogMaxBytes, (body) => {
 					const name = typeof body.name === "string" ? body.name.trim() : "";
 					if (!name) {
 						sendJson(res, 400, { error: "name is required" });
@@ -1432,7 +1481,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, 401, { error: "unauthorized" });
 				return;
 			}
-			readJsonBody(req, res, resourceSetMaxBytes, (body) => {
+			readJsonBody(req, res, catalogMaxBytes, (body) => {
 				const target = typeof body.path === "string" ? body.path.trim() : "";
 				if (!target) {
 					sendJson(res, 400, { error: "path is required" });
@@ -1488,7 +1537,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, 401, { error: "unauthorized" });
 				return;
 			}
-			readJsonBody(req, res, resourceSetMaxBytes, (body) => {
+			readJsonBody(req, res, catalogMaxBytes, (body) => {
 				const input: { name?: string; tags?: unknown; resources?: unknown } = {};
 				if (typeof body.name === "string") {
 					const trimmed = body.name.trim();
@@ -2167,7 +2216,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			sendJson(res, 404, { error: "unknown_workflow" });
 			return;
 		}
-		if (workflow.contextInjected) {
+		if (workflow.contextInjected && listWorkflowTcpSelections(workflowId).length > 0) {
 			sendJson(res, 400, { error: "context already injected" });
 			return;
 		}

@@ -32,6 +32,10 @@ const { completeStep, getWorkflow, listSteps, markStepRunning, setWorkflowSessio
 const { addStep, cloneWorkflow, createWorkflow, renameWorkflow, setConversationContext } =
 	await import("./workflow.ts");
 const { hookRuntime } = await import("./awb.ts");
+const { insertTcp, listWorkflowTcpSelections, setWorkflowTcpSelections } = await import("./tcp-store.ts");
+const { insertResourceSet, listWorkflowResourceSelections, setWorkflowResourceSelections } =
+	await import("./rci-store.ts");
+const { shouldInjectAttachmentCatalog } = await import("./runner.ts");
 const { loadConfig } = await import("./config.ts");
 const { createServer } = await import("./server.ts");
 
@@ -160,6 +164,53 @@ test("cloneWorkflow copies the conversation context and re-materialises its cont
 			.map((s) => s.description),
 		["do the thing"],
 	);
+});
+
+test("cloneWorkflow carries the attached TCP packs and Resource Sets, with the operator's subset", () => {
+	// The bug this pins: a clone kept the steps, the context and the name, and
+	// silently dropped its attachments. Nothing surfaced it — the clone simply
+	// had no tools, so its agent was never given a catalog and went looking for
+	// GitHub credentials by hand.
+	const tcp = insertTcp({
+		name: "github",
+		tools: [
+			{ name: "get_me", description: "d", requestTemplate: "curl https://api.github.com/user", inputs: [], tokens: {} },
+			{ name: "unpicked", description: "d", requestTemplate: "curl https://example.com", inputs: [], tokens: {} },
+		],
+	});
+	const set = insertResourceSet({
+		name: "kit",
+		resources: [
+			{ name: "picked", description: "", content: "keep me", files: [] },
+			{ name: "unpicked", description: "", content: "leave me", files: [] },
+		],
+	});
+	const source = createWorkflow("cursor test github tools", { conversationContext: "this is a dummy step" });
+	// A SUBSET of each, which is the part a naive "copy the pack ids" fix loses.
+	setWorkflowTcpSelections(source.id, [{ tcpId: tcp.id, toolNames: ["get_me"] }]);
+	setWorkflowResourceSelections(source.id, [{ resourceSetId: set.id, resourceNames: ["picked"] }]);
+	addStep(source.id, "use github TCP tools to tell me my github user", { useSubagent: false });
+
+	const clone = cloneWorkflow(source.id);
+
+	assert.deepEqual(listWorkflowTcpSelections(clone.id), [{ tcpId: tcp.id, toolNames: ["get_me"] }]);
+	assert.deepEqual(listWorkflowResourceSelections(clone.id), [
+		{ resourceSetId: set.id, resourceNames: ["picked"] },
+	]);
+	// And the consequence that actually matters: the clone's task step now
+	// qualifies for the catalog, which is what was silently false before.
+	const taskStep = listSteps(clone.id).find((s) => s.kind !== "context")!;
+	assert.equal(shouldInjectAttachmentCatalog(taskStep, getWorkflow(clone.id)!), true);
+
+	// The original keeps its own, untouched.
+	assert.deepEqual(listWorkflowTcpSelections(source.id), [{ tcpId: tcp.id, toolNames: ["get_me"] }]);
+});
+
+test("a clone of a workflow with nothing attached stays empty", () => {
+	const source = seedWorkflow("bare");
+	const clone = cloneWorkflow(source.id);
+	assert.deepEqual(listWorkflowTcpSelections(clone.id), []);
+	assert.deepEqual(listWorkflowResourceSelections(clone.id), []);
 });
 
 test("a clone of a clone nests the prefix rather than replacing it", () => {
