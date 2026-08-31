@@ -32,8 +32,8 @@ export { resourceSlug } from "./rci-store.ts";
 /** How each kind is introduced to the agent in its injected block. */
 const KIND_LABELS: Record<ResourceKind, string> = {
 	skill: "Skill",
-	agent: "Agente",
-	doc: "Documento",
+	agent: "Agent",
+	doc: "Document",
 };
 
 /** Root of the materialised resources for one workflow. */
@@ -80,7 +80,7 @@ function resourceBlock(set: ResourceSet, resource: Resource, dir: string): strin
 	if (resource.description) lines.push(`_${resource.description}_`, "");
 	lines.push(resource.content.trim(), "");
 	if (resource.files.length > 0) {
-		lines.push(`Material de apoyo (léelo con Read cuando este recurso lo pida):`, `  Carpeta: ${dir}`);
+		lines.push(`Supporting material (read it with Read when this resource calls for it):`, `  Folder: ${dir}`);
 		for (const file of resource.files) lines.push(`  - ${path.join(dir, file.path)}`);
 		lines.push("");
 	}
@@ -97,7 +97,7 @@ export function resourcesCatalogPreamble(workflowId: string): string {
 	const materialized = materializeWorkflowResources(workflowId, entries);
 	if (materialized.length === 0) return "";
 	const header = [
-		"Recursos disponibles para este workflow (RCI — Resources Context Injection). No están instalados en el agente: su contenido se te entrega aquí, en la conversación. Una skill describe cómo hacer algo, un agente describe un rol que puedes adoptar, y un documento es material de referencia. Aplícalos cuando la situación que describen se dé; si no aplica, ignóralos.",
+		"Resources available to this workflow (RCI — Resources Context Injection). They are not installed in the agent: their content is handed to you here, in the conversation. A skill describes how to do something, an agent describes a role you can adopt, and a document is reference material. Apply them when the situation they describe comes up; when one does not apply, ignore it.",
 		"",
 	];
 	const blocks = materialized.map(({ set, resource, dir }) => resourceBlock(set, resource, dir));

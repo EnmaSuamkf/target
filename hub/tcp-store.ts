@@ -338,6 +338,19 @@ export function listWorkflowTcps(workflowId: string): Tcp[] {
 	return listWorkflowTcpToolSelections(workflowId).map((entry) => entry.tcp);
 }
 
+/**
+ * May this workflow's agent run this tool? The scope of the per-step execution
+ * credential: a running step can invoke exactly the tools its own workflow has
+ * attached — not another workflow's, and not a tool the operator deselected
+ * from an attached pack. Resolved through the same selection the catalog is
+ * built from, so what the agent was offered and what it may call cannot drift.
+ */
+export function workflowMayExecuteTool(workflowId: string, tcpId: string, toolName: string): boolean {
+	return listWorkflowTcpToolSelections(workflowId).some(
+		(entry) => entry.tcp.id === tcpId && entry.tools.some((tool) => tool.name === toolName),
+	);
+}
+
 function validateSelections(selections: TcpSelection[]): TcpSelection[] {
 	const normalized = normalizeTcpSelections(selections);
 	const out: TcpSelection[] = [];

@@ -94,33 +94,33 @@ write(
 			type: "user",
 			cwd: projDir,
 			timestamp: "2026-08-01T09:00:00.000Z",
-			message: { role: "user", content: "Necesito un workflow para el release" },
+			message: { role: "user", content: "I need a workflow for the release" },
 		},
 		{
 			type: "assistant",
 			message: {
 				role: "assistant",
 				content: [
-					{ type: "thinking", thinking: "PENSAMIENTO PRIVADO" },
-					{ type: "text", text: "Podemos hacerlo en tres pasos." },
+					{ type: "thinking", thinking: "PRIVATE THINKING" },
+					{ type: "text", text: "We can do it in three steps." },
 					{ type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } },
 				],
 			},
 		},
 		// A tool result: a `user` record with no prose at all.
-		{ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "SALIDA DE LA HERRAMIENTA" }] } },
+		{ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "TOOL OUTPUT" }] } },
 		// A subagent's turn, which the operator never said.
-		{ type: "user", isSidechain: true, message: { role: "user", content: "CHARLA DEL SUBAGENTE" } },
+		{ type: "user", isSidechain: true, message: { role: "user", content: "SUBAGENT CHATTER" } },
 		{
 			type: "user",
-			message: { role: "user", content: "<system-reminder>RECORDATORIO INYECTADO</system-reminder>Y el segundo paso?" },
+			message: { role: "user", content: "<system-reminder>INJECTED REMINDER</system-reminder>And the second step?" },
 		},
 	],
 	1_800_000_200,
 );
 
 // Claude nests subagent transcripts one level deeper, under the session id.
-write(path.join(claudeDir, CLAUDE_SESSION, "subagents", "sub-1.jsonl"), [{ type: "user", message: { role: "user", content: "no soy una conversacion" } }], 1_800_000_300);
+write(path.join(claudeDir, CLAUDE_SESSION, "subagents", "sub-1.jsonl"), [{ type: "user", message: { role: "user", content: "i am not a conversation" } }], 1_800_000_300);
 
 // --- a free-code conversation ---
 write(
@@ -128,7 +128,7 @@ write(
 	[
 		{ type: "session", version: 3, id: "bbbbbbbb-5555", timestamp: "2026-08-01T10:00:00.000Z", cwd: projDir },
 		{ type: "model_change", id: "m1", parentId: null, modelId: "some/model" },
-		{ type: "message", id: "u1", message: { role: "user", content: [{ type: "text", text: "Arregla el bug del login" }] } },
+		{ type: "message", id: "u1", message: { role: "user", content: [{ type: "text", text: "Fix the login bug" }] } },
 		{ type: "message", id: "a1", message: { role: "assistant", content: [{ type: "text", text: "Hecho, era el token." }] } },
 	],
 	1_800_000_100,
@@ -138,7 +138,7 @@ write(
 // dirs, so that one has to be excluded by name rather than by depth.
 write(
 	path.join(tmpHome, ".free-code", "agent", "sessions", "subagents", "sub-2.jsonl"),
-	[{ type: "message", message: { role: "user", content: [{ type: "text", text: "tampoco soy una conversacion" }] } }],
+	[{ type: "message", message: { role: "user", content: [{ type: "text", text: "i am not a conversation either" }] } }],
 	1_800_000_400,
 );
 
@@ -146,7 +146,7 @@ write(
 fs.mkdirSync(cursorChatDir, { recursive: true });
 fs.writeFileSync(
 	path.join(cursorChatDir, "meta.json"),
-	JSON.stringify({ schemaVersion: 1, cwd: projDir, title: "Arregla el picker de cursor" }),
+	JSON.stringify({ schemaVersion: 1, cwd: projDir, title: "Fix the cursor picker" }),
 );
 fs.writeFileSync(path.join(cursorChatDir, "store.db"), "placeholder");
 write(
@@ -155,7 +155,7 @@ write(
 		{
 			role: "user",
 			message: {
-				content: [{ type: "text", text: "<timestamp>2026</timestamp>\n<user_query>\nArregla el picker de cursor\n</user_query>" }],
+				content: [{ type: "text", text: "<timestamp>2026</timestamp>\n<user_query>\nFix the cursor picker\n</user_query>" }],
 			},
 		},
 		{
@@ -191,7 +191,7 @@ test("a claude conversation is listed under its resume uuid, titled by the first
 	assert.equal(conversation.path, claudeFile);
 	// Read from the records' own `cwd`: the directory name is a lossy slug of it.
 	assert.equal(conversation.workdir, projDir);
-	assert.equal(conversation.title, "Necesito un workflow para el release");
+	assert.equal(conversation.title, "I need a workflow for the release");
 });
 
 test("a free-code conversation is listed under its .jsonl path, which is what --session takes", () => {
@@ -200,7 +200,7 @@ test("a free-code conversation is listed under its .jsonl path, which is what --
 	const [conversation] = found;
 	assert.equal(conversation.sessionId, freeCodeFile, "the session id IS the path for free-code");
 	assert.equal(conversation.workdir, projDir);
-	assert.equal(conversation.title, "Arregla el bug del login");
+	assert.equal(conversation.title, "Fix the login bug");
 });
 
 test("a cursor conversation is listed under its chat uuid, with workdir from meta.json and title from the transcript", () => {
@@ -210,7 +210,7 @@ test("a cursor conversation is listed under its chat uuid, with workdir from met
 	assert.equal(conversation.sessionId, CURSOR_SESSION);
 	assert.equal(conversation.path, cursorTranscriptFile);
 	assert.equal(conversation.workdir, projDir);
-	assert.equal(conversation.title, "Arregla el picker de cursor");
+	assert.equal(conversation.title, "Fix the cursor picker");
 	assert.deepEqual(adoptability(conversation), { ok: true, workdir: projDir, reason: null });
 });
 
@@ -259,29 +259,29 @@ test("the preview keeps the prose and drops the machinery", () => {
 	assert.ok(conversation);
 	const preview = readConversationPreview(conversation);
 
-	assert.match(preview.text, /Necesito un workflow para el release/);
-	assert.match(preview.text, /Podemos hacerlo en tres pasos\./);
-	assert.match(preview.text, /Y el segundo paso\?/);
+	assert.match(preview.text, /I need a workflow for the release/);
+	assert.match(preview.text, /We can do it in three steps./);
+	assert.match(preview.text, /And the second step?/);
 
 	// The preview is for recognising a conversation, so it shows what was SAID.
 	// (None of this is a fidelity question for the workflow: the workflow resumes
 	// the transcript itself, tool calls and all.)
-	assert.doesNotMatch(preview.text, /PENSAMIENTO PRIVADO/, "thinking blocks are not part of the conversation");
-	assert.doesNotMatch(preview.text, /SALIDA DE LA HERRAMIENTA/, "tool results are dropped");
-	assert.doesNotMatch(preview.text, /CHARLA DEL SUBAGENTE/, "a sidechain is a subagent, not the operator");
-	assert.doesNotMatch(preview.text, /RECORDATORIO INYECTADO/, "injected reminders are not things the human typed");
+	assert.doesNotMatch(preview.text, /PRIVATE THINKING/, "thinking blocks are not part of the conversation");
+	assert.doesNotMatch(preview.text, /TOOL OUTPUT/, "tool results are dropped");
+	assert.doesNotMatch(preview.text, /SUBAGENT CHATTER/, "a sidechain is a subagent, not the operator");
+	assert.doesNotMatch(preview.text, /INJECTED REMINDER/, "injected reminders are not things the human typed");
 	assert.equal(preview.turns, 3);
 });
 
 test("a long conversation previews its tail — where it got to is what you check before continuing it", () => {
 	const noisy = path.join(claudeDir, "cccccccc-9999.jsonl");
 	const lines: unknown[] = [
-		{ type: "user", cwd: projDir, message: { role: "user", content: "PRIMER MENSAJE" } },
+		{ type: "user", cwd: projDir, message: { role: "user", content: "FIRST MESSAGE" } },
 	];
 	for (let i = 0; i < 400; i += 1) {
-		lines.push({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: `relleno ${i} ${"x".repeat(300)}` }] } });
+		lines.push({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: `filler ${i} ${"x".repeat(300)}` }] } });
 	}
-	lines.push({ type: "user", message: { role: "user", content: "ULTIMO MENSAJE" } });
+	lines.push({ type: "user", message: { role: "user", content: "LAST MESSAGE" } });
 	write(noisy, lines, 1_800_000_500);
 
 	const conversation = findConversation("claude", "cccccccc-9999");
@@ -290,8 +290,8 @@ test("a long conversation previews its tail — where it got to is what you chec
 
 	assert.equal(preview.turns, 402);
 	assert.equal(preview.shownTurns, 5);
-	assert.match(preview.text, /ULTIMO MENSAJE/, "the end is what identifies where to carry on from");
-	assert.doesNotMatch(preview.text, /PRIMER MENSAJE/, "the opening is 400 turns back");
+	assert.match(preview.text, /LAST MESSAGE/, "the end is what identifies where to carry on from");
+	assert.doesNotMatch(preview.text, /FIRST MESSAGE/, "the opening is 400 turns back");
 	// Said out loud, or the operator reads a 5-turn panel as the whole history
 	// the workflow is about to work from.
 	assert.match(preview.text, /earlier turn\(s\) not shown/);
@@ -397,7 +397,7 @@ test("every conversation is listed, not just a fixed first page, and the total i
 		const file = path.join(claudeDir, `bulk-${String(i).padStart(3, "0")}.jsonl`);
 		// Ascending mtimes, all OLDER than the original fixture, so a cap that kept
 		// only the newest N would drop the oldest of these.
-		write(file, [{ type: "user", cwd: projDir, message: { role: "user", content: `conversacion ${i}` } }], 1_700_000_000 + i);
+		write(file, [{ type: "user", cwd: projDir, message: { role: "user", content: `conversation ${i}` } }], 1_700_000_000 + i);
 		made.push(file);
 	}
 
@@ -406,7 +406,7 @@ test("every conversation is listed, not just a fixed first page, and the total i
 	assert.equal(conversations.length, total, "and every one of them is returned");
 	// The oldest — exactly what the old cap threw away — is reachable.
 	assert.ok(
-		conversations.some((c) => c.title === "conversacion 0"),
+		conversations.some((c) => c.title === "conversation 0"),
 		"the oldest conversation is still listed",
 	);
 
@@ -448,7 +448,7 @@ test("GET /api/conversations/preview shows where the conversation got to, and wh
 		preview: { text: string; turns: number };
 		adoptable: { ok: boolean; workdir: string | null };
 	};
-	assert.match(body.preview.text, /Necesito un workflow para el release/);
+	assert.match(body.preview.text, /I need a workflow for the release/);
 	assert.deepEqual(body.adoptable.ok, true);
 	assert.equal(body.adoptable.workdir, projDir, "the directory the workflow will be pinned to");
 
@@ -543,7 +543,7 @@ test("a workflow created from a conversation ADOPTS it: same session, same direc
 		method: "POST",
 		headers: adminHeaders(),
 		body: JSON.stringify({
-			name: "desde la conversacion",
+			name: "from the conversation",
 			conversation: { runner: "claude", sessionId: CLAUDE_SESSION },
 		}),
 	});
@@ -598,7 +598,7 @@ test("an operator note is delivered as one turn inside the adopted conversation"
 	// The note, and ONLY the note: the transcript it would once have been prefixed
 	// to is the session the workflow is now running in.
 	assert.equal(created.workflow.conversationContext, "Responde siempre en espanol.");
-	assert.doesNotMatch(created.workflow.conversationContext, /Arregla el bug del login/);
+	assert.doesNotMatch(created.workflow.conversationContext, /Fix the login bug/);
 
 	// It rides the machinery that already delivers a workflow's background: the
 	// hub-owned context step, one turn, before any real step.
@@ -699,7 +699,7 @@ test("the first step of an adopted workflow dispatches as a RESUME of that conve
 		method: "POST",
 		headers: adminHeaders(),
 		body: JSON.stringify({
-			name: "reanuda la conversacion",
+			name: "resumes the conversation",
 			conversation: { runner: "claude", sessionId: CLAUDE_SESSION },
 		}),
 	});
@@ -707,7 +707,7 @@ test("the first step of an adopted workflow dispatches as a RESUME of that conve
 	const { workflow: created } = (await res.json()) as { workflow: { id: string } };
 	const workflow = getWorkflow(created.id);
 	assert.ok(workflow);
-	const step = getStep(insertStep(workflow.id, "el primer paso").id);
+	const step = getStep(insertStep(workflow.id, "the first step").id);
 	assert.ok(step);
 
 	// Point the dispatch at the fake broker instead of the real awb port.
@@ -726,16 +726,16 @@ test("restarting an adopted workflow goes back to the conversation, not to a bla
 		method: "POST",
 		headers: adminHeaders(),
 		body: JSON.stringify({
-			name: "reinicia",
+			name: "restarts",
 			conversation: { runner: "claude", sessionId: CLAUDE_SESSION },
 		}),
 	});
 	assert.equal(res.status, 200);
 	const { workflow: created } = (await res.json()) as { workflow: { id: string } };
-	insertStep(created.id, "un paso");
+	insertStep(created.id, "a step");
 
 	// A run has moved the session on (the harness reports its own id back).
-	setWorkflowSessionId(created.id, "una-sesion-posterior");
+	setWorkflowSessionId(created.id, "a-later-session");
 	await restartWorkflow(created.id, cfg, silent);
 
 	const after = getWorkflow(created.id);
@@ -784,7 +784,7 @@ test("a workflow created without a conversation still has no context step (uncha
 	const res = await fetch(`${baseUrl}/api/workflows`, {
 		method: "POST",
 		headers: adminHeaders(),
-		body: JSON.stringify({ name: "sin conversacion" }),
+		body: JSON.stringify({ name: "without a conversation" }),
 	});
 	assert.equal(res.status, 200);
 	const created = (await res.json()) as { workflow: { id: string; conversationContext: string | null } };

@@ -92,6 +92,22 @@ test("parseCurlTemplate reads URL and headers in any order", () => {
 	assert.equal(parsed.headers.Authorization, "Bearer tok");
 });
 
+test("parseCurlTemplate reads -sS quoted URL followed by -H headers", () => {
+	const parsed = parseCurlTemplate(
+		'curl -sS "https://jira.example.com/rest/api/2/issue/KEY-1?fields=summary" -H "Authorization: Bearer tok" -H "Accept: application/json"',
+	);
+	assert.equal(parsed.url, "https://jira.example.com/rest/api/2/issue/KEY-1?fields=summary");
+	assert.equal(parsed.headers.Authorization, "Bearer tok");
+	assert.equal(parsed.headers.Accept, "application/json");
+});
+
+test("parseCurlTemplate maps -u to Basic Authorization", () => {
+	const parsed = parseCurlTemplate(
+		'curl -sS "https://jira.example.com/rest/api/2/issue/KEY-1" -u "user:pass" -H "Accept: application/json"',
+	);
+	assert.equal(parsed.headers.Authorization, `Basic ${Buffer.from("user:pass").toString("base64")}`);
+});
+
 test("validateInputs reports missing required inputs", () => {
 	const missing = validateInputs(
 		{

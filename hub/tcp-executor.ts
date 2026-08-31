@@ -42,19 +42,17 @@ export function parseCurlTemplate(template: string): ParsedCurlRequest {
 	let method = "GET";
 	const headers: Record<string, string> = {};
 	let body: string | null = null;
-
-	const methodMatch = /(?:^|\s)-X\s+(\w+)/i.exec(rest);
-	if (methodMatch) {
-		method = methodMatch[1].toUpperCase();
-		rest = rest.replace(methodMatch[0], " ").trim();
-	}
-
-	const urlMatch = /https?:\/\/[^\s'"]+/i.exec(rest) ?? /^(\S+)/.exec(rest);
-	if (!urlMatch) throw new Error("invalid_curl_template");
-	const url = urlMatch[0].replace(/^['"]|['"]$/g, "");
-	rest = rest.replace(urlMatch[0], " ").trim();
+	let url = "";
 
 	while (rest.length > 0) {
+		if (rest.startsWith("-X ") || rest.startsWith("--request ")) {
+			const flag = rest.startsWith("-X ") ? "-X " : "--request ";
+			rest = rest.slice(flag.length).trim();
+			const token = readQuoted(rest);
+			method = token.value.toUpperCase();
+			rest = token.rest.trim();
+			continue;
+		}
 		if (rest.startsWith("-H ") || rest.startsWith("--header ")) {
 			const flag = rest.startsWith("-H ") ? "-H " : "--header ";
 			rest = rest.slice(flag.length).trim();
@@ -64,6 +62,14 @@ export function parseCurlTemplate(template: string): ParsedCurlRequest {
 			const key = quoted.value.slice(0, sep).trim();
 			const value = quoted.value.slice(sep + 1).trim();
 			headers[key] = value;
+			rest = quoted.rest.trim();
+			continue;
+		}
+		if (rest.startsWith("-u ") || rest.startsWith("--user ")) {
+			const flag = rest.startsWith("-u ") ? "-u " : "--user ";
+			rest = rest.slice(flag.length).trim();
+			const quoted = readQuoted(rest);
+			headers.Authorization = `Basic ${Buffer.from(quoted.value).toString("base64")}`;
 			rest = quoted.rest.trim();
 			continue;
 		}
@@ -80,6 +86,12 @@ export function parseCurlTemplate(template: string): ParsedCurlRequest {
 			rest = quoted.rest.trim();
 			continue;
 		}
+		if (rest.startsWith("http://") || rest.startsWith("https://") || rest.startsWith("'") || rest.startsWith('"')) {
+			const quoted = readQuoted(rest);
+			url = quoted.value.replace(/^['"]|['"]$/g, "");
+			rest = quoted.rest.trim();
+			continue;
+		}
 		if (rest.startsWith("-")) {
 			const skip = /^\S+/.exec(rest);
 			rest = skip ? rest.slice(skip[0].length).trim() : "";
@@ -88,6 +100,7 @@ export function parseCurlTemplate(template: string): ParsedCurlRequest {
 		break;
 	}
 
+	if (!url) throw new Error("invalid_curl_template");
 	if (!headers["content-type"] && body != null) headers["content-type"] = "application/json";
 	return { method, url, headers, body };
 }
@@ -173,7 +186,7 @@ export async function executeTcpTool(
 		return {
 			ok: false,
 			error: "missing_inputs",
-			message: `Faltan entradas obligatorias: ${missing.join(", ")}`,
+			message: `Missing required inputs: ${missing.join(", ")}`,
 			missing,
 		};
 	}
@@ -184,7 +197,7 @@ export async function executeTcpTool(
 	try {
 		parsed = parseCurlTemplate(resolvedTemplate);
 	} catch {
-		return { ok: false, error: "invalid_template", message: "La plantilla curl no es válida" };
+		return { ok: false, error: "invalid_template", message: "The curl template is not valid" };
 	}
 
 	const headers = Object.fromEntries(
@@ -231,7 +244,7 @@ export function defaultToolInputs(tool: TcpTool): TcpToolInput[] {
 			{
 				name: "default",
 				placeholder: "$MODEL_INPUT",
-				description: "Argumento del agente",
+				description: "Agent argument",
 				required: true,
 			},
 		];

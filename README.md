@@ -70,6 +70,46 @@ to boot until `hub/ui/dist` exists. Rebuild it on its own with:
 npm run ui:build
 ```
 
+### Desktop app (optional)
+
+`npm start` + the browser is the normal way to run this. The repo also ships
+Electron wrappers that package the hub, the broker and the UI into one
+double-clickable app, for when you'd rather not keep a terminal open.
+
+**These are not published anywhere — no releases, no downloads.** You build
+your own, and you can only build for the machine you are on: a `.dmg` needs
+macOS, the Windows installer needs Windows.
+
+```bash
+npm run target:install       # first — see below, this one is not optional
+npm --prefix desktop/linux install
+npm run desktop:build:linux
+```
+
+Swap `linux` for `mac` or `windows`. (`npm run desktop:install` does all three
+at once, but that downloads Electron three times — install just the one you
+need.) What comes out lands in `desktop/<platform>/dist`:
+
+| Platform | Artifacts |
+|---|---|
+| Linux | `Target for Linux-<version>.AppImage`, `.deb` |
+| macOS | `Target for Mac-<version>.dmg` |
+| Windows | `Target for Windows Setup <version>.exe` (installer), `Target for Windows <version>.exe` (portable) |
+
+**`npm run target:install` has to come first.** The packager copies `vendor/`
+and `hub/node_modules/` into the app, and those are what that command creates —
+build without it and you get an app that starts and then fails looking for the
+broker. Building on the wrong OS fails quietly the same way: ask for a `.dmg`
+from Linux and electron-builder hands you a `.zip` instead.
+
+**The app bundles a snapshot of `hub/`, taken when you build.** It does not
+track the repo afterwards, so an app built before a change keeps running the
+old hub until you rebuild it. If you are testing a change you just made, use
+`npm start` — same hub, current code, no packaging step.
+
+macOS builds are unsigned (`"identity": null`), so Gatekeeper will refuse the
+first launch: right-click the app → **Open** to get the one-time override.
+
 ## Usage
 
 ```bash

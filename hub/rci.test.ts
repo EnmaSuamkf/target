@@ -386,8 +386,8 @@ test("agents and documents inject beside skills, each under its own file name", 
 	const preamble = resourcesCatalogPreamble(wf.id);
 	// Each block says what kind of thing the agent is being handed.
 	assert.match(preamble, /### Skill: brainstorming/);
-	assert.match(preamble, /### Agente: code-reviewer/);
-	assert.match(preamble, /### Documento: architecture/);
+	assert.match(preamble, /### Agent: code-reviewer/);
+	assert.match(preamble, /### Document: architecture/);
 	assert.match(preamble, /You review code\./);
 
 	const root = path.join(workflowResourcesDir(wf.id), "mixed");
