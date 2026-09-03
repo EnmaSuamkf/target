@@ -578,12 +578,13 @@ on the host exactly as they did.
 **A sandboxed workflow needs the hub bound where a container can reach it.**
 The container runs on docker's default bridge, so `127.0.0.1` in there is the
 container, not your machine — and the hub binds to `127.0.0.1` by default. The
-hub already rewrites the urls it hands a sandboxed step (its TCP execution
-endpoint and the run callbacks) to the bridge gateway, but it cannot rewrite
-what it is *listening* on: bound to loopback it refuses
-the connection however right the address is, and the agent reads that as "the
-hub isn't running" and improvises. Set `host` in `~/.target/config.json` and
-restart:
+hub rewrites TCP-tool urls for sandboxed steps to `host.docker.internal`, and
+the broker adds `--add-host=host.docker.internal:host-gateway` on every
+sandboxed `docker run` so that name resolves on Linux as well as Docker
+Desktop. It cannot rewrite what the hub is *listening* on: bound to loopback it
+refuses the connection however right the address is, and the agent reads that as
+"the hub isn't running" and improvises. Set `host` in `~/.target/config.json`
+and restart:
 
 ```json
 { "host": "0.0.0.0" }
