@@ -14,6 +14,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { getReportSettings } from "./db.ts";
 
 export interface HubConfig {
 	host: string;
@@ -184,7 +185,8 @@ function envFlag(value: string | undefined, fallback: boolean): boolean {
 	return fallback;
 }
 
-export function loadReportConfig(): ReportConfig {
+/** Activity-reporting values read from the environment (legacy `.env` path). */
+export function loadReportConfigFromEnv(): ReportConfig {
 	const url = (process.env.TARGET_REPORT_URL ?? "").trim();
 	const token = (process.env.TARGET_REPORT_TOKEN ?? "").trim();
 	const enabled = url.length > 0 && envFlag(process.env.TARGET_REPORT_ENABLED, true);
@@ -201,6 +203,30 @@ export function loadReportConfig(): ReportConfig {
 	const pinnedId = (process.env.TARGET_INSTANCE_ID ?? "").trim();
 
 	return { enabled, url, token, intervalMs, includeConversations, instanceId: pinnedId.length > 0 ? pinnedId : null };
+}
+
+/**
+ * Effective activity-reporting config. Settings saved from the UI win; until
+ * the operator saves at least once, the `.env` values (if any) still apply so
+ * existing installs keep working without migration.
+ */
+export function loadReportConfig(): ReportConfig {
+	const stored = getReportSettings();
+	if (stored.updatedAt != null) {
+		const url = stored.url.trim();
+		const token = stored.token.trim();
+		const enabled = stored.enabled && url.length > 0;
+		const pinnedId = (process.env.TARGET_INSTANCE_ID ?? "").trim();
+		return {
+			enabled,
+			url,
+			token,
+			intervalMs: stored.intervalMs,
+			includeConversations: stored.includeConversations,
+			instanceId: pinnedId.length > 0 ? pinnedId : null,
+		};
+	}
+	return loadReportConfigFromEnv();
 }
 
 /** True when the URL is a non-loopback plaintext http:// endpoint (worth a startup warning). */

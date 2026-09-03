@@ -21,7 +21,7 @@ import {
 } from "./tcp-selection.ts";
 import { type ResourceSelection, normalizeResourceSelections } from "./rci-selection.ts";
 import * as path from "node:path";
-import { dbFile } from "./config.ts";
+import { dbFile, type ConversationReportMode } from "./config.ts";
 import type { ProgressKind } from "./progress.ts";
 
 /**
@@ -2355,6 +2355,134 @@ export function saveShortcutSettings(input: {
 		.run(
 			SHORTCUT_SETTINGS_KEY,
 			JSON.stringify({ bindings: settings.bindings }),
+			settings.updatedAt,
+		);
+	return settings;
+}
+
+// --- Activity reporting (report server) ---------------------------------
+//
+// The ingest URL, bearer token and related knobs used to live only in `.env`.
+// They're editable from the Settings view now and stored here; until the
+// operator saves at least once, loadReportConfig() still reads the `.env`
+// (see config.ts).
+
+/** The single `settings` row the activity-reporting preferences live in. */
+const REPORT_SETTINGS_KEY = "report";
+
+export interface ReportSettings {
+	/** Explicit off switch; reporting is only active when this is true AND url is set. */
+	enabled: boolean;
+	/** Ingest endpoint; empty means disabled. */
+	url: string;
+	/** Bearer token for the ingest endpoint (never returned by the public API). */
+	token: string;
+	/** Flush cadence in ms. */
+	intervalMs: number;
+	includeConversations: ConversationReportMode;
+	/** Null until saved at least once from Settings (`.env` still applies until then). */
+	updatedAt: string | null;
+}
+
+/** What GET /api/settings/report returns — no secret crosses the wire. */
+export interface PublicReportSettings {
+	enabled: boolean;
+	url: string;
+	tokenConfigured: boolean;
+	intervalMs: number;
+	includeConversations: ConversationReportMode;
+	updatedAt: string | null;
+	/** True while behaviour is still driven by `.env` because nothing was saved here yet. */
+	envConfigured: boolean;
+}
+
+const DEFAULT_REPORT_INTERVAL_MS = 30_000;
+const MIN_REPORT_INTERVAL_MS = 1_000;
+
+export function defaultReportSettings(): ReportSettings {
+	return {
+		enabled: false,
+		url: "",
+		token: "",
+		intervalMs: DEFAULT_REPORT_INTERVAL_MS,
+		includeConversations: "digest",
+		updatedAt: null,
+	};
+}
+
+function normalizeConversationReportMode(raw: unknown): ConversationReportMode {
+	if (raw === "off" || raw === "full") return raw;
+	return "digest";
+}
+
+function normalizeReportIntervalMs(raw: unknown): number {
+	const n = typeof raw === "number" ? raw : Number.parseInt(String(raw ?? ""), 10);
+	if (!Number.isFinite(n)) return DEFAULT_REPORT_INTERVAL_MS;
+	return Math.max(MIN_REPORT_INTERVAL_MS, n);
+}
+
+export function getReportSettings(): ReportSettings {
+	const row = open().prepare("SELECT * FROM settings WHERE key = ?").get(REPORT_SETTINGS_KEY) as
+		| Record<string, unknown>
+		| undefined;
+	if (!row) return defaultReportSettings();
+	try {
+		const parsed = JSON.parse(String(row.value)) as Record<string, unknown>;
+		return {
+			enabled: parsed.enabled === true,
+			url: typeof parsed.url === "string" ? parsed.url.trim() : "",
+			token: typeof parsed.token === "string" ? parsed.token.trim() : "",
+			intervalMs: normalizeReportIntervalMs(parsed.intervalMs),
+			includeConversations: normalizeConversationReportMode(parsed.includeConversations),
+			updatedAt: row.updated_at == null ? null : String(row.updated_at),
+		};
+	} catch {
+		return defaultReportSettings();
+	}
+}
+
+export function toPublicReportSettings(stored: ReportSettings, envConfigured: boolean): PublicReportSettings {
+	return {
+		enabled: stored.enabled,
+		url: stored.url,
+		tokenConfigured: stored.token.length > 0,
+		intervalMs: stored.intervalMs,
+		includeConversations: stored.includeConversations,
+		updatedAt: stored.updatedAt,
+		envConfigured,
+	};
+}
+
+/** Replaces the stored preferences wholesale and returns what was written. */
+export function saveReportSettings(input: {
+	enabled: boolean;
+	url: string;
+	token: string;
+	intervalMs: number;
+	includeConversations: ConversationReportMode;
+}): ReportSettings {
+	const settings: ReportSettings = {
+		enabled: input.enabled,
+		url: input.url.trim(),
+		token: input.token.trim(),
+		intervalMs: normalizeReportIntervalMs(input.intervalMs),
+		includeConversations: normalizeConversationReportMode(input.includeConversations),
+		updatedAt: new Date().toISOString(),
+	};
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(
+			REPORT_SETTINGS_KEY,
+			JSON.stringify({
+				enabled: settings.enabled,
+				url: settings.url,
+				token: settings.token,
+				intervalMs: settings.intervalMs,
+				includeConversations: settings.includeConversations,
+			}),
 			settings.updatedAt,
 		);
 	return settings;

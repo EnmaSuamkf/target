@@ -26,6 +26,8 @@ import type {
 	HostCapabilities,
 	NotificationSettings,
 	NotificationSettingsInput,
+	ReportSettings,
+	ReportSettingsInput,
 	OverridableStepStatus,
 	OverridableWorkflowStatus,
 	Runner,
@@ -782,6 +784,25 @@ export async function getShortcutSettings(): Promise<ShortcutSettings> {
  */
 export async function saveShortcutSettings(input: ShortcutSettingsInput): Promise<ShortcutSettings> {
 	const data = await request<{ settings: ShortcutSettings }>("/api/settings/shortcuts", {
+		method: "PUT",
+		admin: true,
+		body: json(input),
+	});
+	return data.settings;
+}
+
+/** Activity-reporting preferences: ingest URL and related knobs. */
+export async function getReportSettings(): Promise<ReportSettings> {
+	const data = await request<{ settings: ReportSettings }>("/api/settings/report");
+	return data.settings;
+}
+
+/**
+ * Replaces the stored activity-reporting preferences. The server refuses
+ * `enabled: true` with an empty URL (400).
+ */
+export async function saveReportSettings(input: ReportSettingsInput): Promise<ReportSettings> {
+	const data = await request<{ settings: ReportSettings }>("/api/settings/report", {
 		method: "PUT",
 		admin: true,
 		body: json(input),

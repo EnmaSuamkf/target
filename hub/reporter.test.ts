@@ -189,7 +189,7 @@ test("loadReportConfig parses the environment", () => {
 	// Disabled when the URL is absent, regardless of the enabled flag.
 	delete process.env.TARGET_REPORT_URL;
 	assert.equal(loadReportConfig().enabled, false);
-	process.env = prev;
+	Object.assign(process.env, prev);
 });
 
 test("isInsecureReportUrl flags only non-loopback http", () => {

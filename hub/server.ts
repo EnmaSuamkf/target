@@ -49,6 +49,8 @@
  *   PUT    /api/settings/notifications                     → replace the notification preferences (admin token)
  *   GET    /api/settings/shortcuts                        → keyboard-shortcut bindings (key per action)
  *   PUT    /api/settings/shortcuts                        → replace the shortcut bindings (admin token)
+ *   GET    /api/settings/report                           → activity-reporting preferences (ingest URL + related knobs)
+ *   PUT    /api/settings/report                           → replace the activity-reporting preferences (admin token)
  *   GET    /                                           → ui/index.html
  *
  * Every route except /health, the /api/auth stack and the awb per-step-token
@@ -87,6 +89,7 @@ import {
 } from "./awb.ts";
 import { needsContextReinjection, observeCompaction } from "./compaction.ts";
 import type { HubConfig } from "./config.ts";
+import { isInsecureReportUrl, loadReportConfigFromEnv } from "./config.ts";
 import { adoptability, findConversation, listConversations, readConversationPreview } from "./conversations.ts";
 import {
 	AccountError,
@@ -105,6 +108,7 @@ import {
 	promoteQueuedToRunning,
 	deleteTemplate,
 	getNotificationSettings,
+	getReportSettings,
 	getShortcutSettings,
 	getWorkflow,
 	importTemplates,
@@ -120,6 +124,8 @@ import {
 	OVERRIDABLE_WORKFLOW_STATUSES,
 	parseTemplateBundle,
 	saveNotificationSettings,
+	saveReportSettings,
+	toPublicReportSettings,
 	saveShortcutSettings,
 	stepProgress,
 	templateBundle,
@@ -1672,6 +1678,97 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					.map(([action, binding]) => `${action}=${binding.key}`)
 					.join(", ")})`);
 				sendJson(res, 200, { settings });
+			});
+			return;
+		}
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
+	// --- /api/settings/report ---
+	//
+	// Activity reporting to a central server (TARGET_REPORT_* in the old `.env`
+	// world). Reading is open; the PUT replaces the whole object and is
+	// admin-gated. The bearer token is never returned — only whether one is set.
+	// Until the operator saves at least once, GET reflects the effective `.env`
+	// values so existing installs see what's running without editing files.
+
+	if (parts[1] === "settings" && parts[2] === "report" && !parts[3]) {
+		if (req.method === "GET") {
+			const stored = getReportSettings();
+			if (stored.updatedAt != null) {
+				sendJson(res, 200, { settings: toPublicReportSettings(stored, false) });
+				return;
+			}
+			const env = loadReportConfigFromEnv();
+			sendJson(res, 200, {
+				settings: toPublicReportSettings(
+					{
+						enabled: env.enabled,
+						url: env.url,
+						token: env.token,
+						intervalMs: env.intervalMs,
+						includeConversations: env.includeConversations,
+						updatedAt: null,
+					},
+					true,
+				),
+			});
+			return;
+		}
+		if (req.method === "PUT" || req.method === "PATCH") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				const enabled = body.enabled === true;
+				const url = typeof body.url === "string" ? body.url.trim() : "";
+				if (enabled && url === "") {
+					sendJson(res, 400, { error: "report server URL is required when reporting is enabled" });
+					return;
+				}
+				if (url !== "") {
+					try {
+						const parsed = new URL(url);
+						if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+							sendJson(res, 400, { error: "report server URL must be http:// or https://" });
+							return;
+						}
+					} catch {
+						sendJson(res, 400, { error: "report server URL is not a valid URL" });
+						return;
+					}
+					if (isInsecureReportUrl(url)) {
+						log("report server URL is plaintext http:// to a non-loopback host — prefer https", "warning");
+					}
+				}
+				const previous = getReportSettings();
+				const env = previous.updatedAt == null ? loadReportConfigFromEnv() : null;
+				let token = previous.token;
+				if (typeof body.token === "string" && body.token.trim() !== "") {
+					token = body.token.trim();
+				} else if (token === "" && env && env.token !== "") {
+					// First save from Settings while `.env` still holds the secret — keep it.
+					token = env.token;
+				}
+				const rawInterval = body.intervalMs;
+				const intervalMs =
+					typeof rawInterval === "number" && Number.isFinite(rawInterval)
+						? Math.max(1_000, rawInterval)
+						: previous.updatedAt != null
+							? previous.intervalMs
+							: (env?.intervalMs ?? 30_000);
+				const rawMode = body.includeConversations;
+				const includeConversations =
+					rawMode === "off" || rawMode === "full"
+						? rawMode
+						: previous.updatedAt != null
+							? previous.includeConversations
+							: (env?.includeConversations ?? "digest");
+				const saved = saveReportSettings({ enabled, url, token, intervalMs, includeConversations });
+				log(`activity reporting settings updated (reporting ${enabled && url ? "enabled" : "disabled"})`);
+				sendJson(res, 200, { settings: toPublicReportSettings(saved, false) });
 			});
 			return;
 		}

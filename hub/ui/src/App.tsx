@@ -8,6 +8,8 @@ import type {
 	CreateWorkflowInput,
 	NotificationSettings,
 	NotificationSettingsInput,
+	ReportSettings,
+	ReportSettingsInput,
 	OverridableStepStatus,
 	OverridableWorkflowStatus,
 	SessionInfo,
@@ -214,6 +216,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	const [resourceSets, setResourceSets] = useState<ResourceSet[]>([]);
 	const [settings, setSettings] = useState<NotificationSettings | null>(null);
 	const [shortcutSettings, setShortcutSettings] = useState<ShortcutSettings | null>(null);
+	const [reportSettings, setReportSettings] = useState<ReportSettings | null>(null);
 	const [selectedId, setSelectedId] = useState<string | null>(readHashSelection);
 	const [steps, setSteps] = useState<Step[]>([]);
 	const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
@@ -316,6 +319,10 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		setShortcutSettings(await api.getShortcutSettings());
 	}, []);
 
+	const refreshReportSettings = useCallback(async (): Promise<void> => {
+		setReportSettings(await api.getReportSettings());
+	}, []);
+
 	// Leaving the workflows view closes the "All workflows" page so a return to
 	// the Workflows tab starts on the rail, not stranded on the page.
 	useEffect(() => {
@@ -346,6 +353,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 					refreshResourceSets(),
 					refreshSettings(),
 					refreshShortcutSettings(),
+					refreshReportSettings(),
 				]);
 			} catch (err) {
 				reportError(err, "Could not load data");
@@ -360,6 +368,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		refreshResourceSets,
 		refreshSettings,
 		refreshShortcutSettings,
+		refreshReportSettings,
 		reportError,
 	]);
 
@@ -1228,6 +1237,13 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		});
 	};
 
+	const handleSaveReportSettings = async (input: ReportSettingsInput): Promise<boolean> => {
+		return await act("Could not save activity reporting", async () => {
+			setReportSettings(await api.saveReportSettings(input));
+			toast.success("Activity reporting saved.");
+		});
+	};
+
 	return (
 		<div className={styles.app}>
 			<Header
@@ -1360,16 +1376,18 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 						onBeforeRemoveResource={confirmResourceRemoval}
 						onScan={handleScanResources}
 					/>
-				) : view === "settings" && settings && shortcutSettings ? (
-					// Keyed on both save stamps: a successful save in either section re-seeds
+				) : view === "settings" && settings && shortcutSettings && reportSettings ? (
+					// Keyed on all three save stamps: a successful save in any section re-seeds
 					// that form's local fields from what the hub actually stored.
 					<SettingsView
-						key={`${settings.updatedAt ?? "unsaved"}|${shortcutSettings.updatedAt ?? "unsaved"}`}
+						key={`${settings.updatedAt ?? "unsaved"}|${shortcutSettings.updatedAt ?? "unsaved"}|${reportSettings.updatedAt ?? "unsaved"}|${reportSettings.envConfigured}`}
 						settings={settings}
 						shortcutSettings={shortcutSettings}
+						reportSettings={reportSettings}
 						busy={busy}
 						onSave={handleSaveNotificationSettings}
 						onSaveShortcuts={handleSaveShortcutSettings}
+						onSaveReport={handleSaveReportSettings}
 					/>
 				) : (
 					<section className={styles.placeholder}>
