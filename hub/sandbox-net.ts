@@ -10,10 +10,9 @@
  *
  * From inside a default-bridge container the host is the bridge gateway, which
  * is the host's own address on `docker0`. Docker Desktop (macOS, Windows)
- * publishes `host.docker.internal` for the same thing; on Linux that name only
- * resolves when the container was started with
- * `--add-host=host.docker.internal:host-gateway`, which the broker does not
- * pass, so the gateway address is read directly instead.
+ * publishes `host.docker.internal` for the same thing; on Linux the broker
+ * passes `--add-host=host.docker.internal:host-gateway` on every sandboxed
+ * `docker run`, so this hostname resolves there too.
  *
  * Knowing the address is only half of it: the hub also has to be LISTENING on
  * something the container can reach. Bound to `127.0.0.1` (the default, and the
