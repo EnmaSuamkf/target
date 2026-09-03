@@ -552,6 +552,34 @@ export interface ShortcutSettingsInput {
 	bindings: Record<ShortcutAction, ShortcutBinding>;
 }
 
+/** Conversation privacy when reporting activity to a central server. */
+export type ConversationReportMode = "off" | "digest" | "full";
+
+export const CONVERSATION_REPORT_MODES = ["off", "digest", "full"] as const;
+
+/** Activity-reporting preferences (ingest URL and related knobs). */
+export interface ReportSettings {
+	enabled: boolean;
+	url: string;
+	/** Whether a bearer token is stored — the secret itself is never returned. */
+	tokenConfigured: boolean;
+	intervalMs: number;
+	includeConversations: ConversationReportMode;
+	updatedAt: string | null;
+	/** True while the hub is still reading these values from `.env`. */
+	envConfigured: boolean;
+}
+
+/** Payload accepted by PUT /api/settings/report (a full replace). */
+export interface ReportSettingsInput {
+	enabled: boolean;
+	url: string;
+	/** Omit or leave empty to keep the stored token. */
+	token?: string;
+	intervalMs: number;
+	includeConversations: ConversationReportMode;
+}
+
 /** Token usage for the workflow's session, read off the harness transcript. */
 export interface TokenUsage {
 	turns: number;

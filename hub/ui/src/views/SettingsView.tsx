@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import type { NotificationSettings, NotificationSettingsInput, ShortcutAction, ShortcutSettings, ShortcutSettingsInput } from "../api/types.ts";
+import type { NotificationSettings, NotificationSettingsInput, ReportSettings, ReportSettingsInput, ShortcutAction, ShortcutSettings, ShortcutSettingsInput } from "../api/types.ts";
 import { Field } from "../components/Field.tsx";
 import { Switch } from "../components/Switch.tsx";
 import { relativeTime } from "../lib/format.ts";
@@ -36,15 +36,19 @@ const SHORTCUT_ORDER: readonly ShortcutAction[] = [
 export function SettingsView({
 	settings,
 	shortcutSettings,
+	reportSettings,
 	busy,
 	onSave,
 	onSaveShortcuts,
+	onSaveReport,
 }: {
 	settings: NotificationSettings;
 	shortcutSettings: ShortcutSettings;
+	reportSettings: ReportSettings;
 	busy: boolean;
 	onSave: (input: NotificationSettingsInput) => Promise<boolean>;
 	onSaveShortcuts: (input: ShortcutSettingsInput) => Promise<boolean>;
+	onSaveReport: (input: ReportSettingsInput) => Promise<boolean>;
 }): React.JSX.Element {
 	const [enabled, setEnabled] = useState(settings.enabled);
 	const [slackUsername, setSlackUsername] = useState(settings.channels.slack.username);
@@ -64,9 +68,18 @@ export function SettingsView({
 	const [shortcutError, setShortcutError] = useState<string | null>(null);
 	const [savingShortcuts, setSavingShortcuts] = useState(false);
 
+	const [reportEnabled, setReportEnabled] = useState(reportSettings.enabled);
+	const [reportUrl, setReportUrl] = useState(reportSettings.url);
+	const [reportToken, setReportToken] = useState("");
+	const [reportIntervalMs, setReportIntervalMs] = useState(String(reportSettings.intervalMs));
+	const [reportConversations, setReportConversations] = useState(reportSettings.includeConversations);
+	const [reportError, setReportError] = useState<string | null>(null);
+	const [savingReport, setSavingReport] = useState(false);
+
 	const notificationsId = useId();
 	const hintId = `${notificationsId}-hint`;
 	const shortcutsId = useId();
+	const reportId = useId();
 
 	const submit = async (ev: React.FormEvent): Promise<void> => {
 		ev.preventDefault();
@@ -129,6 +142,37 @@ export function SettingsView({
 			});
 		} finally {
 			setSavingShortcuts(false);
+		}
+	};
+
+	const submitReport = async (ev: React.FormEvent): Promise<void> => {
+		ev.preventDefault();
+		if (savingReport) return;
+		const url = reportUrl.trim();
+		if (reportEnabled && url === "") {
+			setReportError("Enter the report server URL, or turn reporting off.");
+			return;
+		}
+		const intervalMs = Number.parseInt(reportIntervalMs, 10);
+		if (!Number.isFinite(intervalMs) || intervalMs < 1000) {
+			setReportError("Flush interval must be at least 1000 ms.");
+			return;
+		}
+		setReportError(null);
+		setSavingReport(true);
+		try {
+			const input: ReportSettingsInput = {
+				enabled: reportEnabled,
+				url,
+				intervalMs,
+				includeConversations: reportConversations,
+			};
+			const token = reportToken.trim();
+			if (token !== "") input.token = token;
+			const ok = await onSaveReport(input);
+			if (ok) setReportToken("");
+		} finally {
+			setSavingReport(false);
 		}
 	};
 
@@ -211,6 +255,139 @@ export function SettingsView({
 						{saving ? "Saving…" : "Save"}
 					</button>
 					{settings.updatedAt && <span className="hint">Last saved {relativeTime(settings.updatedAt)}</span>}
+				</div>
+			</form>
+
+			<form className={styles.section} aria-labelledby={`${reportId}-section`} onSubmit={submitReport}>
+				<h3 className={styles.sectionHeading} id={`${reportId}-section`}>
+					Activity reporting
+				</h3>
+				<p className="hint">
+					Send workflow and step activity to a central server for monitoring. Stored by the hub — the same
+					values apply in the desktop app and in the browser.
+					{reportSettings.envConfigured && (
+						<>
+							{" "}
+							Currently reading from <code>.env</code> — save here to manage from Settings instead.
+						</>
+					)}
+				</p>
+
+				<div className={styles.toggleRow}>
+					<div className={styles.toggleText}>
+						<span className="label">Report activity</span>
+						<p className="hint" id={`${reportId}-hint`}>
+							{reportEnabled
+								? "On — events are queued and flushed to the server URL below."
+								: "Off — nothing is sent to a report server."}
+						</p>
+					</div>
+					<Switch
+						checked={reportEnabled}
+						onChange={(next) => {
+							setReportEnabled(next);
+							if (!next) setReportError(null);
+						}}
+						label="Report activity"
+						describedBy={`${reportId}-hint`}
+						disabled={savingReport}
+					/>
+				</div>
+
+				{reportEnabled && (
+					<div className={styles.channels}>
+						<Field
+							label="Report server URL"
+							hint="HTTPS ingest endpoint that receives activity batches."
+							required
+							{...(reportError?.includes("URL") ? { error: reportError } : {})}
+						>
+							{(props) => (
+								<input
+									{...props}
+									type="url"
+									className="input"
+									autoComplete="off"
+									value={reportUrl}
+									placeholder="https://telemetria.example.com/ingest"
+									onChange={(ev) => {
+										setReportUrl(ev.target.value);
+										if (reportError) setReportError(null);
+									}}
+									aria-invalid={reportError?.includes("URL") ? true : undefined}
+								/>
+							)}
+						</Field>
+
+						<Field
+							label="Bearer token"
+							hint={
+								reportSettings.tokenConfigured
+									? "Leave blank to keep the stored token."
+									: "Secret sent as Authorization: Bearer …"
+							}
+						>
+							{(props) => (
+								<input
+									{...props}
+									type="password"
+									className="input"
+									autoComplete="off"
+									value={reportToken}
+									placeholder={reportSettings.tokenConfigured ? "••••••••" : "change-me"}
+									onChange={(ev) => setReportToken(ev.target.value)}
+								/>
+							)}
+						</Field>
+
+						<Field label="Flush interval (ms)" hint="How often the hub sends queued events. Minimum 1000.">
+							{(props) => (
+								<input
+									{...props}
+									type="number"
+									className="input"
+									min={1000}
+									step={1000}
+									value={reportIntervalMs}
+									onChange={(ev) => {
+										setReportIntervalMs(ev.target.value);
+										if (reportError) setReportError(null);
+									}}
+									aria-invalid={reportError?.includes("interval") ? true : undefined}
+								/>
+							)}
+						</Field>
+
+						<Field label="Conversation detail" hint="How much conversation text may leave this machine.">
+							{(props) => (
+								<select
+									{...props}
+									className="input"
+									value={reportConversations}
+									onChange={(ev) => setReportConversations(ev.target.value as ReportSettings["includeConversations"])}
+								>
+									<option value="off">Off — no conversation data</option>
+									<option value="digest">Digest — metadata and summary only (default)</option>
+									<option value="full">Full — include conversation text</option>
+								</select>
+							)}
+						</Field>
+					</div>
+				)}
+
+				{reportError && !reportError.includes("URL") && (
+					<p className="msg msg--error" role="alert">
+						{reportError}
+					</p>
+				)}
+
+				<div className={styles.actions}>
+					<button type="submit" className="btn btn--primary" disabled={savingReport || busy}>
+						{savingReport ? "Saving…" : "Save"}
+					</button>
+					{reportSettings.updatedAt && (
+						<span className="hint">Last saved {relativeTime(reportSettings.updatedAt)}</span>
+					)}
 				</div>
 			</form>
 

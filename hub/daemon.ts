@@ -65,7 +65,7 @@ export function startHub(): void {
 			log(`workflow announce failed: ${String(err)}`, "warning");
 		}
 		const flusher = setInterval(() => {
-			// A fresh read each tick so an edited .env (after a restart) is honoured.
+			// A fresh read each tick so edits from Settings (or `.env` after a restart) apply.
 			const current = loadReportConfig();
 			if (!current.enabled) return;
 			try {
