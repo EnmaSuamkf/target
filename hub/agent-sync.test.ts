@@ -2,7 +2,6 @@
  * Agent skill + MCP sync.
  */
 import * as assert from "node:assert/strict";
-import * as cp from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -16,6 +15,13 @@ fs.writeFileSync(
 	path.join(process.env.TARGET_HOME, "config.json"),
 	`${JSON.stringify({ host: "127.0.0.1", port: 8893, adminToken: "sync-test-token" })}\n`,
 );
+
+// Stub runner CLIs so sync tests do not depend on host-installed agents (CI has none).
+const mockBin = fs.mkdtempSync(path.join(os.tmpdir(), "target-mock-runners-"));
+for (const name of ["agent", "claude", "free-code"]) {
+	fs.writeFileSync(path.join(mockBin, name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+}
+process.env.PATH = `${mockBin}${path.delimiter}${process.env.PATH ?? ""}`;
 
 const { syncSkills, syncMcp, TARGET_SKILL_VERSION } = await import("./agent-sync.ts");
 
@@ -64,9 +70,7 @@ test("syncMcp merges target server into cursor mcp.json", () => {
 	assert.ok(parsed.mcpServers.other);
 });
 
-test("syncMcp enables free-code mcp status when configured", (t) => {
-	const probe = cp.spawnSync("free-code", ["--version"], { stdio: ["ignore", "pipe", "pipe"], timeout: 5000 });
-	if (probe.status !== 0) t.skip("free-code not installed");
+test("syncMcp enables free-code mcp status when configured", () => {
 	const mcpFile = path.join(tmpHome, ".free-code/agent/mcp.json");
 	fs.mkdirSync(path.dirname(mcpFile), { recursive: true });
 	fs.writeFileSync(mcpFile, JSON.stringify({ mcpServers: {} }, null, 2));
