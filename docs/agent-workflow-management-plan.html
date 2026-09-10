@@ -1,0 +1,1088 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>The Target Project — agents that create and modify workflows</title>
+    <meta name="description" content="Hybrid plan: workflow-scoped TCP/RCI for Target steps, plus global per-runner skills (target sync-skills) for ad-hoc CLI and Cursor conversations." />
+    <style>
+      :root{
+        --bg: #0e1416;
+        --surface: #141c1f;
+        --surface-2: #182124;
+        --border: #253034;
+        --text: #e6edee;
+        --muted: #8ea1a6;
+        --faint: #5d7378;
+        --accent: #5ed6a4;
+        --accent-dim: #2f6b54;
+        --warn: #e7b563;
+        --danger: #e07b6b;
+        --good: #5ed6a4;
+        --mono: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        --sans: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      *{ box-sizing: border-box; }
+      html{ scroll-behavior: smooth; }
+      body{
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
+        line-height: 1.65;
+      }
+      a{ color: var(--accent); }
+      a:focus-visible{ outline: 2px solid var(--accent); outline-offset: 2px; }
+      code, kbd{
+        font-family: var(--mono);
+        font-size: 0.88em;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        padding: 0.05em 0.4em;
+        border-radius: 4px;
+        white-space: nowrap;
+      }
+      pre{
+        font-family: var(--mono);
+        font-size: 0.82rem;
+        line-height: 1.6;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1rem 1.15rem;
+        overflow-x: auto;
+        margin: 0 0 1rem;
+      }
+      pre code{ background: none; border: none; padding: 0; white-space: pre; }
+
+      .shell{ max-width: 920px; margin: 0 auto; padding: 3.2rem 1.5rem 5rem; }
+
+      header.hero{ margin-bottom: 2.6rem; }
+      .eyebrow{
+        font-family: var(--mono);
+        font-size: 0.74rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--accent);
+        display: flex;
+        align-items: center;
+        gap: 0.6em;
+        margin-bottom: 0.6rem;
+      }
+      .eyebrow::before{
+        content: "";
+        width: 6px; height: 6px;
+        background: var(--accent);
+        border-radius: 50%;
+        box-shadow: 0 0 0 3px var(--accent-dim);
+      }
+      h1{
+        font-family: var(--mono);
+        font-size: clamp(1.6rem, 4vw, 2.2rem);
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        margin: 0 0 0.8rem;
+        line-height: 1.25;
+      }
+      .lede{ color: var(--muted); font-size: 1.02rem; margin: 0; max-width: 72ch; }
+
+      h2{
+        font-family: var(--mono);
+        font-size: 1.08rem;
+        font-weight: 600;
+        margin: 3.2rem 0 1rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 1px solid var(--border);
+        letter-spacing: -0.01em;
+      }
+      h2 .num{ color: var(--accent); margin-right: 0.55em; }
+      h3{
+        font-family: var(--mono);
+        font-size: 0.94rem;
+        font-weight: 600;
+        margin: 2rem 0 0.7rem;
+        color: var(--text);
+      }
+      p{ margin: 0 0 1rem; }
+      ul, ol{ margin: 0 0 1rem; padding-left: 1.3rem; }
+      li{ margin-bottom: 0.45rem; }
+      strong{ color: #f2f8f9; }
+
+      .callout{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--accent);
+        border-radius: 8px;
+        padding: 1rem 1.15rem;
+        margin: 1.4rem 0;
+      }
+      .callout.warn{ border-left-color: var(--warn); }
+      .callout.danger{ border-left-color: var(--danger); }
+      .callout.good{ border-left-color: var(--good); }
+      .callout p:last-child{ margin-bottom: 0; }
+
+      table{
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.92rem;
+        margin: 1rem 0 1.4rem;
+      }
+      th, td{
+        border: 1px solid var(--border);
+        padding: 0.55rem 0.75rem;
+        text-align: left;
+        vertical-align: top;
+      }
+      th{ background: var(--surface); font-family: var(--mono); font-size: 0.82rem; }
+      td code{ font-size: 0.82em; }
+
+      figure{ margin: 1.6rem 0 1.9rem; }
+      .diagram{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.4rem 1.2rem 1rem;
+        overflow-x: auto;
+      }
+      .diagram svg{ display: block; width: 100%; height: auto; min-width: 680px; }
+      figcaption{
+        color: var(--faint);
+        font-size: 0.84rem;
+        margin-top: 0.65rem;
+        font-family: var(--mono);
+      }
+
+      nav.toc{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.2rem 1.3rem;
+        margin: 2rem 0 2.4rem;
+      }
+      nav.toc h2{ margin: 0 0 0.8rem; padding: 0; border: none; font-size: 0.9rem; }
+      nav.toc ol{ margin: 0; padding-left: 1.2rem; }
+      nav.toc a{ text-decoration: none; }
+      nav.toc a:hover{ text-decoration: underline; }
+
+      .verdict{
+        display: grid;
+        gap: 1rem;
+        margin: 1.5rem 0;
+      }
+      @media (min-width: 700px){
+        .verdict{ grid-template-columns: 1fr 1fr; }
+      }
+      .card{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1rem 1.1rem;
+      }
+      .card h3{ margin-top: 0; font-size: 0.88rem; }
+      .tag{
+        display: inline-block;
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        padding: 0.15em 0.5em;
+        border-radius: 4px;
+        margin-bottom: 0.5rem;
+      }
+      .tag.recommended{ background: var(--accent-dim); color: var(--accent); }
+      .tag.secondary{ background: #3a3020; color: var(--warn); }
+      .tag.not-now{ background: #3a2020; color: var(--danger); }
+
+      footer.meta{
+        margin-top: 4rem;
+        padding-top: 1.5rem;
+        border-top: 1px solid var(--border);
+        color: var(--faint);
+        font-size: 0.84rem;
+        font-family: var(--mono);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <p class="eyebrow">The Target Project · plan (rev. 4)</p>
+        <h1>Letting agents create, delete, and modify workflows &amp; steps</h1>
+        <p class="lede">
+          A <strong>hybrid</strong> plan covering two contexts: <strong>workflow steps</strong> (scoped TCP +
+          RCI) and <strong>ad-hoc CLI / Cursor app conversations</strong> (global skills synced per detected
+          runner via <code>target sync-skills</code>). WebMCP remains optional for browser-native agents only.
+        </p>
+      </header>
+
+      <nav class="toc" aria-label="Table of contents">
+        <h2>Contents</h2>
+        <ol>
+          <li><a href="#goal">Goal &amp; two contexts</a></li>
+          <li><a href="#how-target-works">How Target works today</a></li>
+          <li><a href="#gap">The ad-hoc conversation gap</a></li>
+          <li><a href="#your-proposal">Your proposal (WebMCP + global skills)</a></li>
+          <li><a href="#webmcp-gaps">Why WebMCP is not the main path</a></li>
+          <li><a href="#recommendation">Recommended hybrid approach</a></li>
+          <li><a href="#sync-skills"><code>target sync-skills</code></a></li>
+          <li><a href="#architecture">Architecture</a></li>
+          <li><a href="#implementation">Implementation plan</a></li>
+          <li><a href="#security">Security &amp; scope</a></li>
+          <li><a href="#optional-webmcp">Optional future: WebMCP + Target MCP</a></li>
+          <li><a href="#mcp-manifest">MCP config manifest per runner</a></li>
+          <li><a href="#mcp-runtime">Follow-up: Target MCP needs the hub running</a></li>
+          <li><a href="#summary">Summary</a></li>
+        </ol>
+      </nav>
+
+      <section id="goal">
+        <h2><span class="num">1.</span>Goal &amp; two contexts</h2>
+        <p>
+          Allow agents to <strong>create, delete, and modify workflows and steps</strong> programmatically —
+          using the same hub API the UI and CLI already call — in <em>both</em> of these situations:
+        </p>
+        <table>
+          <thead>
+            <tr><th>Context</th><th>Example</th><th>What must be available</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>A. Target workflow step</strong></td>
+              <td>Agent dispatched by awb on a running workflow</td>
+              <td>Scoped tools + policy injected with the step (TCP + optional RCI)</td>
+            </tr>
+            <tr>
+              <td><strong>B. Ad-hoc conversation</strong></td>
+              <td>New <code>agent</code> terminal session, Cursor app chat, or <code>claude</code> outside Target</td>
+              <td>Global skill the agent always loads — not tied to a workflow dispatch</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          The first version of this plan focused on context A only. That is insufficient: opening a fresh CLI
+          or Cursor conversation does <strong>not</strong> run through Target's dispatch pipeline, so workflow
+          attachments never appear. Context B requires <strong>globally installed skills</strong> per detected
+          runner — your original instinct was right for that case.
+        </p>
+      </section>
+
+      <section id="how-target-works">
+        <h2><span class="num">2.</span>How Target works today</h2>
+
+        <h3>Core model</h3>
+        <ul>
+          <li>
+            Each <strong>workflow</strong> owns one dedicated <strong>agent</strong> (an
+            <code>agent-webhook-bridge</code> hook). Steps run <strong>sequentially</strong> on a
+            <strong>shared harness session</strong> (<code>--resume</code> chained).
+          </li>
+          <li>
+            Three runtimes: <code>claude</code>, <code>free-code</code>, <code>cursor</code> (CLI binary
+            <code>agent</code>). Installed runners are probed via <code>GET /api/runners</code> →
+            <code>availableRunners()</code>.
+          </li>
+          <li>
+            Full JSON API for workflow/step CRUD — see <code>hub/server.ts</code> route header.
+          </li>
+        </ul>
+
+        <h3>Mechanisms that only apply during workflow dispatch (context A)</h3>
+
+        <div class="callout good">
+          <p>
+            <strong>TCP (Tool Catalog Packs)</strong> — HTTP tools the hub runs for the agent. Attached TCP
+            packs are listed in every dispatched step via <code>tcpCatalogPreamble()</code>, with a per-step
+            <code>POST /api/tcps/execute?stepId=…&amp;token=…</code> URL. The agent must send that request
+            itself.
+          </p>
+        </div>
+
+        <div class="callout good">
+          <p>
+            <strong>RCI (Resources Context Injection)</strong> — Markdown resources injected into the step
+            prompt by <code>resourcesCatalogPreamble()</code>. Material lands under
+            <code>~/.target/resources/&lt;workflowId&gt;/</code>. Scoped to the workflow; not global.
+          </p>
+        </div>
+
+        <h3>Hub API (both contexts use this)</h3>
+        <table>
+          <thead>
+            <tr><th>Action</th><th>Route</th><th>Notes</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Create workflow</td><td><code>POST /api/workflows</code></td><td>Creates hook + DB row</td></tr>
+            <tr><td>Delete workflow</td><td><code>DELETE /api/workflows/:id</code></td><td>Removes hook, steps, attachments</td></tr>
+            <tr><td>Clone workflow</td><td><code>POST /api/workflows/:id/clone</code></td><td>Copies steps + selections</td></tr>
+            <tr><td>Rename workflow</td><td><code>PATCH /api/workflows/:id/name</code></td><td></td></tr>
+            <tr><td>Set context</td><td><code>PATCH /api/workflows/:id/context</code></td><td>Locked after first injection</td></tr>
+            <tr><td>Add step</td><td><code>POST /api/workflows/:id/steps</code></td><td>Optional <code>afterStepId</code></td></tr>
+            <tr><td>Edit step</td><td><code>PATCH /api/workflows/:id/steps/:stepId</code></td><td>Pending steps only</td></tr>
+            <tr><td>Delete step</td><td><code>DELETE /api/workflows/:id/steps/:stepId</code></td><td>Pending steps only</td></tr>
+            <tr><td>Move step</td><td><code>POST …/steps/:stepId/move</code></td><td><code>{"direction":"up"|"down"}</code></td></tr>
+            <tr><td>Start / pause / restart</td><td><code>POST …/start|pause|restart</code></td><td>Engine control</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="gap">
+        <h2><span class="num">3.</span>The ad-hoc conversation gap</h2>
+
+        <div class="callout warn">
+          <p>
+            <strong>TCP and RCI are injected only when Target dispatches a step</strong>
+            (<code>composeStepInput()</code> in <code>hub/runner.ts</code>). If you open a new Cursor chat,
+            run <code>agent</code> in a terminal, or start <code>claude</code> in a random directory, none of
+            that injection happens — even if Target is running on the same machine.
+          </p>
+        </div>
+
+        <p>For context B, the agent needs:</p>
+        <ul>
+          <li><strong>Knowledge</strong> — hub base URL, routes, auth, constraints (pending-only edits, context lock).</li>
+          <li><strong>A way to act</strong> — shell/curl against the hub API with the admin Bearer token, or (later) a Target MCP server registered globally in the agent's MCP config.</li>
+        </ul>
+
+        <p>
+          A <strong>global skill</strong> installed into each detected runner's skill directory solves the
+          knowledge problem and points the agent at the REST API. It does <em>not</em> replace TCP for
+          workflow steps — the two layers serve different contexts with different security models.
+        </p>
+      </section>
+
+      <section id="your-proposal">
+        <h2><span class="num">4.</span>Your proposal (WebMCP + global skills)</h2>
+        <ol>
+          <li><strong>WebMCP on every UI action</strong> — <code>document.modelContext.registerTool()</code> in the React UI.</li>
+          <li>
+            <strong>Global skills per detected runner</strong> — when Target sees an installed CLI, ensure a
+            Target management skill exists under that agent's skills directory; install if missing.
+          </li>
+        </ol>
+
+        <div class="callout good">
+          <p>
+            <strong>Revised verdict:</strong> global skills per runner — <strong>yes, for context B</strong>,
+            via an explicit <code>target sync-skills</code> command (see §7). WebMCP — <strong>optional
+            later</strong> for browser agents on the UI tab only; it does not reach CLI sessions.
+          </p>
+        </div>
+      </section>
+
+      <section id="webmcp-gaps">
+        <h2><span class="num">5.</span>Why WebMCP is not the main path</h2>
+
+        <p>
+          WebMCP registers tools on a <strong>web page</strong> for <strong>browser-resident</strong> agents.
+          Target workflow agents are <strong>CLI processes</strong> spawned by awb — they never see
+          <code>document.modelContext</code> unless you add browser automation as an extra hop.
+        </p>
+
+        <table>
+          <thead>
+            <tr><th></th><th>Global skill + hub REST</th><th>WebMCP on UI</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Cursor app / <code>agent</code> CLI</td>
+              <td>Works — skill auto-discovered from home dir</td>
+              <td>Does not apply</td>
+            </tr>
+            <tr>
+              <td>Target workflow step (Docker)</td>
+              <td>Host skill irrelevant; use TCP in prompt</td>
+              <td>Does not apply</td>
+            </tr>
+            <tr>
+              <td>Gemini in Chrome on Target UI</td>
+              <td>Overkill (needs curl + token)</td>
+              <td>Natural fit (future)</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="recommendation">
+        <h2><span class="num">6.</span>Recommended hybrid approach</h2>
+
+        <div class="verdict">
+          <div class="card">
+            <span class="tag recommended">Context A</span>
+            <h3>Target Management TCP pack</h3>
+            <p>
+              Bundled TCP attached to workflows that should self-modify during runs. Per-step execute URL +
+              scoped token. Same tool set as before (<code>add_step</code>, <code>delete_workflow</code>, …).
+            </p>
+          </div>
+          <div class="card">
+            <span class="tag recommended">Context A (optional)</span>
+            <h3>RCI copy on workflow</h3>
+            <p>
+              Same policy skill attached via Resource Set for redundancy in long workflows — optional if TCP
+              catalog + global skill already loaded in the same session.
+            </p>
+          </div>
+          <div class="card">
+            <span class="tag recommended">Context B</span>
+            <h3>Global skill: <code>target-workflows</code></h3>
+            <p>
+              One skill per runner, synced by <code>target sync-skills</code>. Teaches hub REST API, auth
+              from <code>~/.target/config.json</code>, safety rules. Always available in ad-hoc chats.
+            </p>
+          </div>
+          <div class="card">
+            <span class="tag secondary">Context B upgrade</span>
+            <h3>Target MCP server (Phase 4)</h3>
+            <p>
+              Optional local MCP exposing the same operations as structured tools — registered once in
+              <code>~/.cursor/mcp.json</code>, Claude Code MCP config, etc. Better ergonomics than curl in a skill.
+            </p>
+          </div>
+        </div>
+
+        <h3>Example TCP tool (context A — add step)</h3>
+        <pre><code>{
+  "name": "add_step",
+  "description": "Add a pending step to a workflow.",
+  "requestTemplate": "curl -sS -X POST 'http://127.0.0.1:8893/api/workflows/$WORKFLOW_ID/steps' \\
+    -H 'Authorization: Bearer $TOKEN_1' \\
+    -H 'Content-Type: application/json' \\
+    -d '{\"description\":\"$DESCRIPTION\"}'",
+  "inputs": [
+    { "name": "WORKFLOW_ID", "description": "Workflow uuid", "required": true },
+    { "name": "DESCRIPTION", "description": "Step task text", "required": true }
+  ],
+  "tokens": { "TOKEN_1": "&lt;scoped or admin token&gt;" }
+}</code></pre>
+
+        <h3>Global skill content (context B — different auth path)</h3>
+        <p>The global skill does <strong>not</strong> reference <code>/api/tcps/execute</code> (no step token exists outside a dispatch). It teaches:</p>
+        <ul>
+          <li>Hub origin: default <code>http://127.0.0.1:8893</code> (or read from env / config).</li>
+          <li>Auth: <code>Authorization: Bearer &lt;adminToken&gt;</code> from <code>~/.target/config.json</code>.</li>
+          <li>Example: <code>curl -H "Authorization: Bearer …" http://127.0.0.1:8893/api/workflows</code>.</li>
+          <li>Policy: confirm before <code>DELETE</code>; respect pending-only edit rules; context lock after injection.</li>
+        </ul>
+
+        <h3>TCP tool set (unchanged)</h3>
+        <table>
+          <thead>
+            <tr><th>Tool name</th><th>Maps to</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>list_workflows</code></td><td><code>GET /api/workflows</code></td></tr>
+            <tr><td><code>get_workflow</code></td><td><code>GET /api/workflows/:id</code></td></tr>
+            <tr><td><code>create_workflow</code></td><td><code>POST /api/workflows</code></td></tr>
+            <tr><td><code>delete_workflow</code></td><td><code>DELETE /api/workflows/:id</code></td></tr>
+            <tr><td><code>rename_workflow</code></td><td><code>PATCH /api/workflows/:id/name</code></td></tr>
+            <tr><td><code>set_context</code></td><td><code>PATCH /api/workflows/:id/context</code></td></tr>
+            <tr><td><code>add_step</code> … <code>restart_workflow</code></td><td>Same routes as §2 table</td></tr>
+          </tbody>
+        </table>
+
+        <h3>One skill, not one skill per action</h3>
+        <p>
+          Whether global or RCI-injected, a single <code>target-workflows</code> skill teaches <em>policy and
+          patterns</em>. TCP (context A) or REST/MCP (context B) carries the per-operation parameter lists.
+        </p>
+      </section>
+
+      <section id="sync-skills">
+        <h2><span class="num">7.</span><code>target sync-skills</code></h2>
+
+        <p>
+          Explicit, idempotent command — run from <code>npm run target:install</code> and available standalone.
+          Does <strong>not</strong> run silently on every hub request.
+        </p>
+
+        <pre><code># Standalone or as part of install
+node hub/cli.ts sync-skills
+# or: npm run target:sync-skills</code></pre>
+
+        <h3>Algorithm</h3>
+        <ol>
+          <li>Call <code>availableRunners()</code> — same probe as the create form (<code>&lt;binary&gt; --version</code>).</li>
+          <li>For each runner where <code>installed === true</code>, copy the bundled skill from the repo to that runner's global skills path (see table below).</li>
+          <li>
+            Compare a <code>TARGET_SKILL_VERSION</code> stamp inside the installed copy with the repo's
+            version; skip if identical, upgrade if older, never downgrade without <code>--force</code>.
+          </li>
+          <li>Print a summary: which runners synced, which skipped (not installed), which updated.</li>
+        </ol>
+
+        <h3>Install paths per runner</h3>
+        <table>
+          <thead>
+            <tr><th>Runner</th><th>CLI binary</th><th>Global skill destination</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>cursor</code></td>
+              <td><code>agent</code></td>
+              <td><code>~/.cursor/skills-cursor/target-workflows/SKILL.md</code></td>
+            </tr>
+            <tr>
+              <td><code>claude</code></td>
+              <td><code>claude</code></td>
+              <td><code>~/.claude/skills/target-workflows/SKILL.md</code></td>
+            </tr>
+            <tr>
+              <td><code>free-code</code></td>
+              <td><code>free-code</code></td>
+              <td><code>~/.free-code/skills/target-workflows/SKILL.md</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>
+          Bundled source in repo: <code>skills/target-workflows/</code> (one tree; small runner-specific
+          frontmatter overrides if needed — e.g. Cursor vs Claude trigger wording). Paths follow each
+          harness's existing skill discovery (same as Cursor's <code>skills-cursor</code> layout today).
+        </p>
+
+        <h3>Guardrails (addressing earlier concerns)</h3>
+        <table>
+          <thead>
+            <tr><th>Concern</th><th>Mitigation</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Surprise writes under home dir</td>
+              <td>Only runs during <code>target:install</code> or explicit <code>sync-skills</code>; logs every path written.</td>
+            </tr>
+            <tr>
+              <td>Conflicts with user skills</td>
+              <td>Installs only under <code>target-workflows/</code> subfolder; never overwrites unrelated skills.</td>
+            </tr>
+            <tr>
+              <td>Docker workflow steps</td>
+              <td>Global host skill irrelevant inside container; those steps use TCP injection (context A).</td>
+            </tr>
+            <tr>
+              <td>Version drift</td>
+              <td><code>TARGET_SKILL_VERSION</code> in skill frontmatter; re-run sync after Target upgrade.</td>
+            </tr>
+            <tr>
+              <td>Runner not installed</td>
+              <td>Skipped — no error. Matches "detect which agents could be used on target".</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout">
+          <p>
+            <strong>Uninstall:</strong> <code>target sync-skills --remove</code> deletes only the
+            <code>target-workflows</code> folder from each detected runner's skills tree.
+          </p>
+        </div>
+      </section>
+
+      <section id="architecture">
+        <h2><span class="num">8.</span>Architecture</h2>
+
+        <figure>
+          <div class="diagram">
+            <svg viewBox="0 0 780 380" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Hybrid architecture">
+              <defs>
+                <style>
+                  .bx{ fill:#182124; stroke:#253034; stroke-width:1.2; }
+                  .tx{ fill:#e6edee; font:600 11px ui-monospace,monospace; }
+                  .sm{ fill:#8ea1a6; font:10px ui-monospace,monospace; }
+                  .ok{ stroke:#5ed6a4; }
+                  .mid{ stroke:#e7b563; }
+                  .bad{ stroke:#e07b6b; stroke-dasharray:4 3; }
+                  .ar{ stroke:#5ed6a4; stroke-width:1.4; fill:none; marker-end:url(#m); }
+                  .ar2{ stroke:#e7b563; stroke-width:1.4; fill:none; marker-end:url(#m2); }
+                  .ar3{ stroke:#e07b6b; stroke-width:1.2; fill:none; stroke-dasharray:5 4; marker-end:url(#m3); }
+                </style>
+                <marker id="m" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#5ed6a4"/></marker>
+                <marker id="m2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#e7b563"/></marker>
+                <marker id="m3" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#e07b6b"/></marker>
+              </defs>
+
+              <text class="tx" x="20" y="22" fill="#5ed6a4">A — Target workflow step (scoped TCP)</text>
+              <rect class="bx ok" x="20" y="34" width="100" height="40" rx="6"/><text class="tx" x="32" y="58">awb dispatch</text>
+              <rect class="bx ok" x="140" y="34" width="120" height="40" rx="6"/><text class="tx" x="150" y="52">prompt + TCP</text><text class="sm" x="150" y="66">catalog</text>
+              <rect class="bx ok" x="280" y="34" width="140" height="40" rx="6"/><text class="tx" x="292" y="58">/api/tcps/execute</text>
+              <rect class="bx ok" x="440" y="34" width="100" height="40" rx="6"/><text class="tx" x="458" y="58">hub API</text>
+              <path class="ar" d="M120 54 H140 M260 54 H280 M420 54 H440"/>
+
+              <text class="tx" x="20" y="108" fill="#e7b563">B — Ad-hoc CLI / Cursor chat (global skill)</text>
+              <rect class="bx mid" x="20" y="120" width="100" height="40" rx="6"/><text class="tx" x="34" y="144">agent CLI</text>
+              <rect class="bx mid" x="140" y="120" width="120" height="40" rx="6"/><text class="tx" x="152" y="138">loads skill</text><text class="sm" x="152" y="152">~/.cursor/…/target-workflows</text>
+              <rect class="bx mid" x="280" y="120" width="140" height="40" rx="6"/><text class="tx" x="292" y="138">curl hub REST</text><text class="sm" x="292" y="152">admin Bearer</text>
+              <rect class="bx mid" x="440" y="120" width="100" height="40" rx="6"/><text class="tx" x="458" y="144">hub API</text>
+              <path class="ar2" d="M120 140 H140 M260 140 H280 M420 140 H440"/>
+
+              <text class="tx" x="20" y="194" fill="#e7b563">B′ — Optional: Target MCP (Phase 4)</text>
+              <rect class="bx mid" x="20" y="206" width="100" height="40" rx="6"/><text class="tx" x="34" y="230">agent CLI</text>
+              <rect class="bx mid" x="140" y="206" width="120" height="40" rx="6"/><text class="tx" x="152" y="224">MCP tools</text><text class="sm" x="152" y="238">global config</text>
+              <rect class="bx mid" x="280" y="206" width="140" height="40" rx="6"/><text class="tx" x="292" y="230">target-mcp server</text>
+              <rect class="bx mid" x="440" y="206" width="100" height="40" rx="6"/><text class="tx" x="458" y="230">hub API</text>
+              <path class="ar2" d="M120 226 H140 M260 226 H280 M420 226 H440"/>
+
+              <text class="tx" x="20" y="280" fill="#e07b6b">WebMCP (browser only — not for A or B)</text>
+              <rect class="bx bad" x="20" y="292" width="100" height="40" rx="6"/><text class="tx" x="28" y="316">browser agent</text>
+              <rect class="bx bad" x="140" y="292" width="120" height="40" rx="6"/><text class="tx" x="152" y="316">Target UI tab</text>
+              <rect class="bx bad" x="280" y="292" width="140" height="40" rx="6"/><text class="tx" x="292" y="316">registerTool()</text>
+              <path class="ar3" d="M120 312 H140 M260 312 H280"/>
+
+              <text class="sm" x="20" y="360" fill="#8ea1a6">sync-skills populates B; TCP attachment populates A. Same hub API underneath.</text>
+            </svg>
+          </div>
+          <figcaption>Three layers: workflow TCP (safest automation), global skill (ad-hoc access), optional MCP/WebMCP upgrades.</figcaption>
+        </figure>
+      </section>
+
+      <section id="implementation">
+        <h2><span class="num">9.</span>Implementation plan</h2>
+
+        <h3>Phase 1 — Workflow tools (context A)</h3>
+        <ol>
+          <li>Bundled TCP pack <code>hub/bundled/target-management.tcp.json</code>; import on install or first hub boot.</li>
+          <li>UI preset: "Attach Target self-management" on workflow create.</li>
+          <li>Tests: <code>hub/tcp-acceptance.test.ts</code> pattern for management tools.</li>
+        </ol>
+
+        <h3>Phase 2 — Global skills + MCP manifest (context B)</h3>
+        <ol>
+          <li>Add <code>skills/target-workflows/SKILL.md</code> (+ optional reference docs) in the repo.</li>
+          <li>Implement <code>hub/sync-skills.ts</code> + <code>node hub/cli.ts sync-skills</code>.</li>
+          <li>Add <code>mcp/runners.manifest.json</code> (§12) + <code>hub/sync-mcp.ts</code> + <code>sync-mcp</code> CLI.</li>
+          <li>Wire both into <code>npm run target:install</code> and re-check on <code>npm start</code>.</li>
+          <li>Optional operator overrides: <code>~/.target/mcp-sync.json</code>.</li>
+        </ol>
+
+        <h3>Phase 3 — Safer credentials</h3>
+        <ul>
+          <li>Scoped <strong>workflow-management token</strong> in <code>~/.target/config.json</code> (rotatable from Settings).</li>
+          <li>Global skill references scoped token, not full admin, when available.</li>
+          <li>TCP step path: same-workflow mutation limits when authenticated via step token.</li>
+        </ul>
+
+        <h3>Phase 4 — Optional upgrades</h3>
+        <ul>
+          <li><strong>Target MCP server</strong> — local stdio/HTTP MCP wrapping hub routes; <code>target sync-skills --mcp</code> writes MCP config snippets per runner.</li>
+          <li><strong>In-process TCP executor</strong> — <code>kind: "target-internal"</code> avoids localhost HTTP loopback.</li>
+          <li><strong>WebMCP on UI</strong> — thin wrapper over <code>api/client.ts</code> for browser-native agents only.</li>
+        </ul>
+      </section>
+
+      <section id="security">
+        <h2><span class="num">10.</span>Security &amp; scope</h2>
+
+        <table>
+          <thead>
+            <tr><th>Layer</th><th>Auth</th><th>Blast radius</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>TCP in workflow step</td>
+              <td>Per-step <code>callbackToken</code>; tools must be attached to workflow</td>
+              <td>Low — can restrict to same-workflow mutations</td>
+            </tr>
+            <tr>
+              <td>Global skill (REST)</td>
+              <td>Admin or scoped Bearer from config</td>
+              <td>High — any workflow on the hub; skill must teach confirmation before destructive ops</td>
+            </tr>
+            <tr>
+              <td>Target MCP (future)</td>
+              <td>Same as global skill; registered in agent MCP config</td>
+              <td>High — same as REST; better structure, same power</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout warn">
+          <p>
+            <strong>Principle:</strong> use context A (TCP) for automated self-modifying workflows; use
+            context B (global skill / MCP) for operator-driven ad-hoc sessions. Do not embed the admin token
+            in workflow step prompts — step agents should use the TCP execute path only.
+          </p>
+        </div>
+      </section>
+
+      <section id="optional-webmcp">
+        <h2><span class="num">11.</span>Optional future: WebMCP + Target MCP</h2>
+
+        <h3>Target MCP server (priority over WebMCP for CLI agents)</h3>
+        <p>
+          Cursor and Claude Code already load MCP servers globally. A small
+          <code>target-mcp</code> package exposing <code>list_workflows</code>, <code>add_step</code>, etc. as
+          MCP tools gives context B the structured ergonomics you wanted from WebMCP — without requiring a
+          browser tab. <code>target sync-skills --mcp</code> can append the server entry to each runner's MCP
+          config when detected. See <a href="#mcp-manifest">§12</a> for the per-runner manifest; see
+          <a href="#mcp-runtime">§13</a> for when the hub must be running and what fails when it is not.
+        </p>
+
+        <h3>WebMCP on the UI (browser agents only)</h3>
+        <p>
+          For Gemini-in-Chrome or similar on <code>127.0.0.1:8893</code>, register tools via
+          <code>document.modelContext</code> wrapping <code>api/client.ts</code>. Feature-detect; no impact on
+          CLI paths. Phase 4, lowest priority.
+        </p>
+      </section>
+
+      <section id="mcp-manifest">
+        <h2><span class="num">12.</span>MCP config manifest per runner</h2>
+
+        <h3>What Target has today</h3>
+        <p>
+          <strong>No MCP runner manifest exists yet.</strong> The only persisted hub config is
+          <code>~/.target/config.json</code> (<code>hub/config.ts</code>): <code>host</code>,
+          <code>port</code>, <code>adminToken</code>, timeouts, optional <code>sandboxHost</code>,
+          <code>modelContextWindows</code>. It does <em>not</em> describe where each agent harness
+          stores MCP settings or what to write there.
+        </p>
+        <p>
+          Target's workflow runners (<code>PUBLISHABLE_RUNNERS</code> in <code>hub/awb.ts</code>) are
+          <code>claude</code>, <code>free-code</code>, and <code>cursor</code> only.
+          <strong>Claude Desktop is a separate app</strong> — not a workflow runner — but it should still
+          appear in the sync manifest as an optional fourth target for ad-hoc conversations.
+        </p>
+
+        <h3>Proposed: repo manifest + optional operator override</h3>
+        <table>
+          <thead>
+            <tr><th>File</th><th>Purpose</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>mcp/runners.manifest.json</code> (in repo)</td>
+              <td>Canonical definition: one <code>target</code> MCP server entry + per-harness destination paths and merge rules. Shipped with Target; versioned in git.</td>
+            </tr>
+            <tr>
+              <td><code>~/.target/mcp-sync.json</code> (optional)</td>
+              <td>Operator overrides: disable a harness (<code>"cursor": false</code>), custom <code>hubUrl</code>, alternate <code>command</code> path to <code>target-mcp</code>, etc. Never committed.</td>
+            </tr>
+            <tr>
+              <td><code>~/.target/config.json</code> (existing)</td>
+              <td>Runtime values merged at sync time: <code>host</code>, <code>port</code>, <code>adminToken</code> → substituted into the MCP server's <code>env</code> block. Do not duplicate the token in the repo manifest.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Where each harness reads MCP config (sync destinations)</h3>
+        <table>
+          <thead>
+            <tr><th>Harness</th><th>Target runner?</th><th>Detect</th><th>Config file to merge into</th><th>JSON path</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Cursor</strong> (Agent CLI + app)</td>
+              <td>Yes (<code>cursor</code>)</td>
+              <td><code>agent --version</code></td>
+              <td><code>~/.cursor/mcp.json</code></td>
+              <td><code>mcpServers.target</code></td>
+            </tr>
+            <tr>
+              <td><strong>Claude Code</strong></td>
+              <td>Yes (<code>claude</code>)</td>
+              <td><code>claude --version</code></td>
+              <td><code>~/.claude/settings.json</code></td>
+              <td><code>mcpServers.target</code></td>
+            </tr>
+            <tr>
+              <td><strong>Claude Desktop</strong></td>
+              <td>No (ad-hoc only)</td>
+              <td>Config file exists (platform path)</td>
+              <td>
+                Linux: <code>~/.config/Claude/claude_desktop_config.json</code><br />
+                macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code><br />
+                Windows: <code>%APPDATA%\Claude\claude_desktop_config.json</code>
+              </td>
+              <td><code>mcpServers.target</code></td>
+            </tr>
+            <tr>
+              <td><strong>free-code</strong></td>
+              <td>Yes (<code>free-code</code>)</td>
+              <td><code>free-code --version</code></td>
+              <td><code>~/.free-code/agent/mcp.json</code></td>
+              <td><code>mcpServers.target</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout warn">
+          <p>
+            <strong>free-code extra step:</strong> enable/disable state lives separately in
+            <code>~/.free-code/agent/mcp-status.json</code>. After merging into <code>mcp.json</code>,
+            <code>sync-mcp</code> must set <code>servers.target = "enabled"</code> (or the user runs
+            <code>/mcp enable target</code> once). Otherwise the server is defined but never connects.
+          </p>
+        </div>
+
+        <h3>Example <code>mcp/runners.manifest.json</code></h3>
+        <pre><code>{
+  "manifestVersion": 1,
+  "serverKey": "target",
+  "server": {
+    "description": "The Target Project hub — workflows, steps, run control",
+    "command": "node",
+    "args": ["{{TARGET_MCP_ENTRY}}"],
+    "env": {
+      "TARGET_HUB_URL": "{{HUB_ORIGIN}}",
+      "TARGET_ADMIN_TOKEN": "{{ADMIN_TOKEN}}"
+    }
+  },
+  "harnesses": {
+    "cursor": {
+      "runnerId": "cursor",
+      "detect": { "binary": "agent", "probe": ["--version"] },
+      "dest": { "file": "~/.cursor/mcp.json", "pointer": "mcpServers" }
+    },
+    "claude-code": {
+      "runnerId": "claude",
+      "detect": { "binary": "claude", "probe": ["--version"] },
+      "dest": { "file": "~/.claude/settings.json", "pointer": "mcpServers" }
+    },
+    "claude-desktop": {
+      "optional": true,
+      "detect": { "configMustExist": true },
+      "dest": {
+        "file": {
+          "linux": "~/.config/Claude/claude_desktop_config.json",
+          "darwin": "~/Library/Application Support/Claude/claude_desktop_config.json",
+          "win32": "%APPDATA%/Claude/claude_desktop_config.json"
+        },
+        "pointer": "mcpServers"
+      }
+    },
+    "free-code": {
+      "runnerId": "free-code",
+      "detect": { "binary": "free-code", "probe": ["--version"] },
+      "dest": { "file": "~/.free-code/agent/mcp.json", "pointer": "mcpServers" },
+      "postSync": ["enableInFreeCodeMcpStatus"]
+    }
+  }
+}</code></pre>
+
+        <p>
+          Placeholders (<code>{{HUB_ORIGIN}}</code>, <code>{{ADMIN_TOKEN}}</code>,
+          <code>{{TARGET_MCP_ENTRY}}</code>) are resolved when <code>target sync-mcp</code> runs — from
+          <code>loadConfig()</code> and the installed repo path (or packaged desktop app path).
+        </p>
+
+        <h3>Merge rules (idempotent sync)</h3>
+        <ol>
+          <li>Read destination JSON (create file + <code>{"mcpServers":{}}</code> if missing, where safe).</li>
+          <li>If <code>mcpServers.target</code> is absent → insert the resolved <code>server</code> block.</li>
+          <li>If present and <code>managedBy: "target"</code> stamp matches manifest version → skip (already synced).</li>
+          <li>If present but user edited (no stamp / different version) → skip unless <code>--force</code>.</li>
+          <li>Never remove unrelated servers (GitHub, Slack, flowise, …).</li>
+        </ol>
+
+        <h3>Commands</h3>
+        <pre><code>node hub/cli.ts sync-mcp          # merge manifest into each detected harness
+node hub/cli.ts sync-mcp --dry-run  # print paths + diff, write nothing
+node hub/cli.ts sync-mcp --remove   # remove only mcpServers.target (our stamp)</code></pre>
+
+        <p>
+          Called from <code>npm start</code> (re-check, skip if up to date) and
+          <code>npm run target:install</code>. Same idempotent pattern as
+          <code>sync-skills</code>.
+        </p>
+
+        <div class="callout good">
+          <p>
+            <strong>Why not put this only in <code>~/.target/config.json</code>?</strong> Destination
+            paths and merge semantics are product definitions — they belong in the repo manifest. Operator
+            overrides (<code>mcp-sync.json</code>) and secrets (<code>adminToken</code>) stay under
+            <code>~/.target/</code>.
+          </p>
+        </div>
+      </section>
+
+      <section id="mcp-runtime">
+        <h2><span class="num">13.</span>Follow-up: Target MCP needs the hub running</h2>
+
+        <p>
+          A common question once Target MCP is configured globally: <em>if Cursor has the MCP entry but Target
+          is not running, can I still create a workflow from the Cursor app?</em> The short answer is
+          <strong>no — not successfully</strong>. Configuration persists; connectivity does not.
+        </p>
+
+        <h3>What auto-config on <code>npm start</code> actually does</h3>
+        <p>When Target starts, it can detect installed runners and write MCP config if missing (skip if already present):</p>
+        <ol>
+          <li>Probe runners via <code>availableRunners()</code> (same as the create form).</li>
+          <li>For each installed runner, ensure a <code>target-mcp</code> entry exists in that harness's MCP config (e.g. <code>~/.cursor/mcp.json</code>, Claude Code's MCP settings).</li>
+          <li>If the entry is already there — <strong>skip</strong> (idempotent).</li>
+        </ol>
+        <p>
+          That only tells Cursor <em>how to spawn</em> the MCP server process. It does <strong>not</strong> keep
+          the hub alive after you stop Target, and Cursor may need a restart to pick up config file changes.
+        </p>
+
+        <h3>Runtime dependency chain</h3>
+        <table>
+          <thead>
+            <tr><th>Component</th><th>Role</th><th>Required for…</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Target MCP server</strong></td>
+              <td>stdio/HTTP process Cursor spawns; proxies tool calls to the hub API</td>
+              <td>Listing tools; forwarding requests</td>
+            </tr>
+            <tr>
+              <td><strong>Hub</strong> (<code>:8893</code>)</td>
+              <td>JSON API, auth, DB, hook registration</td>
+              <td>Create/edit/delete workflows &amp; steps</td>
+            </tr>
+            <tr>
+              <td><strong>Broker</strong> (<code>:8890</code>)</td>
+              <td>agent-webhook-bridge; dispatches steps to CLIs</td>
+              <td>Start/run workflows (not strictly create-only)</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>
+          The MCP server is a <strong>client of the hub</strong>, not a replacement for it. It must not read
+          <code>~/.target</code> SQLite directly — that would bypass validation, hook creation, and auth.
+        </p>
+
+        <h3>What happens when Target is stopped</h3>
+        <table>
+          <thead>
+            <tr><th>State</th><th>What the user sees</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>MCP configured, hub <strong>up</strong></td>
+              <td>Tools listed; <code>create_workflow</code> succeeds via hub API.</td>
+            </tr>
+            <tr>
+              <td>MCP configured, hub <strong>down</strong></td>
+              <td>Cursor may still spawn MCP and list tools, but every hub call fails (<code>ECONNREFUSED</code> on <code>:8893</code>). Create workflow fails — this is expected.</td>
+            </tr>
+            <tr>
+              <td>MCP not configured</td>
+              <td>No Target tools in Cursor at all.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout">
+          <p>
+            <strong>Same as curl:</strong> a global skill that teaches <code>curl http://127.0.0.1:8893/…</code>
+            fails identically when the hub is down. MCP improves ergonomics when Target <em>is</em> running; it
+            does not remove the need to start Target first.
+          </p>
+        </div>
+
+        <h3>Recommended MCP behaviour (Phase 4)</h3>
+        <ul>
+          <li>
+            On <code>initialize</code> / <code>tools/list</code>, ping <code>GET /health</code>. Cache result
+            for a few seconds; expose hub URL in server metadata.
+          </li>
+          <li>
+            When hub is offline, still list tools (so Cursor does not hide them) but every
+            <code>tools/call</code> returns a structured error:
+            <code>{ "error": "target_hub_offline", "message": "Start Target with npm start — hub not reachable at http://127.0.0.1:8893" }</code>.
+          </li>
+          <li>
+            Global skill <code>target-workflows</code> documents the same rule: check hub first; if MCP or curl
+            fails with connection refused, start Target before retrying.
+          </li>
+          <li>
+            Optional CLI: <code>target status</code> (or read <code>/health</code>) that agents can suggest to
+            the operator.
+          </li>
+        </ul>
+
+        <h3>Auto-config timing: start vs install</h3>
+        <table>
+          <thead>
+            <tr><th>Trigger</th><th>Writes MCP config?</th><th>Hub running?</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>npm run target:install</code></td>
+              <td>Yes — <code>sync-skills --mcp</code> (config only)</td>
+              <td>No — install does not start the hub</td>
+            </tr>
+            <tr>
+              <td><code>npm start</code></td>
+              <td>Re-check / skip if present</td>
+              <td>Yes — hub + broker up while process runs</td>
+            </tr>
+            <tr>
+              <td>User quits Target (Ctrl-C)</td>
+              <td>Config remains on disk</td>
+              <td>No — MCP calls fail until Target restarts</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout good">
+          <p>
+            <strong>Design principle:</strong> Target MCP is an <em>online</em> interface to a
+            <em>local service</em>. Treat "hub must be running" as intentional — document it, return clear
+            errors, and optionally surface hub status in the MCP handshake. Do not pretend offline workflow
+            creation works.
+          </p>
+        </div>
+      </section>
+
+      <section id="summary">
+        <h2><span class="num">14.</span>Summary</h2>
+
+        <table>
+          <thead>
+            <tr><th>Approach</th><th>Context</th><th>Verdict</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Target Management TCP pack</td>
+              <td>A — workflow steps</td>
+              <td><strong>Recommended.</strong> Scoped, works in Docker, proven pattern.</td>
+            </tr>
+            <tr>
+              <td><code>target sync-skills</code> (global skill per runner)</td>
+              <td>B — ad-hoc CLI / Cursor</td>
+              <td><strong>Recommended.</strong> Addresses the gap workflow TCP cannot reach.</td>
+            </tr>
+            <tr>
+              <td><code>mcp/runners.manifest.json</code> + <code>target sync-mcp</code></td>
+              <td>B — MCP wiring</td>
+              <td><strong>To implement.</strong> Per-harness paths for Cursor, Claude Code, Claude Desktop, free-code.</td>
+            </tr>
+            <tr>
+              <td>Target MCP server</td>
+              <td>B — upgrade</td>
+              <td><strong>Recommended Phase 4.</strong> Structured tools; requires hub on <code>:8893</code> (see §13).</td>
+            </tr>
+            <tr>
+              <td>WebMCP on all UI actions</td>
+              <td>Browser on UI tab</td>
+              <td>Optional later; does not replace B for CLI agents.</td>
+            </tr>
+            <tr>
+              <td>Scoped token + same-workflow TCP limits</td>
+              <td>A (+ B hardening)</td>
+              <td><strong>Recommended Phase 3.</strong></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout good">
+          <p>
+            <strong>Bottom line:</strong> use <strong>both</strong> layers. TCP for workflow automation
+            (safe, injected on dispatch). <strong>Global skills via <code>target sync-skills</code></strong>
+            for any conversation where Target is not dispatching the agent. Same hub API underneath; different
+            auth and discovery paths. WebMCP is a nicety for browser agents, not the core design.
+          </p>
+        </div>
+      </section>
+
+      <footer class="meta">
+        Workflow "allow agent create workflows, steps or modified it" · rev. 4 (MCP manifest) ·
+        The Target Project · September 2026
+      </footer>
+    </div>
+  </body>
+</html>

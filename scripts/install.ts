@@ -252,6 +252,13 @@ function main(): void {
 	log("[7/7] agent images (docker)");
 	buildAgentImages();
 
+	log("[post] agent skills + MCP config");
+	const syncCli = path.join(HUB_DIR, "cli.ts");
+	for (const sub of ["sync-skills", "sync-mcp"] as const) {
+		const status = run("node", [syncCli, sub], REPO_DIR);
+		if (status !== 0) log(`${sub} exited ${status} — continuing.`, "warning");
+	}
+
 	console.log(`
 Ready to start. One command brings up both the broker and the hub and opens
 the UI:

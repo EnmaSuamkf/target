@@ -1,0 +1,133 @@
+{
+  "kind": "target.tcps",
+  "schemaVersion": 1,
+  "tcps": [
+    {
+      "name": "Target Management",
+      "tags": ["target", "workflows"],
+      "tools": [
+        {
+          "name": "list_workflows",
+          "description": "List all workflows with progress",
+          "requestTemplate": "curl -sS -X GET 'http://127.0.0.1:8893/api/workflows' -H 'Authorization: Bearer $TOKEN_1'",
+          "inputs": [],
+          "tokens": {}
+        },
+        {
+          "name": "get_workflow",
+          "description": "Get one workflow and its steps",
+          "requestTemplate": "curl -sS -X GET 'http://127.0.0.1:8893/api/workflows/$WORKFLOW_ID' -H 'Authorization: Bearer $TOKEN_1'",
+          "inputs": [
+            {
+              "name": "WORKFLOW_ID",
+              "placeholder": "$WORKFLOW_ID",
+              "description": "Workflow uuid",
+              "required": true
+            }
+          ],
+          "tokens": {}
+        },
+        {
+          "name": "create_workflow",
+          "description": "Create a new workflow with its own agent hook",
+          "requestTemplate": "curl -sS -X POST 'http://127.0.0.1:8893/api/workflows' -H 'Authorization: Bearer $TOKEN_1' -H 'Content-Type: application/json' -d '{\"name\":\"$NAME\",\"workdir\":\"$WORKDIR\"}'",
+          "inputs": [
+            {
+              "name": "NAME",
+              "placeholder": "$NAME",
+              "description": "Workflow name",
+              "required": true
+            },
+            {
+              "name": "WORKDIR",
+              "placeholder": "$WORKDIR",
+              "description": "Working directory (absolute path)",
+              "required": true
+            }
+          ],
+          "tokens": {}
+        },
+        {
+          "name": "add_step",
+          "description": "Add a pending step to a workflow",
+          "requestTemplate": "curl -sS -X POST 'http://127.0.0.1:8893/api/workflows/$WORKFLOW_ID/steps' -H 'Authorization: Bearer $TOKEN_1' -H 'Content-Type: application/json' -d '{\"description\":\"$DESCRIPTION\"}'",
+          "inputs": [
+            {
+              "name": "WORKFLOW_ID",
+              "placeholder": "$WORKFLOW_ID",
+              "description": "Workflow uuid",
+              "required": true
+            },
+            {
+              "name": "DESCRIPTION",
+              "placeholder": "$DESCRIPTION",
+              "description": "Step task text",
+              "required": true
+            }
+          ],
+          "tokens": {}
+        },
+        {
+          "name": "edit_step",
+          "description": "Edit a pending step description",
+          "requestTemplate": "curl -sS -X PATCH 'http://127.0.0.1:8893/api/workflows/$WORKFLOW_ID/steps/$STEP_ID' -H 'Authorization: Bearer $TOKEN_1' -H 'Content-Type: application/json' -d '{\"description\":\"$DESCRIPTION\"}'",
+          "inputs": [
+            {
+              "name": "WORKFLOW_ID",
+              "placeholder": "$WORKFLOW_ID",
+              "description": "Workflow uuid",
+              "required": true
+            },
+            {
+              "name": "STEP_ID",
+              "placeholder": "$STEP_ID",
+              "description": "Step uuid",
+              "required": true
+            },
+            {
+              "name": "DESCRIPTION",
+              "placeholder": "$DESCRIPTION",
+              "description": "New step text",
+              "required": true
+            }
+          ],
+          "tokens": {}
+        },
+        {
+          "name": "delete_step",
+          "description": "Remove a pending step",
+          "requestTemplate": "curl -sS -X DELETE 'http://127.0.0.1:8893/api/workflows/$WORKFLOW_ID/steps/$STEP_ID' -H 'Authorization: Bearer $TOKEN_1'",
+          "inputs": [
+            {
+              "name": "WORKFLOW_ID",
+              "placeholder": "$WORKFLOW_ID",
+              "description": "Workflow uuid",
+              "required": true
+            },
+            {
+              "name": "STEP_ID",
+              "placeholder": "$STEP_ID",
+              "description": "Step uuid",
+              "required": true
+            }
+          ],
+          "tokens": {}
+        },
+        {
+          "name": "delete_workflow",
+          "description": "Delete a workflow, its hook, and all steps",
+          "requestTemplate": "curl -sS -X DELETE 'http://127.0.0.1:8893/api/workflows/$WORKFLOW_ID' -H 'Authorization: Bearer $TOKEN_1'",
+          "inputs": [
+            {
+              "name": "WORKFLOW_ID",
+              "placeholder": "$WORKFLOW_ID",
+              "description": "Workflow uuid",
+              "required": true
+            }
+          ],
+          "tokens": {}
+        }
+      ]
+    }
+  ]
+}

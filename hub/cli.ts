@@ -7,6 +7,7 @@
  */
 import * as cp from "node:child_process";
 import { PUBLISHABLE_RUNNERS, runnerBinary, type PublishableRunner } from "./awb.ts";
+import { printSyncActions, syncMcp, syncSkills } from "./agent-sync.ts";
 import { loadConfig } from "./config.ts";
 import { startHub } from "./daemon.ts";
 
@@ -35,6 +36,10 @@ Commands:
   pause <workflowId>                    Stop dispatching further steps
   resume <workflowId>                   Undo pause
   restart <workflowId>                  Reset every step to pending and start over
+  sync-skills [--dry-run] [--remove] [--force]
+                                         Install target-workflows skill for each installed runner
+  sync-mcp [--dry-run] [--remove] [--force]
+                                         Merge Target MCP server into each harness MCP config
 `);
 }
 
@@ -142,6 +147,14 @@ interface TemplateJson {
 	steps: { description: string; acceptanceCriteria: string | null }[];
 }
 
+function parseSyncFlags(args: string[]): { dryRun: boolean; remove: boolean; force: boolean } {
+	return {
+		dryRun: args.includes("--dry-run"),
+		remove: args.includes("--remove"),
+		force: args.includes("--force"),
+	};
+}
+
 async function main(): Promise<void> {
 	const [, , cmd, ...rest] = process.argv;
 
@@ -152,6 +165,21 @@ async function main(): Promise<void> {
 
 	if (cmd === "start") {
 		startHub();
+		return;
+	}
+
+	if (cmd === "sync-skills") {
+		const flags = parseSyncFlags(rest);
+		const actions = syncSkills(flags);
+		printSyncActions("skills", actions);
+		return;
+	}
+
+	if (cmd === "sync-mcp") {
+		const flags = parseSyncFlags(rest);
+		const cfg = loadConfig();
+		const actions = syncMcp({ ...flags, cfg });
+		printSyncActions("mcp", actions);
 		return;
 	}
 

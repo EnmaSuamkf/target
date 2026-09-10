@@ -1,0 +1,43 @@
+{
+  "manifestVersion": 1,
+  "serverKey": "target",
+  "server": {
+    "description": "The Target Project hub — workflows, steps, run control",
+    "command": "node",
+    "args": ["{{TARGET_MCP_ENTRY}}"],
+    "env": {
+      "TARGET_HUB_URL": "{{HUB_ORIGIN}}",
+      "TARGET_ADMIN_TOKEN": "{{ADMIN_TOKEN}}"
+    }
+  },
+  "harnesses": {
+    "cursor": {
+      "runnerId": "cursor",
+      "detect": { "binary": "agent", "probe": ["--version"] },
+      "dest": { "file": "~/.cursor/mcp.json", "pointer": "mcpServers" }
+    },
+    "claude-code": {
+      "runnerId": "claude",
+      "detect": { "binary": "claude", "probe": ["--version"] },
+      "dest": { "file": "~/.claude/settings.json", "pointer": "mcpServers" }
+    },
+    "claude-desktop": {
+      "optional": true,
+      "detect": { "configMustExist": true },
+      "dest": {
+        "file": {
+          "linux": "~/.config/Claude/claude_desktop_config.json",
+          "darwin": "~/Library/Application Support/Claude/claude_desktop_config.json",
+          "win32": "%APPDATA%/Claude/claude_desktop_config.json"
+        },
+        "pointer": "mcpServers"
+      }
+    },
+    "free-code": {
+      "runnerId": "free-code",
+      "detect": { "binary": "free-code", "probe": ["--version"] },
+      "dest": { "file": "~/.free-code/agent/mcp.json", "pointer": "mcpServers" },
+      "postSync": ["enableInFreeCodeMcpStatus"]
+    }
+  }
+}

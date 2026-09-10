@@ -46,7 +46,8 @@ function runVia(manager) {
 		if (!script) return null;
 		log(`node ${process.version} is too old — installing/activating node ${REQUIRED_MAJOR} with nvm...`, "warning");
 		// nvm is a shell function, so it only exists inside a sourced bash.
-		const cmd = `. "${script}" && nvm install ${REQUIRED_MAJOR} && nvm use ${REQUIRED_MAJOR} && exec node "${INSTALLER}"`;
+		// npm often exports npm_config_prefix (e.g. /usr/local), which nvm rejects — unset it.
+		const cmd = `unset npm_config_prefix NPM_CONFIG_PREFIX; . "${script}" && nvm install ${REQUIRED_MAJOR} && nvm use ${REQUIRED_MAJOR} && exec node "${INSTALLER}"`;
 		return spawnSync("bash", ["-c", cmd], { stdio: "inherit" }).status ?? 1;
 	}
 	if (!hasFnm()) return null;
