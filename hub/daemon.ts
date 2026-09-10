@@ -6,6 +6,7 @@
  */
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensureBundledCatalog } from "./bundled-bootstrap.ts";
 import { isInsecureReportUrl, loadConfig, loadReportConfig } from "./config.ts";
 import { listWorkflows } from "./db.ts";
 import { emitHeartbeat, flush } from "./reporter.ts";
@@ -29,6 +30,12 @@ const SWEEP_INTERVAL_MS = 60_000;
 
 export function startHub(): void {
 	const cfg = loadConfig();
+	try {
+		const { tcp, resourceSet } = ensureBundledCatalog(cfg);
+		log(`bundled catalog: TCP '${tcp.name}', resource set '${resourceSet.name}'`);
+	} catch (err) {
+		log(`bundled catalog import failed: ${String(err)}`, "warning");
+	}
 	const server = createServer(cfg, log);
 	server.listen(cfg.port, cfg.host, () => {
 		log(`target hub v${TARGET_VERSION} listening on http://${cfg.host}:${cfg.port}`);

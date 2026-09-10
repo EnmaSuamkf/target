@@ -215,6 +215,10 @@ export function listTcps(): Tcp[] {
 	return (rows as Record<string, unknown>[]).map(rowToTcp);
 }
 
+export function findTcpByName(name: string): Tcp | null {
+	return listTcps().find((tcp) => tcp.name === name) ?? null;
+}
+
 export function updateTcp(id: string, input: { name?: string; tags?: unknown; tools?: unknown }): Tcp | null {
 	const existing = getTcp(id);
 	if (!existing) return null;
