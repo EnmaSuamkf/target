@@ -135,6 +135,23 @@
 	color: var(--text-muted);
 }
 
+.metaLink {
+	padding: 0;
+	border: none;
+	background: transparent;
+	color: var(--accent-600);
+	font-family: inherit;
+	font-size: inherit;
+	font-weight: 550;
+	cursor: pointer;
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+
+.metaLink:hover {
+	color: var(--accent-700);
+}
+
 /* A running step whose agent has gone quiet — a warning, not a failure: the
    idle watchdog hasn't acted yet, but this is what it's counting. */
 .metaItemIdle {
@@ -147,6 +164,19 @@
 	background: var(--surface-sunken);
 	font-family: var(--font-mono);
 	font-size: 0.6875rem;
+}
+
+/* Compact recovery controls for a step stuck at `queued`. */
+.queuedActions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--space-2);
+	margin-left: calc(15px + var(--space-3));
+	padding: var(--space-2) var(--space-3);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	background: var(--surface-sunken);
 }
 
 .criteria {

@@ -752,11 +752,14 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		if (!selectedId) return;
 		const step = steps.find((s) => s.id === stepId);
 		const held = step?.status === "waiting";
+		const queued = step?.status === "queued";
 		const confirmed = await confirm({
 			title: held ? "Abort this step and stop the workflow?" : "Abort this step?",
 			description: held
 				? "Refuses this step's result: it's recorded failed and the workflow stops here — no further step runs. Its result and session are kept, so you can still read it and talk to the agent, and re-running it later — check it, then Start over — clears the failure."
-				: "Force-fails a step whose run never called back, so it can be re-run by checking it and pressing Start over. Its session is preserved.",
+				: queued
+					? "Force-fails this queued step and frees the workdir lock. Its session is preserved — press Retry on the step to run it again, or Start over to reset the whole workflow."
+					: "Force-fails a step whose run never called back, so it can be re-run by checking it and pressing Start over. Its session is preserved.",
 			confirmLabel: held ? "Abort and stop" : "Abort step",
 			danger: true,
 		});
@@ -775,6 +778,11 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	// session instead of the workflow's most recent one — from a held step, the
 	// conversation worth resuming is the one that produced the result being
 	// reviewed.
+	const handleRunStep = async (stepId: string): Promise<void> => {
+		if (!selectedId) return;
+		await act("Could not re-run the step", () => api.runStep(selectedId, stepId), refreshCurrent);
+	};
+
 	const handleOpenStepConversation = async (stepId: string): Promise<void> => {
 		if (!selectedId) return;
 		await act("Could not open the conversation", async () => {
@@ -1308,6 +1316,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								onSaveStep={handleSaveStep}
 								onRemoveStep={(id) => void handleRemoveStep(id)}
 								onAbortStep={(id) => void handleAbortStep(id)}
+								onRunStep={(id) => void handleRunStep(id)}
 								onContinueStep={(id) => void handleContinueStep(id)}
 								onOpenStepConversation={(id) => void handleOpenStepConversation(id)}
 								onAddStepAfter={handleAddStepAfter}
@@ -1318,6 +1327,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								onAddNote={handleAddNote}
 								onEditNote={handleEditNote}
 								onRemoveNote={handleRemoveNote}
+								onSelectWorkflow={setSelectedId}
 							/>
 						) : (
 							// The "pick something" placeholder is a two-pane idea: with only

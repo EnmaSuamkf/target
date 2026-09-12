@@ -418,9 +418,18 @@ export async function moveStep(workflowId: string, stepId: string, direction: "u
 	return data.steps;
 }
 
-// No wrapper for POST /steps/:stepId/run: the endpoint still exists as an admin
-// HTTP surface, but nothing in this UI dispatches a single step out of order any
-// more — running is the workflow's Start acting on the checked steps.
+/**
+ * Runs one step now, outside the sequential order (the old ▶ dispatch). Used to
+ * retry a step after Abort cleared a stuck queue, or to re-run a failed step
+ * without restarting the whole workflow.
+ */
+export async function runStep(workflowId: string, stepId: string): Promise<Step> {
+	const data = await request<{ step: Step }>(`/api/workflows/${workflowId}/steps/${stepId}/run`, {
+		method: "POST",
+		admin: true,
+	});
+	return data.step;
+}
 
 /**
  * Releases a step held at its manual-review gate: it goes `done` and the

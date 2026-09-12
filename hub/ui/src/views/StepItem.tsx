@@ -13,7 +13,7 @@ import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { Markdown } from "../components/Markdown.tsx";
 import { StepNotes } from "../components/StepNotes.tsx";
 import { Switch } from "../components/Switch.tsx";
-import { activityLabel, duration } from "../lib/format.ts";
+import { activityLabel, duration, queuedReasonLabel, queuedStepLabel, queuedStepTooltip } from "../lib/format.ts";
 import { AddStepModal } from "./AddStepModal.tsx";
 import styles from "./StepItem.module.css";
 
@@ -78,6 +78,10 @@ import styles from "./StepItem.module.css";
 /** Length past which a resolution pane offers "Show more" — see below. */
 const RESULT_CLAMP = 220;
 
+/** How to recover a step stuck in the broker queue. */
+const QUEUED_RECOVERY_TOOLTIP =
+	"Stuck in the queue? Abort force-fails the step and frees the workdir lock, then press Retry to run just this step again — or use Start over to reset the whole workflow.";
+
 export function StepItem({
 	step,
 	selected,
@@ -85,6 +89,7 @@ export function StepItem({
 	onSave,
 	onRemove,
 	onAbort,
+	onRunStep,
 	onContinue,
 	onOpenConversation,
 	onAddStepAfter,
@@ -97,6 +102,7 @@ export function StepItem({
 	onAddNote,
 	onEditNote,
 	onRemoveNote,
+	onSelectWorkflow,
 	busy,
 }: {
 	step: Step;
@@ -105,6 +111,8 @@ export function StepItem({
 	onSave: (id: string, input: StepConfigInput) => Promise<void>;
 	onRemove: (id: string) => void;
 	onAbort: (id: string) => void;
+	/** Re-runs this step now (POST .../run) — offered after Abort leaves it failed. */
+	onRunStep: (id: string) => void;
 	onContinue: (id: string) => void;
 	/** Opens a terminal on this step's own session, not the workflow's newest. */
 	onOpenConversation: (id: string) => void;
@@ -124,6 +132,8 @@ export function StepItem({
 	onAddNote?: (stepId: string, content: string, theme: StepNoteTheme) => Promise<void>;
 	onEditNote?: (stepId: string, noteId: string, content: string, theme: StepNoteTheme) => Promise<void>;
 	onRemoveNote?: (stepId: string, noteId: string) => Promise<void>;
+	/** Opens another workflow — used when a queued step is blocked on a shared workdir. */
+	onSelectWorkflow?: ((workflowId: string) => void) | undefined;
 	busy: boolean;
 }): React.JSX.Element {
 	const [editing, setEditing] = useState(false);
@@ -141,6 +151,7 @@ export function StepItem({
 	// of the run, and it isn't counted in "N steps".
 	const isContext = step.kind === "context";
 	const running = step.status === "running";
+	const queued = step.status === "queued";
 	const waiting = step.status === "waiting";
 	const failed = step.status === "failed";
 	// "Open conversation" is offered wherever there is a finished conversation to
@@ -156,7 +167,7 @@ export function StepItem({
 	// A step with a job in flight is the one state the override refuses: its
 	// callback is still coming, so a status written now would be overwritten (or
 	// would strand a live agent). Abort first — the button next to it does that.
-	const inFlight = running || step.status === "queued";
+	const inFlight = running || queued;
 	// Abort covers two different situations: unsticking a dispatch that never
 	// called back, and refusing the result of a step held for review.
 	const abortable = inFlight || waiting;
@@ -276,8 +287,28 @@ export function StepItem({
 				step.manualReview ||
 				delegated ||
 				step.useSubagent === false ||
-				activity) && (
+				activity ||
+				(queued && step.queuedReason)) && (
 				<div className={styles.meta}>
+					{queued && step.queuedReason && (
+						<span className={styles.metaItem}>
+							{step.queuedReason === "workdir_lock" && step.queueBlocker && onSelectWorkflow ? (
+								<>
+									Waiting for workdir — blocked by{" "}
+									<button
+										type="button"
+										className={styles.metaLink}
+										onClick={() => onSelectWorkflow(step.queueBlocker!.workflowId)}
+										title={`Open workflow ${step.queueBlocker.workflowName}`}
+									>
+										{step.queueBlocker.workflowName}
+									</button>
+								</>
+							) : (
+								queuedReasonLabel(step.queuedReason, step.queueBlocker)
+							)}
+						</span>
+					)}
 					{step.acceptanceCriteria && (
 						<span className={styles.metaItem} title={step.acceptanceCriteria}>
 							<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -332,8 +363,9 @@ export function StepItem({
 							inline
 						</span>
 					)}
-					{step.manualRun && <span className={styles.metaItem}>manual run</span>}
-					{elapsed && <span className={styles.metaItem}>{elapsed}</span>}
+					{/* While queued, dispatch and wait time live in the actions label below. */}
+					{step.manualRun && !queued && <span className={styles.metaItem}>manual run</span>}
+					{elapsed && !queued && <span className={styles.metaItem}>{elapsed}</span>}
 					{/* Progress watchdog: a long step that is still writing reads as
 					    healthy, and one that has gone quiet is flagged before the idle
 					    timeout takes it down. */}
@@ -418,6 +450,31 @@ export function StepItem({
 				</div>
 			)}
 
+			{queued && (
+				<div className={styles.queuedActions} title={QUEUED_RECOVERY_TOOLTIP}>
+					{step.queueBlocker && onSelectWorkflow && (
+						<button
+							type="button"
+							className="btn btn--sm"
+							onClick={() => onSelectWorkflow(step.queueBlocker!.workflowId)}
+							disabled={busy}
+							title={`Open ${step.queueBlocker.workflowName}, which holds the workdir lock.`}
+						>
+							Open blocking workflow
+						</button>
+					)}
+					<button
+						type="button"
+						className="btn btn--sm btn--danger"
+						onClick={() => onAbort(step.id)}
+						disabled={busy}
+						title={QUEUED_RECOVERY_TOOLTIP}
+					>
+						Abort
+					</button>
+				</div>
+			)}
+
 			<div className={styles.actions}>
 				{/* The review decision, offered only while the gate is actually holding:
 				    the server refuses Continue on any other status, so buttons that were
@@ -476,20 +533,38 @@ export function StepItem({
 				    same fact and keeps the finer "judging" distinction; this is the
 				    second, closer copy that stops the action row from looking idle
 				    while a job is actually in flight. */}
-				{inFlight && <span className={styles.metaItem}>{running ? "Running…" : "Queued…"}</span>}
-				<button
-					type="button"
-					className="btn btn--sm btn--danger"
-					onClick={() => onAbort(step.id)}
-					disabled={!abortable || busy}
-					title={
-						waiting
-							? "Refuse this step's result: it's recorded failed and the workflow stops here instead of carrying on. The result and the session are kept."
-							: "Force-fail this stuck step so it can be re-run, without restarting the whole workflow. Also kills the spawned agent process on the broker, freeing the workdir lock. Its session is preserved."
-					}
-				>
-					Abort
-				</button>
+				{running && <span className={styles.metaItem}>Running…</span>}
+				{queued && (
+					<span className={styles.metaItem} title={queuedStepTooltip(step.manualRun)}>
+						{queuedStepLabel(step.queuedAt, step.manualRun)}
+					</span>
+				)}
+				{failed && !isContext && (
+					<button
+						type="button"
+						className="btn btn--sm btn--primary"
+						onClick={() => onRunStep(step.id)}
+						disabled={busy}
+						title="Re-run this step now. Use after Abort cleared a stuck queue, or any time a failed step should be tried again."
+					>
+						Retry
+					</button>
+				)}
+				{abortable && !queued && (
+					<button
+						type="button"
+						className="btn btn--sm btn--danger"
+						onClick={() => onAbort(step.id)}
+						disabled={busy}
+						title={
+							waiting
+								? "Refuse this step's result: it's recorded failed and the workflow stops here instead of carrying on. The result and the session are kept."
+								: "Force-fail this stuck step so it can be re-run, without restarting the whole workflow. Also kills the spawned agent process on the broker, freeing the workdir lock. Its session is preserved."
+						}
+					>
+						Abort
+					</button>
+				)}
 				{!isContext && (
 					<button type="button" className="btn btn--sm" onClick={() => setEditing(true)} disabled={!editable || busy}>
 						Edit

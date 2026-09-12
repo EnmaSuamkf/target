@@ -260,6 +260,7 @@ function WorkflowCard({
 			className={`${styles.card} ${selected ? styles.cardSelected : ""}`}
 			onClick={() => onSelect(workflow.id)}
 			aria-current={selected ? "true" : undefined}
+			title={`${workflow.name} · ${workflow.id}`}
 			data-workflow-card
 		>
 			<span className={styles.cardTop}>

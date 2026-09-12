@@ -2,7 +2,7 @@
  * Small formatting helpers shared by the views. Everything here is display-only
  * — no business logic, which lives on the server.
  */
-import type { StepActivity } from "../api/types";
+import type { QueueBlocker, QueuedReason, StepActivity } from "../api/types";
 
 /** `1234` → `1.2k`. Used for token counts, which get long fast. */
 export function compactNumber(n: number): string {
@@ -64,6 +64,42 @@ export function duration(startedAt: string | null, finishedAt: string | null, qu
 	if (minutes < 60) return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
 	const hours = Math.floor(minutes / 60);
 	return `${hours}h ${minutes % 60}m`;
+}
+
+/** Label for a step waiting in the broker queue (list row / actions). */
+export function queuedStepLabel(queuedAt: string | null, manualRun: boolean): string {
+	const elapsed = duration(null, null, queuedAt);
+	const parts = ["Queued", elapsed ? `waiting ${elapsed}` : "waiting"];
+	if (manualRun) parts.push("manual run");
+	return parts.join(" · ");
+}
+
+/** Tooltip: queued means accepted by the broker but not started yet. */
+export function queuedStepTooltip(manualRun: boolean): string {
+	const dispatch = manualRun
+		? "Started manually, outside the sequential engine."
+		: "Dispatched by the workflow run.";
+	return `The broker accepted this step but it has not started yet — usually waiting for the workdir lock or a prior run to finish. ${dispatch}`;
+}
+
+/** Compact queued label for canvas state pills. */
+export function queuedCanvasLabel(queuedAt: string | null): string {
+	const elapsed = duration(null, null, queuedAt);
+	return elapsed ? `queued · ${elapsed}` : "queued";
+}
+
+/** Human-readable label for the hub's `queuedReason` code. */
+export function queuedReasonLabel(reason: QueuedReason, blocker?: QueueBlocker): string {
+	switch (reason) {
+		case "workdir_lock":
+			return blocker
+				? `Waiting for workdir — blocked by ${blocker.workflowName}`
+				: "Waiting for workdir — blocked by another workflow";
+		case "same_workflow_in_flight":
+			return "Another step in this workflow is in flight";
+		case "awaiting_started":
+			return "Accepted by broker, waiting to start";
+	}
 }
 
 /**

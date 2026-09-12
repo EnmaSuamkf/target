@@ -54,6 +54,26 @@
 	overflow-wrap: anywhere;
 }
 
+/* The workflow's stable id — beside the name, not in the facts grid. Click copies. */
+.workflowId {
+	flex: none;
+	padding: 0;
+	border: none;
+	background: transparent;
+	font-family: inherit;
+	font-size: var(--text-xs);
+	color: var(--text-muted);
+	cursor: pointer;
+	max-width: min(100%, 14rem);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.workflowId:hover {
+	color: var(--text-subtle);
+}
+
 /* "Change" sits with the title, not with the run controls. It must never take
    space from the name itself, so it can't shrink and stays on one line. */
 .rename {

@@ -17,6 +17,7 @@ import type {
 } from "../api/types.ts";
 import { OVERRIDABLE_WORKFLOW_STATUSES, startActionFor } from "../api/types.ts";
 import { Badge } from "../components/Badge.tsx";
+import { useToast } from "../components/Toast.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { ProgressBar } from "../components/Progress.tsx";
@@ -108,6 +109,7 @@ export function WorkflowDetail({
 	onSaveStep,
 	onRemoveStep,
 	onAbortStep,
+	onRunStep,
 	onContinueStep,
 	onOpenStepConversation,
 	onAddStepAfter,
@@ -118,6 +120,7 @@ export function WorkflowDetail({
 	onAddNote,
 	onEditNote,
 	onRemoveNote,
+	onSelectWorkflow,
 }: {
 	workflow: Workflow;
 	steps: Step[];
@@ -152,6 +155,8 @@ export function WorkflowDetail({
 	onSaveStep: (id: string, input: StepConfigInput) => Promise<void>;
 	onRemoveStep: (id: string) => void;
 	onAbortStep: (id: string) => void;
+	/** Re-runs one step now (POST .../run) — e.g. after Abort cleared a stuck queue. */
+	onRunStep: (id: string) => void;
 	onContinueStep: (id: string) => void;
 	/** Opens a terminal on one step's own session (the held step's "Open conversation"). */
 	onOpenStepConversation: (id: string) => void;
@@ -172,6 +177,8 @@ export function WorkflowDetail({
 	onAddNote: (stepId: string, content: string, theme: StepNoteTheme) => Promise<void>;
 	onEditNote: (stepId: string, noteId: string, content: string, theme: StepNoteTheme) => Promise<void>;
 	onRemoveNote: (stepId: string, noteId: string) => Promise<void>;
+	/** Switch to another workflow — e.g. when a queued step names its workdir blocker. */
+	onSelectWorkflow?: (workflowId: string) => void;
 }): React.JSX.Element {
 	// Which steps the next run should dispatch. Seeded from the server's
 	// `selected` flag and re-seeded when switching workflows.
@@ -193,6 +200,7 @@ export function WorkflowDetail({
 	const selectionSynced = useRef(false);
 
 	const sectionRef = useRef<HTMLElement>(null);
+	const toast = useToast();
 
 	// The hub-owned conversation-context step is split off BEFORE any selection
 	// state is computed. It is not work the operator chose, and leaving it in
@@ -367,6 +375,19 @@ export function WorkflowDetail({
 
 				<div className={styles.titleRow}>
 					<h2 className={styles.title}>{workflow.name}</h2>
+					<button
+						type="button"
+						className={`mono ${styles.workflowId}`}
+						onClick={() => {
+							void navigator.clipboard.writeText(workflow.id).then(
+								() => toast.success("Workflow ID copied."),
+								() => toast.error("Could not copy — select the ID and copy it by hand."),
+							);
+						}}
+						title={`${workflow.id} — click to copy`}
+					>
+						{workflow.id}
+					</button>
 					{/* Next to the name, because it edits the name and nothing else —
 					    it is not a run control and doesn't belong in that row. */}
 					<button
@@ -574,6 +595,7 @@ export function WorkflowDetail({
 									onSave={onSaveStep}
 									onRemove={onRemoveStep}
 									onAbort={onAbortStep}
+									onRunStep={onRunStep}
 									onContinue={onContinueStep}
 									onOpenConversation={onOpenStepConversation}
 									onAddStepAfter={addStepAfter}
@@ -586,6 +608,7 @@ export function WorkflowDetail({
 									onAddNote={onAddNote}
 									onEditNote={onEditNote}
 									onRemoveNote={onRemoveNote}
+									onSelectWorkflow={onSelectWorkflow}
 									busy={busy}
 								/>
 							</ul>
@@ -610,6 +633,7 @@ export function WorkflowDetail({
 										onSave={onSaveStep}
 										onRemove={onRemoveStep}
 										onAbort={onAbortStep}
+										onRunStep={onRunStep}
 										onContinue={onContinueStep}
 										onOpenConversation={onOpenStepConversation}
 										onAddStepAfter={addStepAfter}
@@ -622,6 +646,7 @@ export function WorkflowDetail({
 										onAddNote={onAddNote}
 										onEditNote={onEditNote}
 										onRemoveNote={onRemoveNote}
+										onSelectWorkflow={onSelectWorkflow}
 										busy={busy}
 									/>
 								))}
