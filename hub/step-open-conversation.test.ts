@@ -230,7 +230,9 @@ test("Open conversation is one button in the step's action row, not a second par
 	// out the row — not floated somewhere above it next to the result panes.
 	const row = stepItem.indexOf("<div className={styles.actions}>");
 	assert.ok(row > -1 && row < stepItem.indexOf("{conversational && ("));
-	assert.ok(stepItem.indexOf("{conversational && (") < stepItem.indexOf("Abort\n"));
+	// Queued steps carry their own Abort in `queuedActions` above this row; the
+	// ordering assertion is against the main-row Abort only.
+	assert.ok(stepItem.indexOf("{conversational && (") < stepItem.indexOf("{abortable && !queued && ("));
 });
 
 test("Open conversation stays disabled, and says why, when the step reported no session", () => {

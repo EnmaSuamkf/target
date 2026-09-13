@@ -867,6 +867,68 @@ export function operatorWorkdir(workdir: string | null, agentName: string): stri
 	return workdir && workdir !== ownSandbox ? workdir : null;
 }
 
+/** Why a step sits at `queued` — derived on read, not stored. */
+export type QueuedReason = "same_workflow_in_flight" | "workdir_lock" | "awaiting_started";
+
+/** The in-flight step holding the workdir lock for a `workdir_lock` queued step. */
+export interface QueueBlocker {
+	workflowId: string;
+	workflowName: string;
+	stepId: string;
+}
+
+export interface ResolvedQueuedReason {
+	queuedReason: QueuedReason;
+	queueBlocker?: QueueBlocker;
+}
+
+/**
+ * Best-effort explanation of why a step is `queued`. Checked in order:
+ *
+ * 1. Another step in the same workflow is `running` or `queued`.
+ * 2. Another workflow on the same awb workdir has a `running` or `queued` step.
+ * 3. Otherwise the broker accepted the dispatch and we're waiting for `started`.
+ */
+export function resolveQueuedReason(step: Step): ResolvedQueuedReason | null {
+	if (step.status !== "queued") return null;
+
+	if (
+		listSteps(step.workflowId).some(
+			(other) => other.id !== step.id && (other.status === "running" || other.status === "queued"),
+		)
+	) {
+		return { queuedReason: "same_workflow_in_flight" };
+	}
+
+	const workflow = getWorkflow(step.workflowId);
+	if (!workflow) return { queuedReason: "awaiting_started" };
+
+	const workdir = hookRuntime(workflow.hookUrl).workdir;
+	if (!workdir) return { queuedReason: "awaiting_started" };
+
+	const normalizedWorkdir = path.resolve(workdir);
+
+	for (const otherWorkflow of listWorkflows()) {
+		if (otherWorkflow.id === step.workflowId) continue;
+		const otherWorkdir = hookRuntime(otherWorkflow.hookUrl).workdir;
+		if (!otherWorkdir || path.resolve(otherWorkdir) !== normalizedWorkdir) continue;
+
+		const blocker = listSteps(otherWorkflow.id).find((s) => s.status === "running" || s.status === "queued");
+		if (blocker) {
+			return {
+				queuedReason: "workdir_lock",
+				queueBlocker: {
+					workflowId: otherWorkflow.id,
+					workflowName: otherWorkflow.name,
+					stepId: blocker.id,
+				},
+			};
+		}
+	}
+
+	return { queuedReason: "awaiting_started" };
+}
+
 /**
  * What a clone may be told to do differently from the workflow it copies —
  * everything the new-workflow form asks for, since the clone dialog IS that

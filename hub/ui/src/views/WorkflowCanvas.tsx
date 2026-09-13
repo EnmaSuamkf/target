@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Step } from "../api/types.ts";
 import type { CanvasEdge, CanvasNode } from "../lib/canvasLayout.ts";
 import { edgePath, focusNodeId, layoutWorkflow } from "../lib/canvasLayout.ts";
+import { queuedCanvasLabel, queuedReasonLabel, queuedStepTooltip } from "../lib/format.ts";
 import styles from "./WorkflowCanvas.module.css";
 
 /**
@@ -72,6 +73,7 @@ export function WorkflowCanvas({
 	onOpenStep: (stepId: string) => void;
 }): React.JSX.Element {
 	const graph = useMemo(() => layoutWorkflow(steps), [steps]);
+	const stepById = useMemo(() => new Map(steps.map((s) => [s.id, s])), [steps]);
 	const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
 	const viewportRef = useRef<HTMLDivElement>(null);
 	const zoom = ZOOM_STEPS[zoomIndex] ?? 1;
@@ -187,7 +189,7 @@ export function WorkflowCanvas({
 						) : node.kind === "subagent" ? (
 							<SubagentBox key={node.id} node={node} onOpen={onOpenStep} />
 						) : (
-							<StepCard key={node.id} node={node} onOpen={onOpenStep} />
+							<StepCard key={node.id} node={node} step={stepById.get(node.stepId)} onOpen={onOpenStep} />
 						),
 					)}
 					</div>
@@ -234,8 +236,19 @@ function EdgeLine({ edge }: { edge: CanvasEdge }): React.JSX.Element {
  * and it announces what pressing it does — which is never "change this step",
  * only "show me this step in the list".
  */
-function StepCard({ node, onOpen }: { node: CanvasNode; onOpen: (stepId: string) => void }): React.JSX.Element {
+function StepCard({
+	node,
+	step,
+	onOpen,
+}: {
+	node: CanvasNode;
+	step?: Step | undefined;
+	onOpen: (stepId: string) => void;
+}): React.JSX.Element {
 	const isContext = node.kind === "context";
+	const queued = node.state === "queued";
+	const stateText = queued && step ? queuedCanvasLabel(step.queuedAt) : node.state;
+	const stateTitle = queued && step ? queuedStepTooltip(step.manualRun) : undefined;
 	return (
 		<button
 			type="button"
@@ -249,23 +262,29 @@ function StepCard({ node, onOpen }: { node: CanvasNode; onOpen: (stepId: string)
 			style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
 			onClick={() => onOpen(node.stepId)}
 			title={node.description}
-			aria-label={`${isContext ? "Conversation context" : `Step ${node.label}`} — ${node.state}. Opens this step in the list.`}
+			aria-label={`${isContext ? "Conversation context" : `Step ${node.label}`} — ${stateText}. Opens this step in the list.`}
 		>
 			<span className={styles.cardHead}>
 				<span className={styles.cardIndex}>{node.label}</span>
 				{/* The pill takes its colour from the card's own state class (see the
 				    `.state_* .cardState` rules), so it never needs one of its own. */}
-				<span className={styles.cardState}>
+				<span className={styles.cardState} title={stateTitle}>
 					{isLiveState(node.state) && <span className={styles.dot} aria-hidden="true" />}
-					{node.state}
+					{stateText}
 				</span>
 			</span>
 			<span className={styles.cardBody}>{node.description}</span>
-			{!isContext && (node.manualReview || node.inline || node.selected) && (
+			{queued && step?.queuedReason && (
+				<span className={styles.cardSubtitle} title={queuedReasonLabel(step.queuedReason, step.queueBlocker)}>
+					{queuedReasonLabel(step.queuedReason, step.queueBlocker)}
+				</span>
+			)}
+			{!isContext && (node.manualReview || node.inline || node.selected || (queued && step?.manualRun)) && (
 				<span className={styles.cardFoot}>
 					{node.selected && <span className={styles.flag}>selected</span>}
 					{node.manualReview && <span className={styles.flag}>manual review</span>}
 					{node.inline && <span className={styles.flag}>inline</span>}
+					{queued && step?.manualRun && <span className={styles.flag}>manual run</span>}
 				</span>
 			)}
 		</button>

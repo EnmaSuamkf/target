@@ -15,6 +15,16 @@
 export type WorkflowStatus = "draft" | "running" | "paused" | "waiting" | "completed" | "failed";
 export type StepStatus = "pending" | "queued" | "running" | "waiting" | "done" | "failed";
 
+/** Why a step sits at `queued` — present on queued steps only (derived on read). */
+export type QueuedReason = "same_workflow_in_flight" | "workdir_lock" | "awaiting_started";
+
+/** The in-flight step holding the workdir lock when `queuedReason` is `workdir_lock`. */
+export interface QueueBlocker {
+	workflowId: string;
+	workflowName: string;
+	stepId: string;
+}
+
 // --- single-user access layer (mirrors hub/account.ts's PublicAccount) ---
 
 /** What GET /api/auth/status returns — open, and the only thing the landing page needs to choose its call to action. */
@@ -292,6 +302,10 @@ export interface Step {
 	activity: StepActivity | null;
 	/** Sticky notes attached to this step. */
 	notes: StepNote[];
+	/** Why this step is queued — only when `status` is `queued`. */
+	queuedReason?: QueuedReason;
+	/** Which step holds the workdir lock — only when `queuedReason` is `workdir_lock`. */
+	queueBlocker?: QueueBlocker;
 }
 
 /** Input for creating or editing a step note. */

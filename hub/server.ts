@@ -199,6 +199,7 @@ import {
 	removeWorkflow,
 	renameWorkflow,
 	restartWorkflow,
+	resolveQueuedReason,
 	resumeWorkflow,
 	runStep,
 	setConversationContext,
@@ -466,6 +467,7 @@ function publicWorkflow(workflow: Workflow): Record<string, unknown> {
 }
 
 function publicStep(step: Step, cfg: HubConfig): Record<string, unknown> {
+	const queued = resolveQueuedReason(step);
 	return {
 		id: step.id,
 		workflowId: step.workflowId,
@@ -508,6 +510,7 @@ function publicStep(step: Step, cfg: HubConfig): Record<string, unknown> {
 		lastProgressAt: step.lastProgressAt,
 		lastProgressKind: step.lastProgressKind,
 		activity: stepActivity(step, cfg),
+		...(queued ?? {}),
 		notes: listStepNotes(step.id).map((n) => ({
 			id: n.id,
 			content: n.content,
