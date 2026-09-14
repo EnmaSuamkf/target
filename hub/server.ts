@@ -458,6 +458,9 @@ function publicWorkflow(workflow: Workflow): Record<string, unknown> {
 		// poll (see `reconcileStatus`).
 		statusManual: workflow.statusManual,
 		statusManualAt: workflow.statusManualAt,
+		origin: workflow.origin,
+		remoteId: workflow.remoteId,
+		remoteSyncedAt: workflow.remoteSyncedAt,
 		tcpIds: listWorkflowTcpIds(workflow.id),
 		tcpSelections: listWorkflowTcpSelections(workflow.id),
 		resourceSelections: listWorkflowResourceSelections(workflow.id),

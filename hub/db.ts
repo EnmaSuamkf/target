@@ -97,6 +97,10 @@ export type OverridableStepStatus = (typeof OVERRIDABLE_STEP_STATUSES)[number];
 export const OVERRIDABLE_WORKFLOW_STATUSES = ["draft", "paused", "completed", "failed"] as const;
 export type OverridableWorkflowStatus = (typeof OVERRIDABLE_WORKFLOW_STATUSES)[number];
 
+/** Whether a workflow was created locally or managed by a remote sync server. */
+export const WORKFLOW_ORIGINS = ["local", "remote"] as const;
+export type WorkflowOrigin = (typeof WORKFLOW_ORIGINS)[number];
+
 export interface Workflow {
 	id: string;
 	name: string;
@@ -163,6 +167,12 @@ export interface Workflow {
 	statusManual: boolean;
 	/** When that override was made; null when the status is the engine's own. */
 	statusManualAt: string | null;
+	/** `local` for operator-created workflows; `remote` when created by the sync agent from a server command. */
+	origin: WorkflowOrigin;
+	/** Server-side workflow id when `origin === "remote"`. */
+	remoteId: string | null;
+	/** Last time remote metadata was synced from the server. */
+	remoteSyncedAt: string | null;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -530,6 +540,11 @@ export function open(): DatabaseSync {
 	addWorkflowColumn("completion_notified", "completion_notified INTEGER NOT NULL DEFAULT 0");
 	addWorkflowColumn("status_manual", "status_manual INTEGER NOT NULL DEFAULT 0");
 	addWorkflowColumn("status_manual_at", "status_manual_at TEXT");
+	// Remote sync metadata (docs/remote-sync-hybrid). DEFAULT 'local' keeps every
+	// pre-existing row a local workflow with no server id.
+	addWorkflowColumn("origin", "origin TEXT NOT NULL DEFAULT 'local'");
+	addWorkflowColumn("remote_id", "remote_id TEXT");
+	addWorkflowColumn("remote_synced_at", "remote_synced_at TEXT");
 	const existingTemplateColumns = new Set(
 		(database.prepare("PRAGMA table_info(templates)").all() as Record<string, unknown>[]).map((c) => String(c.name)),
 	);
@@ -590,6 +605,9 @@ function rowToWorkflow(row: Record<string, unknown>): Workflow {
 		compactionHandledAt: row.compaction_handled_at == null ? null : String(row.compaction_handled_at),
 		statusManual: Number(row.status_manual ?? 0) === 1,
 		statusManualAt: row.status_manual_at == null ? null : String(row.status_manual_at),
+		origin: row.origin === "remote" ? "remote" : "local",
+		remoteId: row.remote_id == null ? null : String(row.remote_id),
+		remoteSyncedAt: row.remote_synced_at == null ? null : String(row.remote_synced_at),
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
 	};
@@ -609,10 +627,16 @@ export function insertWorkflow(input: {
 	 * `--resume` of that conversation rather than a fresh one.
 	 */
 	adoptedSessionId?: string | null;
+	origin?: WorkflowOrigin;
+	remoteId?: string | null;
+	remoteSyncedAt?: string | null;
 }): Workflow {
 	const now = new Date().toISOString();
 	const conversationContext = input.conversationContext?.trim() || null;
 	const adoptedSessionId = input.adoptedSessionId?.trim() || null;
+	const origin = input.origin ?? "local";
+	const remoteId = input.remoteId?.trim() || null;
+	const remoteSyncedAt = input.remoteSyncedAt ?? null;
 	const workflow: Workflow = {
 		id: input.id,
 		name: input.name,
@@ -629,13 +653,16 @@ export function insertWorkflow(input: {
 		compactionHandledAt: null,
 		statusManual: false,
 		statusManualAt: null,
+		origin,
+		remoteId,
+		remoteSyncedAt,
 		createdAt: now,
 		updatedAt: now,
 	};
 	open()
 		.prepare(
-			`INSERT INTO workflows (id, name, agent_name, hook_url, secret, status, last_session_id, adopted_session_id, md_path, conversation_context, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO workflows (id, name, agent_name, hook_url, secret, status, last_session_id, adopted_session_id, md_path, conversation_context, origin, remote_id, remote_synced_at, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			workflow.id,
@@ -648,14 +675,58 @@ export function insertWorkflow(input: {
 			workflow.adoptedSessionId,
 			workflow.mdPath,
 			workflow.conversationContext,
+			workflow.origin,
+			workflow.remoteId,
+			workflow.remoteSyncedAt,
 			workflow.createdAt,
 			workflow.updatedAt,
 		);
 	return workflow;
 }
 
+/** Update remote-sync metadata on a workflow (sync agent). */
+export function setWorkflowRemoteMeta(
+	id: string,
+	{
+		origin,
+		remoteId,
+		remoteSyncedAt,
+	}: {
+		origin?: WorkflowOrigin;
+		remoteId?: string | null;
+		remoteSyncedAt?: string | null;
+	},
+): Workflow | null {
+	const now = new Date().toISOString();
+	const fields: string[] = ["updated_at = ?"];
+	const params: (string | null)[] = [now];
+	if (origin !== undefined) {
+		fields.push("origin = ?");
+		params.push(origin);
+	}
+	if (remoteId !== undefined) {
+		fields.push("remote_id = ?");
+		params.push(remoteId);
+	}
+	if (remoteSyncedAt !== undefined) {
+		fields.push("remote_synced_at = ?");
+		params.push(remoteSyncedAt);
+	}
+	params.push(id);
+	open()
+		.prepare(`UPDATE workflows SET ${fields.join(", ")} WHERE id = ?`)
+		.run(...params);
+	return getWorkflow(id);
+}
+
 export function getWorkflow(id: string): Workflow | null {
 	const row = open().prepare("SELECT * FROM workflows WHERE id = ?").get(id);
+	return row ? rowToWorkflow(row as Record<string, unknown>) : null;
+}
+
+/** Resolve a server-side remote workflow id to the local row, if any. */
+export function getWorkflowByRemoteId(remoteId: string): Workflow | null {
+	const row = open().prepare("SELECT * FROM workflows WHERE remote_id = ?").get(remoteId.trim());
 	return row ? rowToWorkflow(row as Record<string, unknown>) : null;
 }
 
@@ -2647,6 +2718,133 @@ export interface NewReportEvent {
 }
 
 const INSTANCE_ID_SETTING = "report:instance_id";
+const SYNC_CLIENT_TOKEN_KEY = "sync:client_token";
+const SYNC_CLIENT_ID_KEY = "sync:client_id";
+const SYNC_STEP_MAP_PREFIX = "sync:step_map:";
+const SYNC_APPLIED_COMMANDS_KEY = "sync:applied_commands";
+
+/** Record of a command the sync agent has already applied (idempotency ledger). */
+export interface AppliedSyncCommand {
+	localId?: string;
+	remoteId: string;
+	type: string;
+}
+
+function readAppliedSyncCommands(): Record<string, AppliedSyncCommand> {
+	const row = open().prepare("SELECT value FROM settings WHERE key = ?").get(SYNC_APPLIED_COMMANDS_KEY) as
+		| { value: string }
+		| undefined;
+	if (!row?.value) return {};
+	try {
+		const parsed = JSON.parse(row.value) as unknown;
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+		const out: Record<string, AppliedSyncCommand> = {};
+		for (const [id, raw] of Object.entries(parsed as Record<string, unknown>)) {
+			if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+			const rec = raw as Record<string, unknown>;
+			if (typeof rec.remoteId !== "string" || typeof rec.type !== "string") continue;
+			out[id] = {
+				remoteId: rec.remoteId,
+				type: rec.type,
+				...(typeof rec.localId === "string" ? { localId: rec.localId } : {}),
+			};
+		}
+		return out;
+	} catch {
+		return {};
+	}
+}
+
+function writeAppliedSyncCommands(map: Record<string, AppliedSyncCommand>): void {
+	const now = new Date().toISOString();
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(SYNC_APPLIED_COMMANDS_KEY, JSON.stringify(map), now);
+}
+
+export function getAppliedSyncCommand(commandId: string): AppliedSyncCommand | null {
+	return readAppliedSyncCommands()[commandId] ?? null;
+}
+
+export function markSyncCommandApplied(commandId: string, record: AppliedSyncCommand): void {
+	const map = readAppliedSyncCommands();
+	map[commandId] = record;
+	writeAppliedSyncCommands(map);
+}
+
+/** Clear the applied-command ledger (tests). */
+export function clearAppliedSyncCommands(): void {
+	open().prepare("DELETE FROM settings WHERE key = ?").run(SYNC_APPLIED_COMMANDS_KEY);
+}
+
+/** Persisted remote-sync client credentials (issued by POST /api/sync/register). */
+export function getSyncCredentials(): { clientId: string | null; token: string | null } {
+	const db = open();
+	const tokenRow = db.prepare("SELECT value FROM settings WHERE key = ?").get(SYNC_CLIENT_TOKEN_KEY) as
+		| { value: string }
+		| undefined;
+	const idRow = db.prepare("SELECT value FROM settings WHERE key = ?").get(SYNC_CLIENT_ID_KEY) as
+		| { value: string }
+		| undefined;
+	return {
+		clientId: idRow?.value?.trim() || null,
+		token: tokenRow?.value?.trim() || null,
+	};
+}
+
+export function saveSyncCredentials(clientId: string, token: string): void {
+	const now = new Date().toISOString();
+	const db = open();
+	const upsert = db.prepare(
+		`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+	);
+	upsert.run(SYNC_CLIENT_ID_KEY, clientId.trim(), now);
+	upsert.run(SYNC_CLIENT_TOKEN_KEY, token.trim(), now);
+}
+
+/** Stable remote step_key → local step id map for one remote workflow. */
+export function getSyncStepMap(remoteId: string): Record<string, string> {
+	const row = open()
+		.prepare("SELECT value FROM settings WHERE key = ?")
+		.get(`${SYNC_STEP_MAP_PREFIX}${remoteId}`) as { value: string } | undefined;
+	if (!row?.value) return {};
+	try {
+		const parsed = JSON.parse(row.value) as unknown;
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			const entries = Object.entries(parsed as Record<string, unknown>).filter(
+				(entry): entry is [string, string] => typeof entry[0] === "string" && typeof entry[1] === "string",
+			);
+			return Object.fromEntries(entries);
+		}
+	} catch {
+		// Malformed map → treat as empty.
+	}
+	return {};
+}
+
+export function saveSyncStepMap(remoteId: string, map: Record<string, string>): void {
+	const now = new Date().toISOString();
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(`${SYNC_STEP_MAP_PREFIX}${remoteId}`, JSON.stringify(map), now);
+}
+
+export function setSyncStepKey(remoteId: string, stepKey: string, stepId: string): void {
+	const map = getSyncStepMap(remoteId);
+	map[stepKey] = stepId;
+	saveSyncStepMap(remoteId, map);
+}
+
+export function deleteSyncStepMap(remoteId: string): void {
+	open().prepare("DELETE FROM settings WHERE key = ?").run(`${SYNC_STEP_MAP_PREFIX}${remoteId}`);
+}
 
 /**
  * The stable id this instance reports under. An operator-pinned

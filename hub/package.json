@@ -13,6 +13,7 @@
   "scripts": {
     "start": "node daemon.ts",
     "test": "node --test --import ./test-setup.ts",
+    "test:sync": "node --test --import ./test-setup.ts sync.test.ts sync-executor.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

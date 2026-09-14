@@ -172,6 +172,8 @@ Working on it:
 npm run ui:dev     # Vite dev server on :5173, proxying /api to the hub
 npm run ui:build   # production build into hub/ui/dist
 npm run typecheck  # type-checks the hub and the UI
+npm test           # hub test suite (node:test)
+npm run test:sync  # remote-sync agent tests only
 ```
 
 `ui:dev` gives hot reload while proxying API calls to a hub started separately
@@ -628,6 +630,38 @@ knows which version each user runs. Conversation privacy is enforced by
 metadata only, `full` includes text. Secrets (hook secret, auth/session hashes)
 are never reported. The full wire contract is in
 [`docs/report-server.es.html`](docs/report-server.es.html).
+
+### Remote sync (`.env`)
+
+When a central **target-server** runs the remote-sync API, the hub daemon can
+register, poll for commands, apply them locally (creating workflows with
+`origin=remote`), and push events back. Off unless configured:
+
+```
+TARGET_SYNC_URL=http://127.0.0.1:8900    # target-server base URL
+TARGET_SYNC_ENABLED=true
+# TARGET_SYNC_TOKEN=sync_…               # optional; persisted after register
+# TARGET_SYNC_INTERVAL_MS=30000          # poll cadence (default 30s)
+```
+
+Wire contract: `target-server/docs/remote-sync.md`.
+
+### Tests
+
+Hub tests run from the repo root or `hub/`:
+
+```bash
+npm test                              # from repo root
+npm --prefix hub test                 # same — all hub tests
+npm --prefix hub run test:sync        # sync agent + command executor only
+npm --prefix hub run typecheck        # TypeScript (includes sync.test.ts)
+```
+
+`hub/sync.test.ts` drives the sync agent against an **in-process mock server**
+(no sibling target-server checkout required). `hub/sync-executor.test.ts` unit-
+tests command application (`workflow.create`, `step.add`, `workflow.start`,
+`workflow.pause`, duplicate `command_id` idempotency). Tests use throwaway
+`TARGET_HOME` / `AWB_HOME` directories — see `hub/test-setup.ts`.
 
 ## External requirement
 

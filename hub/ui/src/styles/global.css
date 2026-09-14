@@ -283,6 +283,12 @@ kbd,
 	border-color: var(--danger-200);
 	color: var(--danger-700);
 }
+.badge--remote {
+	background: #eef2ff;
+	border-color: #c7d2fe;
+	color: #4338ca;
+}
+
 .badge--pending {
 	background: var(--gray-100);
 	border-color: var(--gray-200);

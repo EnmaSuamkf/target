@@ -1,4 +1,4 @@
-import type { StepStatus, WorkflowStatus } from "../api/types.ts";
+import type { StepStatus, WorkflowOrigin, WorkflowStatus } from "../api/types.ts";
 
 /**
  * Status pill. A `running` badge carries a pulsing dot so in-flight work is
@@ -44,6 +44,16 @@ export function Badge({
 					<span className="sr-only">status set manually</span>
 				</span>
 			)}
+		</span>
+	);
+}
+
+/** Marks workflows created and managed by a remote sync server. */
+export function OriginBadge({ origin }: { origin: WorkflowOrigin }): React.JSX.Element | null {
+	if (origin !== "remote") return null;
+	return (
+		<span className="badge badge--remote" title="Managed by remote sync server">
+			Remote
 		</span>
 	);
 }

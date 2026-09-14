@@ -250,7 +250,15 @@
 /* The badge states the run status — it must never be the thing that gets
    truncated when the name is long. `:global` because Badge renders the shared
    `.badge` class from global.css, which CSS Modules would otherwise hash. */
-.cardTop > :global(.badge) {
+.cardBadges {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--space-1);
+	flex: none;
+	justify-content: flex-end;
+}
+
+.cardBadges > :global(.badge) {
 	flex: none;
 }
 
