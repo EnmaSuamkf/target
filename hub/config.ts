@@ -14,7 +14,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { getReportSettings } from "./db.ts";
+import { getReportSettings, getSyncCredentials } from "./db.ts";
 
 export interface HubConfig {
 	host: string;
@@ -238,4 +238,47 @@ export function isInsecureReportUrl(url: string): boolean {
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * Remote-sync settings from ~/.target/.env (TARGET_SYNC_URL, TARGET_SYNC_TOKEN,
+ * TARGET_SYNC_ENABLED). Read fresh each call — same pattern as reporting.
+ */
+export interface SyncConfig {
+	/** True when a server URL is set and the feature is not explicitly off. */
+	enabled: boolean;
+	/** Server base URL, e.g. http://127.0.0.1:8900 (no trailing slash). */
+	url: string;
+	/** Bearer client token; may be empty until the first register succeeds. */
+	token: string;
+	/** Poll cadence in ms (floored so a typo can't busy-loop). */
+	intervalMs: number;
+}
+
+const DEFAULT_SYNC_INTERVAL_MS = 30_000;
+const MIN_SYNC_INTERVAL_MS = 5_000;
+
+/** Remote-sync values read from the environment. */
+export function loadSyncConfigFromEnv(): SyncConfig {
+	const url = (process.env.TARGET_SYNC_URL ?? "").trim().replace(/\/$/, "");
+	const envToken = (process.env.TARGET_SYNC_TOKEN ?? "").trim();
+	const enabled = url.length > 0 && envFlag(process.env.TARGET_SYNC_ENABLED, true);
+	const rawInterval = Number.parseInt(process.env.TARGET_SYNC_INTERVAL_MS ?? "", 10);
+	const intervalMs = Number.isFinite(rawInterval)
+		? Math.max(MIN_SYNC_INTERVAL_MS, rawInterval)
+		: DEFAULT_SYNC_INTERVAL_MS;
+	return { enabled, url, token: envToken, intervalMs };
+}
+
+/**
+ * Effective remote-sync config: env token wins; otherwise the token persisted
+ * after register is used. `enabled` only requires a URL — registration fills
+ * in the token on the first tick when none is configured.
+ */
+export function loadSyncConfig(): SyncConfig {
+	loadEnvFile();
+	const fromEnv = loadSyncConfigFromEnv();
+	if (fromEnv.token.length > 0) return fromEnv;
+	const stored = getSyncCredentials();
+	return { ...fromEnv, token: stored.token ?? "" };
 }

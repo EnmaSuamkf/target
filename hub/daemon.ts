@@ -7,9 +7,10 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureBundledCatalog } from "./bundled-bootstrap.ts";
-import { isInsecureReportUrl, loadConfig, loadReportConfig } from "./config.ts";
+import { isInsecureReportUrl, loadConfig, loadReportConfig, loadSyncConfig } from "./config.ts";
 import { listWorkflows } from "./db.ts";
 import { emitHeartbeat, flush } from "./reporter.ts";
+import { initSyncStateCache, runSyncTick } from "./sync.ts";
 import { createServer } from "./server.ts";
 import { announceWorkflows, expireStale } from "./workflow.ts";
 import { TARGET_VERSION } from "./version.ts";
@@ -83,6 +84,32 @@ export function startHub(): void {
 			void flush({ config: current, log }).catch((err) => log(`report flush failed: ${String(err)}`, "warning"));
 		}, report.intervalMs);
 		flusher.unref();
+	}
+
+	// Remote sync: register/heartbeat, poll server commands, apply locally, ack.
+	const syncCfg = loadSyncConfig();
+	if (syncCfg.enabled) {
+		log(`remote sync enabled → ${syncCfg.url} (every ${syncCfg.intervalMs}ms)`);
+		if (isInsecureReportUrl(syncCfg.url)) {
+			log("TARGET_SYNC_URL is plaintext http:// to a non-loopback host — prefer https", "warning");
+		}
+		initSyncStateCache();
+		const syncLoop = setInterval(() => {
+			const current = loadSyncConfig();
+			if (!current.enabled) return;
+			void runSyncTick({ config: current, hubConfig: cfg, log }).catch((err) =>
+				log(`remote sync tick failed: ${String(err)}`, "warning"),
+			);
+		}, syncCfg.intervalMs);
+		syncLoop.unref();
+		// First tick soon after startup so a server-enqueued command materializes quickly.
+		setTimeout(() => {
+			const current = loadSyncConfig();
+			if (!current.enabled) return;
+			void runSyncTick({ config: current, hubConfig: cfg, log }).catch((err) =>
+				log(`remote sync tick failed: ${String(err)}`, "warning"),
+			);
+		}, 2_000).unref();
 	}
 
 	server.on("error", (err) => {

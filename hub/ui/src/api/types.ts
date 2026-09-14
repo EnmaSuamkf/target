@@ -149,6 +149,9 @@ export interface Progress {
 	failed: boolean;
 }
 
+/** Whether a workflow was created locally or by remote sync. */
+export type WorkflowOrigin = "local" | "remote";
+
 /**
  * Which of the three text inputs an image is pinned to: the workflow's
  * conversation context, or a step's task description / acceptance criteria.
@@ -230,6 +233,9 @@ export interface Workflow {
 	 */
 	statusManual: boolean;
 	statusManualAt: string | null;
+	origin: WorkflowOrigin;
+	remoteId: string | null;
+	remoteSyncedAt: string | null;
 	createdAt: string;
 	updatedAt: string;
 }

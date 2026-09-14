@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Workflow, WorkflowStatus } from "../api/types.ts";
-import { Badge } from "../components/Badge.tsx";
+import type { Workflow, WorkflowOrigin, WorkflowStatus } from "../api/types.ts";
+import { Badge, OriginBadge } from "../components/Badge.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { ProgressBar } from "../components/Progress.tsx";
 import { prettyPath, relativeTime } from "../lib/format.ts";
@@ -40,6 +40,7 @@ const STATUS_ORDER: Record<WorkflowStatus, number> = {
 };
 
 type Filter = "all" | WorkflowStatus;
+type OriginFilter = "all" | WorkflowOrigin;
 
 /** How many cards the "All workflows" page shows per page. */
 const PAGE_SIZE = 12;
@@ -50,10 +51,11 @@ const PAGE_SIZE = 12;
  * identically. Kept as a plain function (not a hook) so each surface can call
  * it in its own `useMemo` without sharing state.
  */
-function filterAndSort(workflows: Workflow[], query: string, filter: Filter): Workflow[] {
+function filterAndSort(workflows: Workflow[], query: string, filter: Filter, originFilter: OriginFilter): Workflow[] {
 	const q = query.trim().toLowerCase();
 	return workflows
 		.filter((w) => (filter === "all" ? true : w.status === filter))
+		.filter((w) => (originFilter === "all" ? true : w.origin === originFilter))
 		.filter((w) => (q === "" ? true : w.name.toLowerCase().includes(q) || w.agentName.toLowerCase().includes(q)))
 		.sort((a, b) => {
 			const byStatus = STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
@@ -68,6 +70,11 @@ function presentStatuses(workflows: Workflow[]): WorkflowStatus[] {
 	return (Object.keys(STATUS_ORDER) as WorkflowStatus[])
 		.filter((s) => present.has(s))
 		.sort((a, b) => STATUS_ORDER[a] - STATUS_ORDER[b]);
+}
+
+function presentOrigins(workflows: Workflow[]): WorkflowOrigin[] {
+	const present = new Set(workflows.map((w) => w.origin));
+	return (["local", "remote"] as WorkflowOrigin[]).filter((o) => present.has(o));
 }
 
 export function WorkflowList({
@@ -96,10 +103,12 @@ export function WorkflowList({
 	// surfaces' state, so narrowing one doesn't silently narrow the other.
 	const [query, setQuery] = useState("");
 	const [filter, setFilter] = useState<Filter>("all");
+	const [originFilter, setOriginFilter] = useState<OriginFilter>("all");
 	const railRef = useRef<HTMLDivElement | null>(null);
 
-	const visible = useMemo(() => filterAndSort(workflows, query, filter), [workflows, query, filter]);
+	const visible = useMemo(() => filterAndSort(workflows, query, filter, originFilter), [workflows, query, filter, originFilter]);
 	const statuses = useMemo(() => presentStatuses(workflows), [workflows]);
+	const origins = useMemo(() => presentOrigins(workflows), [workflows]);
 
 	// A new workflow: put the rail back at its left edge. `scrollLeft` (not
 	// `scrollIntoView`) on purpose — this must never move the *page*, which
@@ -138,6 +147,30 @@ export function WorkflowList({
 								/>
 							</div>
 
+							{origins.length > 1 && (
+								<div className={styles.filters} role="group" aria-label="Filter by origin">
+									<button
+										type="button"
+										className={`${styles.filter} ${originFilter === "all" ? styles.filterActive : ""}`}
+										onClick={() => setOriginFilter("all")}
+										aria-pressed={originFilter === "all"}
+									>
+										All origins
+									</button>
+									{origins.map((origin) => (
+										<button
+											key={origin}
+											type="button"
+											className={`${styles.filter} ${originFilter === origin ? styles.filterActive : ""}`}
+											onClick={() => setOriginFilter(origin)}
+											aria-pressed={originFilter === origin}
+										>
+											{origin === "remote" ? "Remote" : "Local"}
+										</button>
+									))}
+								</div>
+							)}
+
 							{statuses.length > 1 && (
 								<div className={styles.filters} role="group" aria-label="Filter by status">
 									<button
@@ -146,7 +179,7 @@ export function WorkflowList({
 										onClick={() => setFilter("all")}
 										aria-pressed={filter === "all"}
 									>
-										All
+										All statuses
 									</button>
 									{statuses.map((status) => (
 										<button
@@ -270,7 +303,10 @@ function WorkflowCard({
 				    workflows where it actually says something. Marked here too: a
 				    status somebody set by hand should be recognisable from the list,
 				    not only after opening it. */}
-				<Badge status={workflow.status} manual={workflow.statusManual} manualAt={workflow.statusManualAt} />
+				<span className={styles.cardBadges}>
+					<OriginBadge origin={workflow.origin} />
+					<Badge status={workflow.status} manual={workflow.statusManual} manualAt={workflow.statusManualAt} />
+				</span>
 			</span>
 
 			<ProgressBar progress={workflow.progress} running={workflow.status === "running"} />
@@ -316,14 +352,20 @@ function FilterToolbar({
 	setQuery,
 	filter,
 	setFilter,
+	originFilter,
+	setOriginFilter,
 	statuses,
+	origins,
 	autoFocus,
 }: {
 	query: string;
 	setQuery: (q: string) => void;
 	filter: Filter;
 	setFilter: (f: Filter) => void;
+	originFilter: OriginFilter;
+	setOriginFilter: (f: OriginFilter) => void;
 	statuses: WorkflowStatus[];
+	origins: WorkflowOrigin[];
 	autoFocus?: boolean;
 }): React.JSX.Element {
 	return (
@@ -345,6 +387,30 @@ function FilterToolbar({
 				/>
 			</div>
 
+			{origins.length > 1 && (
+				<div className={styles.filters} role="group" aria-label="Filter by origin">
+					<button
+						type="button"
+						className={`${styles.filter} ${originFilter === "all" ? styles.filterActive : ""}`}
+						onClick={() => setOriginFilter("all")}
+						aria-pressed={originFilter === "all"}
+					>
+						All origins
+					</button>
+					{origins.map((origin) => (
+						<button
+							key={origin}
+							type="button"
+							className={`${styles.filter} ${originFilter === origin ? styles.filterActive : ""}`}
+							onClick={() => setOriginFilter(origin)}
+							aria-pressed={originFilter === origin}
+						>
+							{origin === "remote" ? "Remote" : "Local"}
+						</button>
+					))}
+				</div>
+			)}
+
 			{statuses.length > 1 && (
 				<div className={styles.filters} role="group" aria-label="Filter by status">
 					<button
@@ -353,7 +419,7 @@ function FilterToolbar({
 						onClick={() => setFilter("all")}
 						aria-pressed={filter === "all"}
 					>
-						All
+						All statuses
 					</button>
 					{statuses.map((status) => (
 						<button
@@ -413,10 +479,12 @@ export function AllWorkflowsPage({
 }): React.JSX.Element {
 	const [query, setQuery] = useState("");
 	const [filter, setFilter] = useState<Filter>("all");
+	const [originFilter, setOriginFilter] = useState<OriginFilter>("all");
 	const [page, setPage] = useState(1);
 
-	const visible = useMemo(() => filterAndSort(workflows, query, filter), [workflows, query, filter]);
+	const visible = useMemo(() => filterAndSort(workflows, query, filter, originFilter), [workflows, query, filter, originFilter]);
 	const statuses = useMemo(() => presentStatuses(workflows), [workflows]);
+	const origins = useMemo(() => presentOrigins(workflows), [workflows]);
 
 	const total = visible.length;
 	const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -432,7 +500,7 @@ export function AllWorkflowsPage({
 	// search you've just retyped is never the page you want.
 	useEffect(() => {
 		setPage(1);
-	}, [query, filter]);
+	}, [query, filter, originFilter]);
 
 	return (
 		<section className={styles.page} aria-label="All workflows">
@@ -457,7 +525,10 @@ export function AllWorkflowsPage({
 						setQuery={setQuery}
 						filter={filter}
 						setFilter={setFilter}
+						originFilter={originFilter}
+						setOriginFilter={setOriginFilter}
 						statuses={statuses}
+						origins={origins}
 						autoFocus
 					/>
 				</div>
