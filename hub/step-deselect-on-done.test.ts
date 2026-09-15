@@ -284,5 +284,6 @@ test("WorkflowDetail actually applies the rule (the seam these unit tests can't 
 	// Driven by the polled steps, and remembering their statuses for the next
 	// comparison — without the ref there is no transition to spot.
 	assert.match(source, /seenStatuses\.current = stepStatuses\(taskSteps\)/);
-	assert.match(source, /setSelection\(\(current\) => selectionAfterPoll\(current, previous, taskSteps\)/);
+	assert.match(source, /selectionAfterPoll\(current, previous, taskSteps\)/);
+	assert.match(source, /reconcileSelectionWithServer\(afterDeselect, taskSteps\)/);
 });

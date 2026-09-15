@@ -25,7 +25,14 @@ import { Switch } from "../components/Switch.tsx";
 import { useStagedImages } from "../hooks/useStagedImages.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
 import { canMoveStep } from "../lib/stepMove.ts";
-import { seedSelectionFromSteps, selectionAfterPoll, stepStatuses } from "../lib/stepSelection.ts";
+import {
+	reconcileSelectionWithServer,
+	seedSelectionFromSteps,
+	selectionAfterPoll,
+	serverSelectedIds,
+	setsEqual,
+	stepStatuses,
+} from "../lib/stepSelection.ts";
 import { ContextPanel } from "./ContextPanel.tsx";
 import { RciPanel } from "./RciPanel.tsx";
 import { TcpPanel } from "./TcpPanel.tsx";
@@ -198,6 +205,8 @@ export function WorkflowDetail({
 	// False again after every workflow switch; flipped once its steps load so a
 	// reload (steps arrive after the first paint) still picks up server selection.
 	const selectionSynced = useRef(false);
+	const onSelectionChangeRef = useRef(onSelectionChange);
+	onSelectionChangeRef.current = onSelectionChange;
 
 	const sectionRef = useRef<HTMLElement>(null);
 	const toast = useToast();
@@ -239,8 +248,21 @@ export function WorkflowDetail({
 		seenStatuses.current = stepStatuses(taskSteps);
 		// Functional form so the rule always reads the checkboxes as they stand
 		// right now, and returns the same Set when nothing finished (React then
-		// bails out, so the common poll re-renders nothing).
-		setSelection((current) => selectionAfterPoll(current, previous, taskSteps) as Set<string>);
+		// bails out, so the common poll re-renders nothing). Reconcile with the
+		// server's `selected` flags for steps the engine still reads, then push
+		// when local drifted — otherwise a pending step can look checked while
+		// the run has already drained past it.
+		setSelection((current) => {
+			const afterDeselect = selectionAfterPoll(current, previous, taskSteps) as Set<string>;
+			const next = reconcileSelectionWithServer(afterDeselect, taskSteps);
+			if (!setsEqual(next, current)) {
+				const onServer = serverSelectedIds(taskSteps);
+				if (!setsEqual(next, onServer)) {
+					onSelectionChangeRef.current([...next]);
+				}
+			}
+			return next;
+		});
 	}, [taskSteps]);
 
 	// Move focus to the detail pane when a workflow is opened, so keyboard
@@ -577,7 +599,7 @@ export function WorkflowDetail({
 					    I act on?" to be worked out every time. Only the list is an editor,
 					    which is why the add-step form goes with it. */}
 					{stepsView === "canvas" ? (
-						<WorkflowCanvas steps={steps} onOpenStep={openStepInList} />
+						<WorkflowCanvas steps={steps} selectedIds={selection} onOpenStep={openStepInList} />
 					) : (
 						<>
 						{/* Pinned above the numbered list, not inside it: it runs before step 1

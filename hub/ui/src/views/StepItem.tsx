@@ -355,7 +355,7 @@ export function StepItem({
 					{step.useSubagent === false && (
 						<span
 							className={styles.metaItem}
-							title="This step runs inline in the conversation instead of being delegated to a subagent — unless the session is over 60% full when it is dispatched, in which case it is delegated anyway to keep the conversation from degrading."
+							title="This step runs inline in the conversation instead of being delegated to a subagent."
 						>
 							<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
 								<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />

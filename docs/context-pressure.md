@@ -1,7 +1,11 @@
 # Feature: Context-pressure override
 
-Once a workflow's shared conversation is **more than 60% full**, a step is
-delegated to a subagent even when its own "Use subagent" toggle says inline.
+> **Removed.** The hub no longer overrides a step's "Use subagent" toggle based
+> on session occupancy. Each step always runs according to its configured
+> `useSubagent` value. The rest of this document is kept for historical context.
+
+Once a workflow's shared conversation is **more than 60% full**, a step was
+delegated to a subagent even when its own "Use subagent" toggle said inline.
 
 ## Why
 

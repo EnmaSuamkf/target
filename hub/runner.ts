@@ -20,13 +20,8 @@
  * thread, spawn nothing — because leaving the input bare would make the
  * behaviour depend on the agent's mood: the session's earlier turns are full of
  * "delegate this" instructions, and an unqualified step would very likely be
- * delegated by imitation. Exactly one of the three instructions below is always
+ * delegated by imitation. Exactly one of the two instructions below is always
  * appended, so a step never has to be guessed about.
- *
- * The third one is the context-pressure override (see context-pressure.ts): an
- * inline step dispatched onto a session that is already more than 60% full is
- * delegated anyway, because pouring its working context into a crowded thread
- * is what degrades the agent's thinking for this step and every step after it.
  *
  * Two things here exist because that shared conversation is not permanent. It
  * gets COMPACTED — the harness drops the earlier turns and keeps a summary —
@@ -41,7 +36,6 @@ import { attachmentSection, listFieldAttachments } from "./attachments.ts";
 import { ensureSandboxImage, hookRuntime } from "./awb.ts";
 import { markContextReinjected, needsContextReinjection, observeCompaction } from "./compaction.ts";
 import type { HubConfig } from "./config.ts";
-import { CONTEXT_PRESSURE_PERCENT, shouldForceSubagent, workflowContextRatio } from "./context-pressure.ts";
 import type { Attachment, Step, Workflow } from "./db.ts";
 import { completeStep, getContextStep, listSteps, markStepQueued } from "./db.ts";
 import { listWorkflowTcpSelections } from "./tcp-store.ts";
@@ -70,24 +64,11 @@ export const INLINE_SUFFIX =
 	"\n\nImportant: run this step yourself, directly in this thread — do NOT delegate it to a subagent (do not use the Task tool for it). This step was explicitly configured to run inline, so its work belongs in this conversation.";
 
 /**
- * The instruction for an inline step that context pressure has overridden. It
- * replaces INLINE_SUFFIX rather than being added to it — the agent must be told
- * one thing, not a configured preference and a contradiction of it — and it says
- * WHY the operator's choice was overridden, so the agent doesn't read it as a
- * mistake and "helpfully" honour the toggle it can still see in the UI.
+ * The instruction appended to a step's exec input, per its subagent toggle.
  */
-export const CONTEXT_PRESSURE_SUFFIX =
-	`\n\nImportant: run this step by delegating the work to a subagent (the Task tool) instead of solving it yourself directly in this thread. This step was configured to run inline, but this session's context window is already more than ${CONTEXT_PRESSURE_PERCENT}% full, and doing the work here would crowd it further and degrade the quality of your thinking for this step and every step after it. The override is deliberate: delegate, and keep only the subagent's summary in this thread.`;
-
-/**
- * The instruction appended to a step's exec input, per its subagent toggle —
- * unless `forced`, which is the context-pressure override taking the choice
- * away from an inline step (see context-pressure.ts). `forced` is meaningless
- * for a step that already delegates, so it's ignored when `useSubagent` is on.
- */
-export function subagentInstruction(useSubagent: boolean, forced = false): string {
+export function subagentInstruction(useSubagent: boolean): string {
 	if (useSubagent) return SUBAGENT_SUFFIX;
-	return forced ? CONTEXT_PRESSURE_SUFFIX : INLINE_SUFFIX;
+	return INLINE_SUFFIX;
 }
 
 /**
@@ -206,8 +187,7 @@ function contextPreamble(context: string | null | undefined, images: Attachment[
  *
  * Hence the four explicit prohibitions (no tools, no delegation, no starting a
  * later step) and the one-line acknowledgement — which is also what keeps this
- * turn's cost to the background text plus a sentence, on a session whose
- * occupancy is the very thing context-pressure.ts exists to protect.
+ * turn's cost to the background text plus a sentence.
  */
 export const CONTEXT_STEP_SUFFIX =
 	"This step exists only to establish that background for the rest of this workflow. There is no work to do here: do not use any tools, do not delegate anything to a subagent, and do not start on any later step. Confirm in one line that you have read the background above and will apply it; the workflow's real steps follow in separate turns on this same conversation.";
@@ -289,13 +269,6 @@ export function composeStepInput(
 		retryReason?: string;
 		timedOut?: boolean;
 		/**
-		 * Context pressure overrode this step's inline toggle — delegate anyway.
-		 * The caller's decision, not this function's: only `dispatchStep` knows
-		 * which session this dispatch lands on, and it's that session's occupancy
-		 * the rule is about.
-		 */
-		forceSubagent?: boolean;
-		/**
 		 * Where the agent POSTs to run an attached TCP tool, token included — built
 		 * by `dispatchStep`, which is the only caller that knows both the hub's
 		 * address and this step's credential. Without it the catalog still lists the
@@ -323,14 +296,8 @@ export function composeStepInput(
 		return `${preamble}${CONTEXT_STEP_SUFFIX}`;
 	}
 	const acceptanceImages = listFieldAttachments(workflow.id, step.id, "acceptance");
-	// What actually ran (or is about to): the toggle, unless pressure overrode it.
-	const delegated = step.useSubagent || (options.forceSubagent ?? false);
+	const delegated = step.useSubagent;
 	if ((options.mode ?? "exec") === "judge") {
-		// The judge grades the exec pass, so it needs to know where that pass's
-		// output really went. An overridden step's work went to a subagent even
-		// though its toggle says inline — telling the judge to distrust "what you
-		// said while doing the step" would point it at a thread that never held
-		// the work.
 		return judgeInput(step.acceptanceCriteria ?? "", delegated, acceptanceImages);
 	}
 	const preamble = options.injectContext
@@ -356,7 +323,7 @@ export function composeStepInput(
 	return `${preamble}${tcpBlock}${resourcesBlock}${step.description}${descriptionImages}${criteriaNote(
 		step.acceptanceCriteria,
 		acceptanceImages,
-	)}${priorResults}${subagentInstruction(step.useSubagent, options.forceSubagent ?? false)}${
+	)}${priorResults}${subagentInstruction(step.useSubagent)}${
 		// After the delegate/inline instruction, because it only qualifies THAT: it
 		// tells an agent already told to delegate what it has to take along.
 		subagentAttachmentsInstruction(delegated, tcpBlock !== "" || resourcesBlock !== "")
@@ -487,41 +454,8 @@ export async function dispatchStep(
 	// exec: the judge is a single graded turn on a session it was just given, and
 	// prefixing a workflow-wide preamble to a verdict prompt is noise.
 	//
-	// This costs a scan of a transcript that grows all workflow long, which is why
-	// the context-pressure read below is careful to avoid one it doesn't need.
-	// Paid here anyway, and unconditionally: it happens once per dispatched step,
-	// and the alternative is not knowing that the agent has forgotten the workflow.
 	const observed = mode === "exec" && sessionToResume ? observeCompaction(workflow, sessionToResume, log) : workflow;
 	const afterCompaction = mode === "exec" && needsContextReinjection(observed);
-	// The context-pressure override, measured on `sessionToResume` — the session
-	// this dispatch is about to add to — and therefore only after it's known.
-	// A fresh conversation has no session, so the ratio is null and the step's own
-	// toggle stands: there is no pressure on a thread that doesn't exist yet.
-	//
-	// Only measured for a step that could be overridden. Reading it costs a full
-	// scan of a transcript that grows all workflow long, and for a step already
-	// delegating the answer changes nothing.
-	//
-	// The context step is exempt outright, and the exemption is not an
-	// optimisation: `shouldForceSubagent` would happily delegate it under pressure,
-	// and background delivered inside a subagent dies with that subagent — the
-	// shared session, which is the only reason this step exists, would end up
-	// without it. Skipping the read also avoids a transcript scan on the one
-	// dispatch that never needs one (a fresh conversation has no ratio anyway).
-	const isContextStep = step.kind === "context";
-	const contextRatio = step.useSubagent || isContextStep ? null : workflowContextRatio(workflow, sessionToResume);
-	const forceSubagent = !isContextStep && shouldForceSubagent(step.useSubagent, contextRatio);
-	// Worth a line only for the pass it actually redirects. The judge always runs
-	// on this thread (its verdict has to come straight back), so there the flag
-	// just keeps the prompt's wording honest about who produced the output.
-	if (forceSubagent && mode === "exec") {
-		log(
-			`step ${step.id} (workflow ${workflow.id}) is configured inline, but session ${sessionToResume} is at ${(
-				100 * (contextRatio ?? 0)
-			).toFixed(1)}% context (> ${CONTEXT_PRESSURE_PERCENT}%) — delegating to a subagent anyway`,
-			"warning",
-		);
-	}
 	if (afterCompaction) {
 		log(
 			`step ${step.id} (workflow ${workflow.id}) resumes conversation ${sessionToResume}, which was compacted at ` +
@@ -559,7 +493,6 @@ export async function dispatchStep(
 		afterCompaction,
 		retryReason: options.retryReason,
 		timedOut: options.timedOut,
-		forceSubagent,
 		tcpExecuteUrl,
 	});
 	// A contained workflow can only run if its image exists on this machine. The

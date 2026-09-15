@@ -661,10 +661,6 @@ export function writeStatusMd(workflowId: string): void {
 		// through a subagent, so "inline" is the thing that explains why this
 		// step's work shows up in the conversation itself.
 		if (!step.useSubagent) {
-			// "configured" rather than "runs": context pressure can override this at
-			// dispatch time (see context-pressure.ts), and this file is written from
-			// the step's configuration, which doesn't know what the session's
-			// occupancy will be when the step is actually sent.
 			lines.push("   - Subagent: off — this step is configured to run inline in the conversation");
 		}
 		// The gate is worth stating in the file too: it explains, without the UI,

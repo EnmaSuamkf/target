@@ -1,7 +1,6 @@
 /**
  * Tests for the derived context window (models.ts + transcript.ts) and for the
- * two things that consume it: the 60% delegation gate (context-pressure.ts) and
- * the token meter the UI renders from `usage.contextWindow`.
+ * token meter the UI renders from `usage.contextWindow`.
  *
  * Why this stopped being a constant. `CONTEXT_WINDOW_TOKENS = 200_000` was a
  * guess, and it was wrong by a factor: real transcripts on this machine carry
@@ -29,7 +28,6 @@ process.env.AWB_HOME = path.join(tmpHome, ".agent-webhook-bridge");
 
 const { contextWindowForModel, FALLBACK_CONTEXT_WINDOW_TOKENS, MODEL_CONTEXT_WINDOWS } = await import("./models.ts");
 const { claudeProjectDir, readTokenUsage } = await import("./transcript.ts");
-const { sessionContextRatio, shouldForceSubagent } = await import("./context-pressure.ts");
 
 const workdir = path.join(tmpHome, "workdir");
 
@@ -173,21 +171,20 @@ test("a transcript that names no model at all measures against the fallback", ()
 
 // --- the consumers ---------------------------------------------------------
 
-test("the 60% delegation gate divides by the DERIVED window", () => {
+test("occupancy ratio divides by the DERIVED window", () => {
 	// 500k tokens: half of a claude-sonnet-5 window, but two and a half times the
-	// old assumed one. Under the hardcoded 200k this step was force-delegated;
-	// under the real window the operator's inline toggle stands.
+	// old assumed 200k. Under the hardcoded window the meter read permanently red;
+	// under the real window it reflects actual occupancy.
 	writeClaude("sess-gate", [claudeTurn("m1", "claude-sonnet-5", 500_000)]);
-	const ratio = sessionContextRatio(workdir, "sess-gate");
-	assert.ok(ratio !== null && ratio < 0.6, `expected under the gate, got ${ratio}`);
-	assert.equal(shouldForceSubagent(false, ratio), false, "not pressured — that window is a million tokens");
+	const usage = readTokenUsage(workdir, "sess-gate");
+	const ratio = usage.contextTokens / usage.contextWindow;
+	assert.ok(ratio < 0.6, `expected under 60%, got ${ratio}`);
 
-	// The same occupancy on a genuinely 200k model IS over the gate, which is the
-	// proof that the gate still works and only the denominator changed.
+	// The same token count on a genuinely 200k model IS over 60%.
 	writeClaude("sess-gate-small", [claudeTurn("m1", "claude-haiku-5", 150_000)]);
-	const small = sessionContextRatio(workdir, "sess-gate-small");
-	assert.ok(small !== null && small > 0.6, `expected over the gate, got ${small}`);
-	assert.equal(shouldForceSubagent(false, small), true);
+	const small = readTokenUsage(workdir, "sess-gate-small");
+	const smallRatio = small.contextTokens / small.contextWindow;
+	assert.ok(smallRatio > 0.6, `expected over 60%, got ${smallRatio}`);
 });
 
 test("the meter's inputs are the derived window and the model that explains it", () => {

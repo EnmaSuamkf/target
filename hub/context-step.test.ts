@@ -52,13 +52,7 @@ const {
 } = await import("./db.ts");
 const { loadConfig } = await import("./config.ts");
 const { createServer } = await import("./server.ts");
-const {
-	CONTEXT_PRESSURE_SUFFIX,
-	CONTEXT_STEP_SUFFIX,
-	INLINE_SUFFIX,
-	SUBAGENT_SUFFIX,
-	composeStepInput,
-} = await import("./runner.ts");
+const { CONTEXT_STEP_SUFFIX, INLINE_SUFFIX, SUBAGENT_SUFFIX, composeStepInput } = await import("./runner.ts");
 const { stepResultsDir } = await import("./step-results.ts");
 const {
 	addStep,
@@ -288,7 +282,6 @@ test("the context step's payload is the background and nothing else", async () =
 	// step results (this step runs first, so there are none).
 	assert.equal(input.includes(SUBAGENT_SUFFIX), false);
 	assert.equal(input.includes(INLINE_SUFFIX), false);
-	assert.equal(input.includes(CONTEXT_PRESSURE_SUFFIX), false);
 	assert.doesNotMatch(input, /Prior steps' results are on disk/);
 	assert.doesNotMatch(input, /acceptance criterion/i);
 });
