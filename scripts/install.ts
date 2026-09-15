@@ -4,8 +4,10 @@
  * every step's `claude` run and hosts the hooks `hub/awb.ts` writes.
  *
  * Reached through `npm run target:install` (scripts/bootstrap.mjs guarantees a
- * node that can run this file). Idempotent: each step checks whether its work
- * is already done, so a second run is a no-op and costs no network.
+ * node that can run this file). Use `npm run target:install-and-build` to also
+ * force-rebuild the docker agent images after editing a Dockerfile. Idempotent:
+ * each step checks whether its work is already done, so a second run is a no-op
+ * and costs no network.
  *
  * The awb clone lives in vendor/ (gitignored) unless AWB_DIR points elsewhere
  * — pointing it at an existing clone is the way to reuse one instead of
