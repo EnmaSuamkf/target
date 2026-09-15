@@ -32,8 +32,6 @@ RUN apt-get update \
 	&& cp -a "$AGENT_DIR" "/opt/cursor-agent/$(basename "$AGENT_DIR")" \
 	&& ln -sf "/opt/cursor-agent/$(basename "$AGENT_DIR")/cursor-agent" /usr/local/bin/agent \
 	&& chmod -R a+rX /opt/cursor-agent \
-	&& apt-get purge -y curl \
-	&& apt-get autoremove -y \
 	&& rm -rf /var/lib/apt/lists/*
 
 USER ${AGENT_UID}:${AGENT_GID}

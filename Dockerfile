@@ -5,7 +5,7 @@
 #     -v <workdir>:<workdir> -v ~/.claude:~/.claude -w <workdir> \
 #     <image> claude --resume <session> -p "<step>"
 # so this image ships the `claude` binary plus a standard toolchain (Node 24,
-# Java 17, Maven) that derived images inherit too. The broker stays on the host: nothing in
+# Java 17, Maven, curl, git, ripgrep) that derived images inherit too. The broker stays on the host: nothing in
 # here talks to the hub, and no port is published.
 #
 # THIS IMAGE IS REPLACEABLE. The image name is a per-workflow field
@@ -38,8 +38,8 @@ ARG CLAUDE_CODE_VERSION=latest
 ARG AGENT_UID=1000
 ARG AGENT_GID=1000
 
-# git: the agent works in real checkouts. ripgrep: Claude Code's search tool.
-# openjdk-17-jdk + maven: Java builds in sandboxed steps.
+# git: the agent works in real checkouts. curl: HTTP/API calls from steps.
+# ripgrep: Claude Code's search tool. openjdk-17-jdk + maven: Java builds.
 # ca-certificates: the model API is the one network call a step makes.
 # The rest is the small change that makes a shell inside the container usable.
 RUN apt-get update \
