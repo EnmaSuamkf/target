@@ -9,6 +9,7 @@
   },
   "scripts": {
     "target:install": "node scripts/bootstrap.mjs",
+    "target:install-and-build": "node scripts/bootstrap.mjs --rebuild-images",
     "start": "node scripts/start.ts",
     "test": "npm --prefix hub test",
     "test:sync": "npm --prefix hub run test:sync",

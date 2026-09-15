@@ -16,6 +16,10 @@ import { fileURLToPath } from "node:url";
 const REQUIRED_MAJOR = 24;
 const INSTALLER = path.join(path.dirname(fileURLToPath(import.meta.url)), "install.ts");
 
+if (process.argv.includes("--rebuild-images")) {
+	process.env.TARGET_REBUILD_IMAGES = "1";
+}
+
 function log(message, type = "info") {
 	const prefix = type === "error" ? "[error]" : type === "warning" ? "[warn]" : "[info]";
 	console.log(`${prefix} ${message}`);

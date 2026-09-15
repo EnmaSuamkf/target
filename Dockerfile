@@ -4,8 +4,8 @@
 #   docker run --rm --user <your uid>:<your gid> \
 #     -v <workdir>:<workdir> -v ~/.claude:~/.claude -w <workdir> \
 #     <image> claude --resume <session> -p "<step>"
-# so this image only has to provide the `claude` binary and whatever toolchain
-# the repos you point at it need. The broker stays on the host: nothing in
+# so this image ships the `claude` binary plus a standard toolchain (Node 24,
+# Java 17, Maven) that derived images inherit too. The broker stays on the host: nothing in
 # here talks to the hub, and no port is published.
 #
 # THIS IMAGE IS REPLACEABLE. The image name is a per-workflow field
@@ -39,6 +39,7 @@ ARG AGENT_UID=1000
 ARG AGENT_GID=1000
 
 # git: the agent works in real checkouts. ripgrep: Claude Code's search tool.
+# openjdk-17-jdk + maven: Java builds in sandboxed steps.
 # ca-certificates: the model API is the one network call a step makes.
 # The rest is the small change that makes a shell inside the container usable.
 RUN apt-get update \
@@ -48,9 +49,15 @@ RUN apt-get update \
 		git \
 		jq \
 		less \
+		maven \
+		openjdk-17-jdk \
 		procps \
 		ripgrep \
-	&& rm -rf /var/lib/apt/lists/*
+	&& rm -rf /var/lib/apt/lists/* \
+	&& ln -sfn "$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")" /usr/lib/jvm/default-java
+
+ENV JAVA_HOME=/usr/lib/jvm/default-java
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
 	&& npm cache clean --force
