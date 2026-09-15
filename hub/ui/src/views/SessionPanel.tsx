@@ -1,6 +1,6 @@
 import type { SessionInfo } from "../api/types.ts";
 import styles from "./DetailPanels.module.css";
-import { UsageMeter, contextPercent } from "./UsageMeter.tsx";
+import { UsageMeter } from "./UsageMeter.tsx";
 
 /**
  * The workflow's shared Claude session: harness, session id, token usage, and
@@ -32,25 +32,11 @@ export function SessionPanel({
 	opening: boolean;
 }): React.JSX.Element {
 	const usage = info?.usage ?? null;
-	// The meter itself is UsageMeter, and this panel is the only place on the page
-	// that renders it: the numbers describe the session, so they are stated where
-	// the session is and nowhere else. What stays here is the one thing only this
-	// panel says: whether the conversation is under enough pressure to change how
-	// steps run.
-	const pct = usage ? contextPercent(usage) : 0;
-
 	// Already compacted at least once: the conversation the steps share has lost
 	// its earlier turns. The hub recovers by re-injecting the workflow's
 	// conversation context on the next step, but this is the panel where an
 	// operator finds out it happened at all.
 	const compactedAt = info?.lastCompactionAt ?? usage?.lastCompactionAt ?? null;
-
-	// Past this the hub overrides every step's "run inline" toggle and delegates
-	// to a subagent anyway (CONTEXT_PRESSURE_RATIO in hub/context-pressure.ts —
-	// kept in sync by hand, since the UI doesn't import server modules). This is
-	// the panel that already shows the number the rule is about, so it's where an
-	// operator should find out their toggle is no longer being honoured.
-	const pressured = pct > 60;
 
 	return (
 		<section className={styles.block}>
@@ -117,17 +103,7 @@ export function SessionPanel({
 						</p>
 					)}
 
-					{usage && (
-						<>
-							<UsageMeter usage={usage} />
-							{pressured && (
-								<p className="hint">
-									Over 60% — steps set to run inline are delegated to a subagent anyway, so this conversation doesn't
-									fill up and degrade.
-								</p>
-							)}
-						</>
-					)}
+					{usage && <UsageMeter usage={usage} />}
 				</>
 			)}
 		</section>

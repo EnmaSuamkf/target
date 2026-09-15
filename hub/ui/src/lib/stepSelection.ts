@@ -72,3 +72,44 @@ export function selectionAfterPoll(
 export function stepStatuses(steps: readonly SelectableStep[]): Map<string, string> {
 	return new Map(steps.map((step) => [step.id, step.status]));
 }
+
+/** Steps the engine may still dispatch — their `selected` flag is authoritative. */
+const ENGINE_ACTIVE = new Set(["pending", "failed", "waiting", "running", "queued"]);
+
+/**
+ * Aligns local checkbox state with the server for steps the engine still reads.
+ * Done steps keep whatever `selectionAfterPoll` left (so a re-ticked finished
+ * step stays ticked); everything else mirrors `step.selected` from the poll.
+ *
+ * Without this, a mid-run selection sync can leave the server with a pending
+ * step unselected while the list still shows it checked — the run then stops
+ * after the in-flight step even though the operator sees the next step selected.
+ */
+export function reconcileSelectionWithServer(
+	selection: ReadonlySet<string>,
+	steps: readonly SelectableStep[],
+): Set<string> {
+	const next = new Set(selection);
+	for (const step of steps) {
+		if (step.status === "done") {
+			if (step.selected === true) next.add(step.id);
+			else next.delete(step.id);
+			continue;
+		}
+		if (!ENGINE_ACTIVE.has(step.status)) continue;
+		if (step.selected === true) next.add(step.id);
+		else next.delete(step.id);
+	}
+	return next;
+}
+
+/** The server's current run selection, for comparing before a sync push. */
+export function serverSelectedIds(steps: readonly SelectableStep[]): Set<string> {
+	return new Set(steps.filter((step) => step.selected).map((step) => step.id));
+}
+
+export function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+	if (a.size !== b.size) return false;
+	for (const id of a) if (!b.has(id)) return false;
+	return true;
+}

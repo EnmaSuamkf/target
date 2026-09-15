@@ -4,7 +4,7 @@
  *
  * The hub injects those catalogs into the step's prompt, and that prompt goes to
  * the agent on the shared thread. When the step delegates (the `useSubagent`
- * default, or the context-pressure override), the work happens in a Task-tool
+ * default), the work happens in a Task-tool
  * subagent that starts from a fresh context and inherits nothing from the
  * thread — so a catalog delivered only to the thread reaches the agent that
  * hands the work off and never the agent that does it. The tools are then
@@ -119,24 +119,6 @@ test("a step with nothing attached is not told to copy blocks that do not exist"
 	const input = composeStepInput(step, getWorkflow(workflow.id)!, { injectTcp: true, injectResources: true });
 
 	assert.ok(!input.includes(SUBAGENT_ATTACHMENTS_SUFFIX), "no attachments, nothing to carry down");
-});
-
-test("the context-pressure override counts as delegated too", () => {
-	// The step's toggle says inline, but pressure sent the work to a subagent
-	// anyway. The material has to follow the work, not the toggle.
-	const workflow = newWorkflow("forced-tcp");
-	attachTcp(workflow.id);
-	const step = getStep(insertStep(workflow.id, "call the tool", { useSubagent: false }).id)!;
-
-	const forced = composeStepInput(step, getWorkflow(workflow.id)!, {
-		injectTcp: true,
-		injectResources: true,
-		forceSubagent: true,
-	});
-	assert.ok(forced.includes(SUBAGENT_ATTACHMENTS_SUFFIX), "an overridden step delegates, so it must carry the tools");
-
-	const notForced = composeStepInput(step, getWorkflow(workflow.id)!, { injectTcp: true, injectResources: true });
-	assert.ok(!notForced.includes(SUBAGENT_ATTACHMENTS_SUFFIX));
 });
 
 test("the judge pass never carries the catalog — it grades, it does not run tools", () => {

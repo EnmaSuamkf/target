@@ -486,7 +486,10 @@ test("WorkflowDetail renders the canvas behind a List/Canvas toggle, in place of
 
 	assert.match(source, /import \{ WorkflowCanvas \} from "\.\/WorkflowCanvas\.tsx"/);
 	assert.match(source, /data-steps-view=\{mode\}/, "the toggle needs a stable hook for its two halves");
-	assert.match(source, /stepsView === "canvas" \? \(\s*<WorkflowCanvas steps=\{steps\} onOpenStep=\{openStepInList\} \/>/);
+	assert.match(
+		source,
+		/stepsView === "canvas" \? \(\s*<WorkflowCanvas steps=\{steps\} selectedIds=\{selection\} onOpenStep=\{openStepInList\} \/>/,
+	);
 	// The canvas gets `steps`, not `taskSteps`: the context step is part of the
 	// picture (it runs before step 1), it is just not part of the numbering.
 	assert.match(source, /<WorkflowCanvas steps=\{steps\}/);

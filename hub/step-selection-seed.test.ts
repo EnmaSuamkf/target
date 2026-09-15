@@ -15,7 +15,12 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-const { seedSelectionFromSteps, selectionAfterPoll, stepStatuses } = await import("./ui/src/lib/stepSelection.ts");
+const {
+	reconcileSelectionWithServer,
+	seedSelectionFromSteps,
+	selectionAfterPoll,
+	stepStatuses,
+} = await import("./ui/src/lib/stepSelection.ts");
 
 test("seedSelectionFromSteps mirrors the server's selected flags", () => {
 	const seeded = seedSelectionFromSteps([
@@ -51,6 +56,23 @@ function seenStatuses(steps: { id: string; status: string }[], previous: Map<str
 	for (const [id, status] of stepStatuses(steps)) previous.set(id, status);
 }
 
+test("reconcileSelectionWithServer mirrors the server for pending steps", () => {
+	const steps = [
+		{ id: "a", status: "done", selected: false },
+		{ id: "b", status: "pending", selected: false },
+		{ id: "c", status: "pending", selected: true },
+	];
+	// Local still thinks b is ticked (drift); server says it is not.
+	const reconciled = reconcileSelectionWithServer(new Set(["a", "b", "c"]), steps);
+	assert.deepEqual([...reconciled].sort(), ["c"]);
+});
+
+test("reconcileSelectionWithServer keeps a re-ticked done step", () => {
+	const steps = [{ id: "a", status: "done", selected: true }];
+	const reconciled = reconcileSelectionWithServer(new Set(["a"]), steps);
+	assert.deepEqual([...reconciled], ["a"]);
+});
+
 test("WorkflowDetail seeds when steps arrive, not only on workflow.id", () => {
 	const source = fs.readFileSync(
 		path.join(path.dirname(fileURLToPath(import.meta.url)), "ui/src/views/WorkflowDetail.tsx"),
@@ -60,6 +82,7 @@ test("WorkflowDetail seeds when steps arrive, not only on workflow.id", () => {
 	assert.match(source, /selectionSynced\.current = false/, "workflow switch resets the one-time seed");
 	assert.match(source, /seedSelectionFromSteps\(taskSteps\)/, "steps loading after mount must seed from the server");
 	assert.match(source, /selectionSynced\.current = true/, "only seed once per workflow open");
+	assert.match(source, /reconcileSelectionWithServer/, "poll must reconcile list checkboxes with server flags");
 });
 
 test("App clears steps when the selected workflow changes", () => {

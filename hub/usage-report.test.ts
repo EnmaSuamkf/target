@@ -245,7 +245,8 @@ test("the meter quotes the total, in the client's own abbreviations", () => {
 test("the Conversation panel shows the meter whenever usage exists", () => {
 	const panel = read("ui/src/views/SessionPanel.tsx");
 	assert.doesNotMatch(panel, /usage\.turns > 0/, "a failed run with no assistant turn yet still shows Context 0 / window");
-	assert.match(panel, /\{usage && \(/);
+	assert.match(panel, /\{usage && <UsageMeter usage=\{usage\} \/>/);
+	assert.doesNotMatch(panel, /Over 60%/, "inline steps are not overridden based on context occupancy");
 });
 
 test("canReadTokenUsage accepts free-code session paths without a workdir", async () => {

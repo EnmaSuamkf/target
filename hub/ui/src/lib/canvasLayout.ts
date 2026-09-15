@@ -218,7 +218,7 @@ function usesSubagent(step: CanvasStep): boolean {
  * as the step list pins it above the `<ol>`: it runs before step 1, but it is
  * not step 0.
  */
-export function layoutWorkflow(steps: readonly CanvasStep[]): CanvasGraph {
+export function layoutWorkflow(steps: readonly CanvasStep[], selectedIds?: ReadonlySet<string>): CanvasGraph {
 	const contextStep = steps.find((s) => s.kind === "context") ?? null;
 	const taskSteps = steps.filter((s) => s.kind !== "context");
 
@@ -272,7 +272,7 @@ export function layoutWorkflow(steps: readonly CanvasStep[]): CanvasGraph {
 			y,
 			width: CARD_WIDTH,
 			height: CARD_HEIGHT,
-			selected: step.selected === true,
+			selected: selectedIds !== undefined ? selectedIds.has(step.id) : step.selected === true,
 			manualReview: step.manualReview === true,
 			inline: step.useSubagent === false,
 			subagent: usesSubagent(step),

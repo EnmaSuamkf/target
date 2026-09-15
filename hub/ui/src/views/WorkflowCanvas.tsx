@@ -66,13 +66,16 @@ function cls(...names: Array<string | false | undefined>): string {
 
 export function WorkflowCanvas({
 	steps,
+	/** Same run selection as the step-list checkboxes — not the raw server flags alone. */
+	selectedIds,
 	/** Sends the operator to this step's row in the list, where it can be edited. */
 	onOpenStep,
 }: {
 	steps: Step[];
+	selectedIds: ReadonlySet<string>;
 	onOpenStep: (stepId: string) => void;
 }): React.JSX.Element {
-	const graph = useMemo(() => layoutWorkflow(steps), [steps]);
+	const graph = useMemo(() => layoutWorkflow(steps, selectedIds), [steps, selectedIds]);
 	const stepById = useMemo(() => new Map(steps.map((s) => [s.id, s])), [steps]);
 	const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
 	const viewportRef = useRef<HTMLDivElement>(null);
