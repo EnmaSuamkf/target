@@ -19,6 +19,8 @@ import type {
 	ShortcutBinding,
 	ShortcutSettings,
 	ShortcutSettingsInput,
+	UiSettings,
+	UiSettingsInput,
 	StagedStepImages,
 	Step,
 	StepConfigInput,
@@ -220,6 +222,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	const [shortcutSettings, setShortcutSettings] = useState<ShortcutSettings | null>(null);
 	const [reportSettings, setReportSettings] = useState<ReportSettings | null>(null);
 	const [dockerMountSettings, setDockerMountSettings] = useState<DockerMountSettings | null>(null);
+	const [uiSettings, setUiSettings] = useState<UiSettings | null>(null);
 	const [selectedId, setSelectedId] = useState<string | null>(readHashSelection);
 	const [steps, setSteps] = useState<Step[]>([]);
 	const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
@@ -330,11 +333,29 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		setDockerMountSettings(await api.getDockerMountSettings());
 	}, []);
 
+	const refreshUiSettings = useCallback(async (): Promise<void> => {
+		setUiSettings(await api.getUiSettings());
+	}, []);
+
 	// Leaving the workflows view closes the "All workflows" page so a return to
 	// the Workflows tab starts on the rail, not stranded on the page.
 	useEffect(() => {
 		if (view !== "workflows") setAllWorkflowsOpen(false);
 	}, [view]);
+
+	const showTcpCatalog = uiSettings?.showTcpCatalog ?? false;
+	const showRciCatalog = uiSettings?.showRciCatalog ?? false;
+
+	const displayView = useMemo((): View => {
+		if (view === "tcps" && !showTcpCatalog) return "workflows";
+		if (view === "rci" && !showRciCatalog) return "workflows";
+		return view;
+	}, [view, showTcpCatalog, showRciCatalog]);
+
+	// Keep `view` in sync when a catalog was hidden while the operator was on it.
+	useEffect(() => {
+		if (displayView !== view) setView(displayView);
+	}, [displayView, view]);
 
 	const refreshDetail = useCallback(async (id: string): Promise<void> => {
 		const [detail, session] = await Promise.all([
@@ -362,6 +383,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 					refreshShortcutSettings(),
 					refreshReportSettings(),
 					refreshDockerMountSettings(),
+					refreshUiSettings(),
 				]);
 			} catch (err) {
 				reportError(err, "Could not load data");
@@ -378,6 +400,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		refreshShortcutSettings,
 		refreshReportSettings,
 		refreshDockerMountSettings,
+		refreshUiSettings,
 		reportError,
 	]);
 
@@ -1269,6 +1292,13 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		});
 	};
 
+	const handleSaveUiSettings = async (input: UiSettingsInput): Promise<boolean> => {
+		return await act("Could not save catalog navigation settings", async () => {
+			setUiSettings(await api.saveUiSettings(input));
+			toast.success("Catalog navigation saved.");
+		});
+	};
+
 	const handleSaveWorkflowDockerMounts = async (mounts: string[]): Promise<boolean> => {
 		if (!selectedWorkflow) return false;
 		return await act("Could not save docker bind mounts", async () => {
@@ -1281,8 +1311,10 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	return (
 		<div className={styles.app}>
 			<Header
-				view={view}
+				view={displayView}
 				onViewChange={setView}
+				showTcpCatalog={showTcpCatalog}
+				showRciCatalog={showRciCatalog}
 				hasToken={hasToken}
 				onSaveToken={saveToken}
 				account={account}
@@ -1290,7 +1322,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 			/>
 
 			<main className={styles.main}>
-				{view === "workflows" && allWorkflowsOpen ? (
+				{displayView === "workflows" && allWorkflowsOpen ? (
 					<AllWorkflowsPage
 						workflows={workflows}
 						selectedId={selectedId}
@@ -1300,7 +1332,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 						}}
 						onBack={() => setAllWorkflowsOpen(false)}
 					/>
-				) : view === "workflows" ? (
+				) : displayView === "workflows" ? (
 					<div className={styles.workflowLayout}>
 						{/* On a phone the list steps aside while a workflow is open — two
 						    stacked panes would mean scrolling past the whole list to reach
@@ -1324,6 +1356,8 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								templates={templates}
 								tcps={tcps}
 								resourceSets={resourceSets}
+								showTcpCatalog={showTcpCatalog}
+								showRciCatalog={showRciCatalog}
 								busy={busy}
 								{...(isMobile ? { onBack: () => setSelectedId(null) } : {})}
 								onStart={handleStart}
@@ -1378,11 +1412,13 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 							)
 						)}
 					</div>
-				) : view === "templates" ? (
+				) : displayView === "templates" ? (
 					<TemplatesView
 						templates={templates}
 						tcps={tcps}
 						resourceSets={resourceSets}
+						showTcpCatalog={showTcpCatalog}
+						showRciCatalog={showRciCatalog}
 						busy={busy}
 						onCreate={handleCreateTemplate}
 						onUpdate={handleUpdateTemplate}
@@ -1391,7 +1427,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 						onExportAll={() => void handleExportAllTemplates()}
 						onImport={(file) => void handleImportTemplates(file)}
 					/>
-				) : view === "tcps" ? (
+				) : displayView === "tcps" ? (
 					<TcpsView
 						tcps={tcps}
 						busy={busy}
@@ -1403,7 +1439,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 						onExportAll={() => void handleExportAllTcps()}
 						onImport={(file) => void handleImportTcps(file)}
 					/>
-				) : view === "rci" ? (
+				) : displayView === "rci" ? (
 					<ResourceSetsView
 						resourceSets={resourceSets}
 						busy={busy}
@@ -1413,20 +1449,27 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 						onBeforeRemoveResource={confirmResourceRemoval}
 						onScan={handleScanResources}
 					/>
-				) : view === "settings" && settings && shortcutSettings && reportSettings && dockerMountSettings ? (
+				) : displayView === "settings" &&
+				  settings &&
+				  shortcutSettings &&
+				  reportSettings &&
+				  dockerMountSettings &&
+				  uiSettings ? (
 					// Keyed on all save stamps: a successful save in any section re-seeds
 					// that form's local fields from what the hub actually stored.
 					<SettingsView
-						key={`${settings.updatedAt ?? "unsaved"}|${shortcutSettings.updatedAt ?? "unsaved"}|${reportSettings.updatedAt ?? "unsaved"}|${reportSettings.envConfigured}|${dockerMountSettings.updatedAt ?? "unsaved"}`}
+						key={`${settings.updatedAt ?? "unsaved"}|${shortcutSettings.updatedAt ?? "unsaved"}|${reportSettings.updatedAt ?? "unsaved"}|${reportSettings.envConfigured}|${dockerMountSettings.updatedAt ?? "unsaved"}|${uiSettings.updatedAt ?? "unsaved"}`}
 						settings={settings}
 						shortcutSettings={shortcutSettings}
 						reportSettings={reportSettings}
 						dockerMountSettings={dockerMountSettings}
+						uiSettings={uiSettings}
 						busy={busy}
 						onSave={handleSaveNotificationSettings}
 						onSaveShortcuts={handleSaveShortcutSettings}
 						onSaveReport={handleSaveReportSettings}
 						onSaveDockerMounts={handleSaveDockerMountSettings}
+						onSaveUi={handleSaveUiSettings}
 					/>
 				) : (
 					<section className={styles.placeholder}>

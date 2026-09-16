@@ -2629,6 +2629,68 @@ export function saveDockerMountSettings(mounts: string[]): DockerMountSettings {
 	return settings;
 }
 
+// --- UI catalog visibility (Settings) -----------------------------------
+
+const UI_SETTINGS_KEY = "ui";
+
+export interface UiSettings {
+	/** When false, hide the top-level TCP catalog nav (workflow attach unchanged). */
+	showTcpCatalog: boolean;
+	/** When false, hide the top-level RCI / resource-set catalog nav. */
+	showRciCatalog: boolean;
+	updatedAt: string | null;
+}
+
+/** Defaults: both catalogs hidden until the operator turns them on in Settings. */
+export function defaultUiSettings(): UiSettings {
+	return { showTcpCatalog: false, showRciCatalog: false, updatedAt: null };
+}
+
+function normalizeUiCatalogFlag(raw: unknown, fallback: boolean): boolean {
+	if (typeof raw === "boolean") return raw;
+	return fallback;
+}
+
+export function getUiSettings(): UiSettings {
+	const row = open().prepare("SELECT * FROM settings WHERE key = ?").get(UI_SETTINGS_KEY) as
+		| Record<string, unknown>
+		| undefined;
+	if (!row) return defaultUiSettings();
+	try {
+		const parsed = JSON.parse(String(row.value)) as Record<string, unknown>;
+		return {
+			showTcpCatalog: normalizeUiCatalogFlag(parsed.showTcpCatalog, false),
+			showRciCatalog: normalizeUiCatalogFlag(parsed.showRciCatalog, false),
+			updatedAt: row.updated_at == null ? null : String(row.updated_at),
+		};
+	} catch {
+		return defaultUiSettings();
+	}
+}
+
+/** Replaces the stored UI preferences wholesale and returns what was written. */
+export function saveUiSettings(input: { showTcpCatalog: boolean; showRciCatalog: boolean }): UiSettings {
+	const settings: UiSettings = {
+		showTcpCatalog: normalizeUiCatalogFlag(input.showTcpCatalog, false),
+		showRciCatalog: normalizeUiCatalogFlag(input.showRciCatalog, false),
+		updatedAt: new Date().toISOString(),
+	};
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(
+			UI_SETTINGS_KEY,
+			JSON.stringify({
+				showTcpCatalog: settings.showTcpCatalog,
+				showRciCatalog: settings.showRciCatalog,
+			}),
+			settings.updatedAt,
+		);
+	return settings;
+}
+
 // --- Attachments ------------------------------------------------------
 //
 // Images the operator pinned to one of the three text inputs a workflow is

@@ -54,6 +54,8 @@
  *   PUT    /api/settings/report                           → replace the activity-reporting preferences (admin token)
  *   GET    /api/settings/docker-mounts                    → default docker bind-mount paths (applied to every docker workflow)
  *   PUT    /api/settings/docker-mounts                    → replace the default docker bind-mount paths (admin token)
+ *   GET    /api/settings/ui                               → UI catalog visibility (TCP / RCI top-level nav)
+ *   PUT    /api/settings/ui                               → replace UI catalog visibility (admin token)
  *   GET    /                                           → ui/index.html
  *
  * Every route except /health, the /api/auth stack and the awb per-step-token
@@ -114,6 +116,7 @@ import {
 	getNotificationSettings,
 	getReportSettings,
 	getShortcutSettings,
+	getUiSettings,
 	getWorkflow,
 	importTemplates,
 	insertTemplate,
@@ -132,6 +135,7 @@ import {
 	saveReportSettings,
 	toPublicReportSettings,
 	saveShortcutSettings,
+	saveUiSettings,
 	stepProgress,
 	templateBundle,
 	TemplateBundleError,
@@ -1839,6 +1843,47 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					const message = err instanceof DockerMountError ? err.message : "invalid mounts";
 					sendJson(res, 400, { error: message });
 				}
+			});
+			return;
+		}
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
+	// --- /api/settings/ui ---
+	//
+	// Whether TCP / RCI catalog UI is shown (header, workflow, template attach).
+	// Stored selections and MCP/API behaviour are unchanged when hidden.
+
+	if (parts[1] === "settings" && parts[2] === "ui" && !parts[3]) {
+		if (req.method === "GET") {
+			sendJson(res, 200, { settings: getUiSettings() });
+			return;
+		}
+		if (req.method === "PUT" || req.method === "PATCH") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				const current = getUiSettings();
+				const showTcpCatalog =
+					"showTcpCatalog" in body
+						? typeof body.showTcpCatalog === "boolean"
+							? body.showTcpCatalog
+							: current.showTcpCatalog
+						: current.showTcpCatalog;
+				const showRciCatalog =
+					"showRciCatalog" in body
+						? typeof body.showRciCatalog === "boolean"
+							? body.showRciCatalog
+							: current.showRciCatalog
+						: current.showRciCatalog;
+				const settings = saveUiSettings({ showTcpCatalog, showRciCatalog });
+				log(
+					`UI settings updated (TCP catalog ${settings.showTcpCatalog ? "visible" : "hidden"}, RCI catalog ${settings.showRciCatalog ? "visible" : "hidden"})`,
+				);
+				sendJson(res, 200, { settings });
 			});
 			return;
 		}

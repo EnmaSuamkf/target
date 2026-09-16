@@ -36,6 +36,8 @@ import type {
 	SessionInfo,
 	ShortcutSettings,
 	ShortcutSettingsInput,
+	UiSettings,
+	UiSettingsInput,
 	Step,
 	StepConfigInput,
 	StepNote,
@@ -823,6 +825,34 @@ export async function saveReportSettings(input: ReportSettingsInput): Promise<Re
 
 export async function getDockerMountSettings(): Promise<DockerMountSettings> {
 	const data = await request<{ settings: DockerMountSettings }>("/api/settings/docker-mounts");
+	return data.settings;
+}
+
+const DEFAULT_UI_SETTINGS: UiSettings = {
+	showTcpCatalog: false,
+	showRciCatalog: false,
+	updatedAt: null,
+};
+
+/** UI catalog visibility (TCP / RCI header nav). */
+export async function getUiSettings(): Promise<UiSettings> {
+	try {
+		const data = await request<{ settings: UiSettings }>("/api/settings/ui");
+		return data.settings;
+	} catch (err) {
+		// Hubs started before this route existed answer 404 — use defaults (both
+		// catalogs hidden) so the rest of Settings (and the app) still loads.
+		if (err instanceof ApiError && err.status === 404) return DEFAULT_UI_SETTINGS;
+		throw err;
+	}
+}
+
+export async function saveUiSettings(input: UiSettingsInput): Promise<UiSettings> {
+	const data = await request<{ settings: UiSettings }>("/api/settings/ui", {
+		method: "PUT",
+		admin: true,
+		body: json(input),
+	});
 	return data.settings;
 }
 

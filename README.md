@@ -176,6 +176,23 @@ npm test           # hub test suite (node:test)
 npm run test:sync  # remote-sync agent tests only
 ```
 
+### UI catalog visibility (`/api/settings/ui`)
+
+Operators can hide **TCP** and **RCI** (resource sets) in the UI: header catalog
+tabs, workflow attach panels, and template attach sections. The hub API and MCP
+are unchanged.
+Preferences live in the hub database (same `settings` table as notifications and
+shortcuts).
+
+| Method | Path | Auth | Body / response |
+|--------|------|------|-----------------|
+| `GET` | `/api/settings/ui` | session or admin Bearer | `{ "settings": { "showTcpCatalog": false, "showRciCatalog": false, "updatedAt": null \| ISO } }` |
+| `PUT` | `/api/settings/ui` | admin Bearer | `{ "showTcpCatalog": boolean, "showRciCatalog": boolean }` → saved settings |
+
+Both flags default to **`false`** (catalogs hidden) until the operator turns them
+on in Settings. Saved preferences override that default. Hiding a catalog does
+not remove stored selections on workflows or templates — it only hides the UI.
+
 `ui:dev` gives hot reload while proxying API calls to a hub started separately
 with `npm start`. Point it at a hub on another port with `TARGET_HUB_ORIGIN`.
 
@@ -579,25 +596,39 @@ on the host exactly as they did.
 
 **A sandboxed workflow needs the hub bound where a container can reach it.**
 The container runs on docker's default bridge, so `127.0.0.1` in there is the
-container, not your machine — and the hub binds to `127.0.0.1` by default. The
-hub rewrites TCP-tool urls for sandboxed steps to `host.docker.internal`, and
-the broker adds `--add-host=host.docker.internal:host-gateway` on every
-sandboxed `docker run` so that name resolves on Linux as well as Docker
-Desktop. It cannot rewrite what the hub is *listening* on: bound to loopback it
-refuses the connection however right the address is, and the agent reads that as
-"the hub isn't running" and improvises. Set `host` in `~/.target/config.json`
-and restart:
+container, not your machine — and the hub binds to `127.0.0.1` by default. That
+breaks **TCP tools** in particular: a docker step POSTs to `/api/tcps/execute`
+on the hub, and loopback inside the container never reaches your host. The hub
+rewrites TCP-tool urls for sandboxed steps to `host.docker.internal`, and the
+broker adds `--add-host=host.docker.internal:host-gateway` on every sandboxed
+`docker run` so that name resolves on Linux as well as Docker Desktop. It
+cannot rewrite what the hub is *listening* on: bound to loopback it refuses the
+connection however right the address is, and the agent reads that as "the hub
+isn't running" and improvises.
 
-```json
-{ "host": "0.0.0.0" }
+**Opt in via `.env` (default off).** Copy `.env.example` to `.env` (git-ignored)
+and set:
+
+```
+TARGET_HUB_DOCKER_FRIENDLY=true
 ```
 
-That exposes the hub on your LAN, so it's opt-in rather than the default —
-every mutating route still needs the admin token, but treat it as you would
-any bound port. Set `sandboxHost` alongside it for anything the bridge lookup
-can't guess (rootless docker, podman, a custom bridge, or a hub reached by
-name). A sandboxed dispatch onto a loopback-bound hub logs a warning saying
-exactly this, so you find out from the log rather than from a confused agent.
+Unset or `false` keeps today's defaults (`host: 127.0.0.1`, port `8893`). When
+`true`, the hub applies docker-friendly networking on startup: `host: 0.0.0.0`,
+port `8893`, and `sandboxHost: 172.17.0.1` (the usual docker bridge gateway)
+into `~/.target/config.json`, then listens there. Restart the hub after
+changing `.env`. Use this when you run **`--sandbox docker` workflows that use
+TCP tools** (or any step that calls the hub API from inside the container).
+
+That exposes the hub on all interfaces, so it stays opt-in — every mutating
+route still needs the admin token, but treat it as you would any bound port;
+use a host firewall or a narrower bind in `config.json` if you prefer not to
+listen on every interface. You can still set `host` / `sandboxHost` manually in
+`~/.target/config.json` instead (for rootless docker, podman, a custom bridge,
+or a hub reached by hostname). Set `sandboxHost` for anything the default bridge
+gateway can't guess. A sandboxed dispatch onto a loopback-bound hub logs a
+warning saying exactly this, so you find out from the log rather than from a
+confused agent.
 
 ### Activity reporting (`.env`)
 

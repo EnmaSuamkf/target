@@ -606,6 +606,18 @@ export interface DockerMountSettingsInput {
 	mounts: string[];
 }
 
+/** Top-level TCP / RCI catalog visibility in the header nav. */
+export interface UiSettings {
+	showTcpCatalog: boolean;
+	showRciCatalog: boolean;
+	updatedAt: string | null;
+}
+
+export interface UiSettingsInput {
+	showTcpCatalog: boolean;
+	showRciCatalog: boolean;
+}
+
 /** Payload accepted by PUT /api/settings/report (a full replace). */
 export interface ReportSettingsInput {
 	enabled: boolean;

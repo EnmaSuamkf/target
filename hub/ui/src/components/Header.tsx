@@ -3,9 +3,10 @@ import type { Account } from "../api/types.ts";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { Field } from "./Field.tsx";
 import { Modal } from "./Modal.tsx";
+import { filterCatalogNavViews, type NavView } from "../lib/catalogNav.ts";
 import styles from "./Header.module.css";
 
-export type View = "workflows" | "templates" | "tcps" | "rci" | "settings";
+export type View = NavView;
 
 const VIEW_LABELS: Record<View, string> = {
 	workflows: "Workflows",
@@ -14,8 +15,6 @@ const VIEW_LABELS: Record<View, string> = {
 	rci: "RCI",
 	settings: "Settings",
 };
-
-const VIEWS = ["workflows", "templates", "tcps", "rci", "settings"] as const;
 
 /**
  * Icons for the phone tab bar. A bottom bar with text alone reads as a row of
@@ -81,6 +80,8 @@ const VIEW_ICONS: Record<View, React.ReactNode> = {
 export function Header({
 	view,
 	onViewChange,
+	showTcpCatalog = false,
+	showRciCatalog = false,
 	hasToken,
 	onSaveToken,
 	account,
@@ -88,6 +89,10 @@ export function Header({
 }: {
 	view: View;
 	onViewChange: (view: View) => void;
+	/** When false, the TCP catalog tab is omitted from desktop and mobile nav. */
+	showTcpCatalog?: boolean;
+	/** When false, the RCI catalog tab is omitted from desktop and mobile nav. */
+	showRciCatalog?: boolean;
 	hasToken: boolean;
 	onSaveToken: (token: string) => void;
 	/** The signed-in account (single-user model: one per machine). */
@@ -97,6 +102,7 @@ export function Header({
 	const [dialogOpen, setDialogOpen] = useState(false);
 	const [draft, setDraft] = useState("");
 	const isMobile = useIsMobile();
+	const tabs = filterCatalogNavViews(showTcpCatalog, showRciCatalog);
 
 	// Start each visit to the dialog from an empty field rather than showing
 	// the stored secret back.
@@ -128,7 +134,7 @@ export function Header({
 
 					{!isMobile && (
 						<nav className={styles.tabs} aria-label="Views">
-							{VIEWS.map((item) => (
+							{tabs.map((item) => (
 								<button
 									key={item}
 									type="button"
@@ -208,7 +214,7 @@ export function Header({
 
 			{isMobile && (
 				<nav className={styles.bottomNav} aria-label="Views">
-					{VIEWS.map((item) => (
+					{tabs.map((item) => (
 						<button
 							key={item}
 							type="button"
