@@ -22,6 +22,8 @@ import type {
 	Conversation,
 	ConversationPreview,
 	CreateWorkflowInput,
+	DockerMountSettings,
+	DockerMountSettingsInput,
 	DirListing,
 	HostCapabilities,
 	NotificationSettings,
@@ -817,6 +819,29 @@ export async function saveReportSettings(input: ReportSettingsInput): Promise<Re
 		body: json(input),
 	});
 	return data.settings;
+}
+
+export async function getDockerMountSettings(): Promise<DockerMountSettings> {
+	const data = await request<{ settings: DockerMountSettings }>("/api/settings/docker-mounts");
+	return data.settings;
+}
+
+export async function saveDockerMountSettings(input: DockerMountSettingsInput): Promise<DockerMountSettings> {
+	const data = await request<{ settings: DockerMountSettings }>("/api/settings/docker-mounts", {
+		method: "PUT",
+		admin: true,
+		body: json(input),
+	});
+	return data.settings;
+}
+
+export async function updateWorkflowDockerMounts(workflowId: string, mounts: string[]): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${workflowId}/docker-mounts`, {
+		method: "PATCH",
+		admin: true,
+		body: json({ mounts }),
+	});
+	return data.workflow;
 }
 
 // --- auth (the single-user access layer) ---
