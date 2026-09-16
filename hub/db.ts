@@ -173,6 +173,8 @@ export interface Workflow {
 	remoteId: string | null;
 	/** Last time remote metadata was synced from the server. */
 	remoteSyncedAt: string | null;
+	/** Extra host paths bind-mounted in a docker sandbox, on top of Settings defaults. */
+	dockerMounts: string[];
 	createdAt: string;
 	updatedAt: string;
 }
@@ -545,6 +547,7 @@ export function open(): DatabaseSync {
 	addWorkflowColumn("origin", "origin TEXT NOT NULL DEFAULT 'local'");
 	addWorkflowColumn("remote_id", "remote_id TEXT");
 	addWorkflowColumn("remote_synced_at", "remote_synced_at TEXT");
+	addWorkflowColumn("docker_mounts", "docker_mounts TEXT NOT NULL DEFAULT '[]'");
 	const existingTemplateColumns = new Set(
 		(database.prepare("PRAGMA table_info(templates)").all() as Record<string, unknown>[]).map((c) => String(c.name)),
 	);
@@ -608,9 +611,21 @@ function rowToWorkflow(row: Record<string, unknown>): Workflow {
 		origin: row.origin === "remote" ? "remote" : "local",
 		remoteId: row.remote_id == null ? null : String(row.remote_id),
 		remoteSyncedAt: row.remote_synced_at == null ? null : String(row.remote_synced_at),
+		dockerMounts: parseStoredDockerMounts(row.docker_mounts),
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
 	};
+}
+
+function parseStoredDockerMounts(raw: unknown): string[] {
+	if (typeof raw !== "string" || raw.trim() === "") return [];
+	try {
+		const parsed = JSON.parse(raw) as unknown;
+		if (!Array.isArray(parsed)) return [];
+		return parsed.map((entry) => String(entry)).filter((entry) => entry.trim() !== "");
+	} catch {
+		return [];
+	}
 }
 
 export function insertWorkflow(input: {
@@ -630,6 +645,7 @@ export function insertWorkflow(input: {
 	origin?: WorkflowOrigin;
 	remoteId?: string | null;
 	remoteSyncedAt?: string | null;
+	dockerMounts?: string[];
 }): Workflow {
 	const now = new Date().toISOString();
 	const conversationContext = input.conversationContext?.trim() || null;
@@ -637,6 +653,7 @@ export function insertWorkflow(input: {
 	const origin = input.origin ?? "local";
 	const remoteId = input.remoteId?.trim() || null;
 	const remoteSyncedAt = input.remoteSyncedAt ?? null;
+	const dockerMounts = input.dockerMounts ?? [];
 	const workflow: Workflow = {
 		id: input.id,
 		name: input.name,
@@ -656,13 +673,14 @@ export function insertWorkflow(input: {
 		origin,
 		remoteId,
 		remoteSyncedAt,
+		dockerMounts,
 		createdAt: now,
 		updatedAt: now,
 	};
 	open()
 		.prepare(
-			`INSERT INTO workflows (id, name, agent_name, hook_url, secret, status, last_session_id, adopted_session_id, md_path, conversation_context, origin, remote_id, remote_synced_at, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO workflows (id, name, agent_name, hook_url, secret, status, last_session_id, adopted_session_id, md_path, conversation_context, origin, remote_id, remote_synced_at, docker_mounts, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			workflow.id,
@@ -678,10 +696,19 @@ export function insertWorkflow(input: {
 			workflow.origin,
 			workflow.remoteId,
 			workflow.remoteSyncedAt,
+			JSON.stringify(workflow.dockerMounts),
 			workflow.createdAt,
 			workflow.updatedAt,
 		);
 	return workflow;
+}
+
+export function setWorkflowDockerMounts(id: string, mounts: string[]): Workflow | null {
+	const now = new Date().toISOString();
+	open()
+		.prepare("UPDATE workflows SET docker_mounts = ?, updated_at = ? WHERE id = ?")
+		.run(JSON.stringify(mounts), now, id);
+	return getWorkflow(id);
 }
 
 /** Update remote-sync metadata on a workflow (sync agent). */
@@ -2556,6 +2583,49 @@ export function saveReportSettings(input: {
 			}),
 			settings.updatedAt,
 		);
+	return settings;
+}
+
+// --- Docker bind-mount defaults (Settings) --------------------------------
+
+const DOCKER_MOUNT_SETTINGS_KEY = "docker_mounts";
+
+export interface DockerMountSettings {
+	mounts: string[];
+	updatedAt: string | null;
+}
+
+export function defaultDockerMountSettings(): DockerMountSettings {
+	return { mounts: [], updatedAt: null };
+}
+
+export function getDockerMountSettings(): DockerMountSettings {
+	const row = open().prepare("SELECT * FROM settings WHERE key = ?").get(DOCKER_MOUNT_SETTINGS_KEY) as
+		| Record<string, unknown>
+		| undefined;
+	if (!row) return defaultDockerMountSettings();
+	try {
+		const parsed = JSON.parse(String(row.value)) as Record<string, unknown>;
+		const mounts = Array.isArray(parsed.mounts)
+			? parsed.mounts.map((entry) => String(entry)).filter((entry) => entry.trim() !== "")
+			: [];
+		return { mounts, updatedAt: row.updated_at == null ? null : String(row.updated_at) };
+	} catch {
+		return defaultDockerMountSettings();
+	}
+}
+
+export function saveDockerMountSettings(mounts: string[]): DockerMountSettings {
+	const settings: DockerMountSettings = {
+		mounts,
+		updatedAt: new Date().toISOString(),
+	};
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(DOCKER_MOUNT_SETTINGS_KEY, JSON.stringify({ mounts: settings.mounts }), settings.updatedAt);
 	return settings;
 }
 

@@ -17,6 +17,8 @@ import type {
 } from "../api/types.ts";
 import { OVERRIDABLE_WORKFLOW_STATUSES, startActionFor } from "../api/types.ts";
 import { Badge } from "../components/Badge.tsx";
+import { CollapsibleSection } from "../components/CollapsibleSection.tsx";
+import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
@@ -109,6 +111,7 @@ export function WorkflowDetail({
 	onSaveContext,
 	onSaveTcps,
 	onSaveResources,
+	onSaveDockerMounts,
 	onAttachImages,
 	onRemoveAttachment,
 	onOpenTerminal,
@@ -151,6 +154,7 @@ export function WorkflowDetail({
 	onSaveContext: (context: string) => Promise<boolean>;
 	onSaveTcps: (tcpSelections: TcpSelection[]) => Promise<boolean>;
 	onSaveResources: (resourceSelections: ResourceSelection[]) => Promise<boolean>;
+	onSaveDockerMounts: (mounts: string[]) => Promise<boolean>;
 	/**
 	 * Pins images to one of this workflow's text inputs. `stepId` is null for the
 	 * conversation context and the step's id for its description / criteria.
@@ -193,6 +197,8 @@ export function WorkflowDetail({
 	const [opening, setOpening] = useState(false);
 	// The rename dialog opened by "Change", next to the title.
 	const [renaming, setRenaming] = useState(false);
+	const [dockerMounts, setDockerMounts] = useState<string[]>(workflow.dockerMounts);
+	const [savingDockerMounts, setSavingDockerMounts] = useState(false);
 	// How the steps are drawn: the list, or the canvas. A way of LOOKING at the
 	// workflow, not a property of it — so it deliberately survives switching
 	// workflows (unlike `renaming` below, which belongs to one workflow).
@@ -225,8 +231,9 @@ export function WorkflowDetail({
 		// A rename dialog left open belongs to the workflow it was opened from —
 		// carrying it into another one would offer that name for this workflow.
 		setRenaming(false);
+		setDockerMounts(workflow.dockerMounts);
 		seenStatuses.current = new Map();
-	}, [workflow.id]);
+	}, [workflow.id, workflow.dockerMounts]);
 
 	// Seed from the server once per workflow open/reload, when steps first land.
 	// On a refresh the detail fetch completes after mount, so seeding only in the
@@ -452,6 +459,61 @@ export function WorkflowDetail({
 						<dd>{relativeTime(workflow.updatedAt)}</dd>
 					</div>
 				</dl>
+
+				{workflow.sandbox === "docker" && (
+					<CollapsibleSection
+						title="Docker bind mounts"
+						defaultOpen={
+							dockerMounts.length > 0 ||
+							workflow.defaultDockerMounts.length > 0 ||
+							workflow.effectiveDockerMounts.length > 0
+						}
+						meta={
+							workflow.effectiveDockerMounts.length > 0 ? (
+								<span className="hint">{workflow.effectiveDockerMounts.length} mounted</span>
+							) : undefined
+						}
+					>
+						{workflow.defaultDockerMounts.length > 0 && (
+							<p className="hint">
+								From Settings: {workflow.defaultDockerMounts.map((mount) => <code key={mount}>{mount}</code>).reduce(
+									(prev, curr, index) => (index === 0 ? [curr] : [...prev, ", ", curr]),
+									[] as React.ReactNode[],
+								)}
+							</p>
+						)}
+						<p className="hint">Workflow-only paths (on top of Settings defaults):</p>
+						<DockerMountEditor
+							mounts={dockerMounts}
+							onChange={setDockerMounts}
+							disabled={busy || savingDockerMounts}
+						/>
+						<div className={styles.dockerMountsActions}>
+							<button
+								type="button"
+								className="btn btn--sm btn--primary"
+								disabled={busy || savingDockerMounts}
+								onClick={() => {
+									void (async () => {
+										setSavingDockerMounts(true);
+										try {
+											await onSaveDockerMounts(dockerMounts);
+										} finally {
+											setSavingDockerMounts(false);
+										}
+									})();
+								}}
+							>
+								{savingDockerMounts ? "Saving…" : "Save bind mounts"}
+							</button>
+							{workflow.effectiveDockerMounts.length > 0 && (
+								<span className="hint" title={workflow.effectiveDockerMounts.join("\n")}>
+									Effective: {workflow.effectiveDockerMounts.length} path(s) mounted
+								</span>
+							)}
+						</div>
+					</CollapsibleSection>
+				)}
 
 				<div className={styles.progressRow}>
 					<ProgressBar progress={workflow.progress} running={running} />

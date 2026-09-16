@@ -1,5 +1,17 @@
 import { useId, useState } from "react";
-import type { NotificationSettings, NotificationSettingsInput, ReportSettings, ReportSettingsInput, ShortcutAction, ShortcutSettings, ShortcutSettingsInput } from "../api/types.ts";
+import type {
+	DockerMountSettings,
+	DockerMountSettingsInput,
+	NotificationSettings,
+	NotificationSettingsInput,
+	ReportSettings,
+	ReportSettingsInput,
+	ShortcutAction,
+	ShortcutSettings,
+	ShortcutSettingsInput,
+} from "../api/types.ts";
+import { CollapsibleSection } from "../components/CollapsibleSection.tsx";
+import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { Field } from "../components/Field.tsx";
 import { Switch } from "../components/Switch.tsx";
 import { relativeTime } from "../lib/format.ts";
@@ -37,18 +49,22 @@ export function SettingsView({
 	settings,
 	shortcutSettings,
 	reportSettings,
+	dockerMountSettings,
 	busy,
 	onSave,
 	onSaveShortcuts,
 	onSaveReport,
+	onSaveDockerMounts,
 }: {
 	settings: NotificationSettings;
 	shortcutSettings: ShortcutSettings;
 	reportSettings: ReportSettings;
+	dockerMountSettings: DockerMountSettings;
 	busy: boolean;
 	onSave: (input: NotificationSettingsInput) => Promise<boolean>;
 	onSaveShortcuts: (input: ShortcutSettingsInput) => Promise<boolean>;
 	onSaveReport: (input: ReportSettingsInput) => Promise<boolean>;
+	onSaveDockerMounts: (input: DockerMountSettingsInput) => Promise<boolean>;
 }): React.JSX.Element {
 	const [enabled, setEnabled] = useState(settings.enabled);
 	const [slackUsername, setSlackUsername] = useState(settings.channels.slack.username);
@@ -75,6 +91,9 @@ export function SettingsView({
 	const [reportConversations, setReportConversations] = useState(reportSettings.includeConversations);
 	const [reportError, setReportError] = useState<string | null>(null);
 	const [savingReport, setSavingReport] = useState(false);
+	const [dockerMounts, setDockerMounts] = useState<string[]>(dockerMountSettings.mounts);
+	const [dockerMountError, setDockerMountError] = useState<string | null>(null);
+	const [savingDockerMounts, setSavingDockerMounts] = useState(false);
 
 	const notificationsId = useId();
 	const hintId = `${notificationsId}-hint`;
@@ -397,6 +416,52 @@ export function SettingsView({
 			    separate PUT from notifications: they're independent resources with
 			    their own validity, so a half-edited set in one never blocks the
 			    other. */}
+			<div className={styles.section}>
+				<CollapsibleSection
+					title="Docker bind mounts"
+					defaultOpen={dockerMounts.length > 0}
+					meta={
+						dockerMounts.length > 0 ? (
+							<span className="hint">{dockerMounts.length} path{dockerMounts.length === 1 ? "" : "s"}</span>
+						) : undefined
+					}
+				>
+					<p className="hint">
+						Host paths mounted at the same absolute path inside every <strong>docker</strong> workflow container.
+						Use this for shared config such as <code>~/.m2</code> for Maven.
+					</p>
+					<form
+						onSubmit={async (ev) => {
+							ev.preventDefault();
+							if (savingDockerMounts) return;
+							setDockerMountError(null);
+							setSavingDockerMounts(true);
+							try {
+								const ok = await onSaveDockerMounts({ mounts: dockerMounts });
+								if (!ok) setDockerMountError("Could not save docker bind mounts.");
+							} finally {
+								setSavingDockerMounts(false);
+							}
+						}}
+					>
+						<DockerMountEditor mounts={dockerMounts} onChange={setDockerMounts} disabled={savingDockerMounts || busy} />
+						{dockerMountError && (
+							<p className="msg msg--error" role="alert">
+								{dockerMountError}
+							</p>
+						)}
+						<div className={styles.actions}>
+							<button type="submit" className="btn btn--sm btn--primary" disabled={savingDockerMounts || busy}>
+								{savingDockerMounts ? "Saving…" : "Save"}
+							</button>
+							{dockerMountSettings.updatedAt && (
+								<span className="hint">Last saved {relativeTime(dockerMountSettings.updatedAt)}</span>
+							)}
+						</div>
+					</form>
+				</CollapsibleSection>
+			</div>
+
 			<form className={styles.section} aria-labelledby={`${shortcutsId}-section`} onSubmit={submitShortcuts}>
 				<h3 className={styles.sectionHeading} id={`${shortcutsId}-section`}>
 					Atajos

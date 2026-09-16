@@ -41,7 +41,7 @@ export function tcpCatalogPreamble(workflowId: string, executeUrl?: string): str
 	if (entries.length === 0) return "";
 	const lines = executeUrl
 		? [
-				"TCP tools available — run one by POSTing its body to the hub, which performs the HTTP request and answers with the result:",
+				"TCP tools available — run one by POSTing its body to the hub, which executes the tool (HTTP proxy or a local action such as git clone) and answers with the result:",
 				"",
 				`  POST ${executeUrl}`,
 				"  Content-Type: application/json",

@@ -762,6 +762,8 @@ export interface HookOptions {
 	sandbox?: PublishableSandbox;
 	/** Image for `sandbox: "docker"`; defaults to the runner's `defaultSandboxImage`. Ignored on the host. */
 	image?: string;
+	/** Host paths bind-mounted at the same absolute path inside a docker sandbox. */
+	mounts?: string[];
 }
 
 /**
@@ -790,7 +792,15 @@ export function createAwbHook(
 		// No block at all for the host default: an unsandboxed hook stays
 		// byte-for-byte the hook the hub has always written, so nothing about
 		// the existing spawn path is even re-read.
-		...(options.sandbox === "docker" ? { sandbox: { kind: "docker", image: options.image || defaultSandboxImage(runner) } } : {}),
+		...(options.sandbox === "docker"
+			? {
+					sandbox: {
+						kind: "docker",
+						image: options.image || defaultSandboxImage(runner),
+						...(options.mounts && options.mounts.length > 0 ? { mounts: options.mounts } : {}),
+					},
+				}
+			: {}),
 	};
 	const file = awbConfigFile();
 	fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -824,13 +834,38 @@ export function ensureHookMounts(hookUrl: string, mounts: string[]): boolean {
 		const missing = mounts.filter((mount) => !current.includes(mount));
 		if (missing.length === 0) return false;
 		sandbox.mounts = [...current, ...missing];
-		const file = awbConfigFile();
-		fs.mkdirSync(path.dirname(file), { recursive: true });
-		fs.writeFileSync(file, `${JSON.stringify(cfg, null, 2)}\n`);
-		return true;
+		return writeAwbConfig(cfg);
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * Replaces a docker hook's bind-mount list wholesale. Returns whether hooks.json
+ * was rewritten — false when the hook is missing, not docker, or unchanged.
+ */
+export function replaceHookMounts(hookUrl: string, mounts: string[]): boolean {
+	try {
+		const info = inspectLocalHook(hookUrl);
+		if (!info.local || !info.found || !info.name) return false;
+		const cfg = loadAwbConfig();
+		const sandbox = cfg.hooks[info.name]?.sandbox as { kind?: unknown; mounts?: unknown } | undefined;
+		if (!sandbox || sandbox.kind !== "docker") return false;
+		const next = mounts.filter((mount) => typeof mount === "string" && mount.trim() !== "");
+		const current = Array.isArray(sandbox.mounts) ? (sandbox.mounts as string[]) : [];
+		if (current.length === next.length && current.every((mount, index) => mount === next[index])) return false;
+		sandbox.mounts = next;
+		return writeAwbConfig(cfg);
+	} catch {
+		return false;
+	}
+}
+
+function writeAwbConfig(cfg: AwbConfig): boolean {
+	const file = awbConfigFile();
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, `${JSON.stringify(cfg, null, 2)}\n`);
+	return true;
 }
 
 /**
