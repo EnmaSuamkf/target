@@ -8,6 +8,8 @@ import type {
 	CreateWorkflowInput,
 	NotificationSettings,
 	NotificationSettingsInput,
+	DockerMountSettings,
+	DockerMountSettingsInput,
 	ReportSettings,
 	ReportSettingsInput,
 	OverridableStepStatus,
@@ -217,6 +219,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	const [settings, setSettings] = useState<NotificationSettings | null>(null);
 	const [shortcutSettings, setShortcutSettings] = useState<ShortcutSettings | null>(null);
 	const [reportSettings, setReportSettings] = useState<ReportSettings | null>(null);
+	const [dockerMountSettings, setDockerMountSettings] = useState<DockerMountSettings | null>(null);
 	const [selectedId, setSelectedId] = useState<string | null>(readHashSelection);
 	const [steps, setSteps] = useState<Step[]>([]);
 	const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
@@ -323,6 +326,10 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		setReportSettings(await api.getReportSettings());
 	}, []);
 
+	const refreshDockerMountSettings = useCallback(async (): Promise<void> => {
+		setDockerMountSettings(await api.getDockerMountSettings());
+	}, []);
+
 	// Leaving the workflows view closes the "All workflows" page so a return to
 	// the Workflows tab starts on the rail, not stranded on the page.
 	useEffect(() => {
@@ -354,6 +361,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 					refreshSettings(),
 					refreshShortcutSettings(),
 					refreshReportSettings(),
+					refreshDockerMountSettings(),
 				]);
 			} catch (err) {
 				reportError(err, "Could not load data");
@@ -369,6 +377,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		refreshSettings,
 		refreshShortcutSettings,
 		refreshReportSettings,
+		refreshDockerMountSettings,
 		reportError,
 	]);
 
@@ -1252,6 +1261,23 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		});
 	};
 
+	const handleSaveDockerMountSettings = async (input: DockerMountSettingsInput): Promise<boolean> => {
+		return await act("Could not save docker bind mounts", async () => {
+			setDockerMountSettings(await api.saveDockerMountSettings(input));
+			await refreshWorkflows();
+			toast.success("Docker bind mounts saved.");
+		});
+	};
+
+	const handleSaveWorkflowDockerMounts = async (mounts: string[]): Promise<boolean> => {
+		if (!selectedWorkflow) return false;
+		return await act("Could not save docker bind mounts", async () => {
+			const workflow = await api.updateWorkflowDockerMounts(selectedWorkflow.id, mounts);
+			setWorkflows((current) => current.map((w) => (w.id === workflow.id ? workflow : w)));
+			toast.success("Workflow bind mounts saved.");
+		});
+	};
+
 	return (
 		<div className={styles.app}>
 			<Header
@@ -1309,6 +1335,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								onSaveContext={handleSaveContext}
 								onSaveTcps={handleSaveTcps}
 								onSaveResources={handleSaveResources}
+								onSaveDockerMounts={handleSaveWorkflowDockerMounts}
 								onAttachImages={handleAttachImages}
 								onRemoveAttachment={(id) => void handleRemoveAttachment(id)}
 								onOpenTerminal={handleOpenTerminal}
@@ -1386,18 +1413,20 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 						onBeforeRemoveResource={confirmResourceRemoval}
 						onScan={handleScanResources}
 					/>
-				) : view === "settings" && settings && shortcutSettings && reportSettings ? (
-					// Keyed on all three save stamps: a successful save in any section re-seeds
+				) : view === "settings" && settings && shortcutSettings && reportSettings && dockerMountSettings ? (
+					// Keyed on all save stamps: a successful save in any section re-seeds
 					// that form's local fields from what the hub actually stored.
 					<SettingsView
-						key={`${settings.updatedAt ?? "unsaved"}|${shortcutSettings.updatedAt ?? "unsaved"}|${reportSettings.updatedAt ?? "unsaved"}|${reportSettings.envConfigured}`}
+						key={`${settings.updatedAt ?? "unsaved"}|${shortcutSettings.updatedAt ?? "unsaved"}|${reportSettings.updatedAt ?? "unsaved"}|${reportSettings.envConfigured}|${dockerMountSettings.updatedAt ?? "unsaved"}`}
 						settings={settings}
 						shortcutSettings={shortcutSettings}
 						reportSettings={reportSettings}
+						dockerMountSettings={dockerMountSettings}
 						busy={busy}
 						onSave={handleSaveNotificationSettings}
 						onSaveShortcuts={handleSaveShortcutSettings}
 						onSaveReport={handleSaveReportSettings}
+						onSaveDockerMounts={handleSaveDockerMountSettings}
 					/>
 				) : (
 					<section className={styles.placeholder}>

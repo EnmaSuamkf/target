@@ -214,6 +214,12 @@ export interface Workflow {
 	sandbox: Sandbox;
 	/** Image backing a docker sandbox; null on the host. */
 	image: string | null;
+	/** Extra docker bind mounts for this workflow only. */
+	dockerMounts: string[];
+	/** Default docker bind mounts from Settings, applied to every docker workflow. */
+	defaultDockerMounts: string[];
+	/** Defaults ∪ workflow extras (and hub-managed paths such as step results). */
+	effectiveDockerMounts: string[];
 	/** Permission mode its hook spawns with; null means awb's own default (read-only). */
 	permissionMode: string | null;
 	progress: Progress;
@@ -590,6 +596,16 @@ export interface ReportSettings {
 	envConfigured: boolean;
 }
 
+/** Default docker bind-mount paths (Settings). */
+export interface DockerMountSettings {
+	mounts: string[];
+	updatedAt: string | null;
+}
+
+export interface DockerMountSettingsInput {
+	mounts: string[];
+}
+
 /** Payload accepted by PUT /api/settings/report (a full replace). */
 export interface ReportSettingsInput {
 	enabled: boolean;
@@ -653,6 +669,8 @@ export interface CreateWorkflowInput {
 	sandbox?: Sandbox;
 	/** Image for a docker sandbox; the server falls back to its own default image. */
 	image?: string;
+	/** Extra docker bind mounts for this workflow, on top of Settings defaults. */
+	dockerMounts?: string[];
 	templateId?: string;
 	/**
 	 * Create the workflow to RUN ON this existing conversation: the server adopts
@@ -692,6 +710,8 @@ export interface CloneWorkflowInput {
 	sandbox: Sandbox;
 	/** Empty means the runner's default image. Only read for a docker sandbox. */
 	image: string;
+	/** Extra docker bind mounts for the clone; only used when sandbox is docker. */
+	dockerMounts?: string[];
 	/** Empty means read-only — awb's own default — not "whatever the source had". */
 	permissionMode: "" | PermissionMode;
 	/** Required confirmation when permissionMode is "bypassPermissions". */

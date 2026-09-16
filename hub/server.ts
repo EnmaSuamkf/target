@@ -18,6 +18,7 @@
  *   DELETE /api/workflows/:id                          → remove: deletes its awb hook + .md file + DB rows (admin token)
  *   POST   /api/workflows/:id/clone                    → copy it (steps included) into a new "Clone - <name>" workflow with its own agent (admin token)
  *   PATCH  /api/workflows/:id/name                     → rename it (admin token)
+ *   PATCH  /api/workflows/:id/docker-mounts            → replace this workflow's extra docker bind mounts (admin token)
  *   PATCH  /api/workflows/:id/context                  → set the conversation context preamble (admin token)
  *   POST   /api/workflows/:id/steps                    → add a step (admin token); optional afterStepId inserts it right after that step
  *   POST   /api/workflows/:id/steps/from-template       → append a template's steps (admin token)
@@ -51,6 +52,8 @@
  *   PUT    /api/settings/shortcuts                        → replace the shortcut bindings (admin token)
  *   GET    /api/settings/report                           → activity-reporting preferences (ingest URL + related knobs)
  *   PUT    /api/settings/report                           → replace the activity-reporting preferences (admin token)
+ *   GET    /api/settings/docker-mounts                    → default docker bind-mount paths (applied to every docker workflow)
+ *   PUT    /api/settings/docker-mounts                    → replace the default docker bind-mount paths (admin token)
  *   GET    /                                           → ui/index.html
  *
  * Every route except /health, the /api/auth stack and the awb per-step-token
@@ -107,6 +110,7 @@ import {
 import {
 	promoteQueuedToRunning,
 	deleteTemplate,
+	getDockerMountSettings,
 	getNotificationSettings,
 	getReportSettings,
 	getShortcutSettings,
@@ -123,6 +127,7 @@ import {
 	OVERRIDABLE_STEP_STATUSES,
 	OVERRIDABLE_WORKFLOW_STATUSES,
 	parseTemplateBundle,
+	saveDockerMountSettings,
 	saveNotificationSettings,
 	saveReportSettings,
 	toPublicReportSettings,
@@ -141,8 +146,10 @@ import {
 	type Template,
 	type Workflow,
 } from "./db.ts";
+import { DockerMountError, effectiveDockerMounts, parseDockerMountsInput, resyncAllDockerWorkflowMounts } from "./docker-mounts.ts";
 import { executeTcpTool } from "./tcp-executor.ts";
 import { findTcpTool } from "./tcp-catalog.ts";
+import { executeLocalTcpTool, isLocalTcpTool } from "./tcp-local.ts";
 import {
 	deleteTcp,
 	getTcp,
@@ -205,6 +212,7 @@ import {
 	setConversationContext,
 	setWorkflowStepSelection,
 	startWorkflow,
+	updateWorkflowDockerMounts,
 	WorkflowError,
 	type CloneOverrides,
 } from "./workflow.ts";
@@ -447,6 +455,12 @@ function publicWorkflow(workflow: Workflow): Record<string, unknown> {
 		// honest answer is "the default, on this machine".
 		sandbox: runtime.sandbox?.kind ?? "host",
 		image: runtime.sandbox?.image ?? null,
+		dockerMounts: workflow.dockerMounts,
+		defaultDockerMounts: getDockerMountSettings().mounts,
+		effectiveDockerMounts:
+			runtime.sandbox?.kind === "docker"
+				? effectiveDockerMounts(workflow.agentName, workflow.dockerMounts)
+				: [],
 		progress: stepProgress(workflow.id),
 		conversationContext: workflow.conversationContext,
 		contextInjected: workflow.contextInjected,
@@ -705,6 +719,15 @@ function parseCloneOverrides(body: Record<string, unknown>, res: http.ServerResp
 	if ("image" in body) {
 		const raw = typeof body.image === "string" ? body.image.trim() : "";
 		overrides.image = raw === "" ? null : raw;
+	}
+	if ("dockerMounts" in body) {
+		try {
+			overrides.dockerMounts = body.dockerMounts == null ? null : parseDockerMountsInput(body.dockerMounts);
+		} catch (err) {
+			const message = err instanceof DockerMountError ? err.message : "invalid dockerMounts";
+			sendJson(res, 400, { error: message });
+			return null;
+		}
 	}
 	// Same host checks the create route makes, for the same reason: a clone whose
 	// container has no daemon, or whose CLI isn't installed here, is a workflow
@@ -1030,11 +1053,19 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					sendJson(res, 404, { error: "unknown_tool" });
 					return;
 				}
-				const result = await executeTcpTool(found.tool, {
+				const request = {
 					toolName,
 					inputs: typeof body.inputs === "object" && body.inputs ? (body.inputs as Record<string, string>) : undefined,
 					input: typeof body.input === "string" ? body.input : undefined,
-				});
+				};
+				let workdir: string | null = null;
+				if (viaStep && callingStep) {
+					const workflow = getWorkflow(callingStep.workflowId);
+					if (workflow) workdir = hookRuntime(workflow.hookUrl).workdir;
+				}
+				const result = isLocalTcpTool(found.tool)
+					? executeLocalTcpTool(found.tool, request, { workdir })
+					: await executeTcpTool(found.tool, request);
 				sendJson(res, 200, { result });
 			})().catch((err) => {
 				sendJson(res, 500, { error: String((err as Error).message ?? err) });
@@ -1782,6 +1813,39 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		return;
 	}
 
+	// --- /api/settings/docker-mounts ---
+	//
+	// Default host paths bind-mounted into every docker workflow's container.
+	// Per-workflow extras are stored on the workflow row and merged at sync time.
+
+	if (parts[1] === "settings" && parts[2] === "docker-mounts" && !parts[3]) {
+		if (req.method === "GET") {
+			sendJson(res, 200, { settings: getDockerMountSettings() });
+			return;
+		}
+		if (req.method === "PUT" || req.method === "PATCH") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				try {
+					const mounts = parseDockerMountsInput(body.mounts ?? []);
+					const settings = saveDockerMountSettings(mounts);
+					resyncAllDockerWorkflowMounts(listWorkflows());
+					log(`docker bind-mount defaults updated (${mounts.length} path(s))`);
+					sendJson(res, 200, { settings });
+				} catch (err) {
+					const message = err instanceof DockerMountError ? err.message : "invalid mounts";
+					sendJson(res, 400, { error: message });
+				}
+			});
+			return;
+		}
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
 	// --- /api/fs/dirs (directory picker for the create-workflow form) ---
 	//
 	// Lists the subdirectories of a path on the hub's machine so the UI can
@@ -2154,6 +2218,16 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				// (a docker tag / name), never a path or a command, so it's taken as
 				// an opaque trimmed string.
 				const image = typeof body.image === "string" && body.image.trim() !== "" ? body.image.trim() : undefined;
+				let dockerMounts: string[] | undefined;
+				if (body.dockerMounts !== undefined) {
+					try {
+						dockerMounts = parseDockerMountsInput(body.dockerMounts);
+					} catch (err) {
+						const message = err instanceof DockerMountError ? err.message : "invalid dockerMounts";
+						sendJson(res, 400, { error: message });
+						return;
+					}
+				}
 				// Optional: seed the new workflow with a template's steps (same order,
 				// same judge config), leaving the template itself untouched — a
 				// template's name/tags never carry over, only its steps.
@@ -2172,6 +2246,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						runner,
 						sandbox,
 						image,
+						...(dockerMounts !== undefined ? { dockerMounts } : {}),
 						conversationContext,
 						adoptedSessionId,
 					});
@@ -2293,6 +2368,34 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				log(`workflow ${workflowId} renamed to '${workflow.name}'`);
 				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
 			} catch (err) {
+				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		});
+		return;
+	}
+
+	// --- /api/workflows/:id/docker-mounts ---
+
+	if (workflowId && parts[3] === "docker-mounts" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		if (!getWorkflow(workflowId)) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			try {
+				const mounts = parseDockerMountsInput(body.mounts ?? []);
+				const workflow = updateWorkflowDockerMounts(workflowId, mounts);
+				log(`workflow ${workflowId} docker mounts updated (${mounts.length} extra path(s))`);
+				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
+			} catch (err) {
+				if (err instanceof DockerMountError) {
+					sendJson(res, 400, { error: err.message });
+					return;
+				}
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
 			}
 		});

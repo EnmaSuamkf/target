@@ -28,6 +28,7 @@ import {
 	type PublishableRunner,
 	type PublishableSandbox,
 } from "./awb.ts";
+import { effectiveDockerMounts, syncWorkflowDockerMounts } from "./docker-mounts.ts";
 import { loadReportConfig, targetDir, type HubConfig } from "./config.ts";
 import { emit as reportEmit } from "./reporter.ts";
 import { listWorkflowResourceSelections, setWorkflowResourceSelections } from "./rci-store.ts";
@@ -67,6 +68,7 @@ import {
 	resetSteps,
 	setContextInjected,
 	setWorkflowConversationContext,
+	setWorkflowDockerMounts,
 	setWorkflowName,
 	setStatusBeforeReview,
 	setStepSelection,
@@ -726,6 +728,7 @@ export function createWorkflow(
 		runner?: HookOptions["runner"];
 		sandbox?: HookOptions["sandbox"];
 		image?: HookOptions["image"];
+		dockerMounts?: string[];
 		conversationContext?: string | null;
 		adoptedSessionId?: string | null;
 	} = {},
@@ -737,12 +740,14 @@ export function createWorkflow(
 	const slug = slugify(trimmed);
 	const agentName = `${slug}-${shortId}`;
 	const workdir = options.workdir?.trim() || path.join(targetDir(), "sandboxes", agentName);
+	const dockerMounts = options.dockerMounts ?? [];
 	const promptTemplate = `You are the agent of a workflow in The Target Project named "${trimmed}". This session is reused in order for every step of the workflow. Current step:\n\n{{payload}}\n\nCarry out the step and respond with the final result of that step.`;
 	const hook = createAwbHook(agentName, workdir, promptTemplate, {
 		permissionMode: options.permissionMode,
 		runner: options.runner,
 		sandbox: options.sandbox,
 		image: options.image,
+		mounts: options.sandbox === "docker" ? effectiveDockerMounts(agentName, dockerMounts) : undefined,
 	});
 	const mdPath = path.join(targetDir(), `${slug}-${shortId}.md`);
 	const workflow = insertWorkflow({
@@ -754,7 +759,9 @@ export function createWorkflow(
 		mdPath,
 		conversationContext: options.conversationContext ?? null,
 		adoptedSessionId: options.adoptedSessionId ?? null,
+		dockerMounts,
 	});
+	syncWorkflowDockerMounts(workflow);
 	// Before writeStatusMd, so a workflow created with a context has that step in
 	// its progress file from the first write rather than only after the next edit.
 	reconcileContextStep(workflow.id);
@@ -764,6 +771,20 @@ export function createWorkflow(
 		data: { name: workflow.name, agent_name: workflow.agentName, ...workflowRuntimeMeta(workflow.hookUrl) },
 	});
 	return workflow;
+}
+
+/** Replaces a workflow's docker-only bind mounts and rewrites its awb hook. */
+export function updateWorkflowDockerMounts(workflowId: string, mounts: string[]): Workflow {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	const runtime = hookRuntime(workflow.hookUrl);
+	if (runtime.sandbox?.kind !== "docker") {
+		throw new WorkflowError("docker_mounts_only_for_docker_workflows");
+	}
+	const updated = setWorkflowDockerMounts(workflowId, mounts);
+	if (!updated) throw new WorkflowError("unknown workflow");
+	syncWorkflowDockerMounts(updated);
+	return updated;
 }
 
 /**
@@ -950,6 +971,7 @@ export interface CloneOverrides {
 	runner?: PublishableRunner | null;
 	sandbox?: PublishableSandbox | null;
 	image?: string | null;
+	dockerMounts?: string[] | null;
 }
 
 /**
@@ -1031,12 +1053,15 @@ export function cloneWorkflow(workflowId: string, overrides: CloneOverrides = {}
 	// The image only means anything to a docker sandbox: a clone moved onto the
 	// host must not carry the original's image into a hook that won't use it.
 	const image = sandbox === "docker" ? pick(overrides.image, runtime.sandbox?.image) : undefined;
+	const dockerMounts =
+		overrides.dockerMounts === undefined ? source.dockerMounts : overrides.dockerMounts === null ? [] : overrides.dockerMounts;
 	const clone = createWorkflow(overrides.name ?? cloneName(source.name), {
 		...(workdir ? { workdir } : {}),
 		...(runner ? { runner } : {}),
 		...(permissionMode ? { permissionMode } : {}),
 		...(sandbox ? { sandbox } : {}),
 		...(image ? { image } : {}),
+		...(sandbox === "docker" ? { dockerMounts } : {}),
 		conversationContext: source.conversationContext,
 	});
 	// The context's images come across before the steps so the hub-owned context

@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
-import { ApiError, listConversations, listHostCapabilities, openConversationTerminal, previewConversation } from "../api/client.ts";
+import {
+	ApiError,
+	getDockerMountSettings,
+	listConversations,
+	listHostCapabilities,
+	openConversationTerminal,
+	previewConversation,
+} from "../api/client.ts";
 import {
 	PERMISSION_MODES,
 	type CloneWorkflowInput,
@@ -14,6 +21,7 @@ import {
 	type Workflow,
 } from "../api/types.ts";
 import { DirectoryBrowser } from "../components/DirectoryBrowser.tsx";
+import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { Field } from "../components/Field.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { prettyPath, relativeTime, truncate } from "../lib/format.ts";
@@ -190,6 +198,8 @@ export function CreateWorkflowModal({
 	const [previewing, setPreviewing] = useState(false);
 	const [opening, setOpening] = useState(false);
 	const [terminalNote, setTerminalNote] = useState<string | null>(null);
+	const [defaultDockerMounts, setDefaultDockerMounts] = useState<string[]>([]);
+	const [dockerMounts, setDockerMounts] = useState<string[]>([]);
 
 	// Fresh form on every open — or, in clone mode, one seeded from the workflow
 	// being copied, so the dialog opens showing what the clone WOULD be and every
@@ -207,6 +217,7 @@ export function CreateWorkflowModal({
 		setWorkdir(source?.chosenWorkdir ?? "");
 		setSandbox(source?.sandbox ?? "host");
 		setImage(source?.image ?? "");
+		setDockerMounts(source?.dockerMounts ?? []);
 		// A mode this form can't offer (awb publishes more than the UI does) reads
 		// as the default rather than seeding a value with no matching option.
 		setPermissionMode(
@@ -234,7 +245,8 @@ export function CreateWorkflowModal({
 			let boxes: SandboxAvailability[] = [];
 			let failed = false;
 			try {
-				const caps = await listHostCapabilities();
+				const [caps, mountSettings] = await Promise.all([listHostCapabilities(), getDockerMountSettings()]);
+				if (!cancelled) setDefaultDockerMounts(mountSettings.mounts);
 				avail = caps.runners;
 				boxes = caps.sandboxes;
 			} catch {
@@ -448,6 +460,7 @@ export function CreateWorkflowModal({
 					runner,
 					sandbox,
 					image: sandbox === "docker" ? image.trim() : "",
+					...(sandbox === "docker" ? { dockerMounts } : {}),
 					permissionMode,
 					...(bypass ? { acceptBypassRisk: true } : {}),
 				};
@@ -459,6 +472,7 @@ export function CreateWorkflowModal({
 			if (runner !== "claude") input.runner = runner;
 			if (sandbox !== "host") input.sandbox = sandbox;
 			if (sandbox === "docker" && image.trim()) input.image = image.trim();
+			if (sandbox === "docker" && dockerMounts.length > 0) input.dockerMounts = dockerMounts;
 			if (permissionMode) input.permissionMode = permissionMode;
 			if (templateId) input.templateId = templateId;
 			if (conversation) {
@@ -777,6 +791,19 @@ export function CreateWorkflowModal({
 								onChange={(ev) => setImage(ev.target.value)}
 							/>
 						)}
+					</Field>
+				)}
+
+				{sandbox === "docker" && (
+					<Field
+						label="Bind mounts"
+						hint={
+							defaultDockerMounts.length > 0
+								? `Settings defaults are applied automatically: ${defaultDockerMounts.join(", ")}. Add workflow-only paths below.`
+								: "Host paths mounted at the same absolute path inside the container. Configure shared defaults in Settings."
+						}
+					>
+						{() => <DockerMountEditor mounts={dockerMounts} onChange={setDockerMounts} disabled={saving} />}
 					</Field>
 				)}
 

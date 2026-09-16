@@ -121,7 +121,7 @@ function readQuoted(input: string): { value: string; rest: string } {
 	return { value: bare[0], rest: input.slice(bare[0].length) };
 }
 
-function normalizeInputs(tool: TcpTool, request: TcpExecuteRequest): Record<string, string> {
+export function normalizeInputs(tool: TcpTool, request: TcpExecuteRequest): Record<string, string> {
 	const out: Record<string, string> = {};
 	if (request.inputs && typeof request.inputs === "object") {
 		for (const [key, value] of Object.entries(request.inputs)) {
