@@ -9,6 +9,8 @@ import type {
 	ShortcutAction,
 	ShortcutSettings,
 	ShortcutSettingsInput,
+	UiSettings,
+	UiSettingsInput,
 } from "../api/types.ts";
 import { CollapsibleSection } from "../components/CollapsibleSection.tsx";
 import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
@@ -50,21 +52,25 @@ export function SettingsView({
 	shortcutSettings,
 	reportSettings,
 	dockerMountSettings,
+	uiSettings,
 	busy,
 	onSave,
 	onSaveShortcuts,
 	onSaveReport,
 	onSaveDockerMounts,
+	onSaveUi,
 }: {
 	settings: NotificationSettings;
 	shortcutSettings: ShortcutSettings;
 	reportSettings: ReportSettings;
 	dockerMountSettings: DockerMountSettings;
+	uiSettings: UiSettings;
 	busy: boolean;
 	onSave: (input: NotificationSettingsInput) => Promise<boolean>;
 	onSaveShortcuts: (input: ShortcutSettingsInput) => Promise<boolean>;
 	onSaveReport: (input: ReportSettingsInput) => Promise<boolean>;
 	onSaveDockerMounts: (input: DockerMountSettingsInput) => Promise<boolean>;
+	onSaveUi: (input: UiSettingsInput) => Promise<boolean>;
 }): React.JSX.Element {
 	const [enabled, setEnabled] = useState(settings.enabled);
 	const [slackUsername, setSlackUsername] = useState(settings.channels.slack.username);
@@ -95,7 +101,12 @@ export function SettingsView({
 	const [dockerMountError, setDockerMountError] = useState<string | null>(null);
 	const [savingDockerMounts, setSavingDockerMounts] = useState(false);
 
+	const [showTcpCatalog, setShowTcpCatalog] = useState(uiSettings.showTcpCatalog);
+	const [showRciCatalog, setShowRciCatalog] = useState(uiSettings.showRciCatalog);
+	const [savingUi, setSavingUi] = useState(false);
+
 	const notificationsId = useId();
+	const catalogNavId = useId();
 	const hintId = `${notificationsId}-hint`;
 	const shortcutsId = useId();
 	const reportId = useId();
@@ -203,6 +214,65 @@ export function SettingsView({
 					Preferences for this hub. They're stored by the hub itself, so every browser sees the same values.
 				</p>
 			</div>
+
+			<form
+				className={styles.section}
+				aria-labelledby={`${catalogNavId}-section`}
+				onSubmit={async (ev) => {
+					ev.preventDefault();
+					if (savingUi) return;
+					setSavingUi(true);
+					try {
+						await onSaveUi({ showTcpCatalog, showRciCatalog });
+					} finally {
+						setSavingUi(false);
+					}
+				}}
+			>
+				<h3 className={styles.sectionHeading} id={`${catalogNavId}-section`}>
+					Catalog navigation
+				</h3>
+				<p className="hint">
+					Control whether <strong>TCP</strong> and <strong>RCI</strong> (resource sets) appear in the
+					header, on workflows, and on templates. When hidden, existing attachments on the server are
+					unchanged — the hub API and MCP tools still work.
+				</p>
+
+				<div className={styles.toggleRow}>
+					<div className={styles.toggleText}>
+						<span className="label">Show TCP catalog</span>
+						<p className="hint">Top-level page for managing TCP tool definitions.</p>
+					</div>
+					<Switch
+						checked={showTcpCatalog}
+						onChange={setShowTcpCatalog}
+						label="Show TCP catalog"
+						disabled={savingUi || busy}
+					/>
+				</div>
+
+				<div className={styles.toggleRow}>
+					<div className={styles.toggleText}>
+						<span className="label">Show RCI catalog</span>
+						<p className="hint">Top-level page for managing resource sets.</p>
+					</div>
+					<Switch
+						checked={showRciCatalog}
+						onChange={setShowRciCatalog}
+						label="Show RCI catalog"
+						disabled={savingUi || busy}
+					/>
+				</div>
+
+				<div className={styles.actions}>
+					<button type="submit" className="btn btn--primary" disabled={savingUi || busy}>
+						{savingUi ? "Saving…" : "Save"}
+					</button>
+					{uiSettings.updatedAt && (
+						<span className="hint">Last saved {relativeTime(uiSettings.updatedAt)}</span>
+					)}
+				</div>
+			</form>
 
 			<form className={styles.section} aria-labelledby={`${notificationsId}-section`} onSubmit={submit}>
 				<h3 className={styles.sectionHeading} id={`${notificationsId}-section`}>

@@ -38,6 +38,8 @@ export function TemplatesView({
 	templates,
 	tcps,
 	resourceSets,
+	showTcpCatalog = false,
+	showRciCatalog = false,
 	busy,
 	onCreate,
 	onUpdate,
@@ -49,6 +51,8 @@ export function TemplatesView({
 	templates: Template[];
 	tcps: Tcp[];
 	resourceSets: ResourceSet[];
+	showTcpCatalog?: boolean;
+	showRciCatalog?: boolean;
 	busy: boolean;
 	onCreate: (input: TemplateInput) => Promise<void>;
 	onUpdate: (id: string, input: TemplateInput) => Promise<void>;
@@ -260,6 +264,8 @@ export function TemplatesView({
 						template={editing}
 						tcps={tcps}
 						resourceSets={resourceSets}
+						showTcpCatalog={showTcpCatalog}
+						showRciCatalog={showRciCatalog}
 						busy={busy}
 						{...(isMobile ? { onBack: closeForm } : {})}
 						onCancel={closeForm}
@@ -298,6 +304,8 @@ function TemplateForm({
 	template,
 	tcps,
 	resourceSets,
+	showTcpCatalog = false,
+	showRciCatalog = false,
 	busy,
 	onSubmit,
 	onCancel,
@@ -308,6 +316,8 @@ function TemplateForm({
 	template: Template | null;
 	tcps: Tcp[];
 	resourceSets: ResourceSet[];
+	showTcpCatalog?: boolean;
+	showRciCatalog?: boolean;
 	busy: boolean;
 	onSubmit: (input: TemplateInput) => Promise<void>;
 	onCancel: () => void;
@@ -423,20 +433,24 @@ function TemplateForm({
 				)}
 			</Field>
 
-			<div className={styles.stepsBlock}>
-				<span className="label">TCP packs</span>
-				<p className="hint">Attached to the workflow when this template is used. Select a whole pack or individual tools.</p>
-				<TcpSelectionEditor tcps={tcps} selections={tcpSelections} onChange={setTcpSelections} />
-			</div>
+			{showTcpCatalog && (
+				<div className={styles.stepsBlock}>
+					<span className="label">TCP packs</span>
+					<p className="hint">Attached to the workflow when this template is used. Select a whole pack or individual tools.</p>
+					<TcpSelectionEditor tcps={tcps} selections={tcpSelections} onChange={setTcpSelections} />
+				</div>
+			)}
 
-			<div className={styles.stepsBlock}>
-				<span className="label">Resource Sets (RCI)</span>
-				<p className="hint">
-					Injected into the workflow's conversation when this template is used — nothing is installed in the agent.
-					Select a whole set or individual resources.
-				</p>
-				<ResourceSelectionEditor resourceSets={resourceSets} selections={resourceSelections} onChange={setResourceSelections} />
-			</div>
+			{showRciCatalog && (
+				<div className={styles.stepsBlock}>
+					<span className="label">Resource Sets (RCI)</span>
+					<p className="hint">
+						Injected into the workflow's conversation when this template is used — nothing is installed in the agent.
+						Select a whole set or individual resources.
+					</p>
+					<ResourceSelectionEditor resourceSets={resourceSets} selections={resourceSelections} onChange={setResourceSelections} />
+				</div>
+			)}
 
 			<div className={styles.stepsBlock}>
 				<div className={styles.stepsHead}>

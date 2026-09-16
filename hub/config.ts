@@ -15,6 +15,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getReportSettings, getSyncCredentials } from "./db.ts";
+import { dockerHostAddress } from "./sandbox-net.ts";
 
 export interface HubConfig {
 	host: string;
@@ -26,6 +27,16 @@ export interface HubConfig {
 	 * the host, which keep using `host`.
 	 */
 	sandboxHost?: string;
+	/**
+	 * Hub-managed marker: `sandboxHost` was set by the operator, not by
+	 * `TARGET_HUB_DOCKER_FRIENDLY`. When the env flag is off, that host is kept.
+	 */
+	sandboxHostManual?: boolean;
+	/**
+	 * Hub-managed marker: `host` / `sandboxHost` were last applied from
+	 * `TARGET_HUB_DOCKER_FRIENDLY=true`. Cleared when the flag is turned off.
+	 */
+	dockerNetworkingFromEnv?: boolean;
 	port: number;
 	/** Bearer token required by every mutating /api route. */
 	adminToken: string;
@@ -127,7 +138,7 @@ export function loadConfig(): HubConfig {
 	} catch {
 		// Missing/invalid config file → fall back to defaults.
 	}
-	const cfg: HubConfig = {
+	let cfg: HubConfig = {
 		...DEFAULTS,
 		adminToken: fileCfg.adminToken ?? crypto.randomBytes(24).toString("hex"),
 		...fileCfg,
@@ -139,7 +150,9 @@ export function loadConfig(): HubConfig {
 		stepIdleTimeoutMs:
 			fileCfg.stepIdleTimeoutMs ?? fileCfg.stepTimeoutMs ?? DEFAULTS.stepIdleTimeoutMs,
 	};
-	if (!fileCfg.adminToken) saveConfig(cfg);
+	const synced = syncDockerFriendlyNetworking(cfg, fileCfg);
+	cfg = synced.cfg;
+	if (!fileCfg.adminToken || synced.changed) saveConfig(cfg);
 	return cfg;
 }
 
@@ -177,12 +190,89 @@ export interface ReportConfig {
 const DEFAULT_REPORT_INTERVAL_MS = 30_000;
 const MIN_REPORT_INTERVAL_MS = 1_000;
 
+/** Loopback bind used when docker-friendly env mode is off. */
+export const LOOPBACK_HOST = "127.0.0.1";
+
+/** Bind/listen values applied when `TARGET_HUB_DOCKER_FRIENDLY` is true. */
+export const DOCKER_FRIENDLY_HOST = "0.0.0.0";
+export const DOCKER_FRIENDLY_PORT = 8893;
+export const DOCKER_FRIENDLY_SANDBOX_HOST_DEFAULT = "172.17.0.1";
+
 function envFlag(value: string | undefined, fallback: boolean): boolean {
 	if (value === undefined) return fallback;
 	const v = value.trim().toLowerCase();
 	if (["false", "0", "off", "no"].includes(v)) return false;
 	if (["true", "1", "on", "yes"].includes(v)) return true;
 	return fallback;
+}
+
+/** Whether `TARGET_HUB_DOCKER_FRIENDLY` opts into docker-friendly hub networking. */
+export function dockerFriendlyHubEnabled(): boolean {
+	return envFlag(process.env.TARGET_HUB_DOCKER_FRIENDLY, false);
+}
+
+function sandboxHostForDockerFriendlyEnv(): string {
+	return dockerHostAddress() ?? DOCKER_FRIENDLY_SANDBOX_HOST_DEFAULT;
+}
+
+/**
+ * Merge docker-friendly networking from `TARGET_HUB_DOCKER_FRIENDLY` into cfg.
+ *
+ * Precedence: when the flag is **true**, env overrides `host`, `port`, and
+ * `sandboxHost` on every startup. When **false/unset**, env forces loopback
+ * `host` and removes env-managed `sandboxHost`; an operator-owned
+ * `sandboxHost` (present while the flag was off, or marked `sandboxHostManual`)
+ * is preserved.
+ */
+export function syncDockerFriendlyNetworking(
+	cfg: HubConfig,
+	fileCfg: Partial<HubConfig>,
+): { cfg: HubConfig; changed: boolean } {
+	const enabled = dockerFriendlyHubEnabled();
+	const next: HubConfig = { ...cfg };
+	let changed = false;
+
+	const touch = <K extends keyof HubConfig>(key: K, value: HubConfig[K]) => {
+		if (next[key] !== value) {
+			next[key] = value;
+			changed = true;
+		}
+	};
+
+	if (enabled) {
+		touch("host", DOCKER_FRIENDLY_HOST);
+		touch("port", DOCKER_FRIENDLY_PORT);
+		touch("sandboxHost", sandboxHostForDockerFriendlyEnv());
+		touch("dockerNetworkingFromEnv", true);
+		if (next.sandboxHostManual) {
+			delete next.sandboxHostManual;
+			changed = true;
+		}
+	} else {
+		touch("host", LOOPBACK_HOST);
+		const fromEnv = fileCfg.dockerNetworkingFromEnv === true;
+		const manual =
+			fileCfg.sandboxHostManual === true || (!fromEnv && fileCfg.sandboxHost != null && fileCfg.sandboxHost !== "");
+		if (fromEnv) {
+			if (next.dockerNetworkingFromEnv) {
+				delete next.dockerNetworkingFromEnv;
+				changed = true;
+			}
+			if (next.sandboxHost !== undefined) {
+				delete next.sandboxHost;
+				changed = true;
+			}
+		} else if (manual) {
+			const host = typeof fileCfg.sandboxHost === "string" ? fileCfg.sandboxHost : next.sandboxHost;
+			if (host != null && host !== "") touch("sandboxHost", host);
+			touch("sandboxHostManual", true);
+		} else if (next.sandboxHost !== undefined) {
+			delete next.sandboxHost;
+			changed = true;
+		}
+	}
+
+	return { cfg: next, changed };
 }
 
 /** Activity-reporting values read from the environment (legacy `.env` path). */

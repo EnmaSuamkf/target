@@ -12,11 +12,24 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
+import type { HubConfig } from "./config.ts";
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-config-test-"));
 process.env.TARGET_HOME = path.join(tmpHome, ".target");
 
-const { loadConfig } = await import("./config.ts");
+const {
+	loadConfig,
+	syncDockerFriendlyNetworking,
+	DOCKER_FRIENDLY_HOST,
+	DOCKER_FRIENDLY_PORT,
+	DOCKER_FRIENDLY_SANDBOX_HOST_DEFAULT,
+	LOOPBACK_HOST,
+} = await import("./config.ts");
+const { dockerHostAddress } = await import("./sandbox-net.ts");
+
+function expectedEnvSandboxHost(): string {
+	return dockerHostAddress() ?? DOCKER_FRIENDLY_SANDBOX_HOST_DEFAULT;
+}
 
 /** Writes a config file the way an operator would, then loads it back. */
 function loadWith(fileCfg: Record<string, unknown>) {
@@ -60,4 +73,150 @@ test("the other knobs are still overridable from the file", () => {
 	assert.equal(cfg.stepIdleWarnMs, 2_000);
 	assert.equal(cfg.progressProbeThrottleMs, 3_000);
 	assert.equal(cfg.stepIdleTimeoutMs, 10 * 60 * 1000); // untouched by the compat rule
+});
+
+function configPath(): string {
+	return path.join(String(process.env.TARGET_HOME), "config.json");
+}
+
+function readPersisted(): Record<string, unknown> {
+	return JSON.parse(fs.readFileSync(configPath(), "utf8")) as Record<string, unknown>;
+}
+
+function withDockerFriendlyEnv(value: string | undefined, fn: () => void): void {
+	const prev = process.env.TARGET_HUB_DOCKER_FRIENDLY;
+	if (value === undefined) delete process.env.TARGET_HUB_DOCKER_FRIENDLY;
+	else process.env.TARGET_HUB_DOCKER_FRIENDLY = value;
+	try {
+		fn();
+	} finally {
+		if (prev === undefined) delete process.env.TARGET_HUB_DOCKER_FRIENDLY;
+		else process.env.TARGET_HUB_DOCKER_FRIENDLY = prev;
+	}
+}
+
+test("TARGET_HUB_DOCKER_FRIENDLY=false keeps loopback defaults", () => {
+	withDockerFriendlyEnv("false", () => {
+		const cfg = loadWith({ host: "0.0.0.0", sandboxHost: "172.17.0.1", dockerNetworkingFromEnv: true });
+		assert.equal(cfg.host, LOOPBACK_HOST);
+		assert.equal(cfg.port, DOCKER_FRIENDLY_PORT);
+		assert.equal(cfg.sandboxHost, undefined);
+	});
+});
+
+test("env flag off leaves unset host at loopback and port 8893", () => {
+	withDockerFriendlyEnv(undefined, () => {
+		fs.rmSync(configPath(), { force: true });
+		const cfg = loadConfig();
+		assert.equal(cfg.host, LOOPBACK_HOST);
+		assert.equal(cfg.port, DOCKER_FRIENDLY_PORT);
+	});
+});
+
+test("documented docker-friendly sandboxHost fallback is 172.17.0.1", () => {
+	assert.equal(DOCKER_FRIENDLY_SANDBOX_HOST_DEFAULT, "172.17.0.1");
+});
+
+test("flag on sets 0.0.0.0 and sandboxHost 172.17.0.1 when bridge detection is unavailable", () => {
+	withDockerFriendlyEnv("true", () => {
+		const base: HubConfig = {
+			host: LOOPBACK_HOST,
+			port: 8893,
+			adminToken: "t",
+			stepTimeoutMs: 1,
+			stepIdleTimeoutMs: 1,
+			stepIdleWarnMs: 1,
+			stepHardTimeoutMs: 1,
+			progressProbeThrottleMs: 1,
+			queuedTimeoutMs: 1,
+			maxInputBytes: 1,
+		};
+		const { cfg } = syncDockerFriendlyNetworking(base, {});
+		assert.equal(cfg.host, DOCKER_FRIENDLY_HOST);
+		assert.equal(cfg.port, DOCKER_FRIENDLY_PORT);
+		assert.equal(cfg.sandboxHost, expectedEnvSandboxHost());
+		if (dockerHostAddress() === null) {
+			assert.equal(cfg.sandboxHost, DOCKER_FRIENDLY_SANDBOX_HOST_DEFAULT);
+		}
+	});
+});
+
+test("TARGET_HUB_DOCKER_FRIENDLY=true persists docker-friendly networking and keeps adminToken", () => {
+	withDockerFriendlyEnv("true", () => {
+		const cfg = loadWith({ adminToken: "keep-token", stepHardTimeoutMs: 42_000 });
+		assert.equal(cfg.host, DOCKER_FRIENDLY_HOST);
+		assert.equal(cfg.port, DOCKER_FRIENDLY_PORT);
+		assert.equal(cfg.sandboxHost, expectedEnvSandboxHost());
+		assert.equal(cfg.adminToken, "keep-token");
+		assert.equal(cfg.stepHardTimeoutMs, 42_000);
+		const onDisk = readPersisted();
+		assert.equal(onDisk.adminToken, "keep-token");
+		assert.equal(onDisk.host, DOCKER_FRIENDLY_HOST);
+		assert.equal(onDisk.dockerNetworkingFromEnv, true);
+	});
+});
+
+test("turning TARGET_HUB_DOCKER_FRIENDLY off restores loopback and drops env-managed sandboxHost", () => {
+	withDockerFriendlyEnv("true", () => {
+		loadWith({ adminToken: "toggle-token" });
+	});
+	withDockerFriendlyEnv(undefined, () => {
+		const cfg = loadConfig();
+		assert.equal(cfg.host, LOOPBACK_HOST);
+		assert.equal(cfg.sandboxHost, undefined);
+		assert.equal(cfg.adminToken, "toggle-token");
+		const onDisk = readPersisted();
+		assert.equal(onDisk.host, LOOPBACK_HOST);
+		assert.equal(onDisk.sandboxHost, undefined);
+		assert.equal(onDisk.dockerNetworkingFromEnv, undefined);
+	});
+});
+
+test("operator sandboxHost survives when docker-friendly env is off", () => {
+	withDockerFriendlyEnv(undefined, () => {
+		const cfg = loadWith({ adminToken: "manual-host", sandboxHost: "10.8.0.1" });
+		assert.equal(cfg.host, LOOPBACK_HOST);
+		assert.equal(cfg.sandboxHost, "10.8.0.1");
+		const onDisk = readPersisted();
+		assert.equal(onDisk.sandboxHostManual, true);
+		assert.equal(onDisk.sandboxHost, "10.8.0.1");
+	});
+});
+
+test("syncDockerFriendlyNetworking: flag on replaces config.json host with 0.0.0.0", () => {
+	withDockerFriendlyEnv("true", () => {
+		const base: HubConfig = {
+			host: "10.1.2.3",
+			port: 8893,
+			sandboxHost: "10.8.0.1",
+			adminToken: "t",
+			stepTimeoutMs: 1,
+			stepIdleTimeoutMs: 1,
+			stepIdleWarnMs: 1,
+			stepHardTimeoutMs: 1,
+			progressProbeThrottleMs: 1,
+			queuedTimeoutMs: 1,
+			maxInputBytes: 1,
+		};
+		const { cfg } = syncDockerFriendlyNetworking(base, {
+			host: "10.1.2.3",
+			sandboxHost: "10.8.0.1",
+			sandboxHostManual: true,
+		});
+		assert.equal(cfg.host, DOCKER_FRIENDLY_HOST);
+		assert.equal(cfg.sandboxHost, expectedEnvSandboxHost());
+		assert.equal(cfg.sandboxHostManual, undefined);
+	});
+});
+
+test("docker-friendly env overrides a manual sandboxHost while enabled", () => {
+	withDockerFriendlyEnv(undefined, () => {
+		loadWith({ adminToken: "override-me", sandboxHost: "10.8.0.1" });
+	});
+	withDockerFriendlyEnv("true", () => {
+		const cfg = loadConfig();
+		assert.equal(cfg.sandboxHost, expectedEnvSandboxHost());
+		assert.equal(cfg.dockerNetworkingFromEnv, true);
+		assert.equal(cfg.sandboxHostManual, undefined);
+	});
 });

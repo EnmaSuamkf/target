@@ -100,6 +100,8 @@ export function WorkflowDetail({
 	templates,
 	tcps,
 	resourceSets,
+	showTcpCatalog = false,
+	showRciCatalog = false,
 	busy,
 	onBack,
 	onStart,
@@ -138,6 +140,8 @@ export function WorkflowDetail({
 	templates: Template[];
 	tcps: Tcp[];
 	resourceSets: ResourceSet[];
+	showTcpCatalog?: boolean;
+	showRciCatalog?: boolean;
 	busy: boolean;
 	/** Only supplied when the list isn't on screen beside this pane. */
 	onBack?: () => void;
@@ -613,8 +617,10 @@ export function WorkflowDetail({
 					onAttach={(files) => onAttachImages("context", null, files)}
 					onRemoveAttachment={onRemoveAttachment}
 				/>
-				<TcpPanel workflow={workflow} tcps={tcps} onSave={onSaveTcps} />
-				<RciPanel workflow={workflow} resourceSets={resourceSets} onSave={onSaveResources} />
+				{showTcpCatalog && <TcpPanel workflow={workflow} tcps={tcps} onSave={onSaveTcps} />}
+				{showRciCatalog && (
+					<RciPanel workflow={workflow} resourceSets={resourceSets} onSave={onSaveResources} />
+				)}
 
 				<div className={styles.stepsSection}>
 					<div className={styles.stepsHead}>
