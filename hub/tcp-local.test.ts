@@ -2,6 +2,7 @@
  * Local TCP tools run on the hub machine (git clone), not via curl.
  */
 import * as assert from "node:assert/strict";
+import * as cp from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -25,6 +26,18 @@ const cloneTool = {
 	inputs: [
 		{ name: "owner", placeholder: "$INPUT_OWNER", description: "Repository owner", required: true },
 		{ name: "repo", placeholder: "$INPUT_REPO", description: "Repository name", required: true },
+	],
+	tokens: { GITHUB_TOKEN: "test-token" },
+};
+
+const pushTool = {
+	name: "git_push",
+	description: "Push branch",
+	requestTemplate: "target://git-push",
+	inputs: [
+		{ name: "owner", placeholder: "$INPUT_OWNER", description: "Repository owner", required: true },
+		{ name: "repo", placeholder: "$INPUT_REPO", description: "Repository name", required: true },
+		{ name: "branch", placeholder: "$INPUT_BRANCH", description: "Branch", required: true },
 	],
 	tokens: { GITHUB_TOKEN: "test-token" },
 };
@@ -73,6 +86,21 @@ test("executeLocalTcpTool needs a workdir when none is supplied", () => {
 	);
 	assert.equal(result.ok, false);
 	assert.equal(result.error, "no_workdir");
+});
+
+test("isLocalTcpTool recognizes git-push templates", () => {
+	assert.equal(isLocalTcpTool({ ...pushTool, requestTemplate: "target://git-push" }), true);
+});
+
+test("executeLocalTcpTool git_push validates git repo and branch", () => {
+	const workdir = fs.mkdtempSync(path.join(tmpHome, "not-git-"));
+	const result = executeLocalTcpTool(
+		pushTool,
+		{ toolName: "git_push", inputs: { owner: "o", repo: "r", branch: "main", workdir } },
+		{ workdir: null },
+	);
+	assert.equal(result.ok, false);
+	assert.equal(result.error, "not_a_git_repo");
 });
 
 test("POST /api/tcps/execute runs a target://git-clone tool into the calling workflow's workdir", async () => {

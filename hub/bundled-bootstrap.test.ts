@@ -10,8 +10,9 @@ import { test } from "node:test";
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-bundled-"));
 process.env.TARGET_HOME = tmpHome;
 
-const { ensureBundledCatalog, BUNDLED_TCP_NAME, BUNDLED_RESOURCE_SET_NAME } = await import("./bundled-bootstrap.ts");
-const { findTcpByName } = await import("./tcp-store.ts");
+const { ensureBundledCatalog, ensureGitHubGitPushTool, BUNDLED_TCP_NAME, BUNDLED_RESOURCE_SET_NAME } =
+	await import("./bundled-bootstrap.ts");
+const { findTcpByName, insertTcp } = await import("./tcp-store.ts");
 const { listResourceSets } = await import("./rci-store.ts");
 const { executeTcpTool } = await import("./tcp-executor.ts");
 
@@ -66,6 +67,29 @@ test("ensureBundledCatalog is idempotent and refreshes admin token on TCP", () =
 	assert.equal(first?.id, second?.id);
 	assert.equal(second?.tools[0]?.tokens.TOKEN_1, "token-b");
 	assert.equal(listResourceSets().filter((s) => s.name === BUNDLED_RESOURCE_SET_NAME).length, 1);
+});
+
+test("ensureGitHubGitPushTool adds git_push to an existing github TCP", () => {
+	insertTcp({
+		name: "github",
+		tools: [
+			{
+				name: "get_me",
+				description: "me",
+				requestTemplate: "curl https://api.github.com/user",
+				inputs: [],
+				tokens: { TOKEN_1: "gh-test" },
+			},
+		],
+	});
+	ensureGitHubGitPushTool();
+	const github = findTcpByName("github");
+	assert.ok(github?.tools.some((t) => t.name === "git_push"));
+	const gitPush = github?.tools.find((t) => t.name === "git_push");
+	assert.equal(gitPush?.requestTemplate, "target://git-push");
+	assert.equal(gitPush?.tokens.TOKEN_1, "gh-test");
+	ensureGitHubGitPushTool();
+	assert.equal(github?.tools.filter((t) => t.name === "git_push").length, 1);
 });
 
 test("list_workflows TCP tool template carries bearer token placeholder", async (t) => {
