@@ -857,10 +857,15 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	 * when this matters), and a failure is reported without reverting the box —
 	 * the next toggle or Start resends the set.
 	 */
-	const handleSelectionChange = (stepIds: string[]): void => {
+	const handleSelectionChange = (
+		stepIds: string[],
+		options?: { allowShrink?: boolean },
+	): void => {
 		const id = selectedRef.current;
 		if (!id) return;
-		api.setStepSelection(id, stepIds).catch((err) => reportError(err, "Could not save the step selection"));
+		api
+			.setStepSelection(id, stepIds, options)
+			.catch((err) => reportError(err, "Could not save the step selection"));
 	};
 
 	// Releasing a manual-review gate is not destructive (it approves work that

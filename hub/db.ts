@@ -1769,18 +1769,43 @@ export function failTimedOutStep(stepId: string, error: string): boolean {
  * workflows nobody has touched with this feature keep running exactly as
  * before.
  */
-export function setStepSelection(workflowId: string, stepIds: string[]): void {
+export interface SetStepSelectionOptions {
+	/**
+	 * When false, pending/failed steps that are already selected stay selected
+	 * even if omitted from `stepIds` — poll sync is expand-only. Explicit
+	 * checkbox toggles pass true (default) and may deselect.
+	 */
+	allowShrink?: boolean;
+}
+
+export function setStepSelection(
+	workflowId: string,
+	stepIds: string[],
+	options: SetStepSelectionOptions = {},
+): void {
 	const database = open();
+	const allowShrink = options.allowShrink !== false;
+
 	if (stepIds.length === 0) {
+		if (!allowShrink) return;
 		database.prepare("UPDATE steps SET selected = 0 WHERE workflow_id = ?").run(workflowId);
 		return;
 	}
-	const placeholders = stepIds.map(() => "?").join(", ");
+
+	let ids = stepIds;
+	if (!allowShrink) {
+		const keepSelected = listSteps(workflowId)
+			.filter((s) => (s.status === "pending" || s.status === "failed") && s.selected)
+			.map((s) => s.id);
+		ids = [...new Set([...stepIds, ...keepSelected])];
+	}
+
+	const placeholders = ids.map(() => "?").join(", ");
 	database
 		.prepare(
 			`UPDATE steps SET selected = CASE WHEN id IN (${placeholders}) OR kind = 'context' THEN 1 ELSE 0 END WHERE workflow_id = ?`,
 		)
-		.run(...stepIds, workflowId);
+		.run(...ids, workflowId);
 }
 
 /**

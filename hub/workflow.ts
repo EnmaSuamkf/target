@@ -72,6 +72,7 @@ import {
 	setWorkflowName,
 	setStatusBeforeReview,
 	setStepSelection,
+	type SetStepSelectionOptions,
 	setWorkflowSessionId,
 	setWorkflowStatus as setWorkflowStatusRow,
 	slugify,
@@ -546,13 +547,13 @@ export function forceWorkflowStatus(workflowId: string, status: OverridableWorkf
  * "completed with a red bar" fix themselves on the next read instead of
  * sticking forever.
  *
- * One pending case is healed too: a `running` workflow with NOTHING in flight
- * and no live retry wait is stranded — the engine is idle and no callback will
- * ever arrive (rows written by the pre-settle engine, or a ▶ run's settle,
- * which never advances). Left alone it would show `running` forever with Start
- * disabled. Every OTHER workflow with pending/running steps is left strictly
- * alone: the engine (or the operator's next Start) owns those, and addStep's
- * deliberate terminal→draft reset must survive a read.
+ * One pending case is healed too: a `running` workflow with NOTHING in flight,
+ * no live retry wait, and no selected pending work is drained. Selected pending
+ * work is deliberately left alone: `startWorkflow`/`advance` set the workflow
+ * running before the async broker dispatch marks the row queued, so a GET in
+ * that window cannot distinguish a dispatch from an abandoned old row. The
+ * engine owns that state; changing it to draft makes the accepted step run
+ * orphaned and prevents its callback from advancing.
  */
 function healSettledStatuses(log: Logger): void {
 	for (const workflow of listWorkflows()) {
@@ -1590,15 +1591,13 @@ async function notifyWorkflowCompleted(workflowId: string, log?: Logger): Promis
  * steps were removed after the others finished). No callback will ever arrive
  * to settle that, so it IS reconciled here instead of sitting stuck at 100%
  * `running` forever. A `running` workflow is also reconciled when its engine
- * is permanently idle WITH pending steps left — rows written by the pre-2026
- * engine (which never settled a drained selection), or a ▶ run's settle on a
- * `running` workflow (manual runs never advance). Those would otherwise show
- * `running` forever with Start disabled. The only pending case left strictly
- * alone is a LIVE retry wait: a pending step that has consumed retries
- * (`retryCount > 0`, set by `beginRetry`) has its re-dispatch already
- * scheduled — the retry path waits out its interval and dispatches directly,
- * never through `advance()` — so the engine is about to act and the badge is
- * telling the truth. In the normal engine flow the drain is settled by
+ * is permanently idle with only UNSELECTED pending steps left — rows written by
+ * the pre-2026 engine (which never settled a drained selection), or a ▶ run's
+ * settle on a `running` workflow (manual runs never advance). Selected pending
+ * work is left strictly alone because it may be in `advance()`'s async dispatch
+ * window: the workflow is marked running before the broker response marks the
+ * step queued. A live retry wait is likewise left alone. In the normal engine
+ * flow the drain is settled by
  * `advance()` itself the moment the in-flight callback arrives; this heal is
  * the backstop for rows that callback never came for. Never downgrades a
  * deliberate `paused` to `draft`. Returns whether it actually changed the
@@ -1624,8 +1623,10 @@ function reconcileStatus(workflowId: string, log?: Logger): boolean {
 		// A pending step that has consumed retries is mid-retry-wait: its
 		// re-dispatch is already scheduled outside advance(), so the engine is
 		// about to act — hands off. Any OTHER pending step with nothing in
-		// flight means the run is stranded: fall through and derive.
+		// flight may be in advance()'s dispatch window. If it is selected, the
+		// engine still owns it and the read path must not settle the workflow.
 		if (steps.some((s) => s.status === "pending" && s.retryCount > 0)) return false;
+		if (nextPendingStep(workflowId)) return false;
 	}
 	const progress = stepProgress(workflowId);
 	if (progress.total === 0) {
@@ -1830,10 +1831,14 @@ export async function resumeWorkflow(
  * settles the badge to draft/failed — so unticking everything mid-run ends
  * the run cleanly instead of stranding the workflow `running`.
  */
-export function setWorkflowStepSelection(workflowId: string, stepIds: string[]): Step[] {
+export function setWorkflowStepSelection(
+	workflowId: string,
+	stepIds: string[],
+	options: SetStepSelectionOptions = {},
+): Step[] {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
-	setStepSelection(workflowId, stepIds);
+	setStepSelection(workflowId, stepIds, options);
 	return listSteps(workflowId);
 }
 
