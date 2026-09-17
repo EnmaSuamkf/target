@@ -3159,8 +3159,9 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			const stepIds = Array.isArray(body.stepIds)
 				? body.stepIds.filter((id): id is string => typeof id === "string")
 				: [];
+			const allowShrink = body.allowShrink !== false;
 			try {
-				const steps = setWorkflowStepSelection(workflowId, stepIds);
+				const steps = setWorkflowStepSelection(workflowId, stepIds, { allowShrink });
 				sendJson(res, 200, { steps: steps.map((s) => publicStep(s, cfg)) });
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });

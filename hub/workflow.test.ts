@@ -383,10 +383,9 @@ test("removing the last pending steps of a running workflow settles it to comple
 	setWorkflowStatus(workflow.id, "running"); // engine idle: nothing in flight
 
 	removeStep(workflow.id, steps[1].id);
-	// One pending step remains with the engine idle and nothing in flight —
-	// the run is stranded (no callback is coming for it), so the heal settles
-	// it to draft: Start owns what happens to the remaining step now.
-	assert.equal(getWorkflow(workflow.id)?.status, "draft");
+	// One selected pending step remains. This is indistinguishable from the
+	// async dispatch window, so the read-path heal must leave it running.
+	assert.equal(getWorkflow(workflow.id)?.status, "running");
 
 	removeStep(workflow.id, steps[2].id);
 	// Now every remaining step is done and nothing can ever call back: settled.
@@ -436,25 +435,26 @@ test("the read-path heal fixes a workflow marked completed while a step is still
 	assert.equal(getWorkflow(workflow.id)?.status, "failed");
 });
 
-test("the read-path heal settles a stranded running workflow (idle, pending steps, no retry wait) to draft", () => {
-	// The state rows written by the pre-settle engine are stuck in: running,
-	// nothing in flight, pending steps (selected or not) nobody is coming for.
-	// It must heal to draft on the next read, not sit running with Start
-	// disabled forever.
+test("the read-path heal leaves selected pending work running during the dispatch window", () => {
+	// startWorkflow/advance marks the workflow running before the async broker
+	// response marks the next selected row queued. A GET in that window must not
+	// orphan the dispatched step by changing the workflow back to draft.
 	const { workflow, steps } = makeWorkflow(3);
 	completeStep(steps[0].id, { ok: true });
-	setWorkflowStatus(workflow.id, "running"); // stranded: engine idle
+	setWorkflowStatus(workflow.id, "running"); // dispatch window: selected pending work
 
 	expireStale(cfg, silent); // runs on every workflow GET
 
-	assert.equal(getWorkflow(workflow.id)?.status, "draft");
-	assert.equal(getStep(steps[1].id)?.status, "pending"); // untouched, Start owns it now
+	assert.equal(getWorkflow(workflow.id)?.status, "running");
+	assert.equal(getStep(steps[1].id)?.status, "pending");
 	assert.equal(getStep(steps[2].id)?.status, "pending");
 });
 
 test("the read-path heal settles a stranded running workflow with a failed step to failed", () => {
 	const { workflow, steps } = makeWorkflow(3);
 	completeStep(steps[0].id, { ok: false, error: "boom" });
+	// No selected pending work remains, so this cannot be advance() dispatching.
+	setStepSelection(workflow.id, [steps[0].id]);
 	setWorkflowStatus(workflow.id, "running"); // stranded with a red bar
 
 	expireStale(cfg, silent);

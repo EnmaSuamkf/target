@@ -508,7 +508,11 @@ test("pressing the run control switches the steps to the canvas", () => {
 	assert.ok(at > 0, "the run control's handler must stay findable");
 	const handler = source.slice(at, source.indexOf("};", at));
 	assert.match(handler, /setStepsView\("canvas"\)/, "Start shows the canvas");
-	assert.match(handler, /onStart\(\[\.\.\.selection\]\)/, "and still starts exactly the selected steps");
+	assert.match(
+		handler,
+		/onStart\(stepIdsForStartRunWithServer\(taskSteps, selection, allSelected\)\)/,
+		"and still starts exactly the selected runnable steps",
+	);
 	// Wired to the one button that carries the shortcut's hook, so Alt/Shift+S
 	// lands on the canvas too.
 	assert.match(source, /onClick=\{startRun\}[\s\S]{0,200}data-start-workflow/);

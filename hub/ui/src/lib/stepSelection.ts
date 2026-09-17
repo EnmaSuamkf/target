@@ -76,6 +76,102 @@ export function stepStatuses(steps: readonly SelectableStep[]): Map<string, stri
 /** Steps the engine may still dispatch — their `selected` flag is authoritative. */
 const ENGINE_ACTIVE = new Set(["pending", "failed", "waiting", "running", "queued"]);
 
+const STEP_IN_FLIGHT = new Set(["running", "queued", "waiting"]);
+
+/**
+ * True while the sequential engine may still dispatch — from the workflow badge
+ * and/or from step rows. The 2s poll can show `draft` for a beat after Start
+ * while a step is already `running`; treating that as idle lets reconcile shrink
+ * the server selection and strand the queue after the in-flight step finishes.
+ */
+export function workflowRunActive(
+	workflowStatus: string,
+	steps: readonly SelectableStep[],
+): boolean {
+	if (workflowStatus === "running" || workflowStatus === "waiting") return true;
+	return steps.some((step) => STEP_IN_FLIGHT.has(step.status));
+}
+
+export interface ReconcileSelectionOptions {
+	/**
+	 * While a run is in flight (`running` / `waiting`), keep a tick the operator
+	 * already has locally even if the server's `selected` flag is false. Mid-run
+	 * deselects only come from an explicit toggle (which pushes immediately) or
+	 * from the engine when a step settles `done`. Without this, a poll that
+	 * mirrors the server can push a shrunken id list and strand the queue.
+	 */
+	preserveLocalDuringRun?: boolean;
+}
+
+/**
+ * Pending steps the server still has ticked but the local Set missed (seed/poll
+ * drift). Folds them in so the next Start sends them to the engine.
+ */
+export function absorbServerSelectedPending(
+	selection: ReadonlySet<string>,
+	steps: readonly SelectableStep[],
+): Set<string> {
+	let changed = false;
+	const next = new Set(selection);
+	for (const step of steps) {
+		if (step.status !== "pending" && step.status !== "failed") continue;
+		if (step.selected !== true) continue;
+		if (next.has(step.id)) continue;
+		next.add(step.id);
+		changed = true;
+	}
+	return changed ? next : new Set(selection);
+}
+
+/** Ids the engine should receive on Start / Resume / Start over. */
+export function stepIdsForStartRun(
+	taskSteps: readonly SelectableStep[],
+	selection: ReadonlySet<string>,
+	allSelected: boolean,
+): string[] {
+	const runnable = taskSteps.filter((step) => step.status === "pending" || step.status === "failed");
+	if (allSelected) {
+		return runnable.map((step) => step.id);
+	}
+	return runnable.filter((step) => selection.has(step.id)).map((step) => step.id);
+}
+
+/**
+ * Like `stepIdsForStartRun`, but also includes every runnable step the poll
+ * already shows as `selected` on the server. Covers a partial local Set (seed
+ * ran before every step row arrived) without ignoring an intentional subset when
+ * the server flag is already off.
+ */
+export function stepIdsForStartRunWithServer(
+	taskSteps: readonly SelectableStep[],
+	selection: ReadonlySet<string>,
+	allSelected: boolean,
+): string[] {
+	const ids = new Set(stepIdsForStartRun(taskSteps, selection, allSelected));
+	for (const step of taskSteps) {
+		if (step.status !== "pending" && step.status !== "failed") continue;
+		if (step.selected === true) ids.add(step.id);
+	}
+	return [...ids];
+}
+
+export function adoptNewlyVisibleSteps(
+	selection: ReadonlySet<string>,
+	knownStepIds: ReadonlySet<string>,
+	steps: readonly SelectableStep[],
+): Set<string> {
+	let changed = false;
+	const next = new Set(selection);
+	for (const step of steps) {
+		if (knownStepIds.has(step.id)) continue;
+		if (step.status === "pending" && step.selected === true) {
+			next.add(step.id);
+			changed = true;
+		}
+	}
+	return changed ? next : new Set(selection);
+}
+
 /**
  * Aligns local checkbox state with the server for steps the engine still reads.
  * Done steps keep whatever `selectionAfterPoll` left (so a re-ticked finished
@@ -88,7 +184,9 @@ const ENGINE_ACTIVE = new Set(["pending", "failed", "waiting", "running", "queue
 export function reconcileSelectionWithServer(
 	selection: ReadonlySet<string>,
 	steps: readonly SelectableStep[],
+	options: ReconcileSelectionOptions = {},
 ): Set<string> {
+	const preserve = options.preserveLocalDuringRun === true;
 	const next = new Set(selection);
 	for (const step of steps) {
 		if (step.status === "done") {
@@ -98,9 +196,29 @@ export function reconcileSelectionWithServer(
 		}
 		if (!ENGINE_ACTIVE.has(step.status)) continue;
 		if (step.selected === true) next.add(step.id);
-		else next.delete(step.id);
+		else if (!preserve) next.delete(step.id);
 	}
 	return next;
+}
+
+/**
+ * Whether a poll-driven sync may call `PUT /selection`. During a run, never push
+ * a list that would deselect steps the server still has ticked — only expansions
+ * (local or newly adopted ids missing on the server).
+ */
+export function shouldPushSelectionToServer(
+	next: ReadonlySet<string>,
+	onServer: ReadonlySet<string>,
+	_workflowStatus: string,
+	_steps: readonly SelectableStep[] = [],
+): boolean {
+	if (setsEqual(next, onServer)) return false;
+	// Poll sync is expand-only whenever the engine could still dispatch — and on
+	// draft too, so a shrunken local Set cannot wipe the DB before Start.
+	for (const id of next) {
+		if (!onServer.has(id)) return true;
+	}
+	return false;
 }
 
 /** The server's current run selection, for comparing before a sync push. */

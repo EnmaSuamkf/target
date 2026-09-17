@@ -37,7 +37,7 @@ process.env.TARGET_HOME = tmpHome;
 process.env.AWB_HOME = tmpHome;
 process.env.CLAUDE_CONFIG_DIR = path.join(tmpHome, "claude");
 
-const { getStep, getWorkflow, insertStep, insertWorkflow } = await import("./db.ts");
+const { getStep, getWorkflow, insertStep, insertWorkflow, setStepSelection } = await import("./db.ts");
 const { loadConfig } = await import("./config.ts");
 const { addStep, continueStep, onStepResult, setWorkflowStepSelection, startWorkflow } = await import("./workflow.ts");
 
@@ -107,6 +107,32 @@ test("Start with only the first of two steps selected never dispatches the secon
 	// (neither "running" with nothing in flight, nor a false "done").
 	assert.equal(getStep(steps[1].id)?.status, "pending");
 	assert.equal(getWorkflow(workflow.id)?.status, "draft");
+});
+
+test("poll-shaped selection sync cannot shrink selected steps on a draft workflow", () => {
+	const { workflow, steps } = makeWorkflow("http://127.0.0.1:1/hook", 3);
+	setStepSelection(workflow.id, [steps[0].id, steps[1].id, steps[2].id]);
+	setWorkflowStepSelection(workflow.id, [steps[0].id], { allowShrink: false });
+	assert.ok(getStep(steps[1].id)?.selected);
+	assert.ok(getStep(steps[2].id)?.selected);
+});
+
+test("poll-shaped selection sync cannot shrink the queue while a step is in flight", async (t) => {
+	const url = await hook(t);
+	const { workflow, steps } = makeWorkflow(url, 2);
+
+	await startWorkflow(workflow.id, cfg, silent, [steps[0].id, steps[1].id]);
+	assert.equal(getStep(steps[0].id)?.status, "queued");
+	assert.ok(getStep(steps[1].id)?.selected);
+
+	// A stale/smaller body (racy poll) must not drop step 2 from the engine queue.
+	setWorkflowStepSelection(workflow.id, [steps[0].id], { allowShrink: false });
+	assert.ok(getStep(steps[1].id)?.selected);
+
+	await finishOk(steps[0].id);
+
+	assert.equal(getStep(steps[1].id)?.status, "queued");
+	assert.equal(getWorkflow(workflow.id)?.status, "running");
 });
 
 test("a step unticked MID-RUN is not dispatched when the in-flight step finishes", async (t) => {

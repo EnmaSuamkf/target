@@ -28,12 +28,17 @@ import { useStagedImages } from "../hooks/useStagedImages.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
 import { canMoveStep } from "../lib/stepMove.ts";
 import {
+	adoptNewlyVisibleSteps,
 	reconcileSelectionWithServer,
 	seedSelectionFromSteps,
 	selectionAfterPoll,
+	absorbServerSelectedPending,
+	shouldPushSelectionToServer,
 	serverSelectedIds,
 	setsEqual,
+	stepIdsForStartRunWithServer,
 	stepStatuses,
+	workflowRunActive,
 } from "../lib/stepSelection.ts";
 import { ContextPanel } from "./ContextPanel.tsx";
 import { RciPanel } from "./RciPanel.tsx";
@@ -183,7 +188,7 @@ export function WorkflowDetail({
 	 * box unticked mid-run never reached the engine — which then dispatched the
 	 * step anyway.
 	 */
-	onSelectionChange: (stepIds: string[]) => void;
+	onSelectionChange: (stepIds: string[], options?: { allowShrink?: boolean }) => void;
 	/** Forces one step's status by hand; never runs the step. */
 	onSetStepStatus: (id: string, status: OverridableStepStatus) => void;
 	/** Swaps a step with its neighbour, so it runs one place earlier or later. */
@@ -212,6 +217,9 @@ export function WorkflowDetail({
 	// difference between "untick it now" and "untick it forever". A ref, not
 	// state: it feeds the next comparison, it is never rendered.
 	const seenStatuses = useRef<Map<string, string>>(new Map());
+	// Step ids seen on the previous poll — drives `adoptNewlyVisibleSteps` when
+	// steps are appended while this workflow stays open (template, MCP, etc.).
+	const knownStepIds = useRef<Set<string>>(new Set());
 	// False again after every workflow switch; flipped once its steps load so a
 	// reload (steps arrive after the first paint) still picks up server selection.
 	const selectionSynced = useRef(false);
@@ -237,6 +245,7 @@ export function WorkflowDetail({
 		setRenaming(false);
 		setDockerMounts(workflow.dockerMounts);
 		seenStatuses.current = new Map();
+		knownStepIds.current = new Set();
 	}, [workflow.id, workflow.dockerMounts]);
 
 	// Seed from the server once per workflow open/reload, when steps first land.
@@ -244,11 +253,25 @@ export function WorkflowDetail({
 	// workflow-id effect (with steps still []) left every box unchecked while the
 	// engine still had the prior selection in the DB.
 	useEffect(() => {
-		if (selectionSynced.current || taskSteps.length === 0) return;
-		setSelection(seedSelectionFromSteps(taskSteps));
-		seenStatuses.current = new Map();
-		selectionSynced.current = true;
-	}, [workflow.id, taskSteps]);
+		if (taskSteps.length === 0) return;
+		const fullyLoaded =
+			workflow.progress.total > 0 && taskSteps.length >= workflow.progress.total;
+		if (!selectionSynced.current) {
+			setSelection(seedSelectionFromSteps(taskSteps));
+			seenStatuses.current = new Map();
+			knownStepIds.current = new Set(taskSteps.map((s) => s.id));
+			selectionSynced.current = true;
+			return;
+		}
+		// Steps can land in more than one poll (or a stale partial row). Re-seed
+		// once the list matches progress.total so Start does not send a 1-step run.
+		if (fullyLoaded && knownStepIds.current.size < taskSteps.length) {
+			setSelection(seedSelectionFromSteps(taskSteps));
+			knownStepIds.current = new Set(taskSteps.map((s) => s.id));
+		}
+	}, [workflow.id, taskSteps, workflow.progress.total]);
+
+	const runInFlight = workflowRunActive(workflow.status, taskSteps);
 
 	// A step that finishes lets go of its checkbox: the selection says what the
 	// next run should do, and a step that just succeeded isn't it. Only the
@@ -264,17 +287,21 @@ export function WorkflowDetail({
 		// when local drifted — otherwise a pending step can look checked while
 		// the run has already drained past it.
 		setSelection((current) => {
-			const afterDeselect = selectionAfterPoll(current, previous, taskSteps) as Set<string>;
-			const next = reconcileSelectionWithServer(afterDeselect, taskSteps);
-			if (!setsEqual(next, current)) {
-				const onServer = serverSelectedIds(taskSteps);
-				if (!setsEqual(next, onServer)) {
-					onSelectionChangeRef.current([...next]);
-				}
+			const afterNew = adoptNewlyVisibleSteps(current, knownStepIds.current, taskSteps);
+			const afterAbsorb = absorbServerSelectedPending(afterNew, taskSteps);
+			const afterDeselect = selectionAfterPoll(afterAbsorb, previous, taskSteps) as Set<string>;
+			const next = reconcileSelectionWithServer(afterDeselect, taskSteps, {
+				preserveLocalDuringRun: runInFlight,
+			});
+			knownStepIds.current = new Set(taskSteps.map((s) => s.id));
+			const onServer = serverSelectedIds(taskSteps);
+			if (shouldPushSelectionToServer(next, onServer, workflow.status, taskSteps)) {
+				onSelectionChangeRef.current([...next], { allowShrink: false });
 			}
-			return next;
+			if (!setsEqual(next, current)) return next;
+			return current;
 		});
-	}, [taskSteps]);
+	}, [taskSteps, runInFlight, workflow.status]);
 
 	// Move focus to the detail pane when a workflow is opened, so keyboard
 	// navigation and screen readers land on the workflow's controls instead of
@@ -306,6 +333,8 @@ export function WorkflowDetail({
 	const stepInFlight = steps.some((s) => s.status === "running" || s.status === "queued");
 	const selectedCount = selection.size;
 	const allSelected = taskSteps.length > 0 && selectedCount === taskSteps.length;
+	const stepsFullyLoaded =
+		workflow.progress.total === 0 || taskSteps.length >= workflow.progress.total;
 
 	const startLabel = useMemo(() => {
 		if (startAction === "resume") return "Resume";
@@ -323,13 +352,13 @@ export function WorkflowDetail({
 		if (checked) next.add(id);
 		else next.delete(id);
 		setSelection(next);
-		onSelectionChange([...next]);
+		onSelectionChange([...next], { allowShrink: true });
 	};
 
 	const toggleAll = (): void => {
 		const next: Set<string> = allSelected ? new Set() : new Set(taskSteps.map((s) => s.id));
 		setSelection(next);
-		onSelectionChange([...next]);
+		onSelectionChange([...next], { allowShrink: true });
 	};
 
 	/**
@@ -348,7 +377,7 @@ export function WorkflowDetail({
 		if (created) {
 			const next = new Set(selection).add(created.id);
 			setSelection(next);
-			onSelectionChange([...next]);
+			onSelectionChange([...next], { allowShrink: true });
 		}
 		return created;
 	};
@@ -367,7 +396,9 @@ export function WorkflowDetail({
 	 */
 	const startRun = (): void => {
 		setStepsView("canvas");
-		onStart([...selection]);
+		// POST /start is the only writer — a fire-and-forget PUT here can race and
+		// shrink the DB selection after the engine already started.
+		onStart(stepIdsForStartRunWithServer(taskSteps, selection, allSelected));
 	};
 
 	/**
@@ -536,16 +567,18 @@ export function WorkflowDetail({
 						type="button"
 						className="btn btn--primary"
 						onClick={startRun}
-						disabled={!startAction || busy || selectedCount === 0}
+						disabled={!startAction || busy || selectedCount === 0 || !stepsFullyLoaded}
 						data-start-workflow
 						title={
 							!startAction
 								? workflow.status === "waiting"
 									? "A step is waiting for your review — Continue it to carry on, or Abort it to stop here."
 									: "Already running."
-								: selectedCount === 0
-									? "Select at least one step to run."
-									: `${startLabel} the ${selectedCount} selected step${selectedCount === 1 ? "" : "s"}. Alt/Shift+S presses this button.`
+								: !stepsFullyLoaded
+									? "Loading steps — wait until every step is listed before starting."
+									: selectedCount === 0
+										? "Select at least one step to run."
+										: `${startLabel} the ${selectedCount} selected step${selectedCount === 1 ? "" : "s"}. Alt/Shift+S presses this button.`
 						}
 					>
 						{startLabel}

@@ -298,11 +298,15 @@ export async function runWorkflowAction(
  * (and a pending one ticked mid-run is really picked up). Writes the flags and
  * nothing else: it never starts, stops or re-derives anything.
  */
-export async function setStepSelection(id: string, stepIds: string[]): Promise<Step[]> {
+export async function setStepSelection(
+	id: string,
+	stepIds: string[],
+	options?: { allowShrink?: boolean },
+): Promise<Step[]> {
 	const data = await request<{ steps: Step[] }>(`/api/workflows/${id}/selection`, {
 		method: "PUT",
 		admin: true,
-		body: json({ stepIds }),
+		body: json({ stepIds, allowShrink: options?.allowShrink !== false }),
 	});
 	return data.steps;
 }
