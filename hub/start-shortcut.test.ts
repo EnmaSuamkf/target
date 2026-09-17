@@ -315,8 +315,12 @@ test("the real Start button in WorkflowDetail carries the attribute the shortcut
 	assert.match(start?.body ?? "", /\{startLabel\}/);
 	assert.match(source, /if \(startAction === "resume"\) return "Resume";/);
 	// And its disabled state is what makes the shortcut inert when starting is
-	// impossible: no action for this status, a mutation in flight, nothing picked.
-	assert.match(start?.attributes ?? "", /disabled=\{!startAction \|\| busy \|\| selectedCount === 0\}/);
+	// impossible: no action for this status, a mutation in flight, nothing
+	// picked, or the complete step list has not loaded yet.
+	assert.match(
+		start?.attributes ?? "",
+		/disabled=\{!startAction \|\| busy \|\| selectedCount === 0 \|\| !stepsFullyLoaded\}/,
+	);
 });
 
 test("the shortcuts hook presses that button rather than calling the API itself", () => {
