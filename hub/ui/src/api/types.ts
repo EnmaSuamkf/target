@@ -628,6 +628,52 @@ export interface ReportSettingsInput {
 	includeConversations: ConversationReportMode;
 }
 
+export interface SyncSettings {
+	enabled: boolean;
+	updatedAt: string | null;
+}
+
+/** Redacted optional-server link state; credentials never cross the hub API. */
+export type DeviceLinkState =
+	| "local_unconfigured"
+	| "awaiting_authorization"
+	| "connected"
+	| "temporarily_disconnected"
+	| "relink_required"
+	| "disconnected_locally";
+
+export interface DeviceLinkStatus {
+	state: DeviceLinkState;
+	origin: string | null;
+	deviceName: string | null;
+	deviceId: string | null;
+	scopes: Array<"ingest:write" | "sync:write">;
+	credentialVersion: number | null;
+	createdAt: string | null;
+	connectedAt: string | null;
+	lastRemoteActivityAt: string | null;
+	legacy: { reportingConfigured: boolean; syncConfigured: boolean };
+	remoteCleanupPending: boolean;
+	reason: "none" | "local_identity_unavailable" | "sync_registration_failed" | "remote_transport_unavailable";
+}
+
+export type DeviceLinkOutcomeCode =
+	| "browser_opened"
+	| "open_browser_manually"
+	| "waiting_for_approval"
+	| "connected"
+	| "approval_denied"
+	| "approval_expired"
+	| "cancelled"
+	| "server_unavailable"
+	| "relink_required";
+
+export interface DeviceLinkOutcome {
+	status: DeviceLinkStatus;
+	code: DeviceLinkOutcomeCode;
+	browserUrl?: string;
+}
+
 /** Token usage for the workflow's session, read off the harness transcript. */
 export interface TokenUsage {
 	turns: number;

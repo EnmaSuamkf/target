@@ -24,12 +24,15 @@ import type {
 	CreateWorkflowInput,
 	DockerMountSettings,
 	DockerMountSettingsInput,
+	DeviceLinkOutcome,
+	DeviceLinkStatus,
 	DirListing,
 	HostCapabilities,
 	NotificationSettings,
 	NotificationSettingsInput,
 	ReportSettings,
 	ReportSettingsInput,
+	SyncSettings,
 	OverridableStepStatus,
 	OverridableWorkflowStatus,
 	Runner,
@@ -769,6 +772,30 @@ export async function setWorkflowResourceSelections(
 
 // --- settings ---
 
+export async function getDeviceLinkStatus(): Promise<DeviceLinkStatus> {
+	const data = await request<{ status: DeviceLinkStatus }>("/api/device-link", { admin: true });
+	return data.status;
+}
+
+export async function startDeviceLink(input: { origin: string; deviceName?: string }): Promise<DeviceLinkOutcome> {
+	const data = await request<{ outcome: DeviceLinkOutcome }>("/api/device-link/start", {
+		method: "POST",
+		admin: true,
+		body: json(input),
+	});
+	return data.outcome;
+}
+
+export async function pollDeviceLink(): Promise<DeviceLinkOutcome> {
+	const data = await request<{ outcome: DeviceLinkOutcome }>("/api/device-link/poll", { method: "POST", admin: true });
+	return data.outcome;
+}
+
+export async function cancelDeviceLink(): Promise<DeviceLinkOutcome> {
+	const data = await request<{ outcome: DeviceLinkOutcome }>("/api/device-link", { method: "DELETE", admin: true });
+	return data.outcome;
+}
+
 /** Notification preferences: the master switch plus the config it gates. */
 export async function getNotificationSettings(): Promise<NotificationSettings> {
 	const data = await request<{ settings: NotificationSettings }>("/api/settings/notifications");
@@ -820,6 +847,20 @@ export async function getReportSettings(): Promise<ReportSettings> {
  */
 export async function saveReportSettings(input: ReportSettingsInput): Promise<ReportSettings> {
 	const data = await request<{ settings: ReportSettings }>("/api/settings/report", {
+		method: "PUT",
+		admin: true,
+		body: json(input),
+	});
+	return data.settings;
+}
+
+export async function getSyncSettings(): Promise<SyncSettings> {
+	const data = await request<{ settings: SyncSettings }>("/api/settings/sync");
+	return data.settings;
+}
+
+export async function saveSyncSettings(input: { enabled: boolean }): Promise<SyncSettings> {
+	const data = await request<{ settings: SyncSettings }>("/api/settings/sync", {
 		method: "PUT",
 		admin: true,
 		body: json(input),

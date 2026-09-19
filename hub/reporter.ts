@@ -26,8 +26,10 @@ import {
 	purgeDeliveredReportEvents,
 	type ReportEventRow,
 } from "./db.ts";
-import { getAccount } from "./account.ts";
-import { loadReportConfig, type ReportConfig } from "./config.ts";
+import { type ReportConfig } from "./config.ts";
+import { deviceHeaders, handleDeviceAuthResponse, remoteAuth } from "./device-auth.ts";
+import { getDeviceCredential } from "./device-link.ts";
+import { loadEffectiveReportConfig } from "./remote-config.ts";
 import { TARGET_VERSION } from "./version.ts";
 
 /** Version of THIS wire contract (§7.1). Bump when the envelope/event shapes change. */
@@ -70,7 +72,7 @@ export interface EmitInput {
  * Queue one activity event. No-op (and no DB write) when reporting is disabled,
  * so every emission site can call unconditionally. Never throws.
  */
-export function emit(kind: string, input: EmitInput = {}, config: ReportConfig = loadReportConfig()): void {
+export function emit(kind: string, input: EmitInput = {}, config: ReportConfig = loadEffectiveReportConfig()): void {
 	if (!config.enabled) return;
 	try {
 		enqueueReportEvent({
@@ -96,14 +98,12 @@ export function backoffMs(attempts: number): number {
 }
 
 function toEnvelope(events: ReportEventRow[], instanceId: string, batchId: string): string {
-	const account = safeAccount();
 	return JSON.stringify({
 		batch_id: batchId,
 		instance_id: instanceId,
 		version: TARGET_VERSION,
 		schema_version: REPORT_SCHEMA_VERSION,
 		sent_at: new Date().toISOString(),
-		...(account?.displayName ? { user: { display_name: account.displayName } } : {}),
 		events: events.map((e) => ({
 			id: e.id,
 			kind: e.kind,
@@ -115,19 +115,22 @@ function toEnvelope(events: ReportEventRow[], instanceId: string, batchId: strin
 	});
 }
 
+/**
+ * Device-authenticated ingest is attributed to the server-issued device id.
+ * The durable local UUID remains exclusively the identity of legacy reporters.
+ */
+export function resolveReportInstanceId(config: ReportConfig): string | null {
+	if (remoteAuth("ingest:write").kind !== "device") {
+		return getOrCreateInstanceId(config.instanceId);
+	}
+	return getDeviceCredential()?.deviceId ?? null;
+}
+
 function parsePayload(raw: string): unknown {
 	try {
 		return JSON.parse(raw);
 	} catch {
 		return { _unparsed: raw };
-	}
-}
-
-function safeAccount(): { displayName: string | null } | null {
-	try {
-		return getAccount();
-	} catch {
-		return null;
 	}
 }
 
@@ -149,16 +152,15 @@ function idsFrom(value: unknown): string[] {
  * Safe to call when disabled — it just returns zeros without touching the DB.
  */
 export async function flush(options: FlushOptions = {}): Promise<{ delivered: number; retried: number; dropped: number }> {
-	const config = options.config ?? loadReportConfig();
+	const config = options.config ?? loadEffectiveReportConfig();
 	const summary = { delivered: 0, retried: 0, dropped: 0 };
 	if (!config.enabled) return summary;
+	if (remoteAuth("ingest:write").kind === "blocked") return summary;
 
 	const fetchImpl = options.fetchImpl ?? (globalThis.fetch as FetchLike | undefined);
 	if (!fetchImpl) return summary;
 	const log = options.log ?? (() => {});
 	const now = options.now ?? Date.now;
-
-	const instanceId = getOrCreateInstanceId(config.instanceId);
 
 	// Deliver in batches until the queue drains or a batch tells us to stop.
 	for (;;) {
@@ -166,6 +168,13 @@ export async function flush(options: FlushOptions = {}): Promise<{ delivered: nu
 		if (batch.length === 0) break;
 		const ids = batch.map((e) => e.id);
 		const batchId = crypto.randomUUID();
+		const auth = remoteAuth("ingest:write");
+		if (auth.kind === "blocked") break;
+		const instanceId = resolveReportInstanceId(config);
+		if (!instanceId) break;
+		const body = toEnvelope(batch, instanceId, batchId);
+		const signed = auth.kind === "device" ? deviceHeaders("POST", new URL(config.url).pathname, body) : null;
+		if (auth.kind === "device" && !signed) break;
 
 		let res: Response;
 		try {
@@ -173,11 +182,11 @@ export async function flush(options: FlushOptions = {}): Promise<{ delivered: nu
 				method: "POST",
 				headers: {
 					"content-type": "application/json",
-					authorization: `Bearer ${config.token}`,
+					...(signed ?? { authorization: `Bearer ${config.token}` }),
 					"idempotency-key": batchId,
 					"x-target-version": TARGET_VERSION,
 				},
-				body: toEnvelope(batch, instanceId, batchId),
+				body,
 				signal: AbortSignal.timeout(REPORT_TIMEOUT_MS),
 			});
 		} catch (err) {
@@ -189,6 +198,21 @@ export async function flush(options: FlushOptions = {}): Promise<{ delivered: nu
 		}
 
 		const status = res.status;
+		const authError = (status === 401 || status === 403 ? await safeJson(res) : null) as { error?: unknown } | null;
+		if (authError?.error === "device_identity_mismatch") {
+			// This means client and server disagree about the ingest contract, not
+			// that the device credential has been revoked. Keep the local link and
+			// queue intact; a corrected hub/server can retry the exact events later.
+			markReportEventsRetry(ids, new Date(now() + BACKOFF_CAP_MS).toISOString());
+			summary.retried += ids.length;
+			log("report flush: device identity mismatch at /ingest; waiting for a compatible configuration", "error");
+			break;
+		}
+		if (handleDeviceAuthResponse(status, authError?.error)) {
+			markReportEventsRetry(ids, new Date(now() + BACKOFF_CAP_MS).toISOString());
+			summary.retried += ids.length;
+			break;
+		}
 		if (status >= 200 && status < 300) {
 			// Success, possibly partial: honour accepted/rejected; empty body = all accepted.
 			let accepted = ids;
@@ -264,7 +288,7 @@ export async function flush(options: FlushOptions = {}): Promise<{ delivered: nu
 /** Emit a heartbeat carrying version + instance health (§7.2). No-op when disabled. */
 export function emitHeartbeat(
 	stats: { workflowsTotal: number; uptimeMs: number },
-	config: ReportConfig = loadReportConfig(),
+	config: ReportConfig = loadEffectiveReportConfig(),
 ): void {
 	if (!config.enabled) return;
 	emit(

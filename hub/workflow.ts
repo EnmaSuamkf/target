@@ -30,10 +30,12 @@ import {
 } from "./awb.ts";
 import { effectiveDockerMounts, syncWorkflowDockerMounts } from "./docker-mounts.ts";
 import { loadReportConfig, targetDir, type HubConfig } from "./config.ts";
+import { readConversationPreview, type ConversationSummary } from "./conversations.ts";
 import { emit as reportEmit } from "./reporter.ts";
+import { loadEffectiveReportConfig } from "./remote-config.ts";
 import { listWorkflowResourceSelections, setWorkflowResourceSelections } from "./rci-store.ts";
 import { listWorkflowTcpSelections, setWorkflowTcpSelections } from "./tcp-store.ts";
-import { readTokenUsage, usageSnapshot } from "./transcript.ts";
+import { readTokenUsage, transcriptPath, usageSnapshot } from "./transcript.ts";
 import {
 	beginRetry,
 	claimWorkflowCompletionNotice,
@@ -2174,7 +2176,7 @@ function reportStepEvent(step: Step, kind: string, data: Record<string, unknown>
  * the same ones the operator's own client shows for that session.
  */
 function reportUsageSnapshot(workflow: Workflow, step: Step): void {
-	const rc = loadReportConfig();
+	const rc = loadEffectiveReportConfig();
 	if (!rc.enabled) return;
 	const sessionId = step.sessionId ?? workflow.lastSessionId;
 	if (!sessionId) return;
@@ -2191,17 +2193,44 @@ function reportUsageSnapshot(workflow: Workflow, step: Step): void {
 			},
 			rc,
 		);
-		// Conversation activity (metadata only unless 'full'); honours the privacy switch.
+		// A linked `full` consent sends every prose turn. The parser excludes
+		// tool calls, hidden thinking and transport records.
 		if (rc.includeConversations !== "off") {
+			const data = conversationSnapshotPayload(workdir, sessionId, rc.includeConversations, u.turns);
 			reportEmit(
 				"conversation.snapshot",
-				{ workflowId: workflow.id, sessionId, data: { turns: u.turns, mode: rc.includeConversations } },
+				{ workflowId: workflow.id, sessionId, data },
 				rc,
 			);
 		}
 	} catch {
 		// Transcript unreadable (never dispatched, sandbox, etc.) — skip silently.
 	}
+}
+
+/** Build the report-safe prose payload from the same transcript a workflow resumes. */
+export function conversationSnapshotPayload(
+	workdir: string,
+	sessionId: string,
+	mode: "digest" | "full",
+	turns: number,
+): Record<string, unknown> {
+	const data: Record<string, unknown> = { turns, mode };
+	if (mode !== "full") return data;
+	const transcript = sessionId.endsWith(".jsonl") && path.isAbsolute(sessionId)
+		? sessionId
+		: transcriptPath(workdir, sessionId);
+	const preview = readConversationPreview({
+		runner: "claude",
+		sessionId,
+		path: transcript,
+		workdir,
+		title: "",
+		updatedAt: "",
+		sizeBytes: 0,
+	} satisfies ConversationSummary, Number.MAX_SAFE_INTEGER);
+	data.text = preview.text;
+	return data;
 }
 
 export async function onStepResult(

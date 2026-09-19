@@ -1,5 +1,7 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type {
+	DeviceLinkOutcome,
+	DeviceLinkStatus,
 	DockerMountSettings,
 	DockerMountSettingsInput,
 	NotificationSettings,
@@ -12,6 +14,7 @@ import type {
 	UiSettings,
 	UiSettingsInput,
 } from "../api/types.ts";
+import * as api from "../api/client.ts";
 import { CollapsibleSection } from "../components/CollapsibleSection.tsx";
 import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { Field } from "../components/Field.tsx";
@@ -104,12 +107,56 @@ export function SettingsView({
 	const [showTcpCatalog, setShowTcpCatalog] = useState(uiSettings.showTcpCatalog);
 	const [showRciCatalog, setShowRciCatalog] = useState(uiSettings.showRciCatalog);
 	const [savingUi, setSavingUi] = useState(false);
+	const [linkStatus, setLinkStatus] = useState<DeviceLinkStatus | null>(null);
+	const [linkOrigin, setLinkOrigin] = useState("");
+	const [linkDeviceName, setLinkDeviceName] = useState("");
+	const [linkMessage, setLinkMessage] = useState<string | null>(null);
+	const [linkBrowserUrl, setLinkBrowserUrl] = useState<string | null>(null);
+	const [linkBusy, setLinkBusy] = useState(false);
 
 	const notificationsId = useId();
 	const catalogNavId = useId();
 	const hintId = `${notificationsId}-hint`;
 	const shortcutsId = useId();
 	const reportId = useId();
+	const linkId = useId();
+
+	const applyLinkOutcome = (outcome: DeviceLinkOutcome): void => {
+		setLinkStatus(outcome.status);
+		setLinkBrowserUrl(outcome.browserUrl ?? null);
+		const messages: Record<DeviceLinkOutcome["code"], string> = {
+			browser_opened: "Browser opened. Sign in with Google or email/password on your server; approval is tied to that server account and this hub completes automatically.",
+			open_browser_manually: "Open the approval page below. Sign in on the server, then this hub will complete automatically after approval.",
+			waiting_for_approval: "Waiting for your server account to approve this device. No additional action is needed in this hub.",
+			connected: "Connected securely. Remote reporting and sync can use this device.",
+			approval_denied: "Your server account denied this device or lacks permission to approve it. This hub remains fully local; ask a server administrator or try again.",
+			approval_expired: "Approval expired or the server login was cancelled. This hub remains fully local; choose Connect to start a new request.",
+			cancelled: "Disconnected. Remote traffic stopped and local workflows continue unchanged.",
+			server_unavailable: "Disconnected locally; remote cleanup pending. Local workflows and tools continue unchanged.",
+			relink_required: "This device needs to be linked again. Local workflows and tools continue unchanged.",
+		};
+		setLinkMessage(messages[outcome.code]);
+	};
+
+	useEffect(() => {
+		void api
+			.getDeviceLinkStatus()
+			.then((status) => {
+				setLinkStatus(status);
+				if (status.origin) setLinkOrigin(status.origin);
+			})
+			.catch(() => setLinkMessage("Could not read server connection status. Local workflows and tools continue unchanged."));
+	}, []);
+
+	useEffect(() => {
+		if (linkStatus?.state !== "awaiting_authorization") return;
+		const timer = window.setInterval(() => {
+			void api.pollDeviceLink().then(applyLinkOutcome).catch(() => {
+				setLinkMessage("Could not contact the server yet. Local workflows and tools continue unchanged.");
+			});
+		}, 3_000);
+		return () => window.clearInterval(timer);
+	}, [linkStatus?.state]);
 
 	const submit = async (ev: React.FormEvent): Promise<void> => {
 		ev.preventDefault();
@@ -178,8 +225,9 @@ export function SettingsView({
 	const submitReport = async (ev: React.FormEvent): Promise<void> => {
 		ev.preventDefault();
 		if (savingReport) return;
-		const url = reportUrl.trim();
-		if (reportEnabled && url === "") {
+		const linked = linkStatus?.state === "connected";
+		const url = linked ? reportSettings.url : reportUrl.trim();
+		if (reportEnabled && !linked && url === "") {
 			setReportError("Enter the report server URL, or turn reporting off.");
 			return;
 		}
@@ -214,6 +262,74 @@ export function SettingsView({
 					Preferences for this hub. They're stored by the hub itself, so every browser sees the same values.
 				</p>
 			</div>
+
+			<section className={styles.section} aria-labelledby={`${linkId}-section`}>
+				<h3 className={styles.sectionHeading} id={`${linkId}-section`}>Optional server connection</h3>
+				<p className="hint">
+					This hub stays fully usable for workflows, templates, TCP tools and RCI with no server, while offline,
+					or if a link is revoked. Your server login stays in the browser; this hub never receives a password.
+				</p>
+				{linkStatus && (
+					<p className="hint" aria-live="polite">
+						Status: <strong>{linkStatus.state.replaceAll("_", " ")}</strong>
+						{linkStatus.deviceName ? ` · ${linkStatus.deviceName}` : ""}
+						{linkStatus.lastRemoteActivityAt
+							? ` · last remote activity ${relativeTime(linkStatus.lastRemoteActivityAt)}`
+							: linkStatus.connectedAt
+								? ` · linked ${relativeTime(linkStatus.connectedAt)}`
+								: ""}
+						{linkStatus.remoteCleanupPending ? " · remote cleanup pending" : ""}
+						{linkStatus.reason === "sync_registration_failed" ? " · server rejected Remote Sync registration; will retry without changing this device link" : ""}
+					</p>
+				)}
+				{linkStatus?.state === "connected" ? (
+					<div className={styles.channels}>
+						<p className="hint"><strong>{linkStatus.origin}</strong> · device {linkStatus.deviceName ?? "unnamed"} · scopes: {linkStatus.scopes.join(", ") || "none"}{linkStatus.lastRemoteActivityAt ? ` · last remote activity ${relativeTime(linkStatus.lastRemoteActivityAt)}` : ""}</p>
+						{linkStatus.scopes.includes("sync:write") && <p className="hint">Remote Sync is active automatically for this linked device.</p>}
+						{linkStatus.scopes.includes("ingest:write") && <p className="hint">Activity reporting is active automatically and includes full conversation text, as accepted when this hub was linked.</p>}
+						<div className={styles.actions}>
+						<button type="button" className="btn btn--secondary" disabled={linkBusy} onClick={async () => {
+							setLinkBusy(true);
+							try { applyLinkOutcome(await api.cancelDeviceLink()); } finally { setLinkBusy(false); }
+						}}>{linkBusy ? "Disconnecting…" : "Disconnect this device"}</button>
+						<button type="button" className="btn btn--primary" disabled={linkBusy} onClick={async () => {
+							setLinkBusy(true);
+							try { applyLinkOutcome(await api.cancelDeviceLink()); setLinkMessage("Previous link removed. Connect this hub again to link a replacement."); }
+							finally { setLinkBusy(false); }
+						}}>Link a replacement</button>
+						</div>
+					</div>
+				) : (
+					<form className={styles.channels} onSubmit={async (event) => {
+						event.preventDefault();
+						if (linkBusy) return;
+						setLinkBusy(true);
+						try {
+							const deviceName = linkDeviceName.trim();
+							applyLinkOutcome(await api.startDeviceLink({
+								origin: linkOrigin.trim(),
+								...(deviceName ? { deviceName } : {}),
+							}));
+						}
+						catch { setLinkMessage("Could not start the connection. Check the server address; local work remains available."); }
+						finally { setLinkBusy(false); }
+					}}>
+						<p className="msg msg--error" role="note" id={`${linkId}-consent`}>By connecting, you explicitly allow this server to receive Activity and full conversation text whenever it grants <code>ingest:write</code>, and Remote Sync whenever it grants <code>sync:write</code>. You can cancel before connecting.</p>
+						<Field label="Server address" hint="HTTPS server origin, for example https://target.example." required>
+							{(props) => <input {...props} type="url" className="input" value={linkOrigin} placeholder="https://target.example" onChange={(event) => setLinkOrigin(event.target.value)} disabled={linkBusy} />}
+						</Field>
+						<Field label="Device name" hint="Optional display name shown when approving this device.">
+							{(props) => <input {...props} type="text" className="input" value={linkDeviceName} onChange={(event) => setLinkDeviceName(event.target.value)} disabled={linkBusy} />}
+						</Field>
+						<div className={styles.actions}>
+							<button type="submit" className="btn btn--primary" disabled={linkBusy} aria-describedby={`${linkId}-consent`}>{linkBusy ? "Connecting…" : linkStatus?.state === "awaiting_authorization" ? "Start a new request" : "Connect with my server"}</button>
+							{linkStatus?.state === "awaiting_authorization" && <button type="button" className="btn btn--secondary" disabled={linkBusy} onClick={async () => { setLinkBusy(true); try { applyLinkOutcome(await api.cancelDeviceLink()); } finally { setLinkBusy(false); } }}>Cancel</button>}
+						</div>
+					</form>
+				)}
+				{linkBrowserUrl && <p className="hint">If your browser did not open, <a href={linkBrowserUrl} target="_blank" rel="noreferrer">open the approval page</a>.</p>}
+				{linkMessage && <p className="msg msg--error" role="status">{linkMessage}</p>}
+			</section>
 
 			<form
 				className={styles.section}
@@ -347,13 +463,12 @@ export function SettingsView({
 				</div>
 			</form>
 
-			<form className={styles.section} aria-labelledby={`${reportId}-section`} onSubmit={submitReport}>
+			{linkStatus?.state !== "connected" && <form className={styles.section} aria-labelledby={`${reportId}-section`} onSubmit={submitReport}>
 				<h3 className={styles.sectionHeading} id={`${reportId}-section`}>
 					Activity reporting
 				</h3>
 				<p className="hint">
-					Send workflow and step activity to a central server for monitoring. Stored by the hub — the same
-					values apply in the desktop app and in the browser.
+					Send workflow and step activity to a central server for monitoring. Stored by the hub — the same values apply in the desktop app and in the browser.
 					{reportSettings.envConfigured && (
 						<>
 							{" "}
@@ -385,6 +500,16 @@ export function SettingsView({
 
 				{reportEnabled && (
 					<div className={styles.channels}>
+						<Field label="Conversation detail" hint="Choose what may leave this machine. Activity metadata is still reported when reporting is on.">
+							{(props) => (
+								<select {...props} className="input" value={reportConversations} onChange={(ev) => setReportConversations(ev.target.value as ReportSettings["includeConversations"])}>
+									<option value="off">Off — no conversation data</option>
+									<option value="digest">Digest — metadata and summary only (default)</option>
+									<option value="full">Full — include conversation text</option>
+								</select>
+							)}
+						</Field>
+						<CollapsibleSection title="Legacy / Advanced endpoint configuration" defaultOpen={false}>
 						<Field
 							label="Report server URL"
 							hint="HTTPS ingest endpoint that receives activity batches."
@@ -447,20 +572,7 @@ export function SettingsView({
 							)}
 						</Field>
 
-						<Field label="Conversation detail" hint="How much conversation text may leave this machine.">
-							{(props) => (
-								<select
-									{...props}
-									className="input"
-									value={reportConversations}
-									onChange={(ev) => setReportConversations(ev.target.value as ReportSettings["includeConversations"])}
-								>
-									<option value="off">Off — no conversation data</option>
-									<option value="digest">Digest — metadata and summary only (default)</option>
-									<option value="full">Full — include conversation text</option>
-								</select>
-							)}
-						</Field>
+						</CollapsibleSection>
 					</div>
 				)}
 
@@ -478,7 +590,7 @@ export function SettingsView({
 						<span className="hint">Last saved {relativeTime(reportSettings.updatedAt)}</span>
 					)}
 				</div>
-			</form>
+			</form>}
 
 			{/* Atajos: the key each of the five hub shortcuts fires on. The
 			    modifier is always Alt or Shift (the hook honours either), so only

@@ -1,0 +1,17 @@
+{
+  "contractVersion": "device-link/v1",
+  "initiatePath": "/api/device-links/requests",
+  "pollPath": "/api/device-links/requests/:requestId/poll",
+  "consumePath": "/api/device-links/requests/:requestId/consume",
+  "protectedPaths": [
+    "/ingest",
+    "/api/sync/heartbeat",
+    "/api/sync/commands",
+    "/api/sync/commands/:commandId/ack",
+    "/api/sync/events"
+  ],
+  "deviceAuthorizationScheme": "Target-Device v1",
+  "linkAuthorizationScheme": "Target-Link",
+  "signaturePrefix": "target-device-v1",
+  "publicKeyAlgorithm": "ed25519"
+}

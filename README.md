@@ -630,13 +630,17 @@ gateway can't guess. A sandboxed dispatch onto a loopback-bound hub logs a
 warning saying exactly this, so you find out from the log rather than from a
 confused agent.
 
-### Activity reporting (`.env`)
+### Activity reporting — Advanced/Legacy `.env`
 
 Each instance can report its activity to a central server for monitoring —
 workflow lifecycle, step transitions (including structured errors), token usage,
-and conversation metadata. It is **off by default**: nothing is sent unless you
-configure a destination URL.
+and conversation metadata. For a normally linked hub, **Settings → Optional
+server connection** is explicit consent: when the server grants `ingest:write`,
+the linked server origin and device identity are used automatically and full
+conversation text is sent. There is no URL, token, privacy or off switch in
+the linked path; disconnect the device to stop linked remote traffic.
 
+The variables below are only for an unlinked, explicitly legacy integration.
 Copy `.env.example` to `.env` (git-ignored) and set at least the URL. The hub
 looks for it first at `TARGET_HOME/.env` (`~/.target/.env`), then at the
 repo-root `.env` — resolved from the hub's own location, so it is found no
@@ -662,11 +666,13 @@ metadata only, `full` includes text. Secrets (hook secret, auth/session hashes)
 are never reported. The full wire contract is in
 [`docs/report-server.es.html`](docs/report-server.es.html).
 
-### Remote sync (`.env`)
+### Remote sync — Advanced/Legacy `.env`
 
 When a central **target-server** runs the remote-sync API, the hub daemon can
 register, poll for commands, apply them locally (creating workflows with
-`origin=remote`), and push events back. Off unless configured:
+`origin=remote`), and push events back. A linked hub with the `sync:write`
+scope does this automatically and can be paused in Settings; local workflows
+continue either way. The variables below are only for an unlinked legacy hub:
 
 ```
 TARGET_SYNC_URL=http://127.0.0.1:8900    # target-server base URL
@@ -676,6 +682,49 @@ TARGET_SYNC_ENABLED=true
 ```
 
 Wire contract: `target-server/docs/remote-sync.md`.
+
+### Optional device link to target-server
+
+For a server that implements `device-link/v1`, open **Settings → Optional
+server connection** and choose **Connect with my server**. Enter only the
+server origin and an optional device label. Target opens the server approval
+page in your browser; sign in there with the server's Google or
+email/password method, then approve there if your account is permitted. The
+hub keeps polling and completes automatically after the server approves it —
+there is no second confirmation in the hub. The hub never asks for, sees,
+stores, or copies a human password, browser cookie, or server token.
+
+The connection panel shows only safe metadata (connection state, device label
+and last remote activity), scopes, and the active services. It has no field
+that reveals a device secret. Before connecting, Settings clearly explains that
+`sync:write` enables sync and `ingest:write` enables Activity reporting with
+full conversation text; a missing scope leaves only that service off. Linked
+routing takes precedence over legacy `.env` values, which Settings keeps under
+**Legacy / Advanced**.
+Approval can be cancelled, and **Disconnect this device** removes local device
+credentials. If approval expires, is denied, the server is offline, or the
+server revokes the device, choose **Connect with my server** / **Link a
+replacement** to make a fresh request.
+
+All local features remain available in every connection state: workflows keep
+running, and templates, TCP tools, RCI resources and local report queues are
+never deleted or blocked. Linked hubs require target-server's `device-link/v1`
+contract and its `optional` or `required` device-linking mode. Legacy report
+and sync environment settings continue to work only with a server deployment
+that explicitly permits its legacy mode; they are never converted into device
+credentials.
+
+### Updating a linked hub
+
+Normal `npm run target:install` updates code and dependencies only; it never
+replaces `TARGET_HOME` (normally `~/.target`). The private device identity and
+pending remote-cleanup state remain there, so an update/reinstall over the same
+directory continues with the same device — do not approve a second device.
+Identity files are migrated in place with `0600` permissions. A deliberately
+new `TARGET_HOME`, restored machine without that directory, or quarantined
+corrupt identity is a new local installation: Target cannot recover device
+secrets from the server or from an email account, and clearly requires a
+manual link.
 
 ### Tests
 

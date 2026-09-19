@@ -14,7 +14,10 @@ import {
 	type PublishableRunner,
 	type PublishableSandbox,
 } from "./awb.ts";
-import { loadSyncConfig, type HubConfig, type SyncConfig } from "./config.ts";
+import { type HubConfig, type SyncConfig } from "./config.ts";
+import { deviceHeaders, handleDeviceAuthResponse, remoteAuth } from "./device-auth.ts";
+import { markDeviceRemoteRecovered, setDeviceLinkRemoteState } from "./device-link.ts";
+import { loadEffectiveSyncConfig } from "./remote-config.ts";
 import {
 	clearAppliedSyncCommands,
 	deleteSyncStepMap,
@@ -159,9 +162,10 @@ async function syncFetch(
 	}
 }
 
-function authHeaders(token: string): Record<string, string> {
+function authHeaders(token: string, method: string, path: string, body = ""): Record<string, string> {
+	const signed = remoteAuth("sync:write").kind === "device" ? deviceHeaders(method, path, body) : null;
 	return {
-		authorization: `Bearer ${token}`,
+		...(signed ?? { authorization: `Bearer ${token}` }),
 		"content-type": "application/json",
 	};
 }
@@ -257,31 +261,50 @@ async function ensureRegistered(
 	fetchImpl: FetchLike,
 	log?: SyncTickOptions["log"],
 ): Promise<string> {
-	if (config.token.length > 0) return config.token;
+	const device = remoteAuth("sync:write").kind === "device";
+	if (!device && config.token.length > 0) return config.token;
 	const instanceId = getOrCreateInstanceId(process.env.TARGET_INSTANCE_ID ?? null);
-	const res = await syncFetch(
-		syncUrl(config.url, "/api/sync/register"),
-		{
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
-				name: osHostname(),
-				instance_id: instanceId,
-				version: TARGET_VERSION,
-				capabilities: { commands: [...SYNC_COMMAND_TYPES], ...syncRunnerCapabilities() },
-			}),
-		},
-		fetchImpl,
-	);
-	if (!res.ok) {
-		const text = await res.text().catch(() => "");
-		throw new Error(`sync register failed (${res.status}): ${text}`);
+	const body = JSON.stringify({
+		name: osHostname(),
+		instance_id: instanceId,
+		version: TARGET_VERSION,
+		capabilities: { commands: [...SYNC_COMMAND_TYPES], ...syncRunnerCapabilities() },
+	});
+	let res: Response;
+	try {
+		res = await syncFetch(
+			syncUrl(config.url, "/api/sync/register"),
+			{
+				method: "POST",
+				headers: device ? authHeaders("", "POST", "/api/sync/register", body) : { "content-type": "application/json" },
+				body,
+			},
+			fetchImpl,
+		);
+	} catch {
+		if (device) setDeviceLinkRemoteState("temporarily_disconnected", "remote_transport_unavailable");
+		logMessage(log, "remote sync registration failed at /api/sync/register (transport)", "warning");
+		throw new Error("sync register transport failed");
 	}
-	const body = (await res.json()) as { client_id?: string; client_token?: string };
-	if (!body.client_id || !body.client_token) throw new Error("sync register returned no token");
-	saveSyncCredentials(body.client_id, body.client_token);
-	logMessage(log, `remote sync registered as client ${body.client_id}`);
-	return body.client_token;
+	const errorBody = !res.ok ? await res.json().catch(() => null) : null;
+	const errorCode = errorBody && typeof errorBody === "object" ? (errorBody as { error?: unknown }).error : undefined;
+	handleDeviceAuthResponse(res.status, errorCode);
+	if (!res.ok) {
+		if (device && res.status >= 500) setDeviceLinkRemoteState("temporarily_disconnected", "remote_transport_unavailable");
+		logMessage(log, `remote sync registration failed at /api/sync/register (${res.status})`, "warning");
+		throw new Error(`sync register failed (${res.status})`);
+	}
+	const response = (await res.json()) as { client_id?: string; client_token?: string };
+	if (!response.client_id) throw new Error("sync register returned no client id");
+	if (device) {
+		markDeviceRemoteRecovered();
+		logMessage(log, `remote sync registered as device client ${response.client_id}`);
+		return "";
+	}
+	if (!response.client_token) throw new Error("sync register returned no token");
+	saveSyncCredentials(response.client_id, response.client_token);
+	logMessage(log, `remote sync registered as client ${response.client_id}`);
+	return response.client_token;
 }
 
 function osHostname(): string {
@@ -305,24 +328,25 @@ async function sendHeartbeat(
 	const activeRemoteIds = listWorkflows()
 		.filter((w) => w.origin === "remote" && w.remoteId && (w.status === "running" || w.status === "waiting"))
 		.map((w) => w.remoteId as string);
+	const body = JSON.stringify({
+		status: clientAvailability(),
+		version: TARGET_VERSION,
+		instance_id: getOrCreateInstanceId(process.env.TARGET_INSTANCE_ID ?? null),
+		active_remote_ids: activeRemoteIds,
+		capabilities: syncRunnerCapabilities(),
+	});
 	const res = await syncFetch(
 		syncUrl(config.url, "/api/sync/heartbeat"),
 		{
 			method: "POST",
-			headers: authHeaders(token),
-			body: JSON.stringify({
-				status: clientAvailability(),
-				version: TARGET_VERSION,
-				instance_id: getOrCreateInstanceId(process.env.TARGET_INSTANCE_ID ?? null),
-				active_remote_ids: activeRemoteIds,
-				capabilities: syncRunnerCapabilities(),
-			}),
+			headers: authHeaders(token, "POST", "/api/sync/heartbeat", body),
+			body,
 		},
 		fetchImpl,
 	);
+	handleDeviceAuthResponse(res.status);
 	if (!res.ok) {
-		const text = await res.text().catch(() => "");
-		throw new Error(`sync heartbeat failed (${res.status}): ${text}`);
+		throw new Error(`sync heartbeat failed (${res.status})`);
 	}
 }
 
@@ -331,10 +355,14 @@ async function pollCommands(
 	token: string,
 	fetchImpl: FetchLike,
 ): Promise<SyncCommand[]> {
-	const res = await syncFetch(syncUrl(config.url, "/api/sync/commands"), { headers: authHeaders(token) }, fetchImpl);
+	const res = await syncFetch(
+		syncUrl(config.url, "/api/sync/commands"),
+		{ headers: authHeaders(token, "GET", "/api/sync/commands") },
+		fetchImpl,
+	);
+	handleDeviceAuthResponse(res.status);
 	if (!res.ok) {
-		const text = await res.text().catch(() => "");
-		throw new Error(`sync poll failed (${res.status}): ${text}`);
+		throw new Error(`sync poll failed (${res.status})`);
 	}
 	const body = (await res.json()) as { commands?: SyncCommand[] };
 	return body.commands ?? [];
@@ -351,14 +379,16 @@ async function ackCommand(
 	if (result.localId) body.local_id = result.localId;
 	if (command.remote_id) body.remote_id = command.remote_id;
 	if (result.error) body.error = { message: result.error };
+	const encoded = JSON.stringify(body);
+	const path = `/api/sync/commands/${command.id}/ack`;
 	const res = await syncFetch(
 		syncUrl(config.url, `/api/sync/commands/${command.id}/ack`),
-		{ method: "POST", headers: authHeaders(token), body: JSON.stringify(body) },
+		{ method: "POST", headers: authHeaders(token, "POST", path, encoded), body: encoded },
 		fetchImpl,
 	);
+	handleDeviceAuthResponse(res.status);
 	if (!res.ok) {
-		const text = await res.text().catch(() => "");
-		throw new Error(`sync ack failed (${res.status}): ${text}`);
+		throw new Error(`sync ack failed (${res.status})`);
 	}
 	queueEvent({
 		type: "command.ack",
@@ -379,28 +409,29 @@ async function pushEvents(
 	collectLocalStateEvents();
 	if (pendingEvents.length === 0) return;
 	const batch = pendingEvents.splice(0, 100);
+	const body = JSON.stringify({
+		batch_id: crypto.randomUUID(),
+		events: batch.map((e) => ({
+			id: e.id,
+			type: e.type,
+			remote_id: e.remote_id,
+			payload: e.payload,
+			created_at: e.created_at,
+		})),
+	});
 	const res = await syncFetch(
 		syncUrl(config.url, "/api/sync/events"),
 		{
 			method: "POST",
-			headers: authHeaders(token),
-			body: JSON.stringify({
-				batch_id: crypto.randomUUID(),
-				events: batch.map((e) => ({
-					id: e.id,
-					type: e.type,
-					remote_id: e.remote_id,
-					payload: e.payload,
-					created_at: e.created_at,
-				})),
-			}),
+			headers: authHeaders(token, "POST", "/api/sync/events", body),
+			body,
 		},
 		fetchImpl,
 	);
+	handleDeviceAuthResponse(res.status);
 	if (!res.ok) {
 		pendingEvents.unshift(...batch);
-		const text = await res.text().catch(() => "");
-		throw new Error(`sync events push failed (${res.status}): ${text}`);
+		throw new Error(`sync events push failed (${res.status})`);
 	}
 }
 
@@ -741,15 +772,17 @@ export async function executeSyncCommand(
  * One remote-sync cycle: register, heartbeat, poll/apply/ack commands, push events.
  */
 export async function runSyncTick(options: SyncTickOptions = {}): Promise<void> {
-	const config = options.config ?? loadSyncConfig();
+	const config = options.config ?? loadEffectiveSyncConfig();
 	if (!config.enabled) return;
+	if (remoteAuth("sync:write").kind === "blocked") return;
 	const fetchImpl = options.fetchImpl ?? fetch;
 	const log = options.log;
 	const hubConfig = options.hubConfig;
 	if (!hubConfig) throw new Error("runSyncTick requires hubConfig");
 
 	let token = config.token;
-	if (!token) token = await ensureRegistered(config, fetchImpl, log);
+	if (remoteAuth("sync:write").kind === "device") token = await ensureRegistered(config, fetchImpl, log);
+	else if (!token) token = await ensureRegistered(config, fetchImpl, log);
 
 	await sendHeartbeat(config, token, fetchImpl);
 
