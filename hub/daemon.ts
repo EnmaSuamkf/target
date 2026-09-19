@@ -7,11 +7,13 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureBundledCatalog } from "./bundled-bootstrap.ts";
-import { isInsecureReportUrl, loadConfig, loadReportConfig, loadSyncConfig } from "./config.ts";
+import { isInsecureReportUrl, loadConfig } from "./config.ts";
 import { listWorkflows } from "./db.ts";
+import { loadEffectiveReportConfig, loadEffectiveSyncConfig } from "./remote-config.ts";
 import { emitHeartbeat, flush } from "./reporter.ts";
 import { initSyncStateCache, runSyncTick } from "./sync.ts";
 import { createServer } from "./server.ts";
+import { retryRemoteDisconnect } from "./device-link-client.ts";
 import { announceWorkflows, expireStale } from "./workflow.ts";
 import { TARGET_VERSION } from "./version.ts";
 
@@ -28,6 +30,7 @@ function log(message: string, type: "info" | "warning" | "error" = "info"): void
  * is one throttled filesystem probe per in-flight step.
  */
 const SWEEP_INTERVAL_MS = 60_000;
+const REMOTE_CLEANUP_RETRY_INTERVAL_MS = 30_000;
 
 export function startHub(): void {
 	const cfg = loadConfig();
@@ -42,6 +45,11 @@ export function startHub(): void {
 		log(`target hub v${TARGET_VERSION} listening on http://${cfg.host}:${cfg.port}`);
 		log(`admin token (for mutating /api routes): ${cfg.adminToken}`);
 	});
+	void retryRemoteDisconnect().catch(() => {});
+	const cleanupRetry = setInterval(() => {
+		void retryRemoteDisconnect().catch(() => {});
+	}, REMOTE_CLEANUP_RETRY_INTERVAL_MS);
+	cleanupRetry.unref();
 	// `unref` so the timer never keeps the process alive on its own; a sweep that
 	// throws must not take the daemon down with it.
 	const sweep = setInterval(() => {
@@ -54,63 +62,68 @@ export function startHub(): void {
 	sweep.unref();
 
 	// Activity reporting: drain the durable event queue on an interval and emit a
-	// periodic heartbeat. Entirely off when no TARGET_REPORT_URL is configured, so
-	// a default install schedules nothing here. See docs/report-server.es.html.
-	const report = loadReportConfig();
+	// periodic heartbeat. A linked device derives this from its persisted origin;
+	// an unlinked installation may still use the legacy TARGET_REPORT_URL path.
+	const report = loadEffectiveReportConfig();
 	if (report.enabled) {
 		log(`activity reporting enabled → ${report.url} (every ${report.intervalMs}ms)`);
 		if (isInsecureReportUrl(report.url)) {
 			log("TARGET_REPORT_URL is plaintext http:// to a non-loopback host — prefer https", "warning");
 		}
-		const startedAt = Date.now();
-		// Announce the workflows this hub already knows (name, agent, sandbox) so
-		// a server that came up late — or fields added to the report after the
-		// workflows were created — still get complete dashboard rows. Queued, so
-		// it rides the first flush like everything else.
-		try {
-			announceWorkflows();
-		} catch (err) {
-			log(`workflow announce failed: ${String(err)}`, "warning");
-		}
-		const flusher = setInterval(() => {
-			// A fresh read each tick so edits from Settings (or `.env` after a restart) apply.
-			const current = loadReportConfig();
-			if (!current.enabled) return;
-			try {
-				emitHeartbeat({ workflowsTotal: listWorkflows().length, uptimeMs: Date.now() - startedAt }, current);
-			} catch (err) {
-				log(`heartbeat emit failed: ${String(err)}`, "warning");
-			}
-			void flush({ config: current, log }).catch((err) => log(`report flush failed: ${String(err)}`, "warning"));
-		}, report.intervalMs);
-		flusher.unref();
 	}
+	const startedAt = Date.now();
+	let reportingAnnounced = false;
+	// Always retain the lightweight timer: a device can become linked while the
+	// daemon is already running. It performs no network or queue work unless an
+	// effective linked/legacy report configuration is enabled.
+	const flusher = setInterval(() => {
+		const current = loadEffectiveReportConfig();
+		if (!current.enabled) {
+			reportingAnnounced = false;
+			return;
+		}
+		if (!reportingAnnounced) {
+			try {
+				announceWorkflows();
+				reportingAnnounced = true;
+			} catch (err) {
+				log(`workflow announce failed: ${String(err)}`, "warning");
+			}
+		}
+		try {
+			emitHeartbeat({ workflowsTotal: listWorkflows().length, uptimeMs: Date.now() - startedAt }, current);
+		} catch (err) {
+			log(`heartbeat emit failed: ${String(err)}`, "warning");
+		}
+		void flush({ config: current, log }).catch((err) => log(`report flush failed: ${String(err)}`, "warning"));
+	}, report.intervalMs);
+	flusher.unref();
 
 	// Remote sync: register/heartbeat, poll server commands, apply locally, ack.
-	const syncCfg = loadSyncConfig();
+	const syncCfg = loadEffectiveSyncConfig();
 	if (syncCfg.enabled) {
 		log(`remote sync enabled → ${syncCfg.url} (every ${syncCfg.intervalMs}ms)`);
 		if (isInsecureReportUrl(syncCfg.url)) {
 			log("TARGET_SYNC_URL is plaintext http:// to a non-loopback host — prefer https", "warning");
 		}
-		initSyncStateCache();
-		const syncLoop = setInterval(() => {
-			const current = loadSyncConfig();
-			if (!current.enabled) return;
-			void runSyncTick({ config: current, hubConfig: cfg, log }).catch((err) =>
-				log(`remote sync tick failed: ${String(err)}`, "warning"),
-			);
-		}, syncCfg.intervalMs);
-		syncLoop.unref();
-		// First tick soon after startup so a server-enqueued command materializes quickly.
-		setTimeout(() => {
-			const current = loadSyncConfig();
-			if (!current.enabled) return;
-			void runSyncTick({ config: current, hubConfig: cfg, log }).catch((err) =>
-				log(`remote sync tick failed: ${String(err)}`, "warning"),
-			);
-		}, 2_000).unref();
 	}
+	initSyncStateCache();
+	const syncLoop = setInterval(() => {
+		const current = loadEffectiveSyncConfig();
+		if (!current.enabled) return;
+		void runSyncTick({ config: current, hubConfig: cfg, log }).catch((err) =>
+			log(`remote sync tick failed: ${String(err)}`, "warning"),
+		);
+	}, syncCfg.intervalMs);
+	syncLoop.unref();
+	// First tick soon after startup so a server-enqueued command materializes quickly.
+	setTimeout(() => {
+		const current = loadEffectiveSyncConfig();
+		if (!current.enabled) return;
+		void runSyncTick({ config: current, hubConfig: cfg, log }).catch((err) =>
+			log(`remote sync tick failed: ${String(err)}`, "warning"),
+		);
+	}, 2_000).unref();
 
 	server.on("error", (err) => {
 		log(`server error: ${String(err)}`, "error");

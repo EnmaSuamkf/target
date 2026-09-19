@@ -21,7 +21,7 @@ import {
 } from "./tcp-selection.ts";
 import { type ResourceSelection, normalizeResourceSelections } from "./rci-selection.ts";
 import * as path from "node:path";
-import { dbFile, type ConversationReportMode } from "./config.ts";
+import { dbFile, ensureTargetDirSecure, type ConversationReportMode } from "./config.ts";
 import type { ProgressKind } from "./progress.ts";
 
 /**
@@ -347,8 +347,13 @@ let db: DatabaseSync | null = null;
 export function open(): DatabaseSync {
 	if (db) return db;
 	const file = dbFile();
-	fs.mkdirSync(path.dirname(file), { recursive: true });
+	ensureTargetDirSecure();
 	db = new DatabaseSync(file);
+	try {
+		fs.chmodSync(file, 0o600);
+	} catch {
+		// Best effort on filesystems without POSIX permission bits.
+	}
 	db.exec("PRAGMA journal_mode = WAL;");
 	db.exec(`
 		CREATE TABLE IF NOT EXISTS workflows (
@@ -2608,6 +2613,34 @@ export function saveReportSettings(input: {
 			}),
 			settings.updatedAt,
 		);
+	return settings;
+}
+
+// --- Linked remote-service preferences ------------------------------------
+
+const SYNC_SETTINGS_KEY = "linked_sync";
+export interface SyncSettings {
+	enabled: boolean;
+	updatedAt: string | null;
+}
+
+export function getSyncSettings(): SyncSettings {
+	const row = open().prepare("SELECT * FROM settings WHERE key = ?").get(SYNC_SETTINGS_KEY) as Record<string, unknown> | undefined;
+	if (!row) return { enabled: true, updatedAt: null };
+	try {
+		const value = JSON.parse(String(row.value)) as Record<string, unknown>;
+		return { enabled: value.enabled !== false, updatedAt: row.updated_at == null ? null : String(row.updated_at) };
+	} catch {
+		return { enabled: true, updatedAt: null };
+	}
+}
+
+export function saveSyncSettings(input: { enabled: boolean }): SyncSettings {
+	const settings = { enabled: input.enabled, updatedAt: new Date().toISOString() };
+	open()
+		.prepare(`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`)
+		.run(SYNC_SETTINGS_KEY, JSON.stringify({ enabled: settings.enabled }), settings.updatedAt);
 	return settings;
 }
 

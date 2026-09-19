@@ -1,0 +1,16 @@
+{
+  "name": "linked hub without remote environment configuration",
+  "environment": {
+    "TARGET_REPORT_URL": "",
+    "TARGET_REPORT_TOKEN": "",
+    "TARGET_SYNC_URL": "",
+    "TARGET_SYNC_TOKEN": ""
+  },
+  "origin": "https://linked.example",
+  "scopes": ["ingest:write", "sync:write"],
+  "expected": {
+    "ingestPath": "/ingest",
+    "syncPaths": ["/api/sync/register", "/api/sync/heartbeat", "/api/sync/commands"],
+    "authorizationScheme": "Target-Device v1"
+  }
+}

@@ -95,6 +95,8 @@ import {
 import { needsContextReinjection, observeCompaction } from "./compaction.ts";
 import type { HubConfig } from "./config.ts";
 import { isInsecureReportUrl, loadReportConfigFromEnv } from "./config.ts";
+import { disconnectDeviceLink, pollDeviceLink, startDeviceLink } from "./device-link-client.ts";
+import { getDeviceLinkStatus } from "./device-link.ts";
 import { adoptability, findConversation, listConversations, readConversationPreview } from "./conversations.ts";
 import {
 	AccountError,
@@ -115,6 +117,7 @@ import {
 	getDockerMountSettings,
 	getNotificationSettings,
 	getReportSettings,
+	getSyncSettings,
 	getShortcutSettings,
 	getUiSettings,
 	getWorkflow,
@@ -133,6 +136,7 @@ import {
 	saveDockerMountSettings,
 	saveNotificationSettings,
 	saveReportSettings,
+	saveSyncSettings,
 	toPublicReportSettings,
 	saveShortcutSettings,
 	saveUiSettings,
@@ -813,6 +817,51 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 
 	if (parts[0] !== "api") {
 		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
+	// --- /api/device-link ---------------------------------------------------
+	// The only public representation is the redacted status/outcome. Pairing
+	// credentials and the device private key remain in device-link.ts.
+	if (parts[1] === "device-link" && !parts[2] && req.method === "GET") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		sendJson(res, 200, { status: getDeviceLinkStatus() });
+		return;
+	}
+	if (parts[1] === "device-link" && parts[2] === "start" && !parts[3] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			void startDeviceLink({
+				origin: typeof body.origin === "string" ? body.origin : "",
+				deviceName: typeof body.deviceName === "string" ? body.deviceName : os.hostname(),
+			})
+				.then((outcome) => sendJson(res, 200, { outcome }))
+				.catch(() => sendJson(res, 400, { error: "invalid_device_link_request" }));
+		});
+		return;
+	}
+	if (parts[1] === "device-link" && parts[2] === "poll" && !parts[3] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		void pollDeviceLink()
+			.then((outcome) => sendJson(res, 200, { outcome }))
+			.catch(() => sendJson(res, 200, { outcome: { status: getDeviceLinkStatus(), code: "relink_required" } }));
+		return;
+	}
+	if (parts[1] === "device-link" && !parts[2] && req.method === "DELETE") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		void disconnectDeviceLink().then((outcome) => sendJson(res, 200, { outcome }));
 		return;
 	}
 
@@ -1765,7 +1814,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
 				const enabled = body.enabled === true;
 				const url = typeof body.url === "string" ? body.url.trim() : "";
-				if (enabled && url === "") {
+				if (enabled && url === "" && getDeviceLinkStatus().state !== "connected") {
 					sendJson(res, 400, { error: "report server URL is required when reporting is enabled" });
 					return;
 				}
@@ -1810,6 +1859,30 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				const saved = saveReportSettings({ enabled, url, token, intervalMs, includeConversations });
 				log(`activity reporting settings updated (reporting ${enabled && url ? "enabled" : "disabled"})`);
 				sendJson(res, 200, { settings: toPublicReportSettings(saved, false) });
+			});
+			return;
+		}
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
+	// --- /api/settings/sync ---
+	if (parts[1] === "settings" && parts[2] === "sync" && !parts[3]) {
+		if (req.method === "GET") {
+			sendJson(res, 200, { settings: getSyncSettings() });
+			return;
+		}
+		if (req.method === "PUT") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				if (typeof body.enabled !== "boolean") {
+					sendJson(res, 400, { error: "enabled must be boolean" });
+					return;
+				}
+				sendJson(res, 200, { settings: saveSyncSettings({ enabled: body.enabled }) });
 			});
 			return;
 		}

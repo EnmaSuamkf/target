@@ -97,6 +97,24 @@ export function targetDir(): string {
 	return process.env.TARGET_HOME ?? path.join(os.homedir(), ".target");
 }
 
+/**
+ * The hub directory contains the local admin token, SQLite database and device
+ * credentials. Keep it private even when an older installation created it
+ * through a permissive umask. Callers still handle missing/unwritable homes as
+ * their own operational error.
+ */
+export function ensureTargetDirSecure(): string {
+	const dir = targetDir();
+	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	try {
+		fs.chmodSync(dir, 0o700);
+	} catch {
+		// A filesystem that does not implement POSIX modes (for example some
+		// mounted Windows volumes) still gets the safest mode it supports.
+	}
+	return dir;
+}
+
 function configFile(): string {
 	return path.join(targetDir(), "config.json");
 }
@@ -132,9 +150,15 @@ export function loadEnvFile(): void {
 
 export function loadConfig(): HubConfig {
 	loadEnvFile();
+	ensureTargetDirSecure();
 	let fileCfg: Partial<HubConfig> = {};
 	try {
 		fileCfg = JSON.parse(fs.readFileSync(configFile(), "utf8")) as Partial<HubConfig>;
+		try {
+			fs.chmodSync(configFile(), 0o600);
+		} catch {
+			// Best effort on filesystems without POSIX permission bits.
+		}
 	} catch {
 		// Missing/invalid config file → fall back to defaults.
 	}
@@ -158,8 +182,13 @@ export function loadConfig(): HubConfig {
 
 export function saveConfig(cfg: HubConfig): void {
 	const file = configFile();
-	fs.mkdirSync(path.dirname(file), { recursive: true });
-	fs.writeFileSync(file, `${JSON.stringify(cfg, null, 2)}\n`);
+	ensureTargetDirSecure();
+	fs.writeFileSync(file, `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
+	try {
+		fs.chmodSync(file, 0o600);
+	} catch {
+		// See ensureTargetDirSecure.
+	}
 }
 
 /** How much of each conversation is allowed off the machine (see report-server.es.html §8). */

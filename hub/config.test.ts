@@ -16,6 +16,12 @@ import type { HubConfig } from "./config.ts";
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-config-test-"));
 process.env.TARGET_HOME = path.join(tmpHome, ".target");
+// Keep this configuration suite hermetic: config.ts deliberately consults a
+// repo-root .env for real installations, but a developer's local Docker flag
+// must not change assertions about an unset environment. The per-home .env is
+// the documented higher-precedence location and stops that fallback.
+fs.mkdirSync(String(process.env.TARGET_HOME), { recursive: true });
+fs.writeFileSync(path.join(String(process.env.TARGET_HOME), ".env"), "# test environment\n");
 
 const {
 	loadConfig,

@@ -14,7 +14,7 @@ import { test } from "node:test";
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-reporter-test-"));
 process.env.TARGET_HOME = path.join(tmpHome, ".target");
 
-const { emit, flush, backoffMs } = await import("./reporter.ts");
+const { emit, flush, backoffMs, resolveReportInstanceId } = await import("./reporter.ts");
 const { loadReportConfig, isInsecureReportUrl } = await import("./config.ts");
 const { TARGET_VERSION } = await import("./version.ts");
 const db = await import("./db.ts");
@@ -70,6 +70,10 @@ test("flush delivers on a 200 with empty body (whole batch accepted)", async () 
 	assert.equal(body.instance_id, "fixed-instance");
 	assert.equal(body.schema_version, 1);
 	assert.equal(body.events.length, 2);
+});
+
+test("legacy reporting retains its stable local instance UUID", () => {
+	assert.equal(resolveReportInstanceId(ENABLED), "fixed-instance");
 });
 
 test("flush honours partial acceptance: accepted delivered, rejected dropped", async () => {
