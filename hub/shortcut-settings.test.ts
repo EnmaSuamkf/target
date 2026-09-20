@@ -1,11 +1,11 @@
 /**
- * Tests for the keyboard-shortcut bindings: the storage layer in db.ts and the
+ * Tests for the keyboard-shortcut preferences: the storage layer in db.ts and the
  * two routes the Settings view uses (GET/PUT /api/settings/shortcuts).
  *
- * The bindings are one key (a single a–z letter) per action — focus the first
- * workflow, toggle dictation, open the create-workflow modal, continue a step
- * held for review, start the open workflow — so what's worth pinning down is
- * the round-trip, the
+ * Preferences are a master enable switch plus one key (a single a–z letter) per
+ * action — focus the first workflow, toggle dictation, open the create-workflow
+ * modal, continue a step held for review, start the open workflow — so what's
+ * worth pinning down is the round-trip, the enabled default/legacy fill, the
  * per-action default fallback, the admin gate on the write, and the refusal to
  * store two actions on the same key.
  *
@@ -21,7 +21,7 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-test-shortcuts-"))
 process.env.TARGET_HOME = tmpHome;
 process.env.AWB_HOME = tmpHome;
 
-const { getShortcutSettings, saveShortcutSettings, defaultShortcutSettings } = await import("./db.ts");
+const { getShortcutSettings, saveShortcutSettings, defaultShortcutSettings, open } = await import("./db.ts");
 const { loadConfig } = await import("./config.ts");
 const { createServer } = await import("./server.ts");
 
@@ -43,6 +43,7 @@ function adminHeaders() {
 
 interface ShortcutSettingsBody {
 	settings: {
+		enabled: boolean;
 		bindings: {
 			focusWorkflow: { key: string };
 			toggleDictation: { key: string };
@@ -54,8 +55,9 @@ interface ShortcutSettingsBody {
 	};
 }
 
-test("getShortcutSettings on a fresh hub reports the default W/R/N/C/S bindings and no save stamp", () => {
+test("getShortcutSettings on a fresh hub reports enabled=true, default W/R/N/C/S bindings, and no save stamp", () => {
 	const settings = getShortcutSettings();
+	assert.equal(settings.enabled, true);
 	assert.deepEqual(settings.bindings, {
 		focusWorkflow: { key: "w" },
 		toggleDictation: { key: "r" },
@@ -66,8 +68,10 @@ test("getShortcutSettings on a fresh hub reports the default W/R/N/C/S bindings 
 	assert.equal(settings.updatedAt, null);
 });
 
-test("defaultShortcutSettings is the W/R/N/C/S set", () => {
-	assert.deepEqual(defaultShortcutSettings().bindings, {
+test("defaultShortcutSettings is enabled with the W/R/N/C/S set", () => {
+	const defaults = defaultShortcutSettings();
+	assert.equal(defaults.enabled, true);
+	assert.deepEqual(defaults.bindings, {
 		focusWorkflow: { key: "w" },
 		toggleDictation: { key: "r" },
 		createWorkflow: { key: "n" },
@@ -76,7 +80,65 @@ test("defaultShortcutSettings is the W/R/N/C/S set", () => {
 	});
 });
 
-test("saveShortcutSettings persists the five keys and a save stamp", () => {
+test("a legacy shortcuts blob without enabled reads back as enabled=true", () => {
+	// Hubs that saved bindings before the master switch shipped have no `enabled`
+	// field in the JSON. Missing must mean on, not off — otherwise upgrades would
+	// silently disable every operator's shortcuts.
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(
+			"shortcuts",
+			JSON.stringify({
+				bindings: {
+					focusWorkflow: { key: "w" },
+					toggleDictation: { key: "r" },
+					createWorkflow: { key: "n" },
+					continueStep: { key: "c" },
+					startWorkflow: { key: "s" },
+				},
+			}),
+			new Date().toISOString(),
+		);
+	assert.equal(getShortcutSettings().enabled, true);
+	assert.equal(getShortcutSettings().bindings.focusWorkflow.key, "w");
+});
+
+test("saveShortcutSettings persists enabled, the five keys, and a save stamp", () => {
+	const saved = saveShortcutSettings({
+		enabled: false,
+		bindings: {
+			focusWorkflow: { key: "q" },
+			toggleDictation: { key: "d" },
+			createWorkflow: { key: "m" },
+			continueStep: { key: "i" },
+			startWorkflow: { key: "e" },
+		},
+	});
+	assert.equal(saved.enabled, false);
+	assert.equal(saved.bindings.focusWorkflow.key, "q");
+	assert.equal(saved.bindings.toggleDictation.key, "d");
+	assert.equal(saved.bindings.createWorkflow.key, "m");
+	assert.equal(saved.bindings.continueStep.key, "i");
+	assert.equal(saved.bindings.startWorkflow.key, "e");
+	assert.ok(saved.updatedAt);
+	// Read back through a fresh query, not the returned object.
+	assert.deepEqual(getShortcutSettings(), saved);
+});
+
+test("saveShortcutSettings without enabled keeps the previously stored value", () => {
+	saveShortcutSettings({
+		enabled: false,
+		bindings: {
+			focusWorkflow: { key: "a" },
+			toggleDictation: { key: "b" },
+			createWorkflow: { key: "c" },
+			continueStep: { key: "d" },
+			startWorkflow: { key: "e" },
+		},
+	});
 	const saved = saveShortcutSettings({
 		bindings: {
 			focusWorkflow: { key: "q" },
@@ -86,14 +148,8 @@ test("saveShortcutSettings persists the five keys and a save stamp", () => {
 			startWorkflow: { key: "e" },
 		},
 	});
-	assert.equal(saved.bindings.focusWorkflow.key, "q");
-	assert.equal(saved.bindings.toggleDictation.key, "d");
-	assert.equal(saved.bindings.createWorkflow.key, "m");
-	assert.equal(saved.bindings.continueStep.key, "i");
-	assert.equal(saved.bindings.startWorkflow.key, "e");
-	assert.ok(saved.updatedAt);
-	// Read back through a fresh query, not the returned object.
-	assert.deepEqual(getShortcutSettings(), saved);
+	assert.equal(saved.enabled, false);
+	assert.equal(getShortcutSettings().enabled, false);
 });
 
 test("saveShortcutSettings replaces the previous row instead of adding a second one", () => {
@@ -109,12 +165,14 @@ test("saveShortcutSettings replaces the previous row instead of adding a second 
 
 test("GET /api/settings/shortcuts needs no admin token and returns the stored bindings", async () => {
 	saveShortcutSettings({
+		enabled: true,
 		bindings: { focusWorkflow: { key: "f" }, toggleDictation: { key: "t" }, createWorkflow: { key: "o" }, continueStep: { key: "c" }, startWorkflow: { key: "s" } },
 	});
 
 	const res = await fetch(`${baseUrl}/api/settings/shortcuts`, { headers: adminHeaders() });
 	assert.equal(res.status, 200);
 	const body = (await res.json()) as ShortcutSettingsBody;
+	assert.equal(body.settings.enabled, true);
 	assert.equal(body.settings.bindings.focusWorkflow.key, "f");
 	assert.equal(body.settings.bindings.toggleDictation.key, "t");
 	assert.equal(body.settings.bindings.createWorkflow.key, "o");
@@ -156,6 +214,65 @@ test("PUT /api/settings/shortcuts saves the bindings and a later GET reads them 
 	assert.deepEqual(got.settings, put.settings);
 });
 
+test("PUT /api/settings/shortcuts round-trips enabled=false", async () => {
+	const putRes = await fetch(`${baseUrl}/api/settings/shortcuts`, {
+		method: "PUT",
+		headers: adminHeaders(),
+		body: JSON.stringify({
+			enabled: false,
+			bindings: {
+				focusWorkflow: { key: "w" },
+				toggleDictation: { key: "r" },
+				createWorkflow: { key: "n" },
+				continueStep: { key: "c" },
+				startWorkflow: { key: "s" },
+			},
+		}),
+	});
+	assert.equal(putRes.status, 200);
+	const put = (await putRes.json()) as ShortcutSettingsBody;
+	assert.equal(put.settings.enabled, false);
+
+	const getRes = await fetch(`${baseUrl}/api/settings/shortcuts`, { headers: adminHeaders() });
+	const got = (await getRes.json()) as ShortcutSettingsBody;
+	assert.equal(got.settings.enabled, false);
+});
+
+test("PUT /api/settings/shortcuts without enabled keeps the stored switch", async () => {
+	await fetch(`${baseUrl}/api/settings/shortcuts`, {
+		method: "PUT",
+		headers: adminHeaders(),
+		body: JSON.stringify({
+			enabled: false,
+			bindings: {
+				focusWorkflow: { key: "w" },
+				toggleDictation: { key: "r" },
+				createWorkflow: { key: "n" },
+				continueStep: { key: "c" },
+				startWorkflow: { key: "s" },
+			},
+		}),
+	});
+
+	const res = await fetch(`${baseUrl}/api/settings/shortcuts`, {
+		method: "PUT",
+		headers: adminHeaders(),
+		body: JSON.stringify({
+			bindings: {
+				focusWorkflow: { key: "u" },
+				toggleDictation: { key: "v" },
+				createWorkflow: { key: "x" },
+				continueStep: { key: "i" },
+				startWorkflow: { key: "j" },
+			},
+		}),
+	});
+	assert.equal(res.status, 200);
+	const body = (await res.json()) as ShortcutSettingsBody;
+	assert.equal(body.settings.enabled, false, "omitting enabled must not flip the switch back on");
+	assert.equal(body.settings.bindings.focusWorkflow.key, "u");
+});
+
 test("PUT /api/settings/shortcuts rejects two actions sharing the same key", async () => {
 	await fetch(`${baseUrl}/api/settings/shortcuts`, {
 		method: "PUT",
@@ -186,17 +303,19 @@ test("PUT /api/settings/shortcuts without a bindings field keeps the configured 
 		method: "PUT",
 		headers: adminHeaders(),
 		body: JSON.stringify({
-			bindings: { focusWorkflow: { key: "u" }, toggleDictation: { key: "v" }, createWorkflow: { key: "w" }, continueStep: { key: "i" } },
+			enabled: true,
+			bindings: { focusWorkflow: { key: "u" }, toggleDictation: { key: "v" }, createWorkflow: { key: "w" }, continueStep: { key: "i" }, startWorkflow: { key: "s" } },
 		}),
 	});
 
 	const res = await fetch(`${baseUrl}/api/settings/shortcuts`, {
 		method: "PUT",
 		headers: adminHeaders(),
-		body: JSON.stringify({}),
+		body: JSON.stringify({ enabled: false }),
 	});
 	assert.equal(res.status, 200);
 	const body = (await res.json()) as ShortcutSettingsBody;
+	assert.equal(body.settings.enabled, false);
 	assert.equal(body.settings.bindings.focusWorkflow.key, "u");
 	assert.equal(body.settings.bindings.createWorkflow.key, "w");
 });

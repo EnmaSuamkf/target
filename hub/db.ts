@@ -2387,17 +2387,20 @@ export interface ShortcutBinding {
 }
 
 export interface ShortcutSettings {
+	/** Master switch: false means the hub ignores keyboard shortcuts entirely. */
+	enabled: boolean;
 	bindings: Record<ShortcutAction, ShortcutBinding>;
 	/** Null until the bindings have been saved at least once. */
 	updatedAt: string | null;
 }
 
 /**
- * The defaults the hub ships with: W, R, N — C for the manual-review Continue,
- * and S for the workflow's Start button.
+ * The defaults the hub ships with: shortcuts on, W/R/N — C for the
+ * manual-review Continue, and S for the workflow's Start button.
  */
 export function defaultShortcutSettings(): ShortcutSettings {
 	return {
+		enabled: true,
 		bindings: {
 			focusWorkflow: { key: "w" },
 			toggleDictation: { key: "r" },
@@ -2457,6 +2460,9 @@ export function getShortcutSettings(): ShortcutSettings {
 	try {
 		const parsed = JSON.parse(String(row.value)) as Record<string, unknown>;
 		return {
+			// Legacy blobs predating the master switch lack `enabled` — keep
+			// shortcuts on so existing operators are not silently disabled.
+			enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : true,
 			bindings: normalizeShortcutBindings(parsed.bindings),
 			updatedAt: row.updated_at == null ? null : String(row.updated_at),
 		};
@@ -2467,11 +2473,15 @@ export function getShortcutSettings(): ShortcutSettings {
 	}
 }
 
-/** Replaces the stored bindings wholesale and returns what was written. */
+/** Replaces the stored preferences wholesale and returns what was written. */
 export function saveShortcutSettings(input: {
+	/** Omit to keep whatever is already stored (fresh hubs default to true). */
+	enabled?: boolean;
 	bindings: Record<ShortcutAction, ShortcutBinding>;
 }): ShortcutSettings {
+	const previous = getShortcutSettings();
 	const settings: ShortcutSettings = {
+		enabled: typeof input.enabled === "boolean" ? input.enabled : previous.enabled,
 		bindings: normalizeShortcutBindings(input.bindings),
 		updatedAt: new Date().toISOString(),
 	};
@@ -2482,7 +2492,7 @@ export function saveShortcutSettings(input: {
 		)
 		.run(
 			SHORTCUT_SETTINGS_KEY,
-			JSON.stringify({ bindings: settings.bindings }),
+			JSON.stringify({ enabled: settings.enabled, bindings: settings.bindings }),
 			settings.updatedAt,
 		);
 	return settings;

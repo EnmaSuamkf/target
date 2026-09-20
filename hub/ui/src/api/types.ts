@@ -603,6 +603,8 @@ export interface ShortcutBinding {
 }
 
 export interface ShortcutSettings {
+	/** Master switch: false means the hub ignores keyboard shortcuts entirely. */
+	enabled: boolean;
 	bindings: Record<ShortcutAction, ShortcutBinding>;
 	/** Null until the bindings have been saved at least once. */
 	updatedAt: string | null;
@@ -610,6 +612,8 @@ export interface ShortcutSettings {
 
 /** Payload accepted by PUT /api/settings/shortcuts (a full replace). */
 export interface ShortcutSettingsInput {
+	/** Omit to keep whatever is already stored. */
+	enabled?: boolean;
 	bindings: Record<ShortcutAction, ShortcutBinding>;
 }
 

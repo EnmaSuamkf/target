@@ -29,8 +29,8 @@ import styles from "./SettingsView.module.css";
 
 /**
  * Configuration: hub-wide preferences, one section per topic. Notifications is
- * the master switch plus the channels it gates; Shortcuts (Atajos) is the key
- * each of the five hub shortcuts fires on.
+ * the master switch plus the channels it gates; Shortcuts is the master switch
+ * plus the key each of the five hub shortcuts fires on.
  *
  * Everything is edited locally and committed by a per-section Save (a single
  * PUT each), rather than saving on every keystroke: a half-typed username or a
@@ -141,6 +141,7 @@ export function SettingsView({
 		continueStep: shortcutSettings.bindings.continueStep?.key ?? "c",
 		startWorkflow: shortcutSettings.bindings.startWorkflow?.key ?? "s",
 	});
+	const [shortcutsEnabled, setShortcutsEnabled] = useState(shortcutSettings.enabled !== false);
 	const [shortcutError, setShortcutError] = useState<string | null>(null);
 	const [savingShortcuts, setSavingShortcuts] = useState(false);
 
@@ -172,8 +173,10 @@ export function SettingsView({
 	const catalogNavId = useId();
 	const hintId = `${notificationsId}-hint`;
 	const shortcutsId = useId();
+	const shortcutsHintId = `${shortcutsId}-hint`;
 	const reportId = useId();
 	const dockerFriendlyId = useId();
+	const dockerMountsId = useId();
 	const linkId = useId();
 
 	const applyLinkOutcome = (outcome: DeviceLinkOutcome): void => {
@@ -292,28 +295,33 @@ export function SettingsView({
 			continueStep: keys.continueStep.trim().toLowerCase(),
 			startWorkflow: keys.startWorkflow.trim().toLowerCase(),
 		};
-		// Each key must be a single a–z letter (the only thing the hook matches).
-		for (const action of SHORTCUT_ORDER) {
-			if (!/^[a-z]$/.test(normalized[action])) {
-				setShortcutError(`“${SHORTCUT_LABELS[action]}” needs a single letter A–Z.`);
-				return;
+		// Key rows are hidden while off, but bindings still save with the switch so
+		// turning shortcuts back on restores the same keys. Only validate when on.
+		if (shortcutsEnabled) {
+			// Each key must be a single a–z letter (the only thing the hook matches).
+			for (const action of SHORTCUT_ORDER) {
+				if (!/^[a-z]$/.test(normalized[action])) {
+					setShortcutError(`“${SHORTCUT_LABELS[action]}” needs a single letter A–Z.`);
+					return;
+				}
 			}
-		}
-		// No two actions on the same key — the route rejects it too, but the
-		// inline check keeps the reason next to the offending rows.
-		const seen = new Map<string, ShortcutAction>();
-		for (const action of SHORTCUT_ORDER) {
-			const prev = seen.get(normalized[action]);
-			if (prev) {
-				setShortcutError(`“${SHORTCUT_LABELS[prev]}” and “${SHORTCUT_LABELS[action]}” can't share the key ${normalized[action].toUpperCase()}.`);
-				return;
+			// No two actions on the same key — the route rejects it too, but the
+			// inline check keeps the reason next to the offending rows.
+			const seen = new Map<string, ShortcutAction>();
+			for (const action of SHORTCUT_ORDER) {
+				const prev = seen.get(normalized[action]);
+				if (prev) {
+					setShortcutError(`“${SHORTCUT_LABELS[prev]}” and “${SHORTCUT_LABELS[action]}” can't share the key ${normalized[action].toUpperCase()}.`);
+					return;
+				}
+				seen.set(normalized[action], action);
 			}
-			seen.set(normalized[action], action);
 		}
 		setShortcutError(null);
 		setSavingShortcuts(true);
 		try {
 			await onSaveShortcuts({
+				enabled: shortcutsEnabled,
 				bindings: {
 					focusWorkflow: { key: normalized.focusWorkflow },
 					toggleDictation: { key: normalized.toggleDictation },
@@ -338,6 +346,19 @@ export function SettingsView({
 			if (!ok) setDockerFriendlyError("Could not save docker-friendly networking.");
 		} finally {
 			setSavingDockerFriendly(false);
+		}
+	};
+
+	const submitDockerMounts = async (ev: React.FormEvent): Promise<void> => {
+		ev.preventDefault();
+		if (savingDockerMounts) return;
+		setDockerMountError(null);
+		setSavingDockerMounts(true);
+		try {
+			const ok = await onSaveDockerMounts({ mounts: dockerMounts });
+			if (!ok) setDockerMountError("Could not save docker bind mounts.");
+		} finally {
+			setSavingDockerMounts(false);
 		}
 	};
 
@@ -839,13 +860,6 @@ export function SettingsView({
 				</div>
 			</form>}
 
-			{/* Atajos: the key each of the five hub shortcuts fires on. The
-			    modifier is always Alt or Shift (the hook honours either), so only
-			    the letter is configurable — one field per action. A Save here is a
-			    separate PUT from notifications: they're independent resources with
-			    their own validity, so a half-edited set in one never blocks the
-			    other. */}
-			
 			<form className={styles.section} aria-labelledby={`${dockerFriendlyId}-section`} onSubmit={submitDockerFriendly}>
 				<h3 className={styles.sectionHeading} id={`${dockerFriendlyId}-section`}>
 					Docker-friendly hub networking
@@ -905,98 +919,111 @@ export function SettingsView({
 			</form>
 
 
-<div className={styles.section}>
-				<CollapsibleSection
-					title="Docker bind mounts"
-					defaultOpen={dockerMounts.length > 0}
-					meta={
-						dockerMounts.length > 0 ? (
-							<span className="hint">{dockerMounts.length} path{dockerMounts.length === 1 ? "" : "s"}</span>
-						) : undefined
-					}
-				>
-					<p className="hint">
-						Host paths mounted at the same absolute path inside every <strong>docker</strong> workflow container.
-						Use this for shared config such as <code>~/.m2</code> for Maven.
-					</p>
-					<form
-						onSubmit={async (ev) => {
-							ev.preventDefault();
-							if (savingDockerMounts) return;
-							setDockerMountError(null);
-							setSavingDockerMounts(true);
-							try {
-								const ok = await onSaveDockerMounts({ mounts: dockerMounts });
-								if (!ok) setDockerMountError("Could not save docker bind mounts.");
-							} finally {
-								setSavingDockerMounts(false);
-							}
-						}}
-					>
-						<DockerMountEditor mounts={dockerMounts} onChange={setDockerMounts} disabled={savingDockerMounts || busy} />
-						{dockerMountError && (
-							<p className="msg msg--error" role="alert">
-								{dockerMountError}
-							</p>
-						)}
-						<div className={styles.actions}>
-							<button type="submit" className="btn btn--sm btn--primary" disabled={savingDockerMounts || busy}>
-								{savingDockerMounts ? "Saving…" : "Save"}
-							</button>
-							{dockerMountSettings.updatedAt && (
-								<span className="hint">Last saved {relativeTime(dockerMountSettings.updatedAt)}</span>
-							)}
-						</div>
-					</form>
-				</CollapsibleSection>
-			</div>
-
-			<form className={styles.section} aria-labelledby={`${shortcutsId}-section`} onSubmit={submitShortcuts}>
-				<h3 className={styles.sectionHeading} id={`${shortcutsId}-section`}>
-					Atajos
+			<form className={styles.section} aria-labelledby={`${dockerMountsId}-section`} onSubmit={submitDockerMounts}>
+				<h3 className={styles.sectionHeading} id={`${dockerMountsId}-section`}>
+					Docker bind mounts
 				</h3>
 				<p className="hint">
-					The key each shortcut fires on. Hold <strong>Alt</strong> or <strong>Shift</strong> plus the key —
-					“W” means Alt+W or Shift+W. Each action needs its own single letter A–Z.
+					Host paths mounted at the same absolute path inside every <strong>docker</strong> workflow container.
+					Use this for shared config such as <code>~/.m2</code> for Maven.
 				</p>
+				<DockerMountEditor mounts={dockerMounts} onChange={setDockerMounts} disabled={savingDockerMounts || busy} />
+				{dockerMountError && (
+					<p className="msg msg--error" role="alert">
+						{dockerMountError}
+					</p>
+				)}
+				<div className={styles.actions}>
+					<button type="submit" className="btn btn--primary" disabled={savingDockerMounts || busy}>
+						{savingDockerMounts ? "Saving…" : "Save"}
+					</button>
+					{dockerMountSettings.updatedAt && (
+						<span className="hint">Last saved {relativeTime(dockerMountSettings.updatedAt)}</span>
+					)}
+				</div>
+			</form>
 
-				<div className={styles.shortcutRows}>
-					{SHORTCUT_ORDER.map((action) => (
-						<div className={styles.shortcutRow} key={action}>
-							<span className={styles.shortcutLabel}>{SHORTCUT_LABELS[action]}</span>
-							<Field
-								label={`${SHORTCUT_LABELS[action]} key`}
-								hint="A single letter A–Z. Pressed with Alt or Shift."
-							>
-							{(props) => (
-									<input
-										{...props}
-										type="text"
-										className={`input ${styles.shortcutInput}`}
-										autoComplete="off"
-										maxLength={1}
-										value={keys[action]}
-										aria-label={`${SHORTCUT_LABELS[action]} key`}
-										onChange={(ev) => {
-											// One character, lowercased; anything else is a paste the
-											// save validation will catch, but normalising on input keeps
-											// the field tidy.
-											const next = ev.target.value.slice(-1).toLowerCase();
-											setKeys((current) => ({ ...current, [action]: next }));
-											if (shortcutError) setShortcutError(null);
-										}}
-										aria-invalid={shortcutError ? true : undefined}
-									/>
-								)}
-							</Field>
-						</div>
-					))}
+			{/* Shortcuts: master enable switch plus the key each of the five hub
+			    shortcuts fires on. The modifier is always Alt or Shift (the hook
+			    honours either), so only the letter is configurable — one field per
+			    action. A Save here is a separate PUT from notifications: they're
+			    independent resources with their own validity, so a half-edited set
+			    in one never blocks the other. */}
+			<form className={styles.section} aria-labelledby={`${shortcutsId}-section`} onSubmit={submitShortcuts}>
+				<h3 className={styles.sectionHeading} id={`${shortcutsId}-section`}>
+					Shortcuts
+				</h3>
+
+				<div className={styles.toggleRow}>
+					<div className={styles.toggleText}>
+						<span className="label">Keyboard shortcuts</span>
+						<p className="hint" id={shortcutsHintId}>
+							{shortcutsEnabled
+								? "On — configure below which key fires each action."
+								: "Off — shortcuts do nothing, and the key bindings stay hidden."}
+						</p>
+					</div>
+					<Switch
+						checked={shortcutsEnabled}
+						onChange={(next) => {
+							setShortcutsEnabled(next);
+							if (!next) setShortcutError(null);
+						}}
+						label="Keyboard shortcuts"
+						describedBy={shortcutsHintId}
+						disabled={savingShortcuts || busy}
+					/>
 				</div>
 
-				{shortcutError && (
-					<p className="msg msg--error" role="alert">
-						{shortcutError}
-					</p>
+				{/* Key bindings are only meaningful while shortcuts are on, so they
+			    appear with the switch rather than sitting there disabled. Bindings
+			    stay in local state while off so re-enabling does not wipe keys. */}
+				{shortcutsEnabled && (
+					<>
+						<p className="hint">
+							The key each shortcut fires on. Hold <strong>Alt</strong> or <strong>Shift</strong> plus the key —
+							“W” means Alt+W or Shift+W. Each action needs its own single letter A–Z.
+						</p>
+
+						<div className={styles.shortcutRows}>
+							{SHORTCUT_ORDER.map((action) => (
+								<div className={styles.shortcutRow} key={action}>
+									<span className={styles.shortcutLabel}>{SHORTCUT_LABELS[action]}</span>
+									<Field
+										label={`${SHORTCUT_LABELS[action]} key`}
+										hint="A single letter A–Z. Pressed with Alt or Shift."
+									>
+									{(props) => (
+											<input
+												{...props}
+												type="text"
+												className={`input ${styles.shortcutInput}`}
+												autoComplete="off"
+												maxLength={1}
+												value={keys[action]}
+												aria-label={`${SHORTCUT_LABELS[action]} key`}
+												onChange={(ev) => {
+													// One character, lowercased; anything else is a paste the
+													// save validation will catch, but normalising on input keeps
+													// the field tidy.
+													const next = ev.target.value.slice(-1).toLowerCase();
+													setKeys((current) => ({ ...current, [action]: next }));
+													if (shortcutError) setShortcutError(null);
+												}}
+												aria-invalid={shortcutError ? true : undefined}
+											/>
+										)}
+									</Field>
+								</div>
+							))}
+						</div>
+
+						{shortcutError && (
+							<p className="msg msg--error" role="alert">
+								{shortcutError}
+							</p>
+						)}
+					</>
 				)}
 
 				<div className={styles.actions}>
