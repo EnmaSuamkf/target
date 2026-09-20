@@ -33,7 +33,8 @@ import type { Dictation } from "./useDictation.ts";
  *   Default key: S.
  *
  * Which letter fires which action is configured in the Settings view and
- * persisted by the hub (see `ShortcutSettings` in api/types.ts). The bindings
+ * persisted by the hub (see `ShortcutSettings` in api/types.ts), behind a
+ * master enable switch — when that switch is off this hook is a no-op. The bindings
  * are read through a ref, so the listener is attached once and always sees the
  * latest values — the same trick `usePolling` uses, and it matters here both
  * because the app re-renders every 2s on the poll and because a saved change
@@ -63,6 +64,8 @@ export interface KeyboardShortcutHandlers {
 	onCreateWorkflow: () => void;
 	/** Configured key per action; defaults to W/R/N/C/S when nothing is saved yet. */
 	bindings: Record<ShortcutAction, ShortcutBinding>;
+	/** Master switch from Settings; when false the hook ignores every combo. Defaults to true. */
+	enabled?: boolean;
 }
 
 const WORKFLOW_LIST_SELECTOR = "[data-workflow-list]";
@@ -94,12 +97,18 @@ function modalOpen(): boolean {
 	return document.querySelector('[role="dialog"][aria-modal="true"]') !== null;
 }
 
-export function useKeyboardShortcuts({ view, dictation, onCreateWorkflow, bindings }: KeyboardShortcutHandlers): void {
-	const handlersRef = useRef({ view, dictation, onCreateWorkflow, bindings });
-	handlersRef.current = { view, dictation, onCreateWorkflow, bindings };
+export function useKeyboardShortcuts({ view, dictation, onCreateWorkflow, bindings, enabled = true }: KeyboardShortcutHandlers): void {
+	const handlersRef = useRef({ view, dictation, onCreateWorkflow, bindings, enabled });
+	handlersRef.current = { view, dictation, onCreateWorkflow, bindings, enabled };
 
 	useEffect(() => {
 		const onKeyDown = (ev: KeyboardEvent): void => {
+			// Master switch off: ignore every combo without preventDefault, so the
+			// keystroke still reaches the page (typing, browser shortcuts, etc.).
+			if (!handlersRef.current.enabled) {
+				return;
+			}
+
 			// Bare Alt or bare Shift combos only: exactly one of Alt/Shift must be
 			// held. Ignore Alt+Shift (layout switching on some systems) and
 			// Ctrl/Cmd (the OS and window manager grab those), as well as auto-repeat

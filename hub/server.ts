@@ -51,8 +51,8 @@
  *   GET    /api/settings/notifications/slack-credentials   → Slack delivery tokens (flags; admin also gets effective xoxc/xoxd)
  *   PUT    /api/settings/notifications/slack-credentials   → replace Slack delivery tokens (admin token; blank keeps existing)
  *   POST   /api/settings/notifications/test                → send a Slack connection-test DM (admin token)
- *   GET    /api/settings/shortcuts                        → keyboard-shortcut bindings (key per action)
- *   PUT    /api/settings/shortcuts                        → replace the shortcut bindings (admin token)
+ *   GET    /api/settings/shortcuts                        → keyboard-shortcut preferences (master switch + key per action)
+ *   PUT    /api/settings/shortcuts                        → replace the shortcut preferences (admin token)
  *   GET    /api/settings/report                           → activity-reporting preferences (ingest URL + related knobs)
  *   PUT    /api/settings/report                           → replace the activity-reporting preferences (admin token)
  *   GET    /api/settings/docker-mounts                    → default docker bind-mount paths (applied to every docker workflow)
@@ -1845,12 +1845,13 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 
 	// --- /api/settings/shortcuts ---
 	//
-	// The keyboard-shortcut bindings behind the UI's Settings view: one key per
-	// action (focus the first workflow, toggle dictation, open the create-workflow
-	// modal, press a held step's Continue, press the workflow's Start). The
-	// modifier is still Alt or Shift — only the letter is stored.
-	// Reading is open, like the notification preferences; the PUT replaces the
-	// whole binding set and is admin-gated like every other mutating route.
+	// The keyboard-shortcut preferences behind the UI's Settings view: a master
+	// enable switch plus one key per action (focus the first workflow, toggle
+	// dictation, open the create-workflow modal, press a held step's Continue,
+	// press the workflow's Start). The modifier is still Alt or Shift — only the
+	// letter is stored. Reading is open, like the notification preferences; the
+	// PUT replaces the preferences and is admin-gated like every other mutating
+	// route. Omitting `enabled` or `bindings` keeps whatever is stored.
 	//
 	// Two actions on the same key is rejected rather than stored: whichever fired
 	// would be ambiguous, and the Settings form shows the clash inline first, but
@@ -1867,12 +1868,13 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return;
 			}
 			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				const current = getShortcutSettings();
+				// Omitting `enabled` keeps whatever is stored (fresh hubs default on).
+				const enabled = "enabled" in body ? body.enabled === true : current.enabled;
 				// Omitting `bindings` keeps whatever is stored, so a client that only
-				// flips one key can't silently wipe the others.
+				// flips the master switch can't silently wipe the keys.
 				const bindings =
-					"bindings" in body
-						? normalizeShortcutBindings(body.bindings)
-						: getShortcutSettings().bindings;
+					"bindings" in body ? normalizeShortcutBindings(body.bindings) : current.bindings;
 				const keys = new Set<string>();
 				for (const action of [
 					"focusWorkflow",
@@ -1890,10 +1892,14 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					}
 					keys.add(key);
 				}
-				const settings = saveShortcutSettings({ bindings });
-				log(`shortcut settings updated (${Object.entries(settings.bindings)
-					.map(([action, binding]) => `${action}=${binding.key}`)
-					.join(", ")})`);
+				const settings = saveShortcutSettings({ enabled, bindings });
+				log(
+					`shortcut settings updated (shortcuts ${enabled ? "enabled" : "disabled"}; ${Object.entries(
+						settings.bindings,
+					)
+						.map(([action, binding]) => `${action}=${binding.key}`)
+						.join(", ")})`,
+				);
 				sendJson(res, 200, { settings });
 			});
 			return;

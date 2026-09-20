@@ -500,6 +500,8 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		dictation,
 		onCreateWorkflow: () => openCreate(),
 		bindings: shortcutBindings,
+		// Fresh hubs and legacy blobs default to enabled; only an explicit false disables.
+		enabled: shortcutSettings?.enabled !== false,
 	});
 
 	/** Runs a mutating action, then refreshes and reports failures uniformly. */
