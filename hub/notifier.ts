@@ -24,8 +24,9 @@
  * those only exist inside a harness session. Sending is therefore done here, in
  * Node, over plain HTTP, by one of two transports:
  *
- *  1. **Client tokens** (`xoxc` + the `d` cookie, `xoxd`) read from the
- *     environment. This is the same credential pair the Slack web client uses,
+ *  1. **Client tokens** (`xoxc` + the `d` cookie, `xoxd`) from Settings after
+ *     the first save, otherwise from the environment. This is the same credential
+ *     pair the Slack web client uses,
  *     so the hub calls `https://slack.com/api/chat.postMessage` directly — no
  *     MCP anywhere in the path. It exists because creating a Slack app (and
  *     getting an `xoxb-` bot token) needs workspace permissions plenty of
@@ -37,8 +38,8 @@
  *
  * ## Why client tokens come first
  *
- * They are EXPLICIT configuration: someone put two variables in `.env` naming
- * exactly how they want notifications delivered. The `mcpOAuth` entry is
+ * They are EXPLICIT configuration: tokens saved in Settings (or, until the first
+ * save, the `.env` pair) name exactly how notifications should be delivered. The `mcpOAuth` entry is
  * ambient — it may be left over from a `/mcp` login done months ago for
  * something else entirely. Explicit configuration outranks discovery. It is
  * also the shorter path (one request against four: handshake, initialized,
@@ -74,6 +75,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { loadSlackDeliveryTokens } from "./config.ts";
 import { getNotificationSettings } from "./db.ts";
 
 /** Why nothing was sent. Each value maps 1:1 to a case the feature has to handle. */
@@ -82,7 +84,7 @@ export type NotificationSkipReason =
 	| "notifications-disabled"
 	/** Notifications are on but no Slack username is configured, so there's nobody to message. */
 	| "no-slack-username"
-	/** No way to reach Slack could be confirmed: no client tokens in the environment AND no logged-in Slack MCP. */
+	/** No way to reach Slack could be confirmed: no client tokens in Settings/env AND no logged-in Slack MCP. */
 	| "no-transport"
 	/** Every configured transport was attempted and every one of them failed (network, auth, unknown user…). */
 	| "send-failed";
@@ -162,40 +164,24 @@ const SLACK_TIMEOUT_MS = 10_000;
 /** Slack's Web API, which the `xoxc`/`xoxd` pair authenticates against directly. */
 const SLACK_API_BASE = "https://slack.com/api";
 
-/**
- * Where the client tokens are read from, in order, first non-empty wins.
- *
- * Three names because three conventions meet here: this repo prefixes its own
- * variables with `TARGET_` (see `.env.example`), the widely used third-party
- * Slack MCP servers read `SLACK_MCP_*`, and `SLACK_*` is the obvious short
- * form. Accepting all three means an operator who already runs such an MCP puts
- * the tokens in ONE place instead of keeping two copies of a secret that will
- * drift apart the day it rotates.
- */
-const XOXC_ENV_VARS = ["TARGET_SLACK_XOXC_TOKEN", "SLACK_MCP_XOXC_TOKEN", "SLACK_XOXC_TOKEN"] as const;
-const XOXD_ENV_VARS = ["TARGET_SLACK_XOXD_TOKEN", "SLACK_MCP_XOXD_TOKEN", "SLACK_XOXD_TOKEN"] as const;
-
-/** Slack user id shape (`U…`/`W…`), so a username that already IS an id skips the lookup. Shared by both transports. */
+/** Slack user / workspace-user ids (`U…` / `W…`) — used to skip directory lookup. */
 const SLACK_USER_ID = /^[UW][A-Z0-9]{6,}$/;
 
-/** First non-empty value among `names`, trimmed; empty string when none is set. */
-function firstEnv(names: readonly string[]): string {
-	for (const name of names) {
-		const value = (process.env[name] ?? "").trim();
-		if (value !== "") return value;
-	}
-	return "";
-}
-
-/** Claude Code's config directory — `CLAUDE_CONFIG_DIR` when set (which is also what lets tests point this at a throwaway dir). */
 function claudeConfigDir(): string {
 	return process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
 }
 
 /**
- * The Slack web-client tokens from the environment, or null when the pair is
- * incomplete. `.env` is already loaded by config.ts (`process.loadEnvFile`), so
- * "the environment" covers both a real export and the repo's `.env`.
+ * The Slack web-client tokens used for direct delivery, or null when the pair
+ * is incomplete. Precedence:
+ *
+ *  1. Settings (`slack_delivery`) after the operator has saved at least once —
+ *     even if one half was cleared, we do NOT fall through to `.env` (both
+ *     halves are required to send; a half-cleared Settings pair is "no client
+ *     transport").
+ *  2. Otherwise the env chain TARGET_SLACK_* → SLACK_MCP_* → SLACK_* (see
+ *     `loadSlackDeliveryTokens` in config.ts). `.env` is already loaded at
+ *     startup.
  *
  * The `xoxd` value is used EXACTLY as given, not decoded. What the browser
  * stores in the `d` cookie is already percent-encoded, and that stored form is
@@ -203,16 +189,15 @@ function claudeConfigDir(): string {
  * re-encoding an already-encoded value) is how this breaks. So: paste what
  * DevTools shows, and the hub passes it through untouched.
  *
- * Both halves are required. They authenticate different parts of the same
- * request — `xoxc` the `Authorization` header, `xoxd` the `Cookie` — and Slack
- * refuses either one on its own, so half a pair is not a transport.
+ * Token values are never written to log strings — only whether a transport was
+ * found, and Slack's own error codes on failure.
  */
 export function detectSlackClientTokens(): SlackClientTokens | null {
-	const xoxc = firstEnv(XOXC_ENV_VARS);
-	const xoxd = firstEnv(XOXD_ENV_VARS);
-	if (xoxc === "" || xoxd === "") return null;
-	return { xoxc, xoxd };
+	const tokens = loadSlackDeliveryTokens();
+	if (tokens.xoxc === "" || tokens.xoxd === "") return null;
+	return { xoxc: tokens.xoxc, xoxd: tokens.xoxd };
 }
+
 
 /**
  * The Slack MCP entry in Claude Code's credential store, or null when it can't

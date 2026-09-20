@@ -26,10 +26,14 @@ import type {
 	DockerMountSettingsInput,
 	DeviceLinkOutcome,
 	DeviceLinkStatus,
+	DockerFriendlySettings,
+	DockerFriendlySettingsInput,
 	DirListing,
 	HostCapabilities,
 	NotificationSettings,
 	NotificationSettingsInput,
+	SlackDeliverySettings,
+	SlackDeliverySettingsInput,
 	ReportSettings,
 	ReportSettingsInput,
 	SyncSettings,
@@ -816,6 +820,32 @@ export async function saveNotificationSettings(input: NotificationSettingsInput)
 	return data.settings;
 }
 
+/** Slack delivery credentials: configured flags only (no raw tokens). */
+export async function getSlackDeliverySettings(): Promise<SlackDeliverySettings> {
+	const data = await request<{ settings: SlackDeliverySettings }>(
+		"/api/settings/notifications/slack-credentials",
+	);
+	return data.settings;
+}
+
+/**
+ * Replaces stored Slack delivery tokens. Empty / omitted fields keep the
+ * previously saved secret.
+ */
+export async function saveSlackDeliverySettings(
+	input: SlackDeliverySettingsInput,
+): Promise<SlackDeliverySettings> {
+	const data = await request<{ settings: SlackDeliverySettings }>(
+		"/api/settings/notifications/slack-credentials",
+		{
+			method: "PUT",
+			admin: true,
+			body: json(input),
+		},
+	);
+	return data.settings;
+}
+
 /** Keyboard-shortcut bindings: one key per action. */
 export async function getShortcutSettings(): Promise<ShortcutSettings> {
 	const data = await request<{ settings: ShortcutSettings }>("/api/settings/shortcuts");
@@ -861,6 +891,27 @@ export async function getSyncSettings(): Promise<SyncSettings> {
 
 export async function saveSyncSettings(input: { enabled: boolean }): Promise<SyncSettings> {
 	const data = await request<{ settings: SyncSettings }>("/api/settings/sync", {
+		method: "PUT",
+		admin: true,
+		body: json(input),
+	});
+	return data.settings;
+}
+
+/** Docker-friendly hub networking toggle (restart required after save). */
+export async function getDockerFriendlySettings(): Promise<DockerFriendlySettings> {
+	const data = await request<{ settings: DockerFriendlySettings }>("/api/settings/docker-friendly");
+	return data.settings;
+}
+
+/**
+ * Replaces the docker-friendly networking preference. The listen address only
+ * changes after a hub restart.
+ */
+export async function saveDockerFriendlySettings(
+	input: DockerFriendlySettingsInput,
+): Promise<DockerFriendlySettings> {
+	const data = await request<{ settings: DockerFriendlySettings }>("/api/settings/docker-friendly", {
 		method: "PUT",
 		admin: true,
 		body: json(input),

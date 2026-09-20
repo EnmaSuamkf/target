@@ -43,13 +43,15 @@ const steps = [
   },
   {
     description:
-      `Implement the .env support from §3 of ${PLAN}. At the start of loadConfig() in hub/config.ts, load a .env via ` +
-      `process.loadEnvFile(), trying \${TARGET_HOME}/.env first then \${cwd}/.env, ignoring a missing/invalid file. ` +
-      `Add a versioned .env.example listing TARGET_REPORT_URL, TARGET_REPORT_TOKEN, TARGET_REPORT_ENABLED, ` +
-      `TARGET_REPORT_INTERVAL_MS, TARGET_REPORT_INCLUDE_CONVERSATIONS and (commented) TARGET_INSTANCE_ID. Add .env to .gitignore.`,
+      `Implement Settings-first activity reporting from §3 of ${PLAN}. Persist report destination in hub settings ` +
+      `(Settings → Activity reporting). Keep optional process-env overrides for tests/advanced ops ` +
+      `(TARGET_REPORT_URL, TARGET_REPORT_TOKEN, TARGET_REPORT_ENABLED, TARGET_REPORT_INTERVAL_MS, ` +
+      `TARGET_REPORT_INCLUDE_CONVERSATIONS, TARGET_INSTANCE_ID). loadConfig() may still load a private local ` +
+      `.env from \${TARGET_HOME}/.env then cwd for those overrides. Do not add a checked-in .env.example. ` +
+      `Keep .env in .gitignore.`,
     acceptanceCriteria:
-      `.env is loaded during loadConfig() from TARGET_HOME then cwd; .env.example documents every report variable from §3; ` +
-      `.gitignore ignores .env; a test in hub/ proves variables from a temp .env are visible on process.env after loadConfig(); typecheck passes.`,
+      `Activity reporting is configured from Settings; optional .env overrides still load from TARGET_HOME then cwd; ` +
+      `no checked-in .env.example; .gitignore ignores .env; a test in hub/ proves temp .env overrides are visible after loadConfig(); typecheck passes.`,
   },
 
   // ---- Phase A — config surface & durable queue ----

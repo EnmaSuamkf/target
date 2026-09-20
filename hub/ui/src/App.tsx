@@ -8,10 +8,14 @@ import type {
 	CreateWorkflowInput,
 	NotificationSettings,
 	NotificationSettingsInput,
+	DockerFriendlySettings,
+	DockerFriendlySettingsInput,
 	DockerMountSettings,
 	DockerMountSettingsInput,
 	ReportSettings,
 	ReportSettingsInput,
+	SlackDeliverySettings,
+	SlackDeliverySettingsInput,
 	OverridableStepStatus,
 	OverridableWorkflowStatus,
 	SessionInfo,
@@ -221,6 +225,8 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	const [settings, setSettings] = useState<NotificationSettings | null>(null);
 	const [shortcutSettings, setShortcutSettings] = useState<ShortcutSettings | null>(null);
 	const [reportSettings, setReportSettings] = useState<ReportSettings | null>(null);
+	const [slackDeliverySettings, setSlackDeliverySettings] = useState<SlackDeliverySettings | null>(null);
+	const [dockerFriendlySettings, setDockerFriendlySettings] = useState<DockerFriendlySettings | null>(null);
 	const [dockerMountSettings, setDockerMountSettings] = useState<DockerMountSettings | null>(null);
 	const [uiSettings, setUiSettings] = useState<UiSettings | null>(null);
 	const [selectedId, setSelectedId] = useState<string | null>(readHashSelection);
@@ -329,6 +335,14 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		setReportSettings(await api.getReportSettings());
 	}, []);
 
+	const refreshSlackDeliverySettings = useCallback(async (): Promise<void> => {
+		setSlackDeliverySettings(await api.getSlackDeliverySettings());
+	}, []);
+
+	const refreshDockerFriendlySettings = useCallback(async (): Promise<void> => {
+		setDockerFriendlySettings(await api.getDockerFriendlySettings());
+	}, []);
+
 	const refreshDockerMountSettings = useCallback(async (): Promise<void> => {
 		setDockerMountSettings(await api.getDockerMountSettings());
 	}, []);
@@ -382,6 +396,8 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 					refreshSettings(),
 					refreshShortcutSettings(),
 					refreshReportSettings(),
+					refreshSlackDeliverySettings(),
+					refreshDockerFriendlySettings(),
 					refreshDockerMountSettings(),
 					refreshUiSettings(),
 				]);
@@ -399,6 +415,8 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		refreshSettings,
 		refreshShortcutSettings,
 		refreshReportSettings,
+		refreshSlackDeliverySettings,
+		refreshDockerFriendlySettings,
 		refreshDockerMountSettings,
 		refreshUiSettings,
 		reportError,
@@ -1289,6 +1307,20 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		});
 	};
 
+	const handleSaveSlackDeliverySettings = async (input: SlackDeliverySettingsInput): Promise<boolean> => {
+		return await act("Could not save Slack notification settings", async () => {
+			setSlackDeliverySettings(await api.saveSlackDeliverySettings(input));
+			toast.success("Slack notification settings saved.");
+		});
+	};
+
+	const handleSaveDockerFriendlySettings = async (input: DockerFriendlySettingsInput): Promise<boolean> => {
+		return await act("Could not save docker-friendly networking", async () => {
+			setDockerFriendlySettings(await api.saveDockerFriendlySettings(input));
+			toast.success("Docker-friendly networking saved. Restart the hub for the listen address to take effect.");
+		});
+	};
+
 	const handleSaveDockerMountSettings = async (input: DockerMountSettingsInput): Promise<boolean> => {
 		return await act("Could not save docker bind mounts", async () => {
 			setDockerMountSettings(await api.saveDockerMountSettings(input));
@@ -1458,21 +1490,27 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 				  settings &&
 				  shortcutSettings &&
 				  reportSettings &&
+				  slackDeliverySettings &&
+				  dockerFriendlySettings &&
 				  dockerMountSettings &&
 				  uiSettings ? (
 					// Keyed on all save stamps: a successful save in any section re-seeds
 					// that form's local fields from what the hub actually stored.
 					<SettingsView
-						key={`${settings.updatedAt ?? "unsaved"}|${shortcutSettings.updatedAt ?? "unsaved"}|${reportSettings.updatedAt ?? "unsaved"}|${reportSettings.envConfigured}|${dockerMountSettings.updatedAt ?? "unsaved"}|${uiSettings.updatedAt ?? "unsaved"}`}
+						key={`${settings.updatedAt ?? "unsaved"}|${shortcutSettings.updatedAt ?? "unsaved"}|${reportSettings.updatedAt ?? "unsaved"}|${reportSettings.envConfigured}|${slackDeliverySettings.updatedAt ?? "unsaved"}|${slackDeliverySettings.envConfigured}|${dockerFriendlySettings.updatedAt ?? "unsaved"}|${dockerFriendlySettings.envConfigured}|${dockerMountSettings.updatedAt ?? "unsaved"}|${uiSettings.updatedAt ?? "unsaved"}`}
 						settings={settings}
 						shortcutSettings={shortcutSettings}
 						reportSettings={reportSettings}
+						slackDeliverySettings={slackDeliverySettings}
+						dockerFriendlySettings={dockerFriendlySettings}
 						dockerMountSettings={dockerMountSettings}
 						uiSettings={uiSettings}
 						busy={busy}
 						onSave={handleSaveNotificationSettings}
 						onSaveShortcuts={handleSaveShortcutSettings}
 						onSaveReport={handleSaveReportSettings}
+						onSaveSlackDelivery={handleSaveSlackDeliverySettings}
+						onSaveDockerFriendly={handleSaveDockerFriendlySettings}
 						onSaveDockerMounts={handleSaveDockerMountSettings}
 						onSaveUi={handleSaveUiSettings}
 					/>
