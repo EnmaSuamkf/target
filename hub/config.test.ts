@@ -26,6 +26,7 @@ fs.writeFileSync(path.join(String(process.env.TARGET_HOME), ".env"), "# test env
 
 const {
 	loadConfig,
+	loadSyncConfigFromEnv,
 	syncDockerFriendlyNetworking,
 	DOCKER_FRIENDLY_HOST,
 	DOCKER_FRIENDLY_PORT,
@@ -58,6 +59,38 @@ test("the watchdog defaults are the documented ones", () => {
 	assert.equal(cfg.progressProbeThrottleMs, 5_000);
 	// The queued clock is deliberately untouched by this feature.
 	assert.equal(cfg.queuedTimeoutMs, 6 * 60 * 60 * 1000);
+});
+
+test("loadSyncConfigFromEnv defaults the sync/heartbeat interval to 10s", () => {
+	const prevUrl = process.env.TARGET_SYNC_URL;
+	const prevInt = process.env.TARGET_SYNC_INTERVAL_MS;
+	process.env.TARGET_SYNC_URL = "https://sync.example";
+	delete process.env.TARGET_SYNC_INTERVAL_MS;
+	try {
+		assert.equal(loadSyncConfigFromEnv().intervalMs, 10_000);
+	} finally {
+		if (prevUrl === undefined) delete process.env.TARGET_SYNC_URL;
+		else process.env.TARGET_SYNC_URL = prevUrl;
+		if (prevInt === undefined) delete process.env.TARGET_SYNC_INTERVAL_MS;
+		else process.env.TARGET_SYNC_INTERVAL_MS = prevInt;
+	}
+});
+
+test("TARGET_SYNC_INTERVAL_MS overrides the default and floors below MIN_SYNC_INTERVAL_MS", () => {
+	const prevUrl = process.env.TARGET_SYNC_URL;
+	const prevInt = process.env.TARGET_SYNC_INTERVAL_MS;
+	process.env.TARGET_SYNC_URL = "https://sync.example";
+	try {
+		process.env.TARGET_SYNC_INTERVAL_MS = "15000";
+		assert.equal(loadSyncConfigFromEnv().intervalMs, 15_000);
+		process.env.TARGET_SYNC_INTERVAL_MS = "1000";
+		assert.equal(loadSyncConfigFromEnv().intervalMs, 5_000);
+	} finally {
+		if (prevUrl === undefined) delete process.env.TARGET_SYNC_URL;
+		else process.env.TARGET_SYNC_URL = prevUrl;
+		if (prevInt === undefined) delete process.env.TARGET_SYNC_INTERVAL_MS;
+		else process.env.TARGET_SYNC_INTERVAL_MS = prevInt;
+	}
 });
 
 test("a config written before the watchdog has its stepTimeoutMs honored as the idle timeout", () => {

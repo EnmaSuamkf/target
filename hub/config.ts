@@ -427,11 +427,15 @@ export interface SyncConfig {
 	url: string;
 	/** Bearer client token; may be empty until the first register succeeds. */
 	token: string;
-	/** Poll cadence in ms (floored so a typo can't busy-loop). */
+	/**
+	 * Poll/heartbeat cadence in ms (floored so a typo can't busy-loop).
+	 * Default 10s; target-server online TTL is expected to be ~3× this (30s).
+	 */
 	intervalMs: number;
 }
 
-const DEFAULT_SYNC_INTERVAL_MS = 30_000;
+/** Default sync/heartbeat tick (10s). Server presence TTL should stay ~3× this. */
+const DEFAULT_SYNC_INTERVAL_MS = 10_000;
 const MIN_SYNC_INTERVAL_MS = 5_000;
 
 /** Remote-sync values read from the environment. */
