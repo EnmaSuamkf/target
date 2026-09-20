@@ -41,7 +41,7 @@ for (const suffix of ["XOXC", "XOXD"]) {
 	for (const prefix of ["TARGET_SLACK_", "SLACK_MCP_", "SLACK_"]) delete process.env[`${prefix}${suffix}_TOKEN`];
 }
 
-const { saveNotificationSettings } = await import("./db.ts");
+const { open, saveNotificationSettings, saveSlackDeliverySettings } = await import("./db.ts");
 const {
 	_impl,
 	detectSlackClientTokens,
@@ -330,6 +330,70 @@ test("a blank variable counts as unset, so it can't shadow a name set further do
 	});
 	assert.deepEqual(detectSlackClientTokens(), { xoxc: "xoxc-bare", xoxd: "xoxd-bare" });
 });
+
+
+/** Clears stored Slack delivery Settings so env-fallback tests stay isolated. */
+function clearSlackDeliverySettings(): void {
+	open().prepare("DELETE FROM settings WHERE key = ?").run("slack_delivery");
+}
+
+test("Settings-stored tokens win over the environment after the first save", (t) => {
+	clearSlackDeliverySettings();
+	t.after(clearSlackDeliverySettings);
+	withEnv(t, {
+		TARGET_SLACK_XOXC_TOKEN: "xoxc-env",
+		TARGET_SLACK_XOXD_TOKEN: "xoxd-env",
+	});
+	saveSlackDeliverySettings({ xoxcToken: "xoxc-settings", xoxdToken: "xoxd-settings" });
+	assert.deepEqual(detectSlackClientTokens(), { xoxc: "xoxc-settings", xoxd: "xoxd-settings" });
+});
+
+test("without a Settings save, the existing env chain still supplies tokens", (t) => {
+	clearSlackDeliverySettings();
+	t.after(clearSlackDeliverySettings);
+	withEnv(t, {
+		TARGET_SLACK_XOXC_TOKEN: "xoxc-env-only",
+		TARGET_SLACK_XOXD_TOKEN: "xoxd-env-only",
+	});
+	assert.deepEqual(detectSlackClientTokens(), { xoxc: "xoxc-env-only", xoxd: "xoxd-env-only" });
+});
+
+test("an incomplete Settings pair does not fall through to env (both halves required)", (t) => {
+	clearSlackDeliverySettings();
+	t.after(clearSlackDeliverySettings);
+	withEnv(t, {
+		TARGET_SLACK_XOXC_TOKEN: "xoxc-env",
+		TARGET_SLACK_XOXD_TOKEN: "xoxd-env",
+	});
+	// Write a saved row with only one half — empty on purpose, so Settings "won"
+	// and must not leak back to `.env` for the missing half.
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(
+			"slack_delivery",
+			JSON.stringify({ xoxcToken: "xoxc-only", xoxdToken: "" }),
+			new Date().toISOString(),
+		);
+	assert.equal(detectSlackClientTokens(), null);
+});
+
+test("notifier source does not interpolate client token values into log strings", () => {
+	// Guardrail: HTTP Authorization/Cookie headers may carry tokens, but log /
+	// detail template strings must not. Scan the module text for dangerous
+	// interpolations of the token fields into messages.
+	const src = fs.readFileSync(new URL("./notifier.ts", import.meta.url), "utf8");
+	assert.equal(/\blog\([^)]*xox[cd]/.test(src), false);
+	assert.equal(/detail:[^\n]*\$\{[^}]*xox[cd]/.test(src), false);
+	assert.equal(/\bconsole\.\w+\([^)]*xox[cd]/.test(src), false);
+	// Failure `detail` is Slack's own error code / Error.message — never our secrets.
+	assert.match(src, /authorization: `Bearer \$\{tokens\.xoxc\}`/);
+	assert.match(src, /cookie: `d=\$\{tokens\.xoxd\}`/);
+});
+
+
 
 // --- resolveSlackTransports ---------------------------------------------
 

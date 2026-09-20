@@ -554,6 +554,23 @@ export interface NotificationSettingsInput {
 	channels: NotificationChannels;
 }
 
+/** Slack delivery tokens (xoxc / xoxd) — secrets never cross the wire. */
+export interface SlackDeliverySettings {
+	xoxcConfigured: boolean;
+	xoxdConfigured: boolean;
+	updatedAt: string | null;
+	/** True while the hub is still using usable `.env` tokens (nothing saved here yet). */
+	envConfigured: boolean;
+}
+
+/** Payload accepted by PUT /api/settings/notifications/slack-credentials. */
+export interface SlackDeliverySettingsInput {
+	/** Omit or leave empty to keep the stored xoxc token. */
+	xoxc?: string;
+	/** Omit or leave empty to keep the stored xoxd token. */
+	xoxd?: string;
+}
+
 /** The actions a hub shortcut can be bound to — the five the hub ships with. */
 export type ShortcutAction =
 	| "focusWorkflow"
@@ -594,6 +611,19 @@ export interface ReportSettings {
 	updatedAt: string | null;
 	/** True while the hub is still reading these values from `.env`. */
 	envConfigured: boolean;
+}
+
+/** Docker-friendly hub networking (0.0.0.0 bind + sandboxHost). */
+export interface DockerFriendlySettings {
+	dockerFriendlyHub: boolean;
+	updatedAt: string | null;
+	/** True while behaviour is still driven by `TARGET_HUB_DOCKER_FRIENDLY` in `.env`. */
+	envConfigured: boolean;
+}
+
+/** Payload accepted by PUT /api/settings/docker-friendly. */
+export interface DockerFriendlySettingsInput {
+	dockerFriendlyHub: boolean;
 }
 
 /** Default docker bind-mount paths (Settings). */

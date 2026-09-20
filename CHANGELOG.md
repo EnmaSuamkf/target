@@ -120,11 +120,10 @@ The current version is reported by every instance to the central server (see
   activity — workflow lifecycle, step transitions, token usage and (optionally)
   conversation digests — to a server for monitoring. Events are queued durably
   in a new `report_events` table and flushed in batches by the daemon.
-- **`.env` configuration.** The report destination and behaviour are read from a
-  `.env` file (`TARGET_REPORT_URL`, `TARGET_REPORT_TOKEN`,
-  `TARGET_REPORT_ENABLED`, `TARGET_REPORT_INTERVAL_MS`,
-  `TARGET_REPORT_INCLUDE_CONVERSATIONS`, `TARGET_INSTANCE_ID`). See
-  `.env.example`. With no URL configured, reporting is fully disabled.
+- **Activity reporting configuration.** The report destination and behaviour are
+  managed from **Settings → Activity reporting** (URL, token, interval, conversation
+  privacy). Legacy process-env overrides remain for tests/advanced ops. With no URL
+  configured, reporting is fully disabled.
 - **Client versioning.** `hub/version.ts` exposes `TARGET_VERSION` (sourced from
   `package.json`); it is included in every report so the server sees which
   version each user runs.

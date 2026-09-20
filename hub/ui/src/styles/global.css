@@ -374,6 +374,9 @@ kbd,
 .msg--success {
 	color: var(--success-700);
 }
+.msg--warn {
+	color: var(--warn-700);
+}
 .msg--muted {
 	color: var(--text-muted);
 }

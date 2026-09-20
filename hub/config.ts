@@ -14,7 +14,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { getReportSettings, getSyncCredentials } from "./db.ts";
+import { getDockerFriendlySettings, getReportSettings, getSlackDeliverySettings, getSyncCredentials } from "./db.ts";
 import { dockerHostAddress } from "./sandbox-net.ts";
 
 export interface HubConfig {
@@ -235,8 +235,19 @@ function envFlag(value: string | undefined, fallback: boolean): boolean {
 	return fallback;
 }
 
-/** Whether `TARGET_HUB_DOCKER_FRIENDLY` opts into docker-friendly hub networking. */
+/**
+ * Whether docker-friendly hub networking is on.
+ *
+ * Precedence: Settings win after the first save; until then the
+ * `TARGET_HUB_DOCKER_FRIENDLY` env flag applies (default false). Changing the
+ * preference requires a hub restart — bind address / sandboxHost are applied
+ * only during loadConfig() → syncDockerFriendlyNetworking().
+ */
 export function dockerFriendlyHubEnabled(): boolean {
+	const stored = getDockerFriendlySettings();
+	if (stored.updatedAt != null) {
+		return stored.dockerFriendlyHub;
+	}
 	return envFlag(process.env.TARGET_HUB_DOCKER_FRIENDLY, false);
 }
 
@@ -245,13 +256,17 @@ function sandboxHostForDockerFriendlyEnv(): string {
 }
 
 /**
- * Merge docker-friendly networking from `TARGET_HUB_DOCKER_FRIENDLY` into cfg.
+ * Merge docker-friendly networking into cfg from the effective enablement flag
+ * (`dockerFriendlyHubEnabled()` — Settings after first save, else
+ * `TARGET_HUB_DOCKER_FRIENDLY`).
  *
- * Precedence: when the flag is **true**, env overrides `host`, `port`, and
- * `sandboxHost` on every startup. When **false/unset**, env forces loopback
- * `host` and removes env-managed `sandboxHost`; an operator-owned
- * `sandboxHost` (present while the flag was off, or marked `sandboxHostManual`)
- * is preserved.
+ * When enabled is **true**, overrides `host`, `port`, and `sandboxHost` on
+ * every startup. When **false**, forces loopback `host` and removes
+ * env/Settings-managed `sandboxHost`; an operator-owned `sandboxHost` (present
+ * while the flag was off, or marked `sandboxHostManual`) is preserved.
+ *
+ * Listen address changes take effect only after a hub restart (this runs inside
+ * loadConfig() at process start).
  */
 export function syncDockerFriendlyNetworking(
 	cfg: HubConfig,
@@ -346,6 +361,48 @@ export function loadReportConfig(): ReportConfig {
 		};
 	}
 	return loadReportConfigFromEnv();
+}
+
+/**
+ * Slack web-client tokens (`xoxc` / `xoxd`) used for direct delivery.
+ * Three env name families are accepted (same order as notifier.ts): TARGET_*,
+ * SLACK_MCP_*, then bare SLACK_*.
+ */
+export interface SlackDeliveryTokens {
+	xoxc: string;
+	xoxd: string;
+}
+
+const SLACK_XOXC_ENV_VARS = ["TARGET_SLACK_XOXC_TOKEN", "SLACK_MCP_XOXC_TOKEN", "SLACK_XOXC_TOKEN"] as const;
+const SLACK_XOXD_ENV_VARS = ["TARGET_SLACK_XOXD_TOKEN", "SLACK_MCP_XOXD_TOKEN", "SLACK_XOXD_TOKEN"] as const;
+
+function firstNonEmptyEnv(names: readonly string[]): string {
+	for (const name of names) {
+		const value = (process.env[name] ?? "").trim();
+		if (value !== "") return value;
+	}
+	return "";
+}
+
+/** Slack delivery tokens read from the environment (legacy `.env` path). */
+export function loadSlackDeliveryTokensFromEnv(): SlackDeliveryTokens {
+	return {
+		xoxc: firstNonEmptyEnv(SLACK_XOXC_ENV_VARS),
+		xoxd: firstNonEmptyEnv(SLACK_XOXD_ENV_VARS),
+	};
+}
+
+/**
+ * Effective Slack delivery tokens. Settings saved from the UI win; until the
+ * operator saves at least once, the `.env` values (if any) still apply so
+ * existing installs keep working without migration.
+ */
+export function loadSlackDeliveryTokens(): SlackDeliveryTokens {
+	const stored = getSlackDeliverySettings();
+	if (stored.updatedAt != null) {
+		return { xoxc: stored.xoxcToken, xoxd: stored.xoxdToken };
+	}
+	return loadSlackDeliveryTokensFromEnv();
 }
 
 /** True when the URL is a non-loopback plaintext http:// endpoint (worth a startup warning). */

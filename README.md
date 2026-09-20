@@ -606,19 +606,13 @@ cannot rewrite what the hub is *listening* on: bound to loopback it refuses the
 connection however right the address is, and the agent reads that as "the hub
 isn't running" and improvises.
 
-**Opt in via `.env` (default off).** Copy `.env.example` to `.env` (git-ignored)
-and set:
-
-```
-TARGET_HUB_DOCKER_FRIENDLY=true
-```
-
-Unset or `false` keeps today's defaults (`host: 127.0.0.1`, port `8893`). When
-`true`, the hub applies docker-friendly networking on startup: `host: 0.0.0.0`,
+**Opt in from Settings (default off).** Open **Settings → Docker-friendly hub networking**
+and turn the toggle on, then **restart the hub** so the listen address rebinds.
+When enabled, the hub applies docker-friendly networking on startup: `host: 0.0.0.0`,
 port `8893`, and `sandboxHost: 172.17.0.1` (the usual docker bridge gateway)
-into `~/.target/config.json`, then listens there. Restart the hub after
-changing `.env`. Use this when you run **`--sandbox docker` workflows that use
-TCP tools** (or any step that calls the hub API from inside the container).
+into `~/.target/config.json`, then listens there. Use this when you run
+**`--sandbox docker` workflows that use TCP tools** (or any step that calls the
+hub API from inside the container).
 
 That exposes the hub on all interfaces, so it stays opt-in — every mutating
 route still needs the admin token, but treat it as you would any bound port;
@@ -629,6 +623,15 @@ or a hub reached by hostname). Set `sandboxHost` for anything the default bridge
 gateway can't guess. A sandboxed dispatch onto a loopback-bound hub logs a
 warning saying exactly this, so you find out from the log rather than from a
 confused agent.
+
+### Slack notifications (Settings)
+
+Slack username and delivery credentials (browser session `xoxc` / `xoxd` tokens)
+are managed together in **Settings → Notifications**. Paste both tokens from an
+open Slack web session (DevTools / cookies), set who receives messages, save,
+and the hub posts to Slack directly. Until you save credentials in Settings at
+least once, a legacy process-env pair is still accepted for tests and advanced
+ops — day-to-day use does not need a `.env` file.
 
 ### Activity reporting — Advanced/Legacy `.env`
 
@@ -641,11 +644,10 @@ conversation text is sent. There is no URL, token, privacy or off switch in
 the linked path; disconnect the device to stop linked remote traffic.
 
 The variables below are only for an unlinked, explicitly legacy integration.
-Copy `.env.example` to `.env` (git-ignored) and set at least the URL. The hub
-looks for it first at `TARGET_HOME/.env` (`~/.target/.env`), then at the
-repo-root `.env` — resolved from the hub's own location, so it is found no
-matter which directory the daemon was started from. A restart is required:
-the file is only read at startup.
+Prefer **Settings → Activity reporting** when the hub is not linked. Legacy
+process-env / private local `.env` overrides remain for unlinked advanced ops
+(no checked-in template). A restart is required for env changes: the file is
+only read at startup.
 
 ```
 TARGET_REPORT_URL=https://telemetria.example.com/ingest   # empty = reporting OFF
@@ -681,7 +683,16 @@ TARGET_SYNC_ENABLED=true
 # TARGET_SYNC_INTERVAL_MS=30000          # poll cadence (default 30s)
 ```
 
-Wire contract: `target-server/docs/remote-sync.md`.
+Wire contract: `target-server/docs/remote-sync.md`. Moving this into Settings is
+future work; there is no checked-in env template for it.
+
+### Data directory and other process env
+
+Day-to-day hub configuration (Slack notifications, activity reporting, docker-friendly
+networking, notifications, shortcuts) lives in **Settings**. Optional process
+environment overrides remain available for tests and advanced ops — for example
+`TARGET_HOME` to relocate the hub data directory (default `~/.target`). A local
+`.env` is never required for day-to-day use.
 
 ### Optional device link to target-server
 

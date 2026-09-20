@@ -23,6 +23,7 @@ process.env.TARGET_HOME = path.join(tmpHome, ".target");
 fs.mkdirSync(String(process.env.TARGET_HOME), { recursive: true });
 fs.writeFileSync(path.join(String(process.env.TARGET_HOME), ".env"), "# test environment\n");
 
+
 const {
 	loadConfig,
 	syncDockerFriendlyNetworking,
@@ -31,6 +32,8 @@ const {
 	DOCKER_FRIENDLY_SANDBOX_HOST_DEFAULT,
 	LOOPBACK_HOST,
 } = await import("./config.ts");
+const { open } = await import("./db.ts");
+
 const { dockerHostAddress } = await import("./sandbox-net.ts");
 
 function expectedEnvSandboxHost(): string {
@@ -90,6 +93,9 @@ function readPersisted(): Record<string, unknown> {
 }
 
 function withDockerFriendlyEnv(value: string | undefined, fn: () => void): void {
+	// Env-path tests assume Settings have never been saved. Clear any leftover row
+	// (e.g. from a parallel suite sharing TARGET_HOME) so updatedAt stays null.
+	open().prepare("DELETE FROM settings WHERE key = ?").run("docker_friendly");
 	const prev = process.env.TARGET_HUB_DOCKER_FRIENDLY;
 	if (value === undefined) delete process.env.TARGET_HUB_DOCKER_FRIENDLY;
 	else process.env.TARGET_HUB_DOCKER_FRIENDLY = value;

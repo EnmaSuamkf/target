@@ -2644,6 +2644,176 @@ export function saveSyncSettings(input: { enabled: boolean }): SyncSettings {
 	return settings;
 }
 
+// --- Slack delivery credentials (xoxc / xoxd) -----------------------------
+//
+// How the hub reaches Slack used to live only in `.env`. Editable from
+// Settings → Notifications now; until the operator saves at least once,
+// loadSlackDeliveryTokens() still reads the environment (see config.ts).
+
+/** The single `settings` row the Slack client-token pair lives in. */
+const SLACK_DELIVERY_SETTINGS_KEY = "slack_delivery";
+
+export interface SlackDeliverySettings {
+	/** Slack web-client token (`xoxc-…`). Never returned by the public API. */
+	xoxcToken: string;
+	/** Slack `d` cookie value (`xoxd-…`). Never returned by the public API. */
+	xoxdToken: string;
+	/** Null until saved at least once from Settings (`.env` still applies until then). */
+	updatedAt: string | null;
+}
+
+/** What GET /api/settings/slack-delivery returns — no secret crosses the wire. */
+export interface PublicSlackDeliverySettings {
+	xoxcConfigured: boolean;
+	xoxdConfigured: boolean;
+	updatedAt: string | null;
+	/** True while behaviour is still driven by `.env` because nothing was saved here yet. */
+	envConfigured: boolean;
+}
+
+export function defaultSlackDeliverySettings(): SlackDeliverySettings {
+	return {
+		xoxcToken: "",
+		xoxdToken: "",
+		updatedAt: null,
+	};
+}
+
+export function getSlackDeliverySettings(): SlackDeliverySettings {
+	const row = open().prepare("SELECT * FROM settings WHERE key = ?").get(SLACK_DELIVERY_SETTINGS_KEY) as
+		| Record<string, unknown>
+		| undefined;
+	if (!row) return defaultSlackDeliverySettings();
+	try {
+		const parsed = JSON.parse(String(row.value)) as Record<string, unknown>;
+		return {
+			xoxcToken: typeof parsed.xoxcToken === "string" ? parsed.xoxcToken.trim() : "",
+			xoxdToken: typeof parsed.xoxdToken === "string" ? parsed.xoxdToken.trim() : "",
+			updatedAt: row.updated_at == null ? null : String(row.updated_at),
+		};
+	} catch {
+		return defaultSlackDeliverySettings();
+	}
+}
+
+export function toPublicSlackDeliverySettings(
+	stored: SlackDeliverySettings,
+	envConfigured: boolean,
+): PublicSlackDeliverySettings {
+	return {
+		xoxcConfigured: stored.xoxcToken.length > 0,
+		xoxdConfigured: stored.xoxdToken.length > 0,
+		updatedAt: stored.updatedAt,
+		envConfigured,
+	};
+}
+
+/**
+ * Persists the Slack client-token pair. An empty (or omitted) field keeps the
+ * previously stored secret so the Settings form can update one half without
+ * wiping the other — same UX as the report bearer token.
+ */
+export function saveSlackDeliverySettings(input: {
+	xoxcToken?: string;
+	xoxdToken?: string;
+}): SlackDeliverySettings {
+	const previous = getSlackDeliverySettings();
+	const xoxcToken =
+		typeof input.xoxcToken === "string" && input.xoxcToken.trim() !== ""
+			? input.xoxcToken.trim()
+			: previous.xoxcToken;
+	const xoxdToken =
+		typeof input.xoxdToken === "string" && input.xoxdToken.trim() !== ""
+			? input.xoxdToken.trim()
+			: previous.xoxdToken;
+	const settings: SlackDeliverySettings = {
+		xoxcToken,
+		xoxdToken,
+		updatedAt: new Date().toISOString(),
+	};
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(
+			SLACK_DELIVERY_SETTINGS_KEY,
+			JSON.stringify({
+				xoxcToken: settings.xoxcToken,
+				xoxdToken: settings.xoxdToken,
+			}),
+			settings.updatedAt,
+		);
+	return settings;
+}
+
+// --- Docker-friendly hub networking (Settings) ---------------------------
+//
+// Whether the hub binds on 0.0.0.0 / publishes a docker-bridge sandboxHost.
+// Used to live only as TARGET_HUB_DOCKER_FRIENDLY in `.env`. Editable from
+// Settings now; until the operator saves at least once, dockerFriendlyHubEnabled()
+// still reads the environment (see config.ts).
+//
+// Changing this preference requires a hub restart: listen address / sandboxHost
+// are applied in loadConfig() → syncDockerFriendlyNetworking() at process start.
+
+/** The single `settings` row the docker-friendly networking toggle lives in. */
+const DOCKER_FRIENDLY_SETTINGS_KEY = "docker_friendly";
+
+export interface DockerFriendlySettings {
+	/** When true, hub uses docker-friendly host/port/sandboxHost on next startup. */
+	dockerFriendlyHub: boolean;
+	/** Null until saved at least once from Settings (`.env` still applies until then). */
+	updatedAt: string | null;
+}
+
+export function defaultDockerFriendlySettings(): DockerFriendlySettings {
+	return {
+		dockerFriendlyHub: false,
+		updatedAt: null,
+	};
+}
+
+export function getDockerFriendlySettings(): DockerFriendlySettings {
+	const row = open().prepare("SELECT * FROM settings WHERE key = ?").get(DOCKER_FRIENDLY_SETTINGS_KEY) as
+		| Record<string, unknown>
+		| undefined;
+	if (!row) return defaultDockerFriendlySettings();
+	try {
+		const parsed = JSON.parse(String(row.value)) as Record<string, unknown>;
+		return {
+			dockerFriendlyHub: parsed.dockerFriendlyHub === true,
+			updatedAt: row.updated_at == null ? null : String(row.updated_at),
+		};
+	} catch {
+		return defaultDockerFriendlySettings();
+	}
+}
+
+/**
+ * Persists the docker-friendly networking toggle and stamps updatedAt.
+ * A hub restart is required afterwards for the listen address to change.
+ */
+export function saveDockerFriendlySettings(input: {
+	dockerFriendlyHub: boolean;
+}): DockerFriendlySettings {
+	const settings: DockerFriendlySettings = {
+		dockerFriendlyHub: input.dockerFriendlyHub === true,
+		updatedAt: new Date().toISOString(),
+	};
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(
+			DOCKER_FRIENDLY_SETTINGS_KEY,
+			JSON.stringify({ dockerFriendlyHub: settings.dockerFriendlyHub }),
+			settings.updatedAt,
+		);
+	return settings;
+}
+
 // --- Docker bind-mount defaults (Settings) --------------------------------
 
 const DOCKER_MOUNT_SETTINGS_KEY = "docker_mounts";

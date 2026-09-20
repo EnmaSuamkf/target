@@ -413,8 +413,8 @@ for (const f of [path.join(targetDir(), ".env"), path.join(process.cwd(), ".env"
           </tbody>
         </table>
       </div>
-      <p>Se versiona un <code>.env.example</code> y se añade <code>.env</code> a <code>.gitignore</code>:</p>
-      <pre><code># .env.example
+      <p>La configuración cotidiana vive en <strong>Settings → Activity reporting</strong>. No hay <code>.env.example</code> versionado; <code>.env</code> sigue en <code>.gitignore</code> por si alguien usa overrides locales:</p>
+      <pre><code># optional local overrides (not required; prefer Settings)
 TARGET_REPORT_URL=https://telemetria.midominio.com/ingest
 TARGET_REPORT_TOKEN=cambia-esto
 TARGET_REPORT_ENABLED=true
@@ -424,10 +424,11 @@ TARGET_REPORT_INCLUDE_CONVERSATIONS=digest
       <div class="callout">
         <span class="tag">Nota de config</span>
         <p>
-          Los campos de reporte se leen del entorno, no de
-          <code>config.json</code>, para que la URL y el secreto vivan solo en el
-          <code>.env</code> (fuera de git) tal y como pide el requisito. El resto
-          de <code>config.json</code> queda intacto.
+          Los campos de reporte se configuran desde <strong>Settings → Activity reporting</strong>
+          (y se persisten en el almacén de settings del hub). Overrides opcionales por
+          entorno siguen existiendo para tests/ops avanzadas; no hace falta un
+          <code>.env</code> para el uso diario. El resto de <code>config.json</code>
+          queda intacto.
         </p>
       </div>
 
@@ -754,7 +755,7 @@ X-Target-Version: 0.2.0
       <ul>
         <li>Crear <code>CHANGELOG.md</code> y subir <code>package.json</code> a <code>0.2.0</code> (raíz + <code>hub</code> + <code>hub/ui</code>).</li>
         <li><code>hub/version.ts</code> → <code>TARGET_VERSION</code>.</li>
-        <li><code>.env.example</code> + <code>.env</code> en <code>.gitignore</code>.</li>
+        <li>Settings → Activity reporting (+ <code>.env</code> en <code>.gitignore</code> para overrides locales; sin plantilla versionada).</li>
       </ul>
 
       <h3>Fase A — Config y cola</h3>

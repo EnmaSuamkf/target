@@ -48,12 +48,16 @@
  *   DELETE /api/templates/:id                            → remove a template (admin token)
  *   GET    /api/settings/notifications                     → notification preferences (master switch + per-channel config)
  *   PUT    /api/settings/notifications                     → replace the notification preferences (admin token)
+ *   GET    /api/settings/notifications/slack-credentials   → Slack delivery tokens (xoxc/xoxd configured flags only)
+ *   PUT    /api/settings/notifications/slack-credentials   → replace Slack delivery tokens (admin token; blank keeps existing)
  *   GET    /api/settings/shortcuts                        → keyboard-shortcut bindings (key per action)
  *   PUT    /api/settings/shortcuts                        → replace the shortcut bindings (admin token)
  *   GET    /api/settings/report                           → activity-reporting preferences (ingest URL + related knobs)
  *   PUT    /api/settings/report                           → replace the activity-reporting preferences (admin token)
  *   GET    /api/settings/docker-mounts                    → default docker bind-mount paths (applied to every docker workflow)
  *   PUT    /api/settings/docker-mounts                    → replace the default docker bind-mount paths (admin token)
+ *   GET    /api/settings/docker-friendly                  → docker-friendly hub networking toggle (0.0.0.0 bind; restart required)
+ *   PUT    /api/settings/docker-friendly                  → replace docker-friendly hub networking toggle (admin token; restart required)
  *   GET    /api/settings/ui                               → UI catalog visibility (TCP / RCI top-level nav)
  *   PUT    /api/settings/ui                               → replace UI catalog visibility (admin token)
  *   GET    /                                           → ui/index.html
@@ -94,7 +98,12 @@ import {
 } from "./awb.ts";
 import { needsContextReinjection, observeCompaction } from "./compaction.ts";
 import type { HubConfig } from "./config.ts";
-import { isInsecureReportUrl, loadReportConfigFromEnv } from "./config.ts";
+import {
+	dockerFriendlyHubEnabled,
+	isInsecureReportUrl,
+	loadReportConfigFromEnv,
+	loadSlackDeliveryTokensFromEnv,
+} from "./config.ts";
 import { disconnectDeviceLink, pollDeviceLink, startDeviceLink } from "./device-link-client.ts";
 import { getDeviceLinkStatus } from "./device-link.ts";
 import { adoptability, findConversation, listConversations, readConversationPreview } from "./conversations.ts";
@@ -115,6 +124,7 @@ import {
 	promoteQueuedToRunning,
 	deleteTemplate,
 	getDockerMountSettings,
+	getDockerFriendlySettings,
 	getNotificationSettings,
 	getReportSettings,
 	getSyncSettings,
@@ -134,10 +144,14 @@ import {
 	OVERRIDABLE_WORKFLOW_STATUSES,
 	parseTemplateBundle,
 	saveDockerMountSettings,
+	saveDockerFriendlySettings,
 	saveNotificationSettings,
 	saveReportSettings,
 	saveSyncSettings,
 	toPublicReportSettings,
+	getSlackDeliverySettings,
+	saveSlackDeliverySettings,
+	toPublicSlackDeliverySettings,
 	saveShortcutSettings,
 	saveUiSettings,
 	stepProgress,
@@ -1716,6 +1730,72 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		return;
 	}
 
+
+	// --- /api/settings/notifications/slack-credentials ---
+	//
+	// Slack web-client tokens (xoxc / xoxd) used for direct delivery. Nested under
+	// notifications because Settings → Notifications is where operators configure
+	// how Slack is reached. Reading is open like other settings GETs; the PUT is
+	// admin-gated. Raw tokens never leave the server — only whether each half is
+	// configured. Until the operator saves at least once, GET reflects usable
+	// `.env` tokens via envConfigured + the configured flags.
+
+	if (
+		parts[1] === "settings" &&
+		parts[2] === "notifications" &&
+		parts[3] === "slack-credentials" &&
+		!parts[4]
+	) {
+		if (req.method === "GET") {
+			const stored = getSlackDeliverySettings();
+			if (stored.updatedAt != null) {
+				sendJson(res, 200, { settings: toPublicSlackDeliverySettings(stored, false) });
+				return;
+			}
+			const env = loadSlackDeliveryTokensFromEnv();
+			const envConfigured = env.xoxc !== "" && env.xoxd !== "";
+			sendJson(res, 200, {
+				settings: toPublicSlackDeliverySettings(
+					{
+						xoxcToken: env.xoxc,
+						xoxdToken: env.xoxd,
+						updatedAt: null,
+					},
+					envConfigured,
+				),
+			});
+			return;
+		}
+		if (req.method === "PUT" || req.method === "PATCH") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				const previous = getSlackDeliverySettings();
+				const env = previous.updatedAt == null ? loadSlackDeliveryTokensFromEnv() : null;
+				const xoxcRaw = typeof body.xoxc === "string" ? body.xoxc : undefined;
+				const xoxdRaw = typeof body.xoxd === "string" ? body.xoxd : undefined;
+				// First save from Settings while `.env` still holds a half — keep it
+				// when the client sends blank (same pattern as the report token).
+				let xoxcToken = xoxcRaw;
+				let xoxdToken = xoxdRaw;
+				if ((xoxcToken == null || xoxcToken.trim() === "") && previous.xoxcToken === "" && env?.xoxc) {
+					xoxcToken = env.xoxc;
+				}
+				if ((xoxdToken == null || xoxdToken.trim() === "") && previous.xoxdToken === "" && env?.xoxd) {
+					xoxdToken = env.xoxd;
+				}
+				const saved = saveSlackDeliverySettings({ xoxcToken, xoxdToken });
+				log("slack delivery credentials updated");
+				sendJson(res, 200, { settings: toPublicSlackDeliverySettings(saved, false) });
+			});
+			return;
+		}
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
 	// --- /api/settings/shortcuts ---
 	//
 	// The keyboard-shortcut bindings behind the UI's Settings view: one key per
@@ -1916,6 +1996,56 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					const message = err instanceof DockerMountError ? err.message : "invalid mounts";
 					sendJson(res, 400, { error: message });
 				}
+			});
+			return;
+		}
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
+
+	// --- /api/settings/docker-friendly ---
+	//
+	// Toggle docker-friendly hub networking (0.0.0.0 bind + sandboxHost for docker
+	// sandboxes). Dedicated from docker-mounts so that route stays about paths.
+	// Settings win after the first save; until then TARGET_HUB_DOCKER_FRIENDLY
+	// still applies (see dockerFriendlyHubEnabled in config.ts).
+	//
+	// Changing this requires a hub restart: loadConfig() applies host/port/
+	// sandboxHost only at process start via syncDockerFriendlyNetworking().
+
+	if (parts[1] === "settings" && parts[2] === "docker-friendly" && !parts[3]) {
+		if (req.method === "GET") {
+			const stored = getDockerFriendlySettings();
+			if (stored.updatedAt != null) {
+				sendJson(res, 200, { settings: { ...stored, envConfigured: false } });
+				return;
+			}
+			// Nothing saved in Settings yet — reflect the effective env-driven value and
+			// surface envConfigured when TARGET_HUB_DOCKER_FRIENDLY is actually set.
+			const envRaw = (process.env.TARGET_HUB_DOCKER_FRIENDLY ?? "").trim();
+			const envConfigured = envRaw !== "";
+			sendJson(res, 200, {
+				settings: {
+					dockerFriendlyHub: dockerFriendlyHubEnabled(),
+					updatedAt: null,
+					envConfigured,
+				},
+			});
+			return;
+		}
+		if (req.method === "PUT" || req.method === "PATCH") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				const dockerFriendlyHub = body.dockerFriendlyHub === true;
+				const settings = saveDockerFriendlySettings({ dockerFriendlyHub });
+				log(
+					`docker-friendly networking ${dockerFriendlyHub ? "enabled" : "disabled"} (hub restart required to rebind)`,
+				);
+				sendJson(res, 200, { settings: { ...settings, envConfigured: false } });
 			});
 			return;
 		}

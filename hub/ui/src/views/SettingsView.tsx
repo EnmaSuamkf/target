@@ -2,12 +2,16 @@ import { useEffect, useId, useState } from "react";
 import type {
 	DeviceLinkOutcome,
 	DeviceLinkStatus,
+	DockerFriendlySettings,
+	DockerFriendlySettingsInput,
 	DockerMountSettings,
 	DockerMountSettingsInput,
 	NotificationSettings,
 	NotificationSettingsInput,
 	ReportSettings,
 	ReportSettingsInput,
+	SlackDeliverySettings,
+	SlackDeliverySettingsInput,
 	ShortcutAction,
 	ShortcutSettings,
 	ShortcutSettingsInput,
@@ -54,24 +58,32 @@ export function SettingsView({
 	settings,
 	shortcutSettings,
 	reportSettings,
+	slackDeliverySettings,
+	dockerFriendlySettings,
 	dockerMountSettings,
 	uiSettings,
 	busy,
 	onSave,
 	onSaveShortcuts,
 	onSaveReport,
+	onSaveSlackDelivery,
+	onSaveDockerFriendly,
 	onSaveDockerMounts,
 	onSaveUi,
 }: {
 	settings: NotificationSettings;
 	shortcutSettings: ShortcutSettings;
 	reportSettings: ReportSettings;
+	slackDeliverySettings: SlackDeliverySettings;
+	dockerFriendlySettings: DockerFriendlySettings;
 	dockerMountSettings: DockerMountSettings;
 	uiSettings: UiSettings;
 	busy: boolean;
 	onSave: (input: NotificationSettingsInput) => Promise<boolean>;
 	onSaveShortcuts: (input: ShortcutSettingsInput) => Promise<boolean>;
 	onSaveReport: (input: ReportSettingsInput) => Promise<boolean>;
+	onSaveSlackDelivery: (input: SlackDeliverySettingsInput) => Promise<boolean>;
+	onSaveDockerFriendly: (input: DockerFriendlySettingsInput) => Promise<boolean>;
 	onSaveDockerMounts: (input: DockerMountSettingsInput) => Promise<boolean>;
 	onSaveUi: (input: UiSettingsInput) => Promise<boolean>;
 }): React.JSX.Element {
@@ -79,6 +91,11 @@ export function SettingsView({
 	const [slackUsername, setSlackUsername] = useState(settings.channels.slack.username);
 	const [slackError, setSlackError] = useState<string | null>(null);
 	const [saving, setSaving] = useState(false);
+
+	const [xoxc, setXoxc] = useState("");
+	const [xoxd, setXoxd] = useState("");
+	const [slackDeliveryError, setSlackDeliveryError] = useState<string | null>(null);
+	const [savingSlackDelivery, setSavingSlackDelivery] = useState(false);
 
 	// Shortcut keys: one letter per action, edited locally and lowercased on
 	// input. Seeded from the saved bindings, never re-seeded mid-edit (the
@@ -100,6 +117,9 @@ export function SettingsView({
 	const [reportConversations, setReportConversations] = useState(reportSettings.includeConversations);
 	const [reportError, setReportError] = useState<string | null>(null);
 	const [savingReport, setSavingReport] = useState(false);
+	const [dockerFriendlyHub, setDockerFriendlyHub] = useState(dockerFriendlySettings.dockerFriendlyHub);
+	const [dockerFriendlyError, setDockerFriendlyError] = useState<string | null>(null);
+	const [savingDockerFriendly, setSavingDockerFriendly] = useState(false);
 	const [dockerMounts, setDockerMounts] = useState<string[]>(dockerMountSettings.mounts);
 	const [dockerMountError, setDockerMountError] = useState<string | null>(null);
 	const [savingDockerMounts, setSavingDockerMounts] = useState(false);
@@ -119,6 +139,7 @@ export function SettingsView({
 	const hintId = `${notificationsId}-hint`;
 	const shortcutsId = useId();
 	const reportId = useId();
+	const dockerFriendlyId = useId();
 	const linkId = useId();
 
 	const applyLinkOutcome = (outcome: DeviceLinkOutcome): void => {
@@ -160,7 +181,7 @@ export function SettingsView({
 
 	const submit = async (ev: React.FormEvent): Promise<void> => {
 		ev.preventDefault();
-		if (saving) return;
+		if (saving || savingSlackDelivery) return;
 		const username = slackUsername.trim();
 		// Enabled with nowhere to deliver is what the server rejects too; catching
 		// it here keeps the reason next to the field instead of in a toast.
@@ -169,11 +190,27 @@ export function SettingsView({
 			return;
 		}
 		setSlackError(null);
+		setSlackDeliveryError(null);
 		setSaving(true);
+		setSavingSlackDelivery(true);
 		try {
 			await onSave({ enabled, channels: { slack: { username } } });
+			// Same Save also persists delivery tokens (blank fields keep stored secrets).
+			const input: SlackDeliverySettingsInput = {};
+			const xoxcValue = xoxc.trim();
+			const xoxdValue = xoxd.trim();
+			if (xoxcValue !== "") input.xoxc = xoxcValue;
+			if (xoxdValue !== "") input.xoxd = xoxdValue;
+			const ok = await onSaveSlackDelivery(input);
+			if (ok) {
+				setXoxc("");
+				setXoxd("");
+			} else {
+				setSlackDeliveryError("Could not save Slack credentials.");
+			}
 		} finally {
 			setSaving(false);
+			setSavingSlackDelivery(false);
 		}
 	};
 
@@ -219,6 +256,20 @@ export function SettingsView({
 			});
 		} finally {
 			setSavingShortcuts(false);
+		}
+	};
+
+
+	const submitDockerFriendly = async (ev: React.FormEvent): Promise<void> => {
+		ev.preventDefault();
+		if (savingDockerFriendly) return;
+		setDockerFriendlyError(null);
+		setSavingDockerFriendly(true);
+		try {
+			const ok = await onSaveDockerFriendly({ dockerFriendlyHub });
+			if (!ok) setDockerFriendlyError("Could not save docker-friendly networking.");
+		} finally {
+			setSavingDockerFriendly(false);
 		}
 	};
 
@@ -429,6 +480,21 @@ export function SettingsView({
 								<span className={styles.channelName}>Slack</span>
 								<span className="hint">Direct message</span>
 							</div>
+							<p className="hint">
+								Username is who receives messages. The tokens below are how the hub
+								reaches Slack (browser session pair). With Slack open: copy{" "}
+								<code>xoxc</code> from DevTools → console (workspace <code>token</code>{" "}
+								in localStorage); copy <code>xoxd</code> from Application → Cookies →{" "}
+								<code>d</code> on app.slack.com (HttpOnly — paste exactly). Leave a
+								token blank to keep the stored value.
+								{slackDeliverySettings.envConfigured && (
+									<>
+										{" "}
+										Currently reading tokens from <code>.env</code> — save here to
+										manage from Settings instead.
+									</>
+								)}
+							</p>
 							<Field
 								label="Slack username"
 								hint="The handle to message, e.g. @ada or ada.lovelace."
@@ -451,15 +517,77 @@ export function SettingsView({
 									/>
 								)}
 							</Field>
+							<Field
+								label="xoxc token"
+								hint={
+									slackDeliverySettings.xoxcConfigured
+										? "Leave blank to keep the stored token."
+										: "Starts with xoxc-."
+								}
+							>
+								{(props) => (
+									<input
+										{...props}
+										type="password"
+										className="input"
+										autoComplete="off"
+										value={xoxc}
+										placeholder={slackDeliverySettings.xoxcConfigured ? "••••••••" : "xoxc-…"}
+										onChange={(ev) => {
+											setXoxc(ev.target.value);
+											if (slackDeliveryError) setSlackDeliveryError(null);
+										}}
+									/>
+								)}
+							</Field>
+							<Field
+								label="xoxd token"
+								hint={
+									slackDeliverySettings.xoxdConfigured
+										? "Leave blank to keep the stored token."
+										: "Starts with xoxd- (the d cookie)."
+								}
+							>
+								{(props) => (
+									<input
+										{...props}
+										type="password"
+										className="input"
+										autoComplete="off"
+										value={xoxd}
+										placeholder={slackDeliverySettings.xoxdConfigured ? "••••••••" : "xoxd-…"}
+										onChange={(ev) => {
+											setXoxd(ev.target.value);
+											if (slackDeliveryError) setSlackDeliveryError(null);
+										}}
+									/>
+								)}
+							</Field>
 						</div>
 					</div>
 				)}
 
+				{slackDeliveryError && (
+					<p className="msg msg--error" role="alert">
+						{slackDeliveryError}
+					</p>
+				)}
+
 				<div className={styles.actions}>
-					<button type="submit" className="btn btn--primary" disabled={saving || busy}>
-						{saving ? "Saving…" : "Save"}
+					<button type="submit" className="btn btn--primary" disabled={saving || savingSlackDelivery || busy}>
+						{saving || savingSlackDelivery ? "Saving…" : "Save"}
 					</button>
-					{settings.updatedAt && <span className="hint">Last saved {relativeTime(settings.updatedAt)}</span>}
+					{(settings.updatedAt || slackDeliverySettings.updatedAt) && (
+						<span className="hint">
+							Last saved{" "}
+							{relativeTime(
+								[settings.updatedAt, slackDeliverySettings.updatedAt]
+									.filter((value): value is string => value != null)
+									.sort()
+									.at(-1)!,
+							)}
+						</span>
+					)}
 				</div>
 			</form>
 
@@ -598,7 +726,67 @@ export function SettingsView({
 			    separate PUT from notifications: they're independent resources with
 			    their own validity, so a half-edited set in one never blocks the
 			    other. */}
-			<div className={styles.section}>
+			
+			<form className={styles.section} aria-labelledby={`${dockerFriendlyId}-section`} onSubmit={submitDockerFriendly}>
+				<h3 className={styles.sectionHeading} id={`${dockerFriendlyId}-section`}>
+					Docker-friendly hub networking
+				</h3>
+				<p className="hint">
+					When the hub itself runs in Docker (or you need containers to reach it on the host),
+					bind on all interfaces and advertise a host address sandboxes can dial.
+					{dockerFriendlySettings.envConfigured && (
+						<>
+							{" "}
+							Currently reading from <code>.env</code> — save here to manage from Settings
+							instead.
+						</>
+					)}
+				</p>
+
+				<div className={styles.toggleRow}>
+					<div className={styles.toggleText}>
+						<span className="label">Docker-friendly hub networking</span>
+						<p className="hint" id={`${dockerFriendlyId}-hint`}>
+							{dockerFriendlyHub
+								? "On — hub binds 0.0.0.0:8893 and sets sandboxHost so containers can reach the host."
+								: "Off — loopback defaults (127.0.0.1 bind; no sandboxHost override)."}
+						</p>
+					</div>
+					<Switch
+						checked={dockerFriendlyHub}
+						onChange={(next) => {
+							setDockerFriendlyHub(next);
+							if (dockerFriendlyError) setDockerFriendlyError(null);
+						}}
+						label="Docker-friendly hub networking"
+						describedBy={`${dockerFriendlyId}-hint`}
+						disabled={savingDockerFriendly || busy}
+					/>
+				</div>
+
+				<p className="msg msg--warn" role="status">
+					Restart the hub after changing this so the listen address takes effect.{" "}
+					<code>sandboxHost</code> for new sandboxes updates on the next sync without a restart.
+				</p>
+
+				{dockerFriendlyError && (
+					<p className="msg msg--error" role="alert">
+						{dockerFriendlyError}
+					</p>
+				)}
+
+				<div className={styles.actions}>
+					<button type="submit" className="btn btn--primary" disabled={savingDockerFriendly || busy}>
+						{savingDockerFriendly ? "Saving…" : "Save"}
+					</button>
+					{dockerFriendlySettings.updatedAt && (
+						<span className="hint">Last saved {relativeTime(dockerFriendlySettings.updatedAt)}</span>
+					)}
+				</div>
+			</form>
+
+
+<div className={styles.section}>
 				<CollapsibleSection
 					title="Docker bind mounts"
 					defaultOpen={dockerMounts.length > 0}
