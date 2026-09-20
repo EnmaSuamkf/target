@@ -336,7 +336,8 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	}, []);
 
 	const refreshSlackDeliverySettings = useCallback(async (): Promise<void> => {
-		setSlackDeliverySettings(await api.getSlackDeliverySettings());
+		// Admin GET includes effective xoxc/xoxd so Settings can seed the fields.
+		setSlackDeliverySettings(await api.getSlackDeliverySettings({ admin: true }));
 	}, []);
 
 	const refreshDockerFriendlySettings = useCallback(async (): Promise<void> => {
@@ -1309,7 +1310,9 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 
 	const handleSaveSlackDeliverySettings = async (input: SlackDeliverySettingsInput): Promise<boolean> => {
 		return await act("Could not save Slack notification settings", async () => {
-			setSlackDeliverySettings(await api.saveSlackDeliverySettings(input));
+			await api.saveSlackDeliverySettings(input);
+			// PUT returns flags only — re-fetch with admin so Settings keeps seeded tokens.
+			setSlackDeliverySettings(await api.getSlackDeliverySettings({ admin: true }));
 			toast.success("Slack notification settings saved.");
 		});
 	};

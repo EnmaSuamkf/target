@@ -554,13 +554,23 @@ export interface NotificationSettingsInput {
 	channels: NotificationChannels;
 }
 
-/** Slack delivery tokens (xoxc / xoxd) — secrets never cross the wire. */
+/**
+ * Slack delivery tokens (xoxc / xoxd).
+ *
+ * Flags are always present. Effective `xoxc` / `xoxd` strings are only included
+ * when the GET was made with admin auth (Settings seeding); unauthenticated /
+ * flags-only consumers never see them.
+ */
 export interface SlackDeliverySettings {
 	xoxcConfigured: boolean;
 	xoxdConfigured: boolean;
 	updatedAt: string | null;
 	/** True while the hub is still using usable `.env` tokens (nothing saved here yet). */
 	envConfigured: boolean;
+	/** Effective token — only present on admin-authenticated GET. */
+	xoxc?: string;
+	/** Effective token — only present on admin-authenticated GET. */
+	xoxd?: string;
 }
 
 /** Payload accepted by PUT /api/settings/notifications/slack-credentials. */
@@ -570,6 +580,14 @@ export interface SlackDeliverySettingsInput {
 	/** Omit or leave empty to keep the stored xoxd token. */
 	xoxd?: string;
 }
+
+/**
+ * Result of POST /api/settings/notifications/test — same shape as the hub's
+ * NotificationResult (expected Slack failures are `sent: false`, not HTTP 500).
+ */
+export type NotificationConnectionTestResult =
+	| { sent: true }
+	| { sent: false; reason: string; detail?: string };
 
 /** The actions a hub shortcut can be bound to — the five the hub ships with. */
 export type ShortcutAction =

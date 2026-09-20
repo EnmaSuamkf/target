@@ -23,6 +23,7 @@ import { CollapsibleSection } from "../components/CollapsibleSection.tsx";
 import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { Field } from "../components/Field.tsx";
 import { Switch } from "../components/Switch.tsx";
+import { useToast } from "../components/Toast.tsx";
 import { relativeTime } from "../lib/format.ts";
 import styles from "./SettingsView.module.css";
 
@@ -53,6 +54,27 @@ const SHORTCUT_ORDER: readonly ShortcutAction[] = [
 	"continueStep",
 	"startWorkflow",
 ];
+
+/** Eye / eye-off for the Slack token reveal toggles. */
+function SecretVisibilityIcon({ revealed }: { revealed: boolean }): React.JSX.Element {
+	if (revealed) {
+		// Eye-off: token is visible; click will hide it.
+		return (
+			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+				<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
+				<path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
+				<path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+				<line x1="1" y1="1" x2="23" y2="23" />
+			</svg>
+		);
+	}
+	return (
+		<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+			<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+			<circle cx="12" cy="12" r="3" />
+		</svg>
+	);
+}
 
 export function SettingsView({
 	settings,
@@ -92,10 +114,22 @@ export function SettingsView({
 	const [slackError, setSlackError] = useState<string | null>(null);
 	const [saving, setSaving] = useState(false);
 
-	const [xoxc, setXoxc] = useState("");
-	const [xoxd, setXoxd] = useState("");
+	// Seeded from the admin GET so configured tokens show as password dots
+	// instead of an empty field with a placeholder. Parent remounts on save
+	// stamp, so this initializer is enough — no mid-edit re-seed.
+	const [xoxc, setXoxc] = useState(slackDeliverySettings.xoxc ?? "");
+	const [xoxd, setXoxd] = useState(slackDeliverySettings.xoxd ?? "");
+	const [showXoxc, setShowXoxc] = useState(false);
+	const [showXoxd, setShowXoxd] = useState(false);
 	const [slackDeliveryError, setSlackDeliveryError] = useState<string | null>(null);
 	const [savingSlackDelivery, setSavingSlackDelivery] = useState(false);
+
+	const toast = useToast();
+	const [testingConnection, setTestingConnection] = useState(false);
+	const [testConnectionMessage, setTestConnectionMessage] = useState<{
+		kind: "success" | "error";
+		text: string;
+	} | null>(null);
 
 	// Shortcut keys: one letter per action, edited locally and lowercased on
 	// input. Seeded from the saved bindings, never re-seeded mid-edit (the
@@ -191,26 +225,60 @@ export function SettingsView({
 		}
 		setSlackError(null);
 		setSlackDeliveryError(null);
+		setTestConnectionMessage(null);
 		setSaving(true);
 		setSavingSlackDelivery(true);
 		try {
 			await onSave({ enabled, channels: { slack: { username } } });
-			// Same Save also persists delivery tokens (blank fields keep stored secrets).
-			const input: SlackDeliverySettingsInput = {};
-			const xoxcValue = xoxc.trim();
-			const xoxdValue = xoxd.trim();
-			if (xoxcValue !== "") input.xoxc = xoxcValue;
-			if (xoxdValue !== "") input.xoxd = xoxdValue;
-			const ok = await onSaveSlackDelivery(input);
-			if (ok) {
-				setXoxc("");
-				setXoxd("");
-			} else {
+			// Fields are seeded with stored values, so Save always submits what is
+			// currently in the inputs. (Server still treats a blank half as
+			// keep-existing if the operator clears a field.)
+			const ok = await onSaveSlackDelivery({
+				xoxc: xoxc.trim(),
+				xoxd: xoxd.trim(),
+			});
+			if (!ok) {
 				setSlackDeliveryError("Could not save Slack credentials.");
 			}
 		} finally {
 			setSaving(false);
 			setSavingSlackDelivery(false);
+		}
+	};
+
+	/** One-shot Slack DM — does not persist settings; backend bypasses the master switch. */
+	const testConnection = async (): Promise<void> => {
+		const username = slackUsername.trim();
+		if (
+			username === "" ||
+			testingConnection ||
+			saving ||
+			savingSlackDelivery ||
+			busy
+		) {
+			return;
+		}
+		setTestConnectionMessage(null);
+		setTestingConnection(true);
+		try {
+			const result = await api.testNotificationConnection({ username });
+			if (result.sent) {
+				const message = "Slack connection test succeeded — check your DMs.";
+				setTestConnectionMessage({ kind: "success", text: message });
+				toast.success(message);
+			} else {
+				const message = result.detail
+					? `Connection test failed (${result.reason}): ${result.detail}`
+					: `Connection test failed (${result.reason}).`;
+				setTestConnectionMessage({ kind: "error", text: message });
+				toast.error(message);
+			}
+		} catch (err) {
+			const message = `Connection test failed: ${err instanceof Error ? err.message : String(err)}`;
+			setTestConnectionMessage({ kind: "error", text: message });
+			toast.error(message);
+		} finally {
+			setTestingConnection(false);
 		}
 	};
 
@@ -485,8 +553,9 @@ export function SettingsView({
 								reaches Slack (browser session pair). With Slack open: copy{" "}
 								<code>xoxc</code> from DevTools → console (workspace <code>token</code>{" "}
 								in localStorage); copy <code>xoxd</code> from Application → Cookies →{" "}
-								<code>d</code> on app.slack.com (HttpOnly — paste exactly). Leave a
-								token blank to keep the stored value.
+								<code>d</code> on app.slack.com (HttpOnly — paste exactly). Stored
+								tokens load as dots; use the eye to reveal, edit to replace, then
+								Save.
 								{slackDeliverySettings.envConfigured && (
 									<>
 										{" "}
@@ -520,47 +589,71 @@ export function SettingsView({
 							<Field
 								label="xoxc token"
 								hint={
-									slackDeliverySettings.xoxcConfigured
-										? "Leave blank to keep the stored token."
+									slackDeliverySettings.xoxcConfigured || xoxc !== ""
+										? "Loaded from the hub. Edit to replace, then Save."
 										: "Starts with xoxc-."
 								}
 							>
 								{(props) => (
-									<input
-										{...props}
-										type="password"
-										className="input"
-										autoComplete="off"
-										value={xoxc}
-										placeholder={slackDeliverySettings.xoxcConfigured ? "••••••••" : "xoxc-…"}
-										onChange={(ev) => {
-											setXoxc(ev.target.value);
-											if (slackDeliveryError) setSlackDeliveryError(null);
-										}}
-									/>
+									<div className={styles.secretField}>
+										<input
+											{...props}
+											type={showXoxc ? "text" : "password"}
+											className="input"
+											autoComplete="off"
+											spellCheck={false}
+											value={xoxc}
+											placeholder={xoxc === "" ? "xoxc-…" : undefined}
+											onChange={(ev) => {
+												setXoxc(ev.target.value);
+												if (slackDeliveryError) setSlackDeliveryError(null);
+											}}
+										/>
+										<button
+											type="button"
+											className={`btn btn--ghost ${styles.secretToggle}`}
+											aria-label={showXoxc ? "Hide xoxc token" : "Show xoxc token"}
+											aria-pressed={showXoxc}
+											onClick={() => setShowXoxc((v) => !v)}
+										>
+											<SecretVisibilityIcon revealed={showXoxc} />
+										</button>
+									</div>
 								)}
 							</Field>
 							<Field
 								label="xoxd token"
 								hint={
-									slackDeliverySettings.xoxdConfigured
-										? "Leave blank to keep the stored token."
+									slackDeliverySettings.xoxdConfigured || xoxd !== ""
+										? "Loaded from the hub. Edit to replace, then Save."
 										: "Starts with xoxd- (the d cookie)."
 								}
 							>
 								{(props) => (
-									<input
-										{...props}
-										type="password"
-										className="input"
-										autoComplete="off"
-										value={xoxd}
-										placeholder={slackDeliverySettings.xoxdConfigured ? "••••••••" : "xoxd-…"}
-										onChange={(ev) => {
-											setXoxd(ev.target.value);
-											if (slackDeliveryError) setSlackDeliveryError(null);
-										}}
-									/>
+									<div className={styles.secretField}>
+										<input
+											{...props}
+											type={showXoxd ? "text" : "password"}
+											className="input"
+											autoComplete="off"
+											spellCheck={false}
+											value={xoxd}
+											placeholder={xoxd === "" ? "xoxd-…" : undefined}
+											onChange={(ev) => {
+												setXoxd(ev.target.value);
+												if (slackDeliveryError) setSlackDeliveryError(null);
+											}}
+										/>
+										<button
+											type="button"
+											className={`btn btn--ghost ${styles.secretToggle}`}
+											aria-label={showXoxd ? "Hide xoxd token" : "Show xoxd token"}
+											aria-pressed={showXoxd}
+											onClick={() => setShowXoxd((v) => !v)}
+										>
+											<SecretVisibilityIcon revealed={showXoxd} />
+										</button>
+									</div>
 								)}
 							</Field>
 						</div>
@@ -574,8 +667,26 @@ export function SettingsView({
 				)}
 
 				<div className={styles.actions}>
-					<button type="submit" className="btn btn--primary" disabled={saving || savingSlackDelivery || busy}>
+					<button
+						type="submit"
+						className="btn btn--primary"
+						disabled={saving || savingSlackDelivery || testingConnection || busy}
+					>
 						{saving || savingSlackDelivery ? "Saving…" : "Save"}
+					</button>
+					<button
+						type="button"
+						className="btn btn--ghost"
+						disabled={
+							saving ||
+							savingSlackDelivery ||
+							testingConnection ||
+							busy ||
+							slackUsername.trim() === ""
+						}
+						onClick={() => void testConnection()}
+					>
+						{testingConnection ? "Testing…" : "Test connection"}
 					</button>
 					{(settings.updatedAt || slackDeliverySettings.updatedAt) && (
 						<span className="hint">
@@ -589,6 +700,14 @@ export function SettingsView({
 						</span>
 					)}
 				</div>
+				{testConnectionMessage && (
+					<p
+						className={testConnectionMessage.kind === "error" ? "msg msg--error" : "hint"}
+						role={testConnectionMessage.kind === "error" ? "alert" : "status"}
+					>
+						{testConnectionMessage.text}
+					</p>
+				)}
 			</form>
 
 			{linkStatus?.state !== "connected" && <form className={styles.section} aria-labelledby={`${reportId}-section`} onSubmit={submitReport}>

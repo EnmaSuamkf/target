@@ -48,8 +48,9 @@
  *   DELETE /api/templates/:id                            → remove a template (admin token)
  *   GET    /api/settings/notifications                     → notification preferences (master switch + per-channel config)
  *   PUT    /api/settings/notifications                     → replace the notification preferences (admin token)
- *   GET    /api/settings/notifications/slack-credentials   → Slack delivery tokens (xoxc/xoxd configured flags only)
+ *   GET    /api/settings/notifications/slack-credentials   → Slack delivery tokens (flags; admin also gets effective xoxc/xoxd)
  *   PUT    /api/settings/notifications/slack-credentials   → replace Slack delivery tokens (admin token; blank keeps existing)
+ *   POST   /api/settings/notifications/test                → send a Slack connection-test DM (admin token)
  *   GET    /api/settings/shortcuts                        → keyboard-shortcut bindings (key per action)
  *   PUT    /api/settings/shortcuts                        → replace the shortcut bindings (admin token)
  *   GET    /api/settings/report                           → activity-reporting preferences (ingest URL + related knobs)
@@ -205,6 +206,7 @@ import {
 } from "./rci-store.ts";
 import { getResourceSetUsage } from "./rci-usage.ts";
 import { importResourcesFromFolder, MAX_RESOURCE_SET_BYTES, ResourceImportError } from "./rci-import.ts";
+import { sendTestNotification } from "./notifier.ts";
 import { stepActivity } from "./progress.ts";
 import type { Logger } from "./runner.ts";
 import { openResumeTerminal } from "./terminal.ts";
@@ -1735,10 +1737,13 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	//
 	// Slack web-client tokens (xoxc / xoxd) used for direct delivery. Nested under
 	// notifications because Settings → Notifications is where operators configure
-	// how Slack is reached. Reading is open like other settings GETs; the PUT is
-	// admin-gated. Raw tokens never leave the server — only whether each half is
-	// configured. Until the operator saves at least once, GET reflects usable
-	// `.env` tokens via envConfigured + the configured flags.
+	// how Slack is reached. Unauthenticated GET returns configured flags only —
+	// raw tokens never leave without a valid admin bearer. Admin GET includes the
+	// effective `xoxc` / `xoxd` strings (Settings DB after first save, else the
+	// usable `.env` pair) so Settings can seed password fields. The PUT is
+	// admin-gated; blank keeps existing. Until the operator saves at least once,
+	// GET reflects usable `.env` tokens via envConfigured + the configured flags.
+	// Never log the raw token values.
 
 	if (
 		parts[1] === "settings" &&
@@ -1747,23 +1752,31 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		!parts[4]
 	) {
 		if (req.method === "GET") {
+			const admin = isAdmin(cfg, req.headers);
 			const stored = getSlackDeliverySettings();
-			if (stored.updatedAt != null) {
-				sendJson(res, 200, { settings: toPublicSlackDeliverySettings(stored, false) });
-				return;
+			let effective = stored;
+			let envConfigured = false;
+			if (stored.updatedAt == null) {
+				const env = loadSlackDeliveryTokensFromEnv();
+				envConfigured = env.xoxc !== "" && env.xoxd !== "";
+				effective = {
+					xoxcToken: env.xoxc,
+					xoxdToken: env.xoxd,
+					updatedAt: null,
+				};
 			}
-			const env = loadSlackDeliveryTokensFromEnv();
-			const envConfigured = env.xoxc !== "" && env.xoxd !== "";
-			sendJson(res, 200, {
-				settings: toPublicSlackDeliverySettings(
-					{
-						xoxcToken: env.xoxc,
-						xoxdToken: env.xoxd,
-						updatedAt: null,
+			const publicSettings = toPublicSlackDeliverySettings(effective, envConfigured);
+			if (admin) {
+				sendJson(res, 200, {
+					settings: {
+						...publicSettings,
+						xoxc: effective.xoxcToken,
+						xoxd: effective.xoxdToken,
 					},
-					envConfigured,
-				),
-			});
+				});
+			} else {
+				sendJson(res, 200, { settings: publicSettings });
+			}
 			return;
 		}
 		if (req.method === "PUT" || req.method === "PATCH") {
@@ -1789,6 +1802,40 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				const saved = saveSlackDeliverySettings({ xoxcToken, xoxdToken });
 				log("slack delivery credentials updated");
 				sendJson(res, 200, { settings: toPublicSlackDeliverySettings(saved, false) });
+			});
+			return;
+		}
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
+	// --- /api/settings/notifications/test ---
+	//
+	// Admin-only one-shot Slack DM so Settings → Notifications can prove the
+	// transport works without waiting for a real manual-review / completed
+	// notification. Optional body `{ username }` tests an unsaved draft handle;
+	// otherwise the saved notification username is used. Bypasses the master
+	// enabled switch (operator asked explicitly). Expected Slack failures are
+	// 200 `{ sent: false, reason, detail? }` — not 500. Never log tokens.
+
+	if (parts[1] === "settings" && parts[2] === "notifications" && parts[3] === "test" && !parts[4]) {
+		if (req.method === "POST") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				const username = typeof body.username === "string" ? body.username : undefined;
+				void sendTestNotification({ username }).then((result) => {
+					sendJson(res, 200, result);
+					if (result.sent) {
+						log("slack connection test sent");
+					} else {
+						log(
+							`slack connection test not sent (${result.reason}${result.detail ? `: ${result.detail}` : ""})`,
+						);
+					}
+				});
 			});
 			return;
 		}

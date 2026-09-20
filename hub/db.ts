@@ -2654,15 +2654,19 @@ export function saveSyncSettings(input: { enabled: boolean }): SyncSettings {
 const SLACK_DELIVERY_SETTINGS_KEY = "slack_delivery";
 
 export interface SlackDeliverySettings {
-	/** Slack web-client token (`xoxc-…`). Never returned by the public API. */
+	/** Slack web-client token (`xoxc-…`). Only returned on admin-authenticated GET. */
 	xoxcToken: string;
-	/** Slack `d` cookie value (`xoxd-…`). Never returned by the public API. */
+	/** Slack `d` cookie value (`xoxd-…`). Only returned on admin-authenticated GET. */
 	xoxdToken: string;
 	/** Null until saved at least once from Settings (`.env` still applies until then). */
 	updatedAt: string | null;
 }
 
-/** What GET /api/settings/slack-delivery returns — no secret crosses the wire. */
+/**
+ * What unauthenticated GET /api/settings/notifications/slack-credentials
+ * returns — configured flags only; no secret crosses the wire. Admin GET adds
+ * effective `xoxc` / `xoxd` strings in the route handler.
+ */
 export interface PublicSlackDeliverySettings {
 	xoxcConfigured: boolean;
 	xoxdConfigured: boolean;
