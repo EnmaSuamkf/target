@@ -30,6 +30,7 @@ import type {
 	DockerFriendlySettingsInput,
 	DirListing,
 	HostCapabilities,
+	NotificationConnectionTestResult,
 	NotificationSettings,
 	NotificationSettingsInput,
 	SlackDeliverySettings,
@@ -820,17 +821,24 @@ export async function saveNotificationSettings(input: NotificationSettingsInput)
 	return data.settings;
 }
 
-/** Slack delivery credentials: configured flags only (no raw tokens). */
-export async function getSlackDeliverySettings(): Promise<SlackDeliverySettings> {
+/**
+ * Slack delivery credentials. Without `admin: true`, the response is flags-only
+ * (no raw tokens). Settings should pass `{ admin: true }` so effective xoxc/xoxd
+ * are returned for seeding the password fields.
+ */
+export async function getSlackDeliverySettings(
+	opts: { admin?: boolean } = {},
+): Promise<SlackDeliverySettings> {
 	const data = await request<{ settings: SlackDeliverySettings }>(
 		"/api/settings/notifications/slack-credentials",
+		opts.admin ? { admin: true } : {},
 	);
 	return data.settings;
 }
 
 /**
  * Replaces stored Slack delivery tokens. Empty / omitted fields keep the
- * previously saved secret.
+ * previously saved secret. Response is flags-only (no raw tokens).
  */
 export async function saveSlackDeliverySettings(
 	input: SlackDeliverySettingsInput,
@@ -844,6 +852,22 @@ export async function saveSlackDeliverySettings(
 		},
 	);
 	return data.settings;
+}
+
+/**
+ * Sends a one-shot Slack connection-test DM via
+ * POST /api/settings/notifications/test. Optional `username` tests an unsaved
+ * draft handle; otherwise the saved notification username is used. Does not
+ * persist settings.
+ */
+export async function testNotificationConnection(
+	input?: { username?: string },
+): Promise<NotificationConnectionTestResult> {
+	return request<NotificationConnectionTestResult>("/api/settings/notifications/test", {
+		method: "POST",
+		admin: true,
+		body: json(input ?? {}),
+	});
 }
 
 /** Keyboard-shortcut bindings: one key per action. */

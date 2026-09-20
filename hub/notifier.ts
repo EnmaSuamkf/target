@@ -503,6 +503,27 @@ export function workflowCompletedMessage(notice: WorkflowCompletedNotice): strin
 }
 
 /**
+ * Walks `_impl.detect()` transports and tries `_impl.send` in order. Shared by
+ * `deliver` and the Settings "Test connection" path so both stay on the same
+ * client-tokens-then-MCP preference. Caller has already resolved the username
+ * and any policy gates (enabled switch, etc.). Never logs token values.
+ */
+async function sendViaTransports(username: string, message: string): Promise<NotificationResult> {
+	const transports = _impl.detect();
+	if (transports.length === 0) return { sent: false, reason: "no-transport" };
+	let firstFailure = "";
+	for (const transport of transports) {
+		try {
+			await _impl.send(transport, username, message);
+			return { sent: true };
+		} catch (err) {
+			if (firstFailure === "") firstFailure = err instanceof Error ? err.message : String(err);
+		}
+	}
+	return { sent: false, reason: "send-failed", detail: firstFailure };
+}
+
+/**
  * The ONE place the five notification outcomes are decided, shared by every
  * notification the hub sends, in the order they're decided:
  *
@@ -533,19 +554,7 @@ async function deliver(buildMessage: () => string): Promise<NotificationResult> 
 		if (!settings.enabled) return { sent: false, reason: "notifications-disabled" };
 		const username = settings.channels.slack.username.trim();
 		if (username === "") return { sent: false, reason: "no-slack-username" };
-		const transports = _impl.detect();
-		if (transports.length === 0) return { sent: false, reason: "no-transport" };
-		const message = buildMessage();
-		let firstFailure = "";
-		for (const transport of transports) {
-			try {
-				await _impl.send(transport, username, message);
-				return { sent: true };
-			} catch (err) {
-				if (firstFailure === "") firstFailure = err instanceof Error ? err.message : String(err);
-			}
-		}
-		return { sent: false, reason: "send-failed", detail: firstFailure };
+		return await sendViaTransports(username, buildMessage());
 	} catch (err) {
 		// Anything unexpected ABOVE the loop (an unreadable settings row, a
 		// detector that blew up): the notification is advisory, so it fails
@@ -571,4 +580,28 @@ export function sendManualReviewNotification(notice: ManualReviewNotice): Promis
  */
 export function sendWorkflowCompletedNotification(notice: WorkflowCompletedNotice): Promise<NotificationResult> {
 	return deliver(() => workflowCompletedMessage(notice));
+}
+
+/** Fixed copy for Settings → Notifications → Test connection — no workflow payload. */
+const TEST_CONNECTION_MESSAGE = "Target hub: Slack connection test succeeded.";
+
+/**
+ * Operator-initiated Slack DM from Settings → Notifications → Test connection.
+ *
+ * Bypasses the master `enabled` switch (the operator asked explicitly) but
+ * still fails clearly on missing username / no transport / send-failed. Optional
+ * `username` lets an unsaved draft handle be tested without persisting settings;
+ * otherwise the saved notification username is used. Shares the same `_impl`
+ * transport walk as real notifications. Never logs token values.
+ */
+export async function sendTestNotification(opts: { username?: string } = {}): Promise<NotificationResult> {
+	try {
+		const fromArg = typeof opts.username === "string" ? opts.username.trim() : "";
+		const username =
+			fromArg !== "" ? fromArg : getNotificationSettings().channels.slack.username.trim();
+		if (username === "") return { sent: false, reason: "no-slack-username" };
+		return await sendViaTransports(username, TEST_CONNECTION_MESSAGE);
+	} catch (err) {
+		return { sent: false, reason: "send-failed", detail: err instanceof Error ? err.message : String(err) };
+	}
 }

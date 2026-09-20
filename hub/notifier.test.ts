@@ -49,6 +49,7 @@ const {
 	manualReviewMessage,
 	resolveSlackTransports,
 	sendManualReviewNotification,
+	sendTestNotification,
 } = await import("./notifier.ts");
 type SlackTransport = Awaited<ReturnType<typeof resolveSlackTransports>>[number];
 
@@ -519,4 +520,65 @@ test("the real detector is what sendManualReviewNotification uses by default", a
 	writeCredentials(null);
 
 	assert.deepEqual(await sendManualReviewNotification(notice), { sent: false, reason: "no-transport" });
+});
+
+// --- sendTestNotification (Settings → Test connection) --------------------
+
+test("sendTestNotification: missing username → no-slack-username", async (t) => {
+	saveNotificationSettings({ enabled: true, channels: { slack: { username: "" } } });
+	const calls = stubImpl(t, { detect: () => [clientTokens] });
+
+	assert.deepEqual(await sendTestNotification(), { sent: false, reason: "no-slack-username" });
+	assert.deepEqual(await sendTestNotification({ username: "   " }), {
+		sent: false,
+		reason: "no-slack-username",
+	});
+	assert.equal(calls.detect, 0);
+	assert.equal(calls.send.length, 0);
+});
+
+test("sendTestNotification: no transport → no-transport", async (t) => {
+	saveNotificationSettings({ enabled: true, channels: { slack: { username: "ada" } } });
+	const calls = stubImpl(t);
+
+	assert.deepEqual(await sendTestNotification(), { sent: false, reason: "no-transport" });
+	assert.equal(calls.detect, 1);
+	assert.equal(calls.send.length, 0);
+});
+
+test("sendTestNotification: mocked send success → sent:true", async (t) => {
+	saveNotificationSettings({ enabled: true, channels: { slack: { username: "ada" } } });
+	const calls = stubImpl(t, { detect: () => [clientTokens] });
+
+	assert.deepEqual(await sendTestNotification({ username: "ada-draft" }), { sent: true });
+	assert.equal(calls.send.length, 1);
+	assert.equal(calls.send[0]!.username, "ada-draft");
+	assert.match(calls.send[0]!.message, /Slack connection test succeeded/);
+});
+
+test("sendTestNotification: send throw → send-failed with detail", async (t) => {
+	saveNotificationSettings({ enabled: true, channels: { slack: { username: "ada" } } });
+	const calls = stubImpl(t, {
+		detect: () => [clientTokens],
+		send: async () => {
+			throw new Error("chat.postMessage: invalid_auth");
+		},
+	});
+
+	assert.deepEqual(await sendTestNotification({ username: "ada" }), {
+		sent: false,
+		reason: "send-failed",
+		detail: "chat.postMessage: invalid_auth",
+	});
+	assert.equal(calls.send.length, 1);
+});
+
+test("sendTestNotification: enabled=false still sends when transports work", async (t) => {
+	// Real notifications refuse this; Test connection must not — the operator asked.
+	saveNotificationSettings({ enabled: false, channels: { slack: { username: "ada" } } });
+	const calls = stubImpl(t, { detect: () => [clientTokens] });
+
+	assert.deepEqual(await sendTestNotification(), { sent: true });
+	assert.equal(calls.send.length, 1);
+	assert.equal(calls.send[0]!.username, "ada");
 });
