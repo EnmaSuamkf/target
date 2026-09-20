@@ -121,7 +121,7 @@ test("mock server: register → poll → apply workflow.create → ack → push 
 	const mock = createMockSyncServer();
 	const hubCfg = loadConfig();
 
-	await runSyncTick({ hubConfig: hubCfg, fetchImpl: mock.fetchImpl, config: { enabled: true, url: MOCK_BASE, token: "", intervalMs: 30_000 } });
+	await runSyncTick({ hubConfig: hubCfg, fetchImpl: mock.fetchImpl, config: { enabled: true, url: MOCK_BASE, token: "", intervalMs: 10_000 } });
 
 	const { clientId, token } = getSyncCredentials();
 	assert.ok(clientId);
@@ -138,7 +138,7 @@ test("mock server: register → poll → apply workflow.create → ack → push 
 		status: "delivered",
 	});
 
-	await runSyncTick({ hubConfig: hubCfg, fetchImpl: mock.fetchImpl, config: { enabled: true, url: MOCK_BASE, token: token!, intervalMs: 30_000 } });
+	await runSyncTick({ hubConfig: hubCfg, fetchImpl: mock.fetchImpl, config: { enabled: true, url: MOCK_BASE, token: token!, intervalMs: 10_000 } });
 
 	const local = getWorkflowByRemoteId(remoteId);
 	assert.ok(local, "local workflow should exist");
@@ -161,7 +161,7 @@ test("mock server: heartbeat reports idle availability", async () => {
 	const mock = createMockSyncServer();
 	const hubCfg = loadConfig();
 
-	await runSyncTick({ hubConfig: hubCfg, fetchImpl: mock.fetchImpl, config: { enabled: true, url: MOCK_BASE, token: "", intervalMs: 30_000 } });
+	await runSyncTick({ hubConfig: hubCfg, fetchImpl: mock.fetchImpl, config: { enabled: true, url: MOCK_BASE, token: "", intervalMs: 10_000 } });
 
 	assert.equal(mock.state.heartbeats.length, 1);
 	const hb = mock.state.heartbeats[0] as {

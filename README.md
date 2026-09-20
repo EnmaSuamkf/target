@@ -680,8 +680,12 @@ continue either way. The variables below are only for an unlinked legacy hub:
 TARGET_SYNC_URL=http://127.0.0.1:8900    # target-server base URL
 TARGET_SYNC_ENABLED=true
 # TARGET_SYNC_TOKEN=sync_…               # optional; persisted after register
-# TARGET_SYNC_INTERVAL_MS=30000          # poll cadence (default 30s)
+# TARGET_SYNC_INTERVAL_MS=10000          # poll/heartbeat cadence (default 10s)
 ```
+
+Presence on the server is derived from this heartbeat traffic (not an explicit
+online/offline event); the server's online TTL is expected to be ~3× the hub
+interval (30s when the default is 10s).
 
 Wire contract: `target-server/docs/remote-sync.md`. Moving this into Settings is
 future work; there is no checked-in env template for it.
