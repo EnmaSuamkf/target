@@ -12,7 +12,7 @@ const SERVER_VERSION = "0.3.0";
 
 const RUNNERS = ["claude", "free-code", "cursor"];
 const SANDBOXES = ["host", "docker"];
-const PERMISSION_MODES = ["acceptEdits", "bypassPermissions", "manual", "plan"];
+const PERMISSION_MODES = ["acceptEdits", "auto", "manual", "dontAsk", "plan", "bypassPermissions"];
 const WORKFLOW_STATUSES = ["draft", "paused", "completed", "failed"];
 const STEP_STATUSES = ["pending", "done", "failed"];
 

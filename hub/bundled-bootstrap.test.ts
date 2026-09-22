@@ -10,8 +10,14 @@ import { test } from "node:test";
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-bundled-"));
 process.env.TARGET_HOME = tmpHome;
 
-const { ensureBundledCatalog, ensureGitHubGitPushTool, BUNDLED_TCP_NAME, BUNDLED_RESOURCE_SET_NAME } =
-	await import("./bundled-bootstrap.ts");
+const {
+	ensureBundledCatalog,
+	ensureGitHubGitPushTool,
+	BUNDLED_TCP_NAME,
+	BUNDLED_RESOURCE_SET_NAME,
+	BUNDLED_RESOURCE_SKILL_NAME,
+	BUNDLED_CREATE_WORKFLOW_SKILL_NAME,
+} = await import("./bundled-bootstrap.ts");
 const { findTcpByName, insertTcp } = await import("./tcp-store.ts");
 const { listResourceSets } = await import("./rci-store.ts");
 const { executeTcpTool } = await import("./tcp-executor.ts");
@@ -33,7 +39,9 @@ test("ensureBundledCatalog creates TCP and resource set", () => {
 	assert.ok(tcp.tools.some((t) => t.name === "list_workflows"));
 	assert.equal(tcp.tools[0]?.tokens.TOKEN_1, "test-admin-token");
 	assert.equal(resourceSet.name, BUNDLED_RESOURCE_SET_NAME);
-	assert.equal(resourceSet.resources[0]?.name, "target-workflows");
+	const resourceNames = resourceSet.resources.map((r) => r.name);
+	assert.ok(resourceNames.includes(BUNDLED_RESOURCE_SKILL_NAME));
+	assert.ok(resourceNames.includes(BUNDLED_CREATE_WORKFLOW_SKILL_NAME));
 });
 
 test("ensureBundledCatalog is idempotent and refreshes admin token on TCP", () => {

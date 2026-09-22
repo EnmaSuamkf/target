@@ -1,16 +1,19 @@
 ---
 name: target-workflows
 description: >-
-  Manage The Target Project hub — create, edit, delete workflows and steps, list
-  workflows, set conversation context. Use when the user asks to create or modify
-  Target workflows, add steps, or control workflow runs. Requires the Target hub
-  running (npm start) and auth via TARGET MCP tools or curl with the admin token
-  from ~/.target/config.json.
-TARGET_SKILL_VERSION: "2"
+  Manage existing Target Project hub workflows — list, edit, delete, add steps,
+  set conversation context, and control runs. Use when the user asks to modify,
+  start, pause, inspect, or delete Target workflows. For creating a new
+  workflow, use the create-workflow skill. Requires the Target hub running
+  (npm start) and auth via TARGET MCP tools or curl with the admin token from
+  ~/.target/config.json.
+TARGET_SKILL_VERSION: "5";
 managedBy: target
 ---
 
 # Target workflow management
+
+Creating a **new** workflow is the `create-workflow` skill — do not skip that interview.
 
 The Target hub exposes a JSON API (default `http://127.0.0.1:8893`). Mutating routes need:
 
@@ -38,9 +41,13 @@ Use `add_step` or `edit_step` with the full form — no separate hub API call ne
   "description": "Say hello to the user",
   "acceptanceCriteria": "The agent said hello",
   "useSubagent": true,
-  "manualReview": true
+  "manualReview": true,
+  "maxRetries": 2,
+  "retryIntervalSeconds": 15
 }
 ```
+
+Steps another agent will run must be self-contained: always set `acceptanceCriteria`, and use `maxRetries` of at least 2.
 
 Omit `useSubagent` / `manualReview` only when you intentionally leave the stored value unchanged on **edit**; on **create**, set them explicitly.
 

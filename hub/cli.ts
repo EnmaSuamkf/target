@@ -37,7 +37,7 @@ Commands:
   resume <workflowId>                   Undo pause
   restart <workflowId>                  Reset every step to pending and start over
   sync-skills [--dry-run] [--remove] [--force]
-                                         Install target-workflows skill for each installed runner
+                                         Install Target skills (skills/) for each installed runner
   sync-mcp [--dry-run] [--remove] [--force]
                                          Merge Target MCP server into each harness MCP config
 `);

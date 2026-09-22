@@ -14,7 +14,7 @@ import { loadConfig, targetDir, type HubConfig } from "./config.ts";
 import { expandUserPath, readJsonFile, repoRoot, writeJsonFile } from "./repo-paths.ts";
 import { TARGET_VERSION } from "./version.ts";
 
-export const TARGET_SKILL_VERSION = "2";
+export const TARGET_SKILL_VERSION = "5";
 export const TARGET_MCP_MANAGED_STAMP = "managedBy";
 export const TARGET_MCP_MANAGED_VALUE = "target";
 
@@ -60,15 +60,35 @@ interface McpSyncOverrides {
 	harnesses?: Record<string, boolean>;
 }
 
-function skillSource(repoDir: string): string {
-	return path.join(repoDir, "skills", "target-workflows", "SKILL.md");
+function skillsRoot(repoDir: string): string {
+	return path.join(repoDir, "skills");
 }
 
-const SKILL_DEST: Record<PublishableRunner, string> = {
-	cursor: ".cursor/skills-cursor/target-workflows/SKILL.md",
-	claude: ".claude/skills/target-workflows/SKILL.md",
-	"free-code": ".free-code/skills/target-workflows/SKILL.md",
+const SKILL_DEST_DIR: Record<PublishableRunner, string> = {
+	cursor: ".cursor/skills-cursor",
+	claude: ".claude/skills",
+	"free-code": ".free-code/skills",
 };
+
+export interface BundledSkill {
+	name: string;
+	source: string;
+}
+
+/** Every `skills/<name>/SKILL.md` shipped with the repo. */
+export function listBundledSkills(repoDir: string): BundledSkill[] {
+	const root = skillsRoot(repoDir);
+	if (!fs.existsSync(root)) return [];
+	return fs
+		.readdirSync(root, { withFileTypes: true })
+		.filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+		.map((entry) => ({
+			name: entry.name,
+			source: path.join(root, entry.name, "SKILL.md"),
+		}))
+		.filter((skill) => fs.existsSync(skill.source))
+		.sort((a, b) => a.name.localeCompare(b.name));
+}
 
 function runnerInstalled(runner: PublishableRunner): boolean {
 	const binary = RUNNER_BINARIES[runner];
@@ -89,46 +109,48 @@ function stampSkillContent(content: string): string {
 export function syncSkills(options: SyncOptions = {}): SyncAction[] {
 	const home = options.homeDir ?? os.homedir();
 	const repoDir = options.repoDir ?? repoRoot();
-	const source = skillSource(repoDir);
-	if (!fs.existsSync(source)) {
-		throw new Error(`missing_skill_source:${source}`);
+	const skills = listBundledSkills(repoDir);
+	if (skills.length === 0) {
+		throw new Error(`missing_skill_source:${skillsRoot(repoDir)}`);
 	}
-	const content = stampSkillContent(fs.readFileSync(source, "utf8"));
 	const actions: SyncAction[] = [];
 
 	for (const runner of PUBLISHABLE_RUNNERS) {
-		const rel = SKILL_DEST[runner];
-		const dest = path.join(home, rel);
+		const destDir = path.join(home, SKILL_DEST_DIR[runner]);
 		const harness = runner;
 		if (!runnerInstalled(runner)) {
-			actions.push({ harness, action: "skipped", path: dest, detail: "runner_not_installed" });
+			actions.push({ harness, action: "skipped", path: destDir, detail: "runner_not_installed" });
 			continue;
 		}
-		if (options.remove) {
-			if (fs.existsSync(dest)) {
-				if (!options.dryRun) fs.rmSync(path.dirname(dest), { recursive: true, force: true });
-				actions.push({ harness, action: "removed", path: dest });
-			} else {
-				actions.push({ harness, action: "unchanged", path: dest });
-			}
-			continue;
-		}
-		if (fs.existsSync(dest) && !options.force) {
-			try {
-				const existing = fs.readFileSync(dest, "utf8");
-				if (readSkillVersion(existing) === TARGET_SKILL_VERSION) {
+		for (const skill of skills) {
+			const dest = path.join(destDir, skill.name, "SKILL.md");
+			if (options.remove) {
+				if (fs.existsSync(dest)) {
+					if (!options.dryRun) fs.rmSync(path.dirname(dest), { recursive: true, force: true });
+					actions.push({ harness, action: "removed", path: dest });
+				} else {
 					actions.push({ harness, action: "unchanged", path: dest });
-					continue;
 				}
-			} catch {
-				// rewrite
+				continue;
 			}
+			const content = stampSkillContent(fs.readFileSync(skill.source, "utf8"));
+			if (fs.existsSync(dest) && !options.force) {
+				try {
+					const existing = fs.readFileSync(dest, "utf8");
+					if (readSkillVersion(existing) === TARGET_SKILL_VERSION) {
+						actions.push({ harness, action: "unchanged", path: dest });
+						continue;
+					}
+				} catch {
+					// rewrite
+				}
+			}
+			if (!options.dryRun) {
+				fs.mkdirSync(path.dirname(dest), { recursive: true });
+				fs.writeFileSync(dest, content, "utf8");
+			}
+			actions.push({ harness, action: "synced", path: dest });
 		}
-		if (!options.dryRun) {
-			fs.mkdirSync(path.dirname(dest), { recursive: true });
-			fs.writeFileSync(dest, content, "utf8");
-		}
-		actions.push({ harness, action: "synced", path: dest });
 	}
 	return actions;
 }
