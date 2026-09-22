@@ -28,9 +28,12 @@ const { syncSkills, syncMcp, TARGET_SKILL_VERSION } = await import("./agent-sync
 test("syncSkills writes skill files for installed runners", () => {
 	const actions = syncSkills({ homeDir: tmpHome, repoDir: repoRoot(), force: true });
 	assert.ok(actions.some((a) => a.harness === "cursor" && a.action === "synced"));
-	const skillPath = path.join(tmpHome, ".cursor/skills-cursor/target-workflows/SKILL.md");
-	assert.ok(fs.existsSync(skillPath));
-	assert.match(fs.readFileSync(skillPath, "utf8"), new RegExp(`TARGET_SKILL_VERSION: "${TARGET_SKILL_VERSION}"`));
+	const workflowsPath = path.join(tmpHome, ".cursor/skills-cursor/target-workflows/SKILL.md");
+	const createPath = path.join(tmpHome, ".cursor/skills-cursor/create-workflow/SKILL.md");
+	assert.ok(fs.existsSync(workflowsPath));
+	assert.ok(fs.existsSync(createPath));
+	assert.match(fs.readFileSync(workflowsPath, "utf8"), new RegExp(`TARGET_SKILL_VERSION: "${TARGET_SKILL_VERSION}"`));
+	assert.match(fs.readFileSync(createPath, "utf8"), /name: create-workflow/);
 });
 
 test("syncSkills skip when version matches", () => {

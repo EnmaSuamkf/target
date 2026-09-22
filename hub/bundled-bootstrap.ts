@@ -19,13 +19,52 @@ import {
 export const BUNDLED_TCP_NAME = "Target Management";
 export const BUNDLED_RESOURCE_SET_NAME = "target-workflows";
 export const BUNDLED_RESOURCE_SKILL_NAME = "target-workflows";
+export const BUNDLED_CREATE_WORKFLOW_SKILL_NAME = "create-workflow";
 
 function bundledDir(): string {
 	return path.join(path.dirname(fileURLToPath(import.meta.url)), "bundled");
 }
 
-function skillSourcePath(): string {
-	return path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "skills", "target-workflows", "SKILL.md");
+function skillsRoot(): string {
+	return path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "skills");
+}
+
+function skillDescription(content: string, fallback: string): string {
+	const folded = content.match(/^description:\s*>-?\s*\n((?:[ \t]+.+\n)+)/m);
+	if (folded?.[1]) return folded[1].replace(/^[ \t]+/gm, " ").replace(/\s+/g, " ").trim();
+	const single = content.match(/^description:\s*(.+)$/m);
+	return single?.[1]?.trim() || fallback;
+}
+
+function bundledSkillResources(): Array<{
+	name: string;
+	kind: "skill";
+	description: string;
+	entryFile: string;
+	content: string;
+	files: [];
+}> {
+	const root = skillsRoot();
+	if (!fs.existsSync(root)) return [];
+	return fs
+		.readdirSync(root, { withFileTypes: true })
+		.filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+		.flatMap((entry) => {
+			const file = path.join(root, entry.name, "SKILL.md");
+			if (!fs.existsSync(file)) return [];
+			const content = fs.readFileSync(file, "utf8");
+			return [
+				{
+					name: entry.name,
+					kind: "skill" as const,
+					description: skillDescription(content, entry.name),
+					entryFile: "SKILL.md",
+					content,
+					files: [] as [],
+				},
+			];
+		})
+		.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function injectAdminToken(tools: TcpTool[], adminToken: string): TcpTool[] {
@@ -49,20 +88,13 @@ export function ensureBundledTcp(adminToken: string): Tcp {
 }
 
 export function ensureBundledResourceSet(): ResourceSet {
-	const content = fs.readFileSync(skillSourcePath(), "utf8");
-	const resource = {
-		name: BUNDLED_RESOURCE_SKILL_NAME,
-		kind: "skill" as const,
-		description: "Manage Target workflows and steps via hub API or MCP",
-		entryFile: "SKILL.md",
-		content,
-		files: [],
-	};
+	const resources = bundledSkillResources();
+	if (resources.length === 0) throw new Error("missing_bundled_skills");
 	const existing = listResourceSets().find((s) => s.name === BUNDLED_RESOURCE_SET_NAME);
 	if (existing) {
 		const updated = updateResourceSet(existing.id, {
 			tags: ["target", "workflows"],
-			resources: [resource],
+			resources,
 		});
 		if (!updated) throw new Error("failed_to_update_bundled_resource_set");
 		return updated;
@@ -70,7 +102,7 @@ export function ensureBundledResourceSet(): ResourceSet {
 	return insertResourceSet({
 		name: BUNDLED_RESOURCE_SET_NAME,
 		tags: ["target", "workflows"],
-		resources: [resource],
+		resources,
 	});
 }
 
