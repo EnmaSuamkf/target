@@ -44,7 +44,7 @@ export function getPermissionsOrigin(): string | null {
 
 /** Tooltip on a disabled control — names the missing permission(s). */
 export function requires(...ids: string[]): string {
-	return ids.length === 1 ? `Requiere ${ids[0]}` : `Requiere ${ids.join(" o ")}`;
+	return ids.length === 1 ? `Requires ${ids[0]}` : `Requires ${ids.join(" or ")}`;
 }
 
 function getSnapshot(): PermissionsState | null {

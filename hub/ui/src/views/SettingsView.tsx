@@ -30,9 +30,9 @@ import { relativeTime } from "../lib/format.ts";
 import styles from "./SettingsView.module.css";
 
 const MODE_LABEL: Record<string, string> = {
-	unrestricted: "Sin vincular — todo permitido",
-	enforced: "Aplicado — el servidor recorta lo concedido",
-	read_only: "Solo lectura",
+	unrestricted: "Unlinked — everything allowed",
+	enforced: "Enforced — the server trims what is granted",
+	read_only: "Read-only",
 };
 
 /**
@@ -190,7 +190,7 @@ export function SettingsView({
 		receivedAt,
 	} = usePermissions();
 	const canManage = can("client.workflows.manage");
-	const manageTitle = "Requiere client.workflows.manage";
+	const manageTitle = "Requires client.workflows.manage";
 	const permissionsId = useId();
 
 	const notificationsId = useId();
@@ -432,23 +432,22 @@ export function SettingsView({
 
 			<section className={styles.section} aria-labelledby={`${permissionsId}-section`}>
 				<h3 className={styles.sectionHeading} id={`${permissionsId}-section`}>
-					Permisos de tu rol
+					Your role permissions
 				</h3>
 				<p className="hint">
-					Estado del modo: <strong>{MODE_LABEL[mode] ?? mode}</strong>
+					Mode: <strong>{MODE_LABEL[mode] ?? mode}</strong>
 					{reason ? ` · ${reason.replaceAll("_", " ")}` : ""}
 					{ownerId ? ` · owner ${ownerId}` : ""}
-					{` · vínculo ${linkState.replaceAll("_", " ")}`}
+					{` · link ${linkState.replaceAll("_", " ")}`}
 				</p>
 				<p className="hint">
-					Origen del servidor:{" "}
-					<strong>{permissionsOrigin ?? linkStatus?.origin ?? "ninguno"}</strong>
-					{receivedAt ? ` · recibido ${relativeTime(receivedAt)}` : ""}
+					Server origin:{" "}
+					<strong>{permissionsOrigin ?? linkStatus?.origin ?? "none"}</strong>
+					{receivedAt ? ` · received ${relativeTime(receivedAt)}` : ""}
 				</p>
 				{readOnly && (
 					<p className="msg msg--error" role="note">
-						Este hub está en solo-lectura: las mutaciones quedan bloqueadas hasta que el owner
-						vuelva a estar vivo o el dispositivo se desvincule.
+						This hub is read-only: mutations stay blocked until the owner is live again or the device is unlinked.
 					</p>
 				)}
 				{granted.groups.length > 0 ? (
@@ -470,14 +469,12 @@ export function SettingsView({
 				) : (
 					<p className="hint">
 						{mode === "unrestricted"
-							? "Sin owner: no hay lista recortada porque este hub no aplica rol."
-							: "El servidor no envió grupos concedidos (o el snapshot aún no llegó)."}
+							? "No owner: there is no trimmed list because this hub is not applying a role."
+							: "The server did not send granted groups (or the snapshot has not arrived yet)."}
 					</p>
 				)}
 				<p className="msg msg--error" role="note">
-					Esto es gobernanza de UI, no una frontera de seguridad. Quien tenga una shell en esta
-					máquina puede saltárselo: token de admin, CLI, <code>~/.target/target.db</code> o
-					borrar <code>device-link.json</code>. El límite real sigue en target-server.
+					This is UI governance, not a security boundary. Anyone with a shell on this machine can bypass it: admin token, CLI, <code>~/.target/target.db</code>, or deleting <code>device-link.json</code>. The real limit remains on target-server.
 				</p>
 			</section>
 
@@ -507,9 +504,9 @@ export function SettingsView({
 						{linkStatus.scopes.includes("ingest:write") && <p className="hint">Activity reporting is active automatically and includes full conversation text, as accepted when this hub was linked.</p>}
 						<div className={styles.toggleRow} title={canManage ? undefined : manageTitle}>
 							<div className={styles.toggleText}>
-								<span className="label">Sincronización remota</span>
+								<span className="label">Remote Sync</span>
 								<p className="hint" id={`${linkId}-sync`}>
-									Activa o pausa el pull remoto. Mientras el dispositivo está vinculado exige{" "}
+									Enable or pause the remote pull. While the device is linked this requires{" "}
 									<code>client.workflows.manage</code>.
 								</p>
 							</div>
@@ -526,7 +523,7 @@ export function SettingsView({
 										})
 										.finally(() => setSyncBusy(false));
 								}}
-								label="Sincronización remota"
+								label="Remote Sync"
 								describedBy={`${linkId}-sync`}
 								disabled={!canManage || syncBusy}
 							/>

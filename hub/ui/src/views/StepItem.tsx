@@ -510,7 +510,7 @@ export function StepItem({
 						title={
 							canExecute
 								? "Approve this step's result: it's marked done and the workflow carries on with the next step. Alt/Shift+C presses this button."
-								: "Requiere client.workflows.execute"
+								: "Requires client.workflows.execute"
 						}
 						data-continue-step
 					>

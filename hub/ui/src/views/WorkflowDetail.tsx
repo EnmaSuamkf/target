@@ -579,7 +579,7 @@ export function WorkflowDetail({
 						data-start-workflow
 						title={
 							!canExecute
-								? "Requiere client.workflows.execute"
+								? "Requires client.workflows.execute"
 								: !startAction
 									? workflow.status === "waiting"
 										? "A step is waiting for your review — Continue it to carry on, or Abort it to stop here."

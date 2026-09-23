@@ -108,7 +108,7 @@ export function WorkflowList({
 	const railRef = useRef<HTMLDivElement | null>(null);
 	const { can } = usePermissions();
 	const canCreate = can("client.workflows.create");
-	const createTitle = canCreate ? undefined : "Requiere client.workflows.create";
+	const createTitle = canCreate ? undefined : "Requires client.workflows.create";
 
 	const visible = useMemo(() => filterAndSort(workflows, query, filter, originFilter), [workflows, query, filter, originFilter]);
 	const statuses = useMemo(() => presentStatuses(workflows), [workflows]);

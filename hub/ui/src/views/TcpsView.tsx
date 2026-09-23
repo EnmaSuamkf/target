@@ -108,7 +108,7 @@ export function TcpsView({
 								className="btn btn--primary btn--sm"
 								onClick={() => { setEditingId(null); setCreating(true); }}
 								disabled={!canCreate}
-								title={canCreate ? undefined : "Requiere client.tcp-tools.create"}
+								title={canCreate ? undefined : "Requires client.tcp-tools.create"}
 							>
 								New
 							</button>

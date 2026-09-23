@@ -92,7 +92,7 @@ export function ResourceSetsView({
 									setCreating(true);
 								}}
 								disabled={!canCreate}
-								title={canCreate ? undefined : "Requiere client.rci.create"}
+								title={canCreate ? undefined : "Requires client.rci.create"}
 							>
 								New
 							</button>

@@ -301,8 +301,8 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 				return;
 			}
 			if (err instanceof ApiError && err.status === 403 && err.permission) {
-				const origin = getPermissionsOrigin() ?? "el servidor";
-				const message = `Tu rol en ${origin} no permite esta accion`;
+				const origin = getPermissionsOrigin() ?? "the server";
+				const message = `Your role on ${origin} does not allow this action`;
 				if (lastForbiddenToast.current !== message) {
 					lastForbiddenToast.current = message;
 					toast.error(message);

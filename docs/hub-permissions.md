@@ -155,14 +155,14 @@ has no routes for those IDs today.
 
 The UI polls `GET /api/permissions` on the existing 2s tick. Controls are
 **disabled**, not hidden, with a `title` that names the missing id
-(`Requiere client.workflows.execute`). Settings → **Permisos de tu rol**
+(`Requires client.workflows.execute`). Settings → **Your role permissions**
 shows the mode, the server origin, the `granted` list the server already
 trimmed, and the read-only warning. Disconnect and the Remote Sync switch
 require `client.workflows.manage` (D5).
 
 ## This is not a security boundary
 
-This is gobernanza de UI y de la API local, **no una frontera de seguridad**.
+This is UI governance of the local API, **not a security boundary**.
 
 Anyone with a shell on this machine can skip it:
 
