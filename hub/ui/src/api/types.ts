@@ -727,31 +727,31 @@ export interface DeviceLinkOutcome {
 }
 
 /**
- * Client-scoped permission IDs from target-server's `remote.*` catalogue.
+ * Client-scoped permission IDs from target-server's `client.*` catalogue.
  * The workflow-agent setting `PermissionMode` (acceptEdits / …) is unrelated.
  */
 export const CLIENT_PERMISSIONS = [
-	"remote.read",
-	"remote.workflows.create",
-	"remote.workflows.steps.add",
-	"remote.workflows.steps.edit",
-	"remote.workflows.manage",
-	"remote.workflows.execute",
-	"remote.templates.create",
-	"remote.templates.edit",
-	"remote.templates.delete",
-	"remote.templates.import",
-	"remote.templates.export",
-	"remote.tcp-tools.create",
-	"remote.tcp-tools.edit",
-	"remote.tcp-tools.delete",
-	"remote.tcp-tools.import",
-	"remote.tcp-tools.export",
-	"remote.rci.create",
-	"remote.rci.edit",
-	"remote.rci.delete",
-	"remote.rci.import",
-	"remote.rci.export",
+	"client.read",
+	"client.workflows.create",
+	"client.workflows.steps.add",
+	"client.workflows.steps.edit",
+	"client.workflows.manage",
+	"client.workflows.execute",
+	"client.templates.create",
+	"client.templates.edit",
+	"client.templates.delete",
+	"client.templates.import",
+	"client.templates.export",
+	"client.tcp-tools.create",
+	"client.tcp-tools.edit",
+	"client.tcp-tools.delete",
+	"client.tcp-tools.import",
+	"client.tcp-tools.export",
+	"client.rci.create",
+	"client.rci.edit",
+	"client.rci.delete",
+	"client.rci.import",
+	"client.rci.export",
 ] as const;
 
 export type ClientPermission = (typeof CLIENT_PERMISSIONS)[number];

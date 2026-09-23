@@ -36,7 +36,7 @@ export function RenameWorkflowModal({
 	const [value, setValue] = useState(name);
 	const [saving, setSaving] = useState(false);
 	const { can } = usePermissions();
-	const canManage = can("remote.workflows.manage");
+	const canManage = can("client.workflows.manage");
 
 	useEffect(() => {
 		if (!open) return;
@@ -79,7 +79,7 @@ export function RenameWorkflowModal({
 						form="rename-workflow"
 						className="btn btn--primary"
 						disabled={!canSubmit}
-						title={canManage ? undefined : requires("remote.workflows.manage")}
+						title={canManage ? undefined : requires("client.workflows.manage")}
 					>
 						{saving ? "Saving…" : "Save"}
 					</button>

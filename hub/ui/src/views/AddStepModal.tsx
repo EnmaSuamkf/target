@@ -64,7 +64,7 @@ export function AddStepModal({
 
 	// The wait between retries only means something with more than one retry.
 	const { can } = usePermissions();
-	const canAdd = can("remote.workflows.steps.add");
+	const canAdd = can("client.workflows.steps.add");
 	const intervalEnabled = (parseInt(maxRetries, 10) || 0) > 1;
 	const canSubmit = description.trim() !== "" && !saving && canAdd;
 
@@ -107,7 +107,7 @@ export function AddStepModal({
 						form="add-step-after"
 						className="btn btn--primary"
 						disabled={!canSubmit}
-						title={canAdd ? undefined : requires("remote.workflows.steps.add")}
+						title={canAdd ? undefined : requires("client.workflows.steps.add")}
 					>
 						{saving ? "Adding…" : "Add step"}
 					</button>

@@ -144,10 +144,10 @@ export function StepItem({
 	const [errorExpanded, setErrorExpanded] = useState(false);
 	const [adding, setAdding] = useState(false);
 	const { can } = usePermissions();
-	const canExecute = can("remote.workflows.execute");
-	const canEdit = can("remote.workflows.steps.edit");
-	const canAdd = can("remote.workflows.steps.add");
-	const canManage = can("remote.workflows.manage");
+	const canExecute = can("client.workflows.execute");
+	const canEdit = can("client.workflows.steps.edit");
+	const canAdd = can("client.workflows.steps.add");
+	const canManage = can("client.workflows.manage");
 	const canMoveUp = canMoveUpAllowed && canEdit;
 	const canMoveDown = canMoveDownAllowed && canEdit;
 
@@ -228,7 +228,7 @@ export function StepItem({
 						title={
 							canManage
 								? "Check to run only the selected steps on Start. Leave all unchecked to run nothing."
-								: requires("remote.workflows.manage")
+								: requires("client.workflows.manage")
 						}
 					>
 						<input
@@ -257,7 +257,7 @@ export function StepItem({
 								canMoveUp
 									? "Move up — this step runs one place earlier."
 									: !canEdit
-										? requires("remote.workflows.steps.edit")
+										? requires("client.workflows.steps.edit")
 										: "Can't move up: this step is already first, or it (or the step above) has already run. Only pending steps can be reordered."
 							}
 							data-move-step="up"
@@ -276,7 +276,7 @@ export function StepItem({
 								canMoveDown
 									? "Move down — this step runs one place later."
 									: !canEdit
-										? requires("remote.workflows.steps.edit")
+										? requires("client.workflows.steps.edit")
 										: "Can't move down: this step is already last, or it (or the step below) has already run. Only pending steps can be reordered."
 							}
 							data-move-step="down"
@@ -424,7 +424,7 @@ export function StepItem({
 					notes={step.notes ?? []}
 					busy={busy}
 					disabled={!canEdit}
-					disabledTitle={requires("remote.workflows.steps.edit")}
+					disabledTitle={requires("client.workflows.steps.edit")}
 					{...(onAddNote
 						? { onAdd: (content, theme) => onAddNote(step.id, content, theme) }
 						: {})}
@@ -487,7 +487,7 @@ export function StepItem({
 						className="btn btn--sm btn--danger"
 						onClick={() => onAbort(step.id)}
 						disabled={busy || !canExecute}
-						title={canExecute ? QUEUED_RECOVERY_TOOLTIP : requires("remote.workflows.execute")}
+						title={canExecute ? QUEUED_RECOVERY_TOOLTIP : requires("client.workflows.execute")}
 					>
 						Abort
 					</button>
@@ -510,7 +510,7 @@ export function StepItem({
 						title={
 							canExecute
 								? "Approve this step's result: it's marked done and the workflow carries on with the next step. Alt/Shift+C presses this button."
-								: "Requiere remote.workflows.execute"
+								: "Requiere client.workflows.execute"
 						}
 						data-continue-step
 					>
@@ -530,7 +530,7 @@ export function StepItem({
 						disabled={!step.sessionId || busy}
 						title={
 							!canExecute
-								? requires("remote.workflows.execute")
+								? requires("client.workflows.execute")
 								: !step.sessionId
 									? "This step never reported a session, so there's no conversation to resume."
 									: failed
@@ -552,7 +552,7 @@ export function StepItem({
 						title={
 							canAdd
 								? "Insert a new step right after this one — it becomes the next thing the agent does when you press Continue."
-								: requires("remote.workflows.steps.add")
+								: requires("client.workflows.steps.add")
 						}
 					>
 						Add step
@@ -579,7 +579,7 @@ export function StepItem({
 						title={
 							canExecute
 								? "Re-run this step now. Use after Abort cleared a stuck queue, or any time a failed step should be tried again."
-								: requires("remote.workflows.execute")
+								: requires("client.workflows.execute")
 						}
 					>
 						Retry
@@ -593,7 +593,7 @@ export function StepItem({
 						disabled={busy || !canExecute}
 						title={
 							!canExecute
-								? requires("remote.workflows.execute")
+								? requires("client.workflows.execute")
 								: waiting
 									? "Refuse this step's result: it's recorded failed and the workflow stops here instead of carrying on. The result and the session are kept."
 									: "Force-fail this stuck step so it can be re-run, without restarting the whole workflow. Also kills the spawned agent process on the broker, freeing the workdir lock. Its session is preserved."
@@ -608,7 +608,7 @@ export function StepItem({
 						className="btn btn--sm"
 						onClick={() => setEditing(true)}
 						disabled={!editable || busy || !canEdit}
-						title={canEdit ? undefined : requires("remote.workflows.steps.edit")}
+						title={canEdit ? undefined : requires("client.workflows.steps.edit")}
 					>
 						Edit
 					</button>
@@ -621,7 +621,7 @@ export function StepItem({
 						disabled={!removable || busy || !canEdit}
 						title={
 							!canEdit
-								? requires("remote.workflows.steps.edit")
+								? requires("client.workflows.steps.edit")
 								: removable
 									? "Remove this step"
 									: "Only a pending step can be removed."
@@ -645,7 +645,7 @@ export function StepItem({
 					aria-label={`Set the status of step ${step.orderIndex + 1} by hand`}
 					title={
 						!canManage
-							? requires("remote.workflows.manage")
+							? requires("client.workflows.manage")
 							: inFlight
 								? "This step still has a job in flight — abort it first."
 								: "Say what really happened: mark this step done, failed or pending by hand. Nothing is run."
@@ -708,7 +708,7 @@ function StepEditor({
 	const [saving, setSaving] = useState(false);
 	const [attaching, setAttaching] = useState(false);
 	const { can } = usePermissions();
-	const canEdit = can("remote.workflows.steps.edit");
+	const canEdit = can("client.workflows.steps.edit");
 
 	// The wait between retries only means something with more than one retry.
 	const intervalEnabled = (parseInt(maxRetries, 10) || 0) > 1;
@@ -864,7 +864,7 @@ function StepEditor({
 					type="submit"
 					className="btn btn--primary btn--sm"
 					disabled={description.trim() === "" || saving || !canEdit}
-					title={canEdit ? undefined : requires("remote.workflows.steps.edit")}
+					title={canEdit ? undefined : requires("client.workflows.steps.edit")}
 				>
 					{saving ? "Saving…" : "Save"}
 				</button>

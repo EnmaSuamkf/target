@@ -189,8 +189,8 @@ export function SettingsView({
 		linkState,
 		receivedAt,
 	} = usePermissions();
-	const canManage = can("remote.workflows.manage");
-	const manageTitle = "Requiere remote.workflows.manage";
+	const canManage = can("client.workflows.manage");
+	const manageTitle = "Requiere client.workflows.manage";
 	const permissionsId = useId();
 
 	const notificationsId = useId();
@@ -510,7 +510,7 @@ export function SettingsView({
 								<span className="label">Sincronización remota</span>
 								<p className="hint" id={`${linkId}-sync`}>
 									Activa o pausa el pull remoto. Mientras el dispositivo está vinculado exige{" "}
-									<code>remote.workflows.manage</code>.
+									<code>client.workflows.manage</code>.
 								</p>
 							</div>
 							<Switch

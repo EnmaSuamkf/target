@@ -62,7 +62,7 @@ test("linked with owner: null is read_only", () => {
 test("a live heartbeat has grace, then the mode becomes read_only", (t) => {
 	t.mock.timers.enable({ apis: ["Date"], now: 1_700_000_000_000 });
 	link();
-	recordOwnerSnapshot(owner(["remote.read", "remote.workflows.execute"]), "dev_mode", ORIGIN);
+	recordOwnerSnapshot(owner(["client.read", "client.workflows.execute"]), "dev_mode", ORIGIN);
 	assert.equal(resolvePermissionMode().mode, "enforced");
 	t.mock.timers.tick(30_000);
 	assert.equal(resolvePermissionMode().mode, "enforced");
@@ -74,7 +74,7 @@ test("a live heartbeat has grace, then the mode becomes read_only", (t) => {
 
 test("a workflow already running is not aborted when the permission is lost", () => {
 	link();
-	recordOwnerSnapshot(owner(["remote.read", "remote.workflows.execute"]), "dev_mode", ORIGIN);
+	recordOwnerSnapshot(owner(["client.read", "client.workflows.execute"]), "dev_mode", ORIGIN);
 	const workflow = insertWorkflow({
 		id: "wf-running",
 		name: "already running",
@@ -87,7 +87,7 @@ test("a workflow already running is not aborted when the permission is lost", ()
 	setWorkflowStatus(workflow.id, "running");
 	assert.equal(getWorkflow(workflow.id)?.status, "running");
 
-	recordOwnerSnapshot(owner(["remote.read"]), "dev_mode", ORIGIN);
+	recordOwnerSnapshot(owner(["client.read"]), "dev_mode", ORIGIN);
 	assert.equal(resolvePermissionMode().mode, "enforced");
 	expireStale(cfg, silent);
 	assert.equal(getWorkflow(workflow.id)?.status, "running");

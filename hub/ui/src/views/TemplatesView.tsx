@@ -71,9 +71,9 @@ export function TemplatesView({
 	const [creating, setCreating] = useState(false);
 	const isMobile = useIsMobile();
 	const { can } = usePermissions();
-	const canCreate = can("remote.templates.create");
-	const canImport = can("remote.templates.import");
-	const canExport = can("remote.templates.export");
+	const canCreate = can("client.templates.create");
+	const canImport = can("client.templates.import");
+	const canExport = can("client.templates.export");
 	// A file input can only be opened by the user clicking the input itself, so
 	// the visible "Import" button clicks a hidden one on their behalf — that's
 	// the only way to have an import control that matches the other buttons.
@@ -127,7 +127,7 @@ export function TemplatesView({
 								setCreating(true);
 							}}
 							disabled={!canCreate}
-							title={canCreate ? undefined : "Requiere remote.templates.create"}
+							title={canCreate ? undefined : "Requiere client.templates.create"}
 						>
 							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
 								<path d="M12 5v14M5 12h14" />
@@ -145,7 +145,7 @@ export function TemplatesView({
 							className="btn btn--sm"
 							onClick={() => fileInput.current?.click()}
 							disabled={busy || !canImport}
-							title={canImport ? "Import templates from a .json bundle" : requires("remote.templates.import")}
+							title={canImport ? "Import templates from a .json bundle" : requires("client.templates.import")}
 						>
 							Import
 						</button>
@@ -155,7 +155,7 @@ export function TemplatesView({
 								className="btn btn--sm"
 								onClick={onExportAll}
 								disabled={busy || !canExport}
-								title={canExport ? "Download every template as one .json bundle" : requires("remote.templates.export")}
+								title={canExport ? "Download every template as one .json bundle" : requires("client.templates.export")}
 							>
 								Export all
 							</button>
@@ -226,7 +226,7 @@ export function TemplatesView({
 										className="btn btn--primary btn--sm"
 										onClick={() => setCreating(true)}
 										disabled={!canCreate}
-										title={canCreate ? undefined : requires("remote.templates.create")}
+										title={canCreate ? undefined : requires("client.templates.create")}
 									>
 										Create a template
 									</button>
@@ -305,7 +305,7 @@ export function TemplatesView({
 									className="btn btn--primary btn--sm"
 									onClick={() => setCreating(true)}
 									disabled={!canCreate}
-									title={canCreate ? undefined : requires("remote.templates.create")}
+									title={canCreate ? undefined : requires("client.templates.create")}
 								>
 									New template
 								</button>
@@ -353,10 +353,10 @@ function TemplateForm({
 	const [resourceSelections, setResourceSelections] = useState<ResourceSelection[]>(template?.resourceSelections ?? []);
 	const [saving, setSaving] = useState(false);
 	const { can } = usePermissions();
-	const canCreate = can("remote.templates.create");
-	const canEdit = can("remote.templates.edit");
-	const canDelete = can("remote.templates.delete");
-	const canExport = can("remote.templates.export");
+	const canCreate = can("client.templates.create");
+	const canEdit = can("client.templates.edit");
+	const canDelete = can("client.templates.delete");
+	const canExport = can("client.templates.export");
 	const canSave = template ? canEdit : canCreate;
 
 	const updateStep = (index: number, patch: Partial<TemplateStep>): void => {
@@ -418,7 +418,7 @@ function TemplateForm({
 							className="btn btn--sm"
 							onClick={onExport}
 							disabled={busy || saving || !canExport}
-							title={canExport ? "Download this template as a .json bundle" : requires("remote.templates.export")}
+							title={canExport ? "Download this template as a .json bundle" : requires("client.templates.export")}
 						>
 							Export
 						</button>
@@ -429,7 +429,7 @@ function TemplateForm({
 							className="btn btn--sm btn--danger"
 							onClick={onDelete}
 							disabled={busy || saving || !canDelete}
-							title={canDelete ? undefined : requires("remote.templates.delete")}
+							title={canDelete ? undefined : requires("client.templates.delete")}
 						>
 							Delete
 						</button>
@@ -648,7 +648,7 @@ function TemplateForm({
 					title={
 						canSave
 							? undefined
-							: requires(template ? "remote.templates.edit" : "remote.templates.create")
+							: requires(template ? "client.templates.edit" : "client.templates.create")
 					}
 				>
 					{saving ? "Saving…" : template ? "Save changes" : "Create template"}

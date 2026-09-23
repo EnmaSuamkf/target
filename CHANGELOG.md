@@ -9,11 +9,20 @@ The current version is reported by every instance to the central server (see
 
 ## [Unreleased]
 
+### Changed
+
+- **Client permission IDs are `client.*`, not `remote.*`.** The hub gate, UI
+  types, tooltips and `docs/hub-permissions.md` now use IDs such as
+  `client.workflows.execute` and `client.workflows.manage`. Semantics are
+  unchanged: pause still accepts execute or manage; disconnect and Remote
+  Sync still need manage. The old `remote.*` prefix is only mentioned here
+  as the previous name.
+
 ### Added
 
 - **Linked-owner permissions on the local hub.** A hub that is not linked to
   a server is unchanged: every local action still works. Once it is linked,
-  target-server already sends the owner's `remote.*` role on register and
+  target-server already sends the owner's `client.*` role on register and
   heartbeat; the hub now stores that snapshot, expires it after
   `max(30s, 3 × sync)`, and applies it. Mutating HTTP routes answer 403 with
   the missing permission instead of doing the work. GET reads stay open

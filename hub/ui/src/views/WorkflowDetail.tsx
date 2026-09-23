@@ -328,10 +328,10 @@ export function WorkflowDetail({
 	}, [taskSteps]);
 
 	const { can } = usePermissions();
-	const canExecute = can("remote.workflows.execute");
-	const canPause = can("remote.workflows.execute", "remote.workflows.manage");
-	const canManage = can("remote.workflows.manage");
-	const canCreate = can("remote.workflows.create");
+	const canExecute = can("client.workflows.execute");
+	const canPause = can("client.workflows.execute", "client.workflows.manage");
+	const canManage = can("client.workflows.manage");
+	const canCreate = can("client.workflows.create");
 
 	const startAction = canExecute ? startActionFor(workflow.status) : null;
 	const running = workflow.status === "running";
@@ -466,7 +466,7 @@ export function WorkflowDetail({
 						className={`btn btn--sm btn--ghost ${styles.rename}`}
 						onClick={() => setRenaming(true)}
 						disabled={busy || !canManage}
-						title={canManage ? "Change this workflow's name." : requires("remote.workflows.manage")}
+						title={canManage ? "Change this workflow's name." : requires("client.workflows.manage")}
 					>
 						Change
 					</button>
@@ -535,7 +535,7 @@ export function WorkflowDetail({
 								type="button"
 								className="btn btn--sm btn--primary"
 								disabled={busy || savingDockerMounts || !canManage}
-								title={canManage ? undefined : requires("remote.workflows.manage")}
+								title={canManage ? undefined : requires("client.workflows.manage")}
 								onClick={() => {
 									void (async () => {
 										setSavingDockerMounts(true);
@@ -579,7 +579,7 @@ export function WorkflowDetail({
 						data-start-workflow
 						title={
 							!canExecute
-								? "Requiere remote.workflows.execute"
+								? "Requiere client.workflows.execute"
 								: !startAction
 									? workflow.status === "waiting"
 										? "A step is waiting for your review — Continue it to carry on, or Abort it to stop here."
@@ -603,7 +603,7 @@ export function WorkflowDetail({
 						title={
 							canPause
 								? "Stops dispatching further steps. The step already in flight finishes on its own."
-								: requires("remote.workflows.execute", "remote.workflows.manage")
+								: requires("client.workflows.execute", "client.workflows.manage")
 						}
 					>
 						Stop
@@ -622,7 +622,7 @@ export function WorkflowDetail({
 						title={
 							canCreate
 								? "Copy this workflow — all of its steps, in order, and its context — into a new one. Opens the new-workflow form seeded from this workflow, so the copy's name, directory, agent and permissions can be changed before it is created."
-								: requires("remote.workflows.create")
+								: requires("client.workflows.create")
 						}
 					>
 						Clone
@@ -639,7 +639,7 @@ export function WorkflowDetail({
 						aria-label="Set this workflow's status by hand"
 						title={
 							!canManage
-								? requires("remote.workflows.manage")
+								? requires("client.workflows.manage")
 								: stepInFlight
 									? "A step is still in flight — stop or abort it first."
 									: "Correct the status by hand when a step really succeeded but was recorded as failed. Nothing is run."
@@ -665,7 +665,7 @@ export function WorkflowDetail({
 						className={`btn btn--danger ${styles.delete}`}
 						onClick={onDelete}
 						disabled={busy || !canManage}
-						title={canManage ? undefined : requires("remote.workflows.manage")}
+						title={canManage ? undefined : requires("client.workflows.manage")}
 					>
 						Delete
 					</button>
@@ -725,7 +725,7 @@ export function WorkflowDetail({
 									className="btn btn--sm btn--ghost"
 									onClick={toggleAll}
 									disabled={!canManage}
-									title={canManage ? undefined : requires("remote.workflows.manage")}
+									title={canManage ? undefined : requires("client.workflows.manage")}
 								>
 									{allSelected ? "Deselect all" : "Select all"}
 								</button>
@@ -871,7 +871,7 @@ function AddStepForm({
 	const [templateId, setTemplateId] = useState("");
 	const [saving, setSaving] = useState(false);
 	const { can } = usePermissions();
-	const canAdd = can("remote.workflows.steps.add");
+	const canAdd = can("client.workflows.steps.add");
 
 	const intervalEnabled = (parseInt(maxRetries, 10) || 0) > 1;
 
@@ -926,7 +926,7 @@ function AddStepForm({
 				className={styles.addTrigger}
 				onClick={() => setOpen(true)}
 				disabled={!canAdd}
-				title={canAdd ? undefined : requires("remote.workflows.steps.add")}
+				title={canAdd ? undefined : requires("client.workflows.steps.add")}
 			>
 				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
 					<path d="M12 5v14M5 12h14" />
@@ -1045,7 +1045,7 @@ function AddStepForm({
 						type="submit"
 						className="btn btn--primary btn--sm"
 						disabled={description.trim() === "" || saving || !canAdd}
-						title={canAdd ? undefined : requires("remote.workflows.steps.add")}
+						title={canAdd ? undefined : requires("client.workflows.steps.add")}
 					>
 						{saving ? "Adding…" : "Add step"}
 					</button>
@@ -1087,7 +1087,7 @@ function AddStepForm({
 							className="btn btn--sm"
 							onClick={() => void applyTemplate()}
 							disabled={!templateId || saving || !canAdd}
-							title={canAdd ? undefined : requires("remote.workflows.steps.add")}
+							title={canAdd ? undefined : requires("client.workflows.steps.add")}
 						>
 							Append
 						</button>

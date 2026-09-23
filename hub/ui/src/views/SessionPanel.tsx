@@ -39,7 +39,7 @@ export function SessionPanel({
 	// operator finds out it happened at all.
 	const compactedAt = info?.lastCompactionAt ?? usage?.lastCompactionAt ?? null;
 	const { can } = usePermissions();
-	const canExecute = can("remote.workflows.execute");
+	const canExecute = can("client.workflows.execute");
 
 	return (
 		<section className={styles.block}>
@@ -52,7 +52,7 @@ export function SessionPanel({
 					disabled={!canOpen || opening || !canExecute}
 					title={
 						!canExecute
-							? requires("remote.workflows.execute")
+							? requires("client.workflows.execute")
 							: canOpen
 								? info?.sandbox === "docker"
 									? "Opens a terminal on this machine running `docker run -it …` in the same container image the steps used, resuming this session."

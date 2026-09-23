@@ -1,9 +1,9 @@
 # Hub owner permissions
 
 This is the local counterpart of `target-server/docs/rbac.md`. The server
-already decides which `remote.*` IDs a linked owner has. The hub caches that
+already decides which `client.*` IDs a linked owner has. The hub caches that
 role and applies it to its own HTTP API and UI. The catalogue is the same
-`remote.*` list; the hub does not invent local permission IDs.
+`client.*` list; the hub does not invent local permission IDs.
 
 ## Modes
 
@@ -31,9 +31,9 @@ are not role-gated.
 | D1 | GET reads are never blocked, except export bundles. | A greyed button that still lets you inspect local data is honest; hiding the list looks like a crash. Exports are a write of the catalogue onto another machine, so they take `.export`. |
 | D2 | After `max(30s, 3 × syncIntervalMs)` without a live heartbeat the hub goes `read_only`. Running work finishes. | Same TTL the server already uses for presence. Killing an in-flight step because the owner packet is late would be worse than waiting. |
 | D3 | Unlinked = `unrestricted`. Linked with `owner: null` = `read_only`. | No server, no role. A link that never received an owner is not a licence to mutate. |
-| D4 | Reuse the server's `remote.*` catalogue. | One vocabulary on both sides. The hub does not mint `hub.*` IDs. |
-| D5 | While linked, `DELETE /api/device-link` and `PUT /api/settings/sync` require `remote.workflows.manage`. | Unlinking or flipping Remote Sync is a governance action, not a local preference. |
-| D6 | `POST /api/workflows/:id/pause` accepts `remote.workflows.execute` **or** `remote.workflows.manage`. | Stopping dispatch is both a run control and a manage action. Either role can hold the line. |
+| D4 | Use the server's `client.*` catalogue (same IDs that used to be `remote.*`). | One vocabulary on both sides. The hub does not mint `hub.*` IDs. |
+| D5 | While linked, `DELETE /api/device-link` and `PUT /api/settings/sync` require `client.workflows.manage`. | Unlinking or flipping Remote Sync is a governance action, not a local preference. |
+| D6 | `POST /api/workflows/:id/pause` accepts `client.workflows.execute` **or** `client.workflows.manage`. | Stopping dispatch is both a run control and a manage action. Either role can hold the line. |
 
 ## `GET /api/permissions`
 
@@ -45,7 +45,7 @@ and **not** by `requirePermission` — this is how the UI learns the role.
   "mode": "unrestricted" | "enforced" | "read_only",
   "linkState": "local_unconfigured" | "awaiting_authorization" | "connected" | "…",
   "ownerId": "owner_…" | null,
-  "permissions": ["remote.read", "remote.workflows.execute"],
+  "permissions": ["client.read", "client.workflows.execute"],
   "granted": { "groups": [{ "id": "…", "scope": "…", "label": "…", "description": "…", "permissions": [{ "id": "…", "label": "…", "description": "…" }] }] },
   "receivedAt": "2026-09-23T08:00:00.000Z" | null,
   "staleAfter": "2026-09-23T08:00:30.000Z" | null
@@ -69,8 +69,8 @@ list is the one a 403 names.
 
 | Method | Path | Permission |
 | --- | --- | --- |
-| `DELETE` | `/api/device-link` | `remote.workflows.manage` (D5) |
-| `PUT` | `/api/settings/sync` | `remote.workflows.manage` (D5) |
+| `DELETE` | `/api/device-link` | `client.workflows.manage` (D5) |
+| `PUT` | `/api/settings/sync` | `client.workflows.manage` (D5) |
 
 Other `/api/settings/*` writes stay operator-gated only (`isAdmin`). Linking
 (`POST /api/device-link/start`, `POST /api/device-link/poll`) is operator-gated
@@ -80,60 +80,60 @@ and not role-gated: there is no owner yet.
 
 | Method | Path | Permission |
 | --- | --- | --- |
-| `POST` | `/api/workflows` | `remote.workflows.create` |
-| `DELETE` | `/api/workflows/:id` | `remote.workflows.manage` |
-| `POST` | `/api/workflows/:id/clone` | `remote.workflows.create` |
-| `PATCH`/`PUT` | `/api/workflows/:id/name` | `remote.workflows.manage` |
-| `PATCH`/`PUT` | `/api/workflows/:id/docker-mounts` | `remote.workflows.manage` |
-| `PATCH`/`PUT` | `/api/workflows/:id/tcps` | `remote.workflows.manage` |
-| `PATCH`/`PUT` | `/api/workflows/:id/resourcesets` | `remote.workflows.manage` |
-| `PATCH`/`PUT` | `/api/workflows/:id/context` | `remote.workflows.manage` |
-| `POST` | `/api/workflows/:id/attachments` | `remote.workflows.manage` when `field` is `context`; otherwise `remote.workflows.steps.edit` |
+| `POST` | `/api/workflows` | `client.workflows.create` |
+| `DELETE` | `/api/workflows/:id` | `client.workflows.manage` |
+| `POST` | `/api/workflows/:id/clone` | `client.workflows.create` |
+| `PATCH`/`PUT` | `/api/workflows/:id/name` | `client.workflows.manage` |
+| `PATCH`/`PUT` | `/api/workflows/:id/docker-mounts` | `client.workflows.manage` |
+| `PATCH`/`PUT` | `/api/workflows/:id/tcps` | `client.workflows.manage` |
+| `PATCH`/`PUT` | `/api/workflows/:id/resourcesets` | `client.workflows.manage` |
+| `PATCH`/`PUT` | `/api/workflows/:id/context` | `client.workflows.manage` |
+| `POST` | `/api/workflows/:id/attachments` | `client.workflows.manage` when `field` is `context`; otherwise `client.workflows.steps.edit` |
 | `DELETE` | `/api/attachments/:id` | same rule as the attachment's field |
-| `POST` | `/api/workflows/:id/open-terminal` | `remote.workflows.execute` |
-| `POST` | `/api/conversations/open-terminal` | `remote.workflows.execute` |
-| `POST` | `/api/workflows/:id/steps` | `remote.workflows.steps.add` |
-| `POST` | `/api/workflows/:id/steps/from-template` | `remote.workflows.steps.add` |
-| `PATCH` | `/api/workflows/:id/steps/:stepId` | `remote.workflows.steps.edit` |
-| `DELETE` | `/api/workflows/:id/steps/:stepId` | `remote.workflows.manage` |
-| `POST` | `/api/workflows/:id/steps/:stepId/notes` | `remote.workflows.steps.edit` |
-| `PATCH` | `/api/workflows/:id/steps/:stepId/notes/:noteId` | `remote.workflows.steps.edit` |
-| `DELETE` | `/api/workflows/:id/steps/:stepId/notes/:noteId` | `remote.workflows.steps.edit` |
-| `POST` | `/api/workflows/:id/steps/:stepId/run` | `remote.workflows.execute` |
-| `POST` | `/api/workflows/:id/steps/:stepId/continue` | `remote.workflows.execute` |
-| `POST` | `/api/workflows/:id/steps/:stepId/abort` | `remote.workflows.execute` |
-| `POST` | `/api/workflows/:id/steps/:stepId/open-terminal` | `remote.workflows.execute` |
-| `POST` | `/api/workflows/:id/steps/:stepId/status` | `remote.workflows.manage` |
-| `POST` | `/api/workflows/:id/steps/:stepId/move` | `remote.workflows.manage` |
-| `POST` | `/api/workflows/:id/status` | `remote.workflows.manage` |
-| `PUT`/`PATCH` | `/api/workflows/:id/selection` | `remote.workflows.manage` |
-| `POST` | `/api/workflows/:id/start` | `remote.workflows.execute` |
-| `POST` | `/api/workflows/:id/resume` | `remote.workflows.execute` |
-| `POST` | `/api/workflows/:id/restart` | `remote.workflows.execute` |
-| `POST` | `/api/workflows/:id/pause` | `remote.workflows.execute` **or** `remote.workflows.manage` (D6) |
-| `POST` | `/api/tcps/execute` | `remote.workflows.execute` (skipped when the caller is a running step with its callback token) |
+| `POST` | `/api/workflows/:id/open-terminal` | `client.workflows.execute` |
+| `POST` | `/api/conversations/open-terminal` | `client.workflows.execute` |
+| `POST` | `/api/workflows/:id/steps` | `client.workflows.steps.add` |
+| `POST` | `/api/workflows/:id/steps/from-template` | `client.workflows.steps.add` |
+| `PATCH` | `/api/workflows/:id/steps/:stepId` | `client.workflows.steps.edit` |
+| `DELETE` | `/api/workflows/:id/steps/:stepId` | `client.workflows.manage` |
+| `POST` | `/api/workflows/:id/steps/:stepId/notes` | `client.workflows.steps.edit` |
+| `PATCH` | `/api/workflows/:id/steps/:stepId/notes/:noteId` | `client.workflows.steps.edit` |
+| `DELETE` | `/api/workflows/:id/steps/:stepId/notes/:noteId` | `client.workflows.steps.edit` |
+| `POST` | `/api/workflows/:id/steps/:stepId/run` | `client.workflows.execute` |
+| `POST` | `/api/workflows/:id/steps/:stepId/continue` | `client.workflows.execute` |
+| `POST` | `/api/workflows/:id/steps/:stepId/abort` | `client.workflows.execute` |
+| `POST` | `/api/workflows/:id/steps/:stepId/open-terminal` | `client.workflows.execute` |
+| `POST` | `/api/workflows/:id/steps/:stepId/status` | `client.workflows.manage` |
+| `POST` | `/api/workflows/:id/steps/:stepId/move` | `client.workflows.manage` |
+| `POST` | `/api/workflows/:id/status` | `client.workflows.manage` |
+| `PUT`/`PATCH` | `/api/workflows/:id/selection` | `client.workflows.manage` |
+| `POST` | `/api/workflows/:id/start` | `client.workflows.execute` |
+| `POST` | `/api/workflows/:id/resume` | `client.workflows.execute` |
+| `POST` | `/api/workflows/:id/restart` | `client.workflows.execute` |
+| `POST` | `/api/workflows/:id/pause` | `client.workflows.execute` **or** `client.workflows.manage` (D6) |
+| `POST` | `/api/tcps/execute` | `client.workflows.execute` (skipped when the caller is a running step with its callback token) |
 
 ### Templates
 
 | Method | Path | Permission |
 | --- | --- | --- |
-| `POST` | `/api/templates` | `remote.templates.create` |
-| `PATCH`/`PUT` | `/api/templates/:id` | `remote.templates.edit` |
-| `DELETE` | `/api/templates/:id` | `remote.templates.delete` |
-| `POST` | `/api/templates/import` | `remote.templates.import` |
-| `GET` | `/api/templates/export` | `remote.templates.export` |
-| `GET` | `/api/templates/:id/export` | `remote.templates.export` |
+| `POST` | `/api/templates` | `client.templates.create` |
+| `PATCH`/`PUT` | `/api/templates/:id` | `client.templates.edit` |
+| `DELETE` | `/api/templates/:id` | `client.templates.delete` |
+| `POST` | `/api/templates/import` | `client.templates.import` |
+| `GET` | `/api/templates/export` | `client.templates.export` |
+| `GET` | `/api/templates/:id/export` | `client.templates.export` |
 
 ### TCP tools
 
 | Method | Path | Permission |
 | --- | --- | --- |
-| `POST` | `/api/tcps` | `remote.tcp-tools.create` |
-| `PATCH`/`PUT` | `/api/tcps/:id` | `remote.tcp-tools.edit` |
-| `DELETE` | `/api/tcps/:id` | `remote.tcp-tools.delete` |
-| `POST` | `/api/tcps/import` | `remote.tcp-tools.import` |
-| `GET` | `/api/tcps/export` | `remote.tcp-tools.export` |
-| `GET` | `/api/tcps/:id/export` | `remote.tcp-tools.export` |
+| `POST` | `/api/tcps` | `client.tcp-tools.create` |
+| `PATCH`/`PUT` | `/api/tcps/:id` | `client.tcp-tools.edit` |
+| `DELETE` | `/api/tcps/:id` | `client.tcp-tools.delete` |
+| `POST` | `/api/tcps/import` | `client.tcp-tools.import` |
+| `GET` | `/api/tcps/export` | `client.tcp-tools.export` |
+| `GET` | `/api/tcps/:id/export` | `client.tcp-tools.export` |
 
 ### RCI
 
@@ -143,22 +143,22 @@ returns resources without storing them; saving the set is a later
 
 | Method | Path | Permission |
 | --- | --- | --- |
-| `POST` | `/api/resourcesets` | `remote.rci.create` |
-| `POST` | `/api/resourcesets/scan` | `remote.rci.create` |
-| `PATCH`/`PUT` | `/api/resourcesets/:id` | `remote.rci.edit` |
-| `DELETE` | `/api/resourcesets/:id` | `remote.rci.delete` |
+| `POST` | `/api/resourcesets` | `client.rci.create` |
+| `POST` | `/api/resourcesets/scan` | `client.rci.create` |
+| `PATCH`/`PUT` | `/api/resourcesets/:id` | `client.rci.edit` |
+| `DELETE` | `/api/resourcesets/:id` | `client.rci.delete` |
 
-The catalogue also lists `remote.rci.import` and `remote.rci.export`. The hub
+The catalogue also lists `client.rci.import` and `client.rci.export`. The hub
 has no routes for those IDs today.
 
 ## UI
 
 The UI polls `GET /api/permissions` on the existing 2s tick. Controls are
 **disabled**, not hidden, with a `title` that names the missing id
-(`Requiere remote.workflows.execute`). Settings → **Permisos de tu rol**
+(`Requiere client.workflows.execute`). Settings → **Permisos de tu rol**
 shows the mode, the server origin, the `granted` list the server already
 trimmed, and the read-only warning. Disconnect and the Remote Sync switch
-require `remote.workflows.manage` (D5).
+require `client.workflows.manage` (D5).
 
 ## This is not a security boundary
 

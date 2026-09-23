@@ -54,7 +54,7 @@ export function ResourceSetsView({
 	const [creating, setCreating] = useState(false);
 	const isMobile = useIsMobile();
 	const { can } = usePermissions();
-	const canCreate = can("remote.rci.create");
+	const canCreate = can("client.rci.create");
 
 	const visible = useMemo(() => {
 		const q = query.trim().toLowerCase();
@@ -92,7 +92,7 @@ export function ResourceSetsView({
 									setCreating(true);
 								}}
 								disabled={!canCreate}
-								title={canCreate ? undefined : "Requiere remote.rci.create"}
+								title={canCreate ? undefined : "Requiere client.rci.create"}
 							>
 								New
 							</button>
@@ -200,12 +200,12 @@ function ResourceSetForm({
 	// would mean re-walking the same six directories.
 	const [browsePath, setBrowsePath] = useState("");
 	const { can } = usePermissions();
-	const canCreate = can("remote.rci.create");
-	const canEdit = can("remote.rci.edit");
-	const canDelete = can("remote.rci.delete");
+	const canCreate = can("client.rci.create");
+	const canEdit = can("client.rci.edit");
+	const canDelete = can("client.rci.delete");
 	const canSave = resourceSet ? canEdit : canCreate;
 	// Scan is create on the API; the folder picker is the RCI "import".
-	const canScan = can("remote.rci.create");
+	const canScan = can("client.rci.create");
 
 	const updateResource = (index: number, patch: Partial<Resource>): void => {
 		setResources((current) => current.map((resource, i) => (i === index ? { ...resource, ...patch } : resource)));
@@ -298,7 +298,7 @@ function ResourceSetForm({
 							className="btn btn--sm btn--danger"
 							onClick={onDelete}
 							disabled={busy || saving || !canDelete}
-							title={canDelete ? undefined : requires("remote.rci.delete")}
+							title={canDelete ? undefined : requires("client.rci.delete")}
 						>
 							Delete
 						</button>
@@ -330,7 +330,7 @@ function ResourceSetForm({
 					onClick={() => setBrowsing((open) => !open)}
 					disabled={busy || saving || importing || !canScan}
 					aria-expanded={browsing}
-					title={canScan ? undefined : requires("remote.rci.create")}
+					title={canScan ? undefined : requires("client.rci.create")}
 				>
 					{importing ? "Importing…" : "Import"}
 				</button>
@@ -339,7 +339,7 @@ function ResourceSetForm({
 					className="btn btn--sm"
 					onClick={addResource}
 					disabled={importing || !canSave}
-					title={canSave ? undefined : requires(resourceSet ? "remote.rci.edit" : "remote.rci.create")}
+					title={canSave ? undefined : requires(resourceSet ? "client.rci.edit" : "client.rci.create")}
 				>
 					Add resource
 				</button>
@@ -481,7 +481,7 @@ function ResourceSetForm({
 					type="submit"
 					className="btn btn--primary"
 					disabled={saving || busy || !canSave}
-					title={canSave ? undefined : requires(resourceSet ? "remote.rci.edit" : "remote.rci.create")}
+					title={canSave ? undefined : requires(resourceSet ? "client.rci.edit" : "client.rci.create")}
 				>
 					{saving ? "Saving…" : "Save"}
 				</button>

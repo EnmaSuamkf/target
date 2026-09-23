@@ -21,7 +21,7 @@ export function TcpPanel({
 	const [state, setState] = useState(() => initialTcpDraftState(workflow.id, serverSelections));
 	const [saving, setSaving] = useState(false);
 	const { can } = usePermissions();
-	const canManage = can("remote.workflows.manage");
+	const canManage = can("client.workflows.manage");
 
 	// Reconcile during render so the 2s poll never wipes unsaved checkbox toggles.
 	const current = reconcileTcpDraft(state, workflow.id, serverSelections);
@@ -57,7 +57,7 @@ export function TcpPanel({
 				type="button"
 				className="btn btn--sm btn--primary"
 				disabled={locked || saving || !dirty || tcps.length === 0 || !canManage}
-				title={canManage ? undefined : requires("remote.workflows.manage")}
+				title={canManage ? undefined : requires("client.workflows.manage")}
 				onClick={() => void save()}
 			>
 				{saving ? "Saving…" : "Save TCP selection"}

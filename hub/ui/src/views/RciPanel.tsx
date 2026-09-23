@@ -20,7 +20,7 @@ export function RciPanel({
 
 	const [state, setState] = useState(() => initialResourceDraftState(workflow.id, serverSelections));
 	const { can } = usePermissions();
-	const canManage = can("remote.workflows.manage");
+	const canManage = can("client.workflows.manage");
 	const [saving, setSaving] = useState(false);
 
 	// Reconcile during render so the 2s poll never wipes unsaved checkbox toggles.
@@ -61,7 +61,7 @@ export function RciPanel({
 				type="button"
 				className="btn btn--sm btn--primary"
 				disabled={locked || saving || !dirty || resourceSets.length === 0 || !canManage}
-				title={canManage ? undefined : requires("remote.workflows.manage")}
+				title={canManage ? undefined : requires("client.workflows.manage")}
 				onClick={() => void save()}
 			>
 				{saving ? "Saving…" : "Save RCI selection"}

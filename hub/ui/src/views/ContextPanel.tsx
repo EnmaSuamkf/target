@@ -45,7 +45,7 @@ export function ContextPanel({
 	const [saving, setSaving] = useState(false);
 	const [attaching, setAttaching] = useState(false);
 	const { can } = usePermissions();
-	const canManage = can("remote.workflows.manage");
+	const canManage = can("client.workflows.manage");
 
 	// Reconcile during render (React's derived-state pattern) rather than in an
 	// effect, so adoption can never land between a blur and the click that
@@ -120,7 +120,7 @@ export function ContextPanel({
 						className="btn btn--sm btn--primary"
 						onClick={save}
 						disabled={!dirty || saving || !canManage}
-						title={canManage ? undefined : requires("remote.workflows.manage")}
+						title={canManage ? undefined : requires("client.workflows.manage")}
 					>
 						{saving ? "Saving…" : "Save context"}
 					</button>

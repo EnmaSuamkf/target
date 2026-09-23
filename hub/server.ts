@@ -896,7 +896,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		return;
 	}
 	if (parts[1] === "device-link" && !parts[2] && req.method === "DELETE") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.manage")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		void disconnectDeviceLink().then((outcome) => sendJson(res, 200, { outcome }));
@@ -1133,7 +1133,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		const callingStep = stepId ? getStep(stepId) : null;
 		const viaStep =
 			callingStep !== null && stepToken !== "" && timingSafeEqualStr(stepToken, callingStep.callbackToken);
-		if (!viaStep && !requirePermission(cfg, req, res, "remote.workflows.execute")) {
+		if (!viaStep && !requirePermission(cfg, req, res, "client.workflows.execute")) {
 			return;
 		}
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
@@ -1235,7 +1235,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			return;
 		}
 		const attachmentPermission =
-			doomed.field === "context" ? "remote.workflows.manage" : "remote.workflows.steps.edit";
+			doomed.field === "context" ? "client.workflows.manage" : "client.workflows.steps.edit";
 		if (!requirePermission(cfg, req, res, attachmentPermission)) {
 			return;
 		}
@@ -1270,7 +1270,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return;
 			}
 			if (req.method === "POST") {
-				if (!requirePermission(cfg, req, res, "remote.templates.create")) {
+				if (!requirePermission(cfg, req, res, "client.templates.create")) {
 					return;
 				}
 				readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1308,7 +1308,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		// creates rows and is admin-gated like every other write here.
 
 		if (parts[2] === "export" && !parts[3] && req.method === "GET") {
-			if (!requirePermission(cfg, req, res, "remote.templates.export")) {
+			if (!requirePermission(cfg, req, res, "client.templates.export")) {
 				return;
 			}
 			sendJson(res, 200, templateBundle(listTemplates()));
@@ -1316,7 +1316,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (parts[2] === "import" && !parts[3] && req.method === "POST") {
-			if (!requirePermission(cfg, req, res, "remote.templates.import")) {
+			if (!requirePermission(cfg, req, res, "client.templates.import")) {
 				return;
 			}
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1343,7 +1343,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		const templateId = parts[2];
 
 		if (parts[3] === "export" && !parts[4] && req.method === "GET") {
-			if (!requirePermission(cfg, req, res, "remote.templates.export")) {
+			if (!requirePermission(cfg, req, res, "client.templates.export")) {
 				return;
 			}
 			const template = getTemplate(templateId);
@@ -1366,7 +1366,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (!parts[3] && (req.method === "PATCH" || req.method === "PUT")) {
-			if (!requirePermission(cfg, req, res, "remote.templates.edit")) {
+			if (!requirePermission(cfg, req, res, "client.templates.edit")) {
 				return;
 			}
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1402,7 +1402,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (!parts[3] && req.method === "DELETE") {
-			if (!requirePermission(cfg, req, res, "remote.templates.delete")) {
+			if (!requirePermission(cfg, req, res, "client.templates.delete")) {
 				return;
 			}
 			const removed = deleteTemplate(templateId);
@@ -1435,7 +1435,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return;
 			}
 			if (req.method === "POST") {
-				if (!requirePermission(cfg, req, res, "remote.tcp-tools.create")) {
+				if (!requirePermission(cfg, req, res, "client.tcp-tools.create")) {
 					return;
 				}
 				readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1455,7 +1455,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (parts[2] === "export" && !parts[3] && req.method === "GET") {
-			if (!requirePermission(cfg, req, res, "remote.tcp-tools.export")) {
+			if (!requirePermission(cfg, req, res, "client.tcp-tools.export")) {
 				return;
 			}
 			sendJson(res, 200, tcpBundle(listTcps()));
@@ -1463,7 +1463,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (parts[2] === "import" && !parts[3] && req.method === "POST") {
-			if (!requirePermission(cfg, req, res, "remote.tcp-tools.import")) {
+			if (!requirePermission(cfg, req, res, "client.tcp-tools.import")) {
 				return;
 			}
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1509,7 +1509,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (parts[3] === "export" && !parts[4] && req.method === "GET") {
-			if (!requirePermission(cfg, req, res, "remote.tcp-tools.export")) {
+			if (!requirePermission(cfg, req, res, "client.tcp-tools.export")) {
 				return;
 			}
 			const tcp = getTcp(tcpId);
@@ -1532,7 +1532,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (!parts[3] && (req.method === "PATCH" || req.method === "PUT")) {
-			if (!requirePermission(cfg, req, res, "remote.tcp-tools.edit")) {
+			if (!requirePermission(cfg, req, res, "client.tcp-tools.edit")) {
 				return;
 			}
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1558,7 +1558,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (!parts[3] && req.method === "DELETE") {
-			if (!requirePermission(cfg, req, res, "remote.tcp-tools.delete")) {
+			if (!requirePermission(cfg, req, res, "client.tcp-tools.delete")) {
 				return;
 			}
 			const removed = deleteTcp(tcpId);
@@ -1604,7 +1604,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return;
 			}
 			if (req.method === "POST") {
-				if (!requirePermission(cfg, req, res, "remote.rci.create")) {
+				if (!requirePermission(cfg, req, res, "client.rci.create")) {
 					return;
 				}
 				readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1631,7 +1631,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		// disk is left untouched either way: RCI copies the resource in, it never
 		// installs it.
 		if (parts[2] === "scan" && !parts[3] && req.method === "POST") {
-			if (!requirePermission(cfg, req, res, "remote.rci.create")) {
+			if (!requirePermission(cfg, req, res, "client.rci.create")) {
 				return;
 			}
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1686,7 +1686,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (!parts[3] && (req.method === "PATCH" || req.method === "PUT")) {
-			if (!requirePermission(cfg, req, res, "remote.rci.edit")) {
+			if (!requirePermission(cfg, req, res, "client.rci.edit")) {
 				return;
 			}
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1712,7 +1712,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (!parts[3] && req.method === "DELETE") {
-			if (!requirePermission(cfg, req, res, "remote.rci.delete")) {
+			if (!requirePermission(cfg, req, res, "client.rci.delete")) {
 				return;
 			}
 			const removed = deleteResourceSet(resourceSetId);
@@ -2045,7 +2045,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			return;
 		}
 		if (req.method === "PUT") {
-			if (!requirePermission(cfg, req, res, "remote.workflows.manage")) {
+			if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 				return;
 			}
 			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
@@ -2342,7 +2342,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		// conversation's OWN workdir, which for claude is what makes `--resume`
 		// find the transcript at all.
 		if (parts[2] === "open-terminal" && !parts[3] && req.method === "POST") {
-			if (!requirePermission(cfg, req, res, "remote.workflows.execute")) {
+			if (!requirePermission(cfg, req, res, "client.workflows.execute")) {
 				return;
 			}
 			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
@@ -2401,7 +2401,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			return;
 		}
 		if (req.method === "POST") {
-			if (!requirePermission(cfg, req, res, "remote.workflows.create")) {
+			if (!requirePermission(cfg, req, res, "client.workflows.create")) {
 				return;
 			}
 			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
@@ -2630,7 +2630,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	if (workflowId && !parts[3] && req.method === "DELETE") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.manage")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		try {
@@ -2661,7 +2661,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// done. Steps and context are not settable here — copying them is the point.
 
 	if (workflowId && parts[3] === "clone" && !parts[4] && req.method === "POST") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.create")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.create")) {
 			return;
 		}
 		if (!getWorkflow(workflowId)) {
@@ -2692,7 +2692,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// at any status, including mid-run.
 
 	if (workflowId && parts[3] === "name" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
-		if (!requirePermission(cfg, req, res, "remote.workflows.manage")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		if (!getWorkflow(workflowId)) {
@@ -2715,7 +2715,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// --- /api/workflows/:id/docker-mounts ---
 
 	if (workflowId && parts[3] === "docker-mounts" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
-		if (!requirePermission(cfg, req, res, "remote.workflows.manage")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		if (!getWorkflow(workflowId)) {
@@ -2750,7 +2750,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// empty string to clear it (only while still editable).
 
 	if (workflowId && parts[3] === "tcps" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
-		if (!requirePermission(cfg, req, res, "remote.workflows.manage")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		const workflow = getWorkflow(workflowId);
@@ -2794,7 +2794,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	if (workflowId && parts[3] === "resourcesets" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
-		if (!requirePermission(cfg, req, res, "remote.workflows.manage")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		const workflow = getWorkflow(workflowId);
@@ -2832,7 +2832,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	if (workflowId && parts[3] === "context" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
-		if (!requirePermission(cfg, req, res, "remote.workflows.manage")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
@@ -2875,7 +2875,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return;
 			}
 			const attachmentPermission =
-				field === "context" ? "remote.workflows.manage" : "remote.workflows.steps.edit";
+				field === "context" ? "client.workflows.manage" : "client.workflows.steps.edit";
 			if (!requirePermission(cfg, req, res, attachmentPermission)) {
 				return;
 			}
@@ -3005,7 +3005,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// action even though nothing in the DB changes.
 
 	if (workflowId && parts[3] === "open-terminal" && !parts[4] && req.method === "POST") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.execute")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.execute")) {
 			return;
 		}
 		const workflow = getWorkflow(workflowId);
@@ -3046,7 +3046,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// --- /api/workflows/:id/steps ---
 
 	if (workflowId && parts[3] === "steps" && !parts[4] && req.method === "POST") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.steps.add")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.steps.add")) {
 			return;
 		}
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
@@ -3069,7 +3069,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// --- /api/workflows/:id/steps/from-template (append a template's steps to an existing workflow) ---
 
 	if (workflowId && parts[3] === "steps" && parts[4] === "from-template" && !parts[5] && req.method === "POST") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.steps.add")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.steps.add")) {
 			return;
 		}
 		const workflow = getWorkflow(workflowId);
@@ -3117,7 +3117,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "notes" && parts[6] && req.method === "PATCH") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.steps.edit")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.steps.edit")) {
 			return;
 		}
 		const stepId = parts[4];
@@ -3136,7 +3136,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "notes" && parts[6] && req.method === "DELETE") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.steps.edit")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.steps.edit")) {
 			return;
 		}
 		const stepId = parts[4];
@@ -3151,7 +3151,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "notes" && !parts[6] && req.method === "POST") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.steps.edit")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.steps.edit")) {
 			return;
 		}
 		const stepId = parts[4];
@@ -3169,7 +3169,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	if (workflowId && parts[3] === "steps" && parts[4] && req.method === "PATCH") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.steps.edit")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.steps.edit")) {
 			return;
 		}
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
@@ -3185,7 +3185,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	if (workflowId && parts[3] === "steps" && parts[4] && req.method === "DELETE") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.manage")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		try {
@@ -3200,7 +3200,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// --- /api/workflows/:id/steps/:stepId/run (run this step now, outside the sequential order) ---
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "run" && !parts[6] && req.method === "POST") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.execute")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.execute")) {
 			return;
 		}
 		const stepId = parts[4];
@@ -3230,7 +3230,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// gate advances the workflow, which dispatches the next step.
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "continue" && !parts[6] && req.method === "POST") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.execute")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.execute")) {
 			return;
 		}
 		(async () => {
@@ -3261,7 +3261,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// Admin-gated (mutating). Async because the broker kill is a network call.
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "abort" && !parts[6] && req.method === "POST") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.execute")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.execute")) {
 			return;
 		}
 		(async () => {
@@ -3290,7 +3290,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// Admin-gated: it launches a real process on the operator's desktop.
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "open-terminal" && !parts[6] && req.method === "POST") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.execute")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.execute")) {
 			return;
 		}
 		const workflow = getWorkflow(workflowId);
@@ -3339,7 +3339,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// semantics. Synchronous: it's a DB write plus the .md rewrite.
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "status" && !parts[6] && req.method === "POST") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.manage")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		const stepId = parts[4];
@@ -3368,7 +3368,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// and the UI renders them by order.
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "move" && !parts[6] && req.method === "POST") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.manage")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		const stepId = parts[4];
@@ -3397,7 +3397,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// with the step route above; the paths don't overlap.
 
 	if (workflowId && parts[3] === "status" && !parts[4] && req.method === "POST") {
-		if (!requirePermission(cfg, req, res, "remote.workflows.manage")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
@@ -3426,7 +3426,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// status.
 
 	if (workflowId && parts[3] === "selection" && !parts[4] && (req.method === "PUT" || req.method === "PATCH")) {
-		if (!requirePermission(cfg, req, res, "remote.workflows.manage")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
@@ -3449,10 +3449,10 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	if (workflowId && ["start", "pause", "resume", "restart"].includes(parts[3]) && !parts[4] && req.method === "POST") {
 		const action = parts[3] as "start" | "pause" | "resume" | "restart";
 		if (action === "pause") {
-			if (!requirePermission(cfg, req, res, "remote.workflows.execute", "remote.workflows.manage")) {
+			if (!requirePermission(cfg, req, res, "client.workflows.execute", "client.workflows.manage")) {
 				return;
 			}
-		} else if (!requirePermission(cfg, req, res, "remote.workflows.execute")) {
+		} else if (!requirePermission(cfg, req, res, "client.workflows.execute")) {
 			return;
 		}
 		// Start/resume/restart may carry a `stepIds` selection: run only those

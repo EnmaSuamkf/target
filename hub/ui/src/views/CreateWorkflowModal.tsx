@@ -158,7 +158,7 @@ export function CreateWorkflowModal({
 	onClone: (input: CloneWorkflowInput) => Promise<void>;
 }): React.JSX.Element {
 	const { can } = usePermissions();
-	const canCreate = can("remote.workflows.create");
+	const canCreate = can("client.workflows.create");
 	const cloning = !!source;
 	const [name, setName] = useState("");
 	const [workdir, setWorkdir] = useState("");
@@ -514,7 +514,7 @@ export function CreateWorkflowModal({
 						form="create-workflow"
 						className="btn btn--primary"
 						disabled={!canSubmit}
-						title={canCreate ? undefined : requires("remote.workflows.create")}
+						title={canCreate ? undefined : requires("client.workflows.create")}
 					>
 						{source ? (saving ? "Cloning…" : "Clone workflow") : saving ? "Creating…" : "Create workflow"}
 					</button>

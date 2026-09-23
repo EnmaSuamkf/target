@@ -62,29 +62,29 @@ function link(deviceId: string): void {
 
 test("recordOwnerSnapshot persists the payload in settings", () => {
 	link("dev_persist");
-	recordOwnerSnapshot(owner(["remote.read", "remote.workflows.create"]), "dev_persist", ORIGIN);
+	recordOwnerSnapshot(owner(["client.read", "client.workflows.create"]), "dev_persist", ORIGIN);
 	const raw = getOwnerPermissionsJson();
 	assert.ok(raw);
 	const stored = JSON.parse(raw) as { ownerId: string; permissions: string[]; deviceId: string };
 	assert.equal(stored.ownerId, "owner_1");
-	assert.deepEqual(stored.permissions, ["remote.read", "remote.workflows.create"]);
+	assert.deepEqual(stored.permissions, ["client.read", "client.workflows.create"]);
 	assert.equal(stored.deviceId, "dev_persist");
 	const mode = resolvePermissionMode();
 	assert.equal(mode.mode, "enforced");
-	assert.equal(hasPermission("remote.workflows.create"), true);
-	assert.equal(hasPermission("remote.workflows.execute"), false);
+	assert.equal(hasPermission("client.workflows.create"), true);
+	assert.equal(hasPermission("client.workflows.execute"), false);
 });
 
 test("snapshot survives a process restart by reloading settings", () => {
 	link("dev_restart");
-	recordOwnerSnapshot(owner(["remote.read"]), "dev_restart", ORIGIN);
+	recordOwnerSnapshot(owner(["client.read"]), "dev_restart", ORIGIN);
 	const before = getOwnerPermissionsJson();
 	assert.ok(before);
 	resetOwnerPermissionsCache();
 	assert.equal(getOwnerPermissionsJson(), before);
 	const reloaded = JSON.parse(getOwnerPermissionsJson()!) as { ownerId: string; permissions: string[] };
 	assert.equal(reloaded.ownerId, "owner_1");
-	assert.deepEqual(reloaded.permissions, ["remote.read"]);
+	assert.deepEqual(reloaded.permissions, ["client.read"]);
 	// Disk loads start stale until the next live heartbeat — the row is still there.
 	const mode = resolvePermissionMode();
 	assert.equal(mode.mode, "read_only");
@@ -94,7 +94,7 @@ test("snapshot survives a process restart by reloading settings", () => {
 test("a live snapshot expires after 3 sync intervals", (t) => {
 	t.mock.timers.enable({ apis: ["Date"], now: 1_700_000_000_000 });
 	link("dev_expire");
-	recordOwnerSnapshot(owner(["remote.read"]), "dev_expire", ORIGIN);
+	recordOwnerSnapshot(owner(["client.read"]), "dev_expire", ORIGIN);
 	assert.equal(resolvePermissionMode().mode, "enforced");
 	t.mock.timers.tick(29_000);
 	assert.equal(resolvePermissionMode().mode, "enforced");
@@ -106,7 +106,7 @@ test("a live snapshot expires after 3 sync intervals", (t) => {
 
 test("disconnecting the device clears the snapshot", () => {
 	link("dev_clear");
-	recordOwnerSnapshot(owner(["remote.read"]), "dev_clear", ORIGIN);
+	recordOwnerSnapshot(owner(["client.read"]), "dev_clear", ORIGIN);
 	assert.ok(getOwnerPermissionsJson());
 	deleteDeviceLink();
 	assert.equal(getOwnerPermissionsJson(), null);
@@ -115,7 +115,7 @@ test("disconnecting the device clears the snapshot", () => {
 
 test("a different deviceId invalidates the stored snapshot", () => {
 	link("dev_a");
-	recordOwnerSnapshot(owner(["remote.read", "remote.workflows.manage"]), "dev_a", ORIGIN);
+	recordOwnerSnapshot(owner(["client.read", "client.workflows.manage"]), "dev_a", ORIGIN);
 	assert.equal(resolvePermissionMode().mode, "enforced");
 	activateDeviceCredential({
 		deviceId: "dev_b",

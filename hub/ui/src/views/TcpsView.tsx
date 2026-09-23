@@ -71,9 +71,9 @@ export function TcpsView({
 	const isMobile = useIsMobile();
 	const fileInput = useRef<HTMLInputElement>(null);
 	const { can } = usePermissions();
-	const canCreate = can("remote.tcp-tools.create");
-	const canImport = can("remote.tcp-tools.import");
-	const canExport = can("remote.tcp-tools.export");
+	const canCreate = can("client.tcp-tools.create");
+	const canImport = can("client.tcp-tools.import");
+	const canExport = can("client.tcp-tools.export");
 
 	const visible = useMemo(() => {
 		const q = query.trim().toLowerCase();
@@ -108,7 +108,7 @@ export function TcpsView({
 								className="btn btn--primary btn--sm"
 								onClick={() => { setEditingId(null); setCreating(true); }}
 								disabled={!canCreate}
-								title={canCreate ? undefined : "Requiere remote.tcp-tools.create"}
+								title={canCreate ? undefined : "Requiere client.tcp-tools.create"}
 							>
 								New
 							</button>
@@ -119,7 +119,7 @@ export function TcpsView({
 								className="btn btn--sm"
 								onClick={() => fileInput.current?.click()}
 								disabled={busy || !canImport}
-								title={canImport ? undefined : requires("remote.tcp-tools.import")}
+								title={canImport ? undefined : requires("client.tcp-tools.import")}
 							>
 								Import
 							</button>
@@ -128,7 +128,7 @@ export function TcpsView({
 								className="btn btn--sm"
 								onClick={onExportAll}
 								disabled={busy || tcps.length === 0 || !canExport}
-								title={canExport ? undefined : requires("remote.tcp-tools.export")}
+								title={canExport ? undefined : requires("client.tcp-tools.export")}
 							>
 								Export all
 							</button>
@@ -213,10 +213,10 @@ function TcpForm({
 	const [jsonError, setJsonError] = useState<string | null>(null);
 	const [saving, setSaving] = useState(false);
 	const { can } = usePermissions();
-	const canCreate = can("remote.tcp-tools.create");
-	const canEdit = can("remote.tcp-tools.edit");
-	const canDelete = can("remote.tcp-tools.delete");
-	const canExport = can("remote.tcp-tools.export");
+	const canCreate = can("client.tcp-tools.create");
+	const canEdit = can("client.tcp-tools.edit");
+	const canDelete = can("client.tcp-tools.delete");
+	const canExport = can("client.tcp-tools.export");
 	const canSave = tcp ? canEdit : canCreate;
 
 	const updateTool = (index: number, patch: Partial<TcpTool>): void => {
@@ -296,7 +296,7 @@ function TcpForm({
 							className="btn btn--sm"
 							onClick={onExport}
 							disabled={busy || saving || !canExport}
-							title={canExport ? undefined : requires("remote.tcp-tools.export")}
+							title={canExport ? undefined : requires("client.tcp-tools.export")}
 						>
 							Export
 						</button>
@@ -307,7 +307,7 @@ function TcpForm({
 							className="btn btn--sm btn--danger"
 							onClick={onDelete}
 							disabled={busy || saving || !canDelete}
-							title={canDelete ? undefined : requires("remote.tcp-tools.delete")}
+							title={canDelete ? undefined : requires("client.tcp-tools.delete")}
 						>
 							Delete
 						</button>
@@ -365,7 +365,7 @@ function TcpForm({
 					type="submit"
 					className="btn btn--primary"
 					disabled={saving || busy || !canSave}
-					title={canSave ? undefined : requires(tcp ? "remote.tcp-tools.edit" : "remote.tcp-tools.create")}
+					title={canSave ? undefined : requires(tcp ? "client.tcp-tools.edit" : "client.tcp-tools.create")}
 				>
 					{saving ? "Saving…" : "Save"}
 				</button>

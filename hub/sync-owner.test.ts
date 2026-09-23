@@ -90,19 +90,19 @@ function link(): void {
 
 test("register owner is enforced, and a second heartbeat with a new role updates the mode", async () => {
 	link();
-	const mock = createOwnerMock(owner(["remote.read"]));
+	const mock = createOwnerMock(owner(["client.read"]));
 	const hubCfg = loadConfig();
 	const tick = { hubConfig: hubCfg, fetchImpl: mock.fetchImpl, config: { enabled: true, url: MOCK_BASE, token: "", intervalMs: 10_000 } };
 
 	await runSyncTick(tick);
 	assert.equal(resolvePermissionMode().mode, "enforced");
-	assert.equal(hasPermission("remote.read"), true);
-	assert.equal(hasPermission("remote.workflows.create"), false);
+	assert.equal(hasPermission("client.read"), true);
+	assert.equal(hasPermission("client.workflows.create"), false);
 
-	mock.setOwner(owner(["remote.read", "remote.workflows.create", "remote.workflows.manage"]));
+	mock.setOwner(owner(["client.read", "client.workflows.create", "client.workflows.manage"]));
 	await runSyncTick(tick);
 	assert.equal(resolvePermissionMode().mode, "enforced");
-	assert.equal(hasPermission("remote.workflows.create"), true);
-	assert.equal(hasPermission("remote.workflows.manage"), true);
-	assert.equal(hasPermission("remote.workflows.execute"), false);
+	assert.equal(hasPermission("client.workflows.create"), true);
+	assert.equal(hasPermission("client.workflows.manage"), true);
+	assert.equal(hasPermission("client.workflows.execute"), false);
 });

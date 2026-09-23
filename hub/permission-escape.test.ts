@@ -1,5 +1,5 @@
 /**
- * D5: without remote.workflows.manage, the local escape hatches stay locked.
+ * D5: without client.workflows.manage, the local escape hatches stay locked.
  */
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -51,7 +51,7 @@ function linkAndGrant(permissions: string[]): void {
 }
 
 test("without manage, PUT /api/settings/sync and DELETE /api/device-link are 403", async () => {
-	linkAndGrant(["remote.read", "remote.workflows.execute"]);
+	linkAndGrant(["client.read", "client.workflows.execute"]);
 	assert.equal(getDeviceLinkStatus().state, "connected");
 
 	const syncRes = await fetch(`${baseUrl}/api/settings/sync`, {
@@ -62,7 +62,7 @@ test("without manage, PUT /api/settings/sync and DELETE /api/device-link are 403
 	assert.equal(syncRes.status, 403);
 	const syncBody = (await syncRes.json()) as { error: string; permission: string };
 	assert.equal(syncBody.error, "forbidden");
-	assert.equal(syncBody.permission, "remote.workflows.manage");
+	assert.equal(syncBody.permission, "client.workflows.manage");
 
 	const unlinkRes = await fetch(`${baseUrl}/api/device-link`, {
 		method: "DELETE",
@@ -71,12 +71,12 @@ test("without manage, PUT /api/settings/sync and DELETE /api/device-link are 403
 	assert.equal(unlinkRes.status, 403);
 	const unlinkBody = (await unlinkRes.json()) as { error: string; permission: string };
 	assert.equal(unlinkBody.error, "forbidden");
-	assert.equal(unlinkBody.permission, "remote.workflows.manage");
+	assert.equal(unlinkBody.permission, "client.workflows.manage");
 	assert.equal(getDeviceLinkStatus().state, "connected");
 });
 
 test("with manage, both escape hatches answer 2xx", async () => {
-	linkAndGrant(["remote.read", "remote.workflows.manage"]);
+	linkAndGrant(["client.read", "client.workflows.manage"]);
 
 	const syncRes = await fetch(`${baseUrl}/api/settings/sync`, {
 		method: "PUT",

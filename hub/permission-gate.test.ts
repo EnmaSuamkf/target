@@ -1,5 +1,5 @@
 /**
- * HTTP matrix: a role that only has remote.read is refused on every mutation
+ * HTTP matrix: a role that only has client.read is refused on every mutation
  * family; the full catalogue is accepted. Hits the real hub server.
  */
 import * as assert from "node:assert/strict";
@@ -35,27 +35,27 @@ test.after(() => {
 
 const ORIGIN = "https://server.example";
 const FULL_PERMISSIONS = [
-	"remote.read",
-	"remote.workflows.create",
-	"remote.workflows.steps.add",
-	"remote.workflows.steps.edit",
-	"remote.workflows.manage",
-	"remote.workflows.execute",
-	"remote.templates.create",
-	"remote.templates.edit",
-	"remote.templates.delete",
-	"remote.templates.import",
-	"remote.templates.export",
-	"remote.tcp-tools.create",
-	"remote.tcp-tools.edit",
-	"remote.tcp-tools.delete",
-	"remote.tcp-tools.import",
-	"remote.tcp-tools.export",
-	"remote.rci.create",
-	"remote.rci.edit",
-	"remote.rci.delete",
-	"remote.rci.import",
-	"remote.rci.export",
+	"client.read",
+	"client.workflows.create",
+	"client.workflows.steps.add",
+	"client.workflows.steps.edit",
+	"client.workflows.manage",
+	"client.workflows.execute",
+	"client.templates.create",
+	"client.templates.edit",
+	"client.templates.delete",
+	"client.templates.import",
+	"client.templates.export",
+	"client.tcp-tools.create",
+	"client.tcp-tools.edit",
+	"client.tcp-tools.delete",
+	"client.tcp-tools.import",
+	"client.tcp-tools.export",
+	"client.rci.create",
+	"client.rci.edit",
+	"client.rci.delete",
+	"client.rci.import",
+	"client.rci.export",
 ];
 
 function owner(permissions: string[]): unknown {
@@ -103,56 +103,56 @@ type Case = {
 const MATRIX: Case[] = [
 	{
 		family: "workflows.create",
-		permission: "remote.workflows.create",
+		permission: "client.workflows.create",
 		method: "POST",
 		path: "/api/workflows",
 		body: { name: "created-by-gate" },
 	},
 	{
 		family: "steps.add",
-		permission: "remote.workflows.steps.add",
+		permission: "client.workflows.steps.add",
 		method: "POST",
 		path: `/api/workflows/${seeded.id}/steps`,
 		body: { description: "added by gate" },
 	},
 	{
 		family: "steps.edit",
-		permission: "remote.workflows.steps.edit",
+		permission: "client.workflows.steps.edit",
 		method: "PATCH",
 		path: `/api/workflows/${seeded.id}/steps/${seededStep.id}`,
 		body: { description: "edited by gate" },
 	},
 	{
 		family: "manage",
-		permission: "remote.workflows.manage",
+		permission: "client.workflows.manage",
 		method: "PATCH",
 		path: `/api/workflows/${seeded.id}/name`,
 		body: { name: "renamed-by-gate" },
 	},
 	{
 		family: "execute",
-		permission: "remote.workflows.execute",
+		permission: "client.workflows.execute",
 		method: "POST",
 		path: `/api/workflows/${seeded.id}/start`,
 		body: { stepIds: [] },
 	},
 	{
 		family: "templates",
-		permission: "remote.templates.create",
+		permission: "client.templates.create",
 		method: "POST",
 		path: "/api/templates",
 		body: { name: "gate-template", tags: [], steps: [{ description: "t" }] },
 	},
 	{
 		family: "tcp-tools",
-		permission: "remote.tcp-tools.create",
+		permission: "client.tcp-tools.create",
 		method: "POST",
 		path: "/api/tcps",
 		body: { name: "gate-tcp", tools: [] },
 	},
 	{
 		family: "rci",
-		permission: "remote.rci.create",
+		permission: "client.rci.create",
 		method: "POST",
 		path: "/api/resourcesets",
 		body: { name: "gate-rci", resources: [] },
@@ -167,8 +167,8 @@ async function call(entry: Case): Promise<Response> {
 	});
 }
 
-test("remote.read only: each mutation family answers 403 with the missing permission", async () => {
-	linkAndGrant(["remote.read"]);
+test("client.read only: each mutation family answers 403 with the missing permission", async () => {
+	linkAndGrant(["client.read"]);
 	for (const entry of MATRIX) {
 		const res = await call(entry);
 		assert.equal(res.status, 403, `${entry.family} should be 403`);
