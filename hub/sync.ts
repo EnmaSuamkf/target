@@ -37,12 +37,23 @@ import {
 	setWorkflowRemoteMeta,
 	type OverridableStepStatus,
 	type OverridableWorkflowStatus,
+	normalizeTemplateStepNotes,
 	type Workflow,
 } from "./db.ts";
 import { normalizeResourceSelections } from "./rci-selection.ts";
-import { applyTemplateResourcesToWorkflow, setWorkflowResourceSelections } from "./rci-store.ts";
+import {
+	applyTemplateResourcesToWorkflow,
+	deleteResourceSet,
+	setWorkflowResourceSelections,
+	upsertServerResourceSet,
+} from "./rci-store.ts";
 import { normalizeTcpSelections } from "./tcp-selection.ts";
-import { applyTemplateTcpsToWorkflow, setWorkflowTcpSelections } from "./tcp-store.ts";
+import {
+	applyTemplateTcpsToWorkflow,
+	deleteTcp,
+	setWorkflowTcpSelections,
+	upsertServerTcp,
+} from "./tcp-store.ts";
 import { TARGET_VERSION } from "./version.ts";
 import {
 	addStep,
@@ -113,6 +124,10 @@ export const SYNC_COMMAND_TYPES = [
 	"step.abort",
 	"step.continue",
 	"step.set_status",
+	"tcp-tool.upsert",
+	"tcp-tool.delete",
+	"resource-set.upsert",
+	"resource-set.delete",
 ] as const;
 
 export type SyncCommandType = (typeof SYNC_COMMAND_TYPES)[number];
@@ -257,6 +272,41 @@ function syncRunnerCapabilities(): { runners: ReturnType<typeof availableRunners
 	return { runners: availableRunners() };
 }
 
+/** Capabilities advertised on register and heartbeat (sync/v2 resource commands). */
+export function syncClientCapabilities() {
+	return {
+		commands: [...SYNC_COMMAND_TYPES],
+		...syncRunnerCapabilities(),
+		resources: { version: 2 as const, tcp_tools: true, resource_sets: true },
+	};
+}
+
+function parseResourceEnvelope(payload: Record<string, unknown>): {
+	id: string;
+	name: string;
+	data: Record<string, unknown>;
+} {
+	const raw = payload.resource;
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		throw new WorkflowError("resource is required");
+	}
+	const resource = raw as Record<string, unknown>;
+	const id = typeof resource.id === "string" ? resource.id.trim() : "";
+	const name = typeof resource.name === "string" ? resource.name.trim() : "";
+	if (!id || !name) throw new WorkflowError("resource id and name are required");
+	const data =
+		resource.data && typeof resource.data === "object" && !Array.isArray(resource.data)
+			? (resource.data as Record<string, unknown>)
+			: {};
+	return { id, name, data };
+}
+
+function parseResourceId(payload: Record<string, unknown>): string {
+	const id = typeof payload.resource_id === "string" ? payload.resource_id.trim() : "";
+	if (!id) throw new WorkflowError("resource_id is required");
+	return id;
+}
+
 async function ensureRegistered(
 	config: SyncConfig,
 	fetchImpl: FetchLike,
@@ -269,7 +319,7 @@ async function ensureRegistered(
 		name: osHostname(),
 		instance_id: instanceId,
 		version: TARGET_VERSION,
-		capabilities: { commands: [...SYNC_COMMAND_TYPES], ...syncRunnerCapabilities() },
+		capabilities: syncClientCapabilities(),
 	});
 	let res: Response;
 	try {
@@ -336,7 +386,7 @@ async function sendHeartbeat(
 		version: TARGET_VERSION,
 		instance_id: getOrCreateInstanceId(process.env.TARGET_INSTANCE_ID ?? null),
 		active_remote_ids: activeRemoteIds,
-		capabilities: syncRunnerCapabilities(),
+		capabilities: syncClientCapabilities(),
 	});
 	const res = await syncFetch(
 		syncUrl(config.url, "/api/sync/heartbeat"),
@@ -676,6 +726,7 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 			maxRetries: typeof payload.max_retries === "number" ? payload.max_retries : 0,
 			retryIntervalSeconds:
 				typeof payload.retry_interval_seconds === "number" ? payload.retry_interval_seconds : 0,
+			templateNotes: Array.isArray(payload.notes) ? normalizeTemplateStepNotes(payload.notes) : undefined,
 		});
 		setSyncStepKey(remoteId, stepKey, added.id);
 		if (typeof payload.order_index === "number") {
@@ -751,6 +802,52 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 		const status = typeof command.payload.status === "string" ? command.payload.status : "";
 		forceStepStatus(workflow.id, stepId, status as OverridableStepStatus, (m) => logMessage(log, m));
 		return { localId: workflow.id };
+	},
+	"tcp-tool.upsert": (command) => {
+		const resource = parseResourceEnvelope(command.payload);
+		const tcp = upsertServerTcp(resource.id, {
+			name: resource.name,
+			tags: resource.data.tags,
+			tools: resource.data.tools,
+		});
+		queueEvent({
+			type: "tcp-tool.upserted",
+			payload: { resource: { id: tcp.id, name: tcp.name, data: { tags: tcp.tags, tools: tcp.tools } } },
+		});
+		return {};
+	},
+	"tcp-tool.delete": (command) => {
+		const resourceId = parseResourceId(command.payload);
+		deleteTcp(resourceId, { allowServerManaged: true });
+		queueEvent({
+			type: "tcp-tool.deleted",
+			payload: { resource_id: resourceId },
+		});
+		return {};
+	},
+	"resource-set.upsert": (command) => {
+		const resource = parseResourceEnvelope(command.payload);
+		const set = upsertServerResourceSet(resource.id, {
+			name: resource.name,
+			tags: resource.data.tags,
+			resources: resource.data.resources,
+		});
+		queueEvent({
+			type: "resource-set.upserted",
+			payload: {
+				resource: { id: set.id, name: set.name, data: { tags: set.tags, resources: set.resources } },
+			},
+		});
+		return {};
+	},
+	"resource-set.delete": (command) => {
+		const resourceId = parseResourceId(command.payload);
+		deleteResourceSet(resourceId, { allowServerManaged: true });
+		queueEvent({
+			type: "resource-set.deleted",
+			payload: { resource_id: resourceId },
+		});
+		return {};
 	},
 };
 

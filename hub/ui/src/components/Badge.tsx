@@ -57,3 +57,12 @@ export function OriginBadge({ origin }: { origin: WorkflowOrigin }): React.JSX.E
 		</span>
 	);
 }
+
+/** Marks TCP packs and Resource Sets that the server pushed and owns. */
+export function ServerManagedBadge(): React.JSX.Element {
+	return (
+		<span className="badge badge--remote" title="Pushed by the Target server; local edit and delete are disabled">
+			Managed by server
+		</span>
+	);
+}

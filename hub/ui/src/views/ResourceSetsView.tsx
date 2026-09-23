@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Resource, ResourceKind, ResourceSet, ResourceSetInput } from "../api/types.ts";
 import { DirectoryBrowser } from "../components/DirectoryBrowser.tsx";
+import { ServerManagedBadge } from "../components/Badge.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { Field } from "../components/Field.tsx";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
@@ -122,7 +123,10 @@ export function ResourceSetsView({
 										setEditingId(set.id);
 									}}
 								>
-									<span className={styles.cardName}>{set.name}</span>
+									<span className={styles.cardNameRow}>
+										<span className={styles.cardName}>{set.name}</span>
+										{set.origin === "server" && <ServerManagedBadge />}
+									</span>
 									<span className={styles.cardMeta}>
 										{kindSummary(set.resources)} · {relativeTime(set.updatedAt)}
 									</span>
@@ -203,9 +207,11 @@ function ResourceSetForm({
 	const canCreate = can("client.rci.create");
 	const canEdit = can("client.rci.edit");
 	const canDelete = can("client.rci.delete");
-	const canSave = resourceSet ? canEdit : canCreate;
+	const serverManaged = resourceSet?.origin === "server";
+	const canSave = !serverManaged && (resourceSet ? canEdit : canCreate);
+	const canDeleteItem = !serverManaged && canDelete;
 	// Scan is create on the API; the folder picker is the RCI "import".
-	const canScan = can("client.rci.create");
+	const canScan = !serverManaged && can("client.rci.create");
 
 	const updateResource = (index: number, patch: Partial<Resource>): void => {
 		setResources((current) => current.map((resource, i) => (i === index ? { ...resource, ...patch } : resource)));
@@ -290,15 +296,24 @@ function ResourceSetForm({
 				</button>
 			)}
 			<div className={styles.formHead}>
-				<h2 className={styles.heading}>{resourceSet ? "Edit Resource Set" : "New Resource Set"}</h2>
+				<h2 className={styles.heading}>
+					{resourceSet ? (serverManaged ? "Resource Set" : "Edit Resource Set") : "New Resource Set"}
+					{serverManaged && <ServerManagedBadge />}
+				</h2>
 				<div className={styles.formHeadActions}>
 					{onDelete && (
 						<button
 							type="button"
 							className="btn btn--sm btn--danger"
 							onClick={onDelete}
-							disabled={busy || saving || !canDelete}
-							title={canDelete ? undefined : requires("client.rci.delete")}
+							disabled={busy || saving || !canDeleteItem}
+							title={
+								serverManaged
+									? "Managed by the server — local delete is disabled"
+									: canDelete
+										? undefined
+										: requires("client.rci.delete")
+							}
 						>
 							Delete
 						</button>
@@ -307,7 +322,7 @@ function ResourceSetForm({
 			</div>
 			<Field label="Name" required>
 				{(props) => (
-					<input {...props} type="text" className="input" value={name} onChange={(ev) => setName(ev.target.value)} required />
+					<input {...props} type="text" className="input" value={name} onChange={(ev) => setName(ev.target.value)} required disabled={serverManaged} />
 				)}
 			</Field>
 			<Field label="Tags">
@@ -319,6 +334,7 @@ function ResourceSetForm({
 						value={tags}
 						onChange={(ev) => setTags(ev.target.value)}
 						placeholder="product, research"
+						disabled={serverManaged}
 					/>
 				)}
 			</Field>
@@ -378,6 +394,7 @@ function ResourceSetForm({
 								value={resource.name}
 								onChange={(ev) => updateResource(index, { name: ev.target.value })}
 								placeholder="brainstorming"
+								disabled={serverManaged}
 							/>
 						)}
 					</Field>
@@ -390,6 +407,7 @@ function ResourceSetForm({
 								value={resource.description}
 								onChange={(ev) => updateResource(index, { description: ev.target.value })}
 								placeholder="When to reach for this resource"
+								disabled={serverManaged}
 							/>
 						)}
 					</Field>
@@ -399,6 +417,7 @@ function ResourceSetForm({
 								{...props}
 								className="input"
 								value={resource.kind}
+								disabled={serverManaged}
 								onChange={(ev) => {
 									const kind = ev.target.value as ResourceKind;
 									// A file name the operator never touched follows the kind; one
@@ -428,6 +447,7 @@ function ResourceSetForm({
 								value={resource.entryFile}
 								onChange={(ev) => updateResource(index, { entryFile: ev.target.value })}
 								placeholder="SKILL.md"
+								disabled={serverManaged}
 							/>
 						)}
 					</Field>
@@ -440,6 +460,7 @@ function ResourceSetForm({
 								value={resource.content}
 								onChange={(ev) => updateResource(index, { content: ev.target.value })}
 								placeholder={"---\nname: brainstorming\ndescription: …\n---\n\n# Brainstorming\n…"}
+								disabled={serverManaged}
 							/>
 						)}
 					</Field>
@@ -457,6 +478,7 @@ function ResourceSetForm({
 												type="button"
 												className="btn btn--sm btn--ghost"
 												onClick={() => removeFile(index, file.path)}
+												disabled={serverManaged}
 											>
 												Remove
 											</button>
@@ -467,7 +489,7 @@ function ResourceSetForm({
 						</Field>
 					)}
 					{resources.length > 1 && (
-						<button type="button" className="btn btn--sm btn--danger" onClick={() => void removeResource(index)}>
+						<button type="button" className="btn btn--sm btn--danger" onClick={() => void removeResource(index)} disabled={serverManaged}>
 							Remove resource
 						</button>
 					)}
@@ -481,7 +503,13 @@ function ResourceSetForm({
 					type="submit"
 					className="btn btn--primary"
 					disabled={saving || busy || !canSave}
-					title={canSave ? undefined : requires(resourceSet ? "client.rci.edit" : "client.rci.create")}
+					title={
+						serverManaged
+							? "Managed by the server — local edit is disabled"
+							: canSave
+								? undefined
+								: requires(resourceSet ? "client.rci.edit" : "client.rci.create")
+					}
 				>
 					{saving ? "Saving…" : "Save"}
 				</button>

@@ -36,13 +36,26 @@ export interface TcpTool {
 	tokens: Record<string, string>;
 }
 
+export type CatalogOrigin = "local" | "server";
+
 export interface Tcp {
 	id: string;
 	name: string;
 	tags: string[];
 	tools: TcpTool[];
+	/** `server` copies are pushed by remote sync and are read-only locally. */
+	origin: CatalogOrigin;
 	createdAt: string;
 	updatedAt: string;
+}
+
+export class TcpStoreError extends Error {
+	readonly code: string;
+	constructor(code: string) {
+		super(code);
+		this.name = "TcpStoreError";
+		this.code = code;
+	}
 }
 
 export interface TcpBundleEntry {
@@ -85,6 +98,7 @@ export function ensureTcpSchema(): void {
 			name TEXT NOT NULL,
 			tags TEXT NOT NULL DEFAULT '[]',
 			tools TEXT NOT NULL DEFAULT '[]',
+			origin TEXT NOT NULL DEFAULT 'local',
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
@@ -104,6 +118,10 @@ export function ensureTcpSchema(): void {
 		(db.prepare("PRAGMA table_info(workflow_tcps)").all() as Record<string, unknown>[]).map((c) => String(c.name)),
 	);
 	if (wfCols.has("mtp_id") && !wfCols.has("tcp_id")) db.exec("ALTER TABLE workflow_tcps RENAME COLUMN mtp_id TO tcp_id;");
+	const tcpCols = new Set(
+		(db.prepare("PRAGMA table_info(tcps)").all() as Record<string, unknown>[]).map((c) => String(c.name)),
+	);
+	if (!tcpCols.has("origin")) db.exec("ALTER TABLE tcps ADD COLUMN origin TEXT NOT NULL DEFAULT 'local';");
 }
 
 function normalizeTags(tags: unknown): string[] {
@@ -181,6 +199,7 @@ function rowToTcp(row: Record<string, unknown>): Tcp {
 		name: String(row.name),
 		tags,
 		tools,
+		origin: row.origin === "server" ? "server" : "local",
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
 	};
@@ -194,13 +213,45 @@ export function insertTcp(input: { name: string; tags?: unknown; tools?: unknown
 		name: input.name.trim(),
 		tags: normalizeTags(input.tags),
 		tools: normalizeTcpTools(input.tools),
+		origin: "local",
 		createdAt: now,
 		updatedAt: now,
 	};
 	open()
-		.prepare(`INSERT INTO tcps (id, name, tags, tools, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
-		.run(tcp.id, tcp.name, JSON.stringify(tcp.tags), JSON.stringify(tcp.tools), tcp.createdAt, tcp.updatedAt);
+		.prepare(`INSERT INTO tcps (id, name, tags, tools, origin, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+		.run(tcp.id, tcp.name, JSON.stringify(tcp.tags), JSON.stringify(tcp.tools), tcp.origin, tcp.createdAt, tcp.updatedAt);
 	return tcp;
+}
+
+/**
+ * Insert or replace a TCP pack under the server's id. A later upsert overwrites
+ * the copy and keeps origin=server.
+ */
+export function upsertServerTcp(id: string, input: { name: string; tags?: unknown; tools?: unknown }): Tcp {
+	ensureTcpSchema();
+	const existing = getTcp(id);
+	const now = new Date().toISOString();
+	const tcp: Tcp = {
+		id,
+		name: input.name.trim(),
+		tags: normalizeTags(input.tags),
+		tools: normalizeTcpTools(input.tools),
+		origin: "server",
+		createdAt: existing?.createdAt ?? now,
+		updatedAt: now,
+	};
+	open()
+		.prepare(
+			`INSERT INTO tcps (id, name, tags, tools, origin, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+			   name = excluded.name,
+			   tags = excluded.tags,
+			   tools = excluded.tools,
+			   origin = 'server',
+			   updated_at = excluded.updated_at`,
+		)
+		.run(tcp.id, tcp.name, JSON.stringify(tcp.tags), JSON.stringify(tcp.tools), tcp.origin, tcp.createdAt, tcp.updatedAt);
+	return getTcp(id)!;
 }
 
 export function getTcp(id: string): Tcp | null {
@@ -222,6 +273,7 @@ export function findTcpByName(name: string): Tcp | null {
 export function updateTcp(id: string, input: { name?: string; tags?: unknown; tools?: unknown }): Tcp | null {
 	const existing = getTcp(id);
 	if (!existing) return null;
+	if (existing.origin === "server") throw new TcpStoreError("server_managed");
 	const name = input.name !== undefined ? input.name.trim() : existing.name;
 	const tags = input.tags !== undefined ? normalizeTags(input.tags) : existing.tags;
 	const tools = input.tools !== undefined ? normalizeTcpTools(input.tools) : existing.tools;
@@ -232,8 +284,13 @@ export function updateTcp(id: string, input: { name?: string; tags?: unknown; to
 	return { ...existing, name, tags, tools, updatedAt };
 }
 
-export function deleteTcp(id: string): boolean {
+export function deleteTcp(id: string, options: { allowServerManaged?: boolean } = {}): boolean {
 	ensureTcpSchema();
+	const existing = getTcp(id);
+	if (!existing) return false;
+	if (existing.origin === "server" && !options.allowServerManaged) {
+		throw new TcpStoreError("server_managed");
+	}
 	open().prepare("DELETE FROM workflow_tcps WHERE tcp_id = ?").run(id);
 	return open().prepare("DELETE FROM tcps WHERE id = ?").run(id).changes > 0;
 }

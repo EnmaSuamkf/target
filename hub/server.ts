@@ -595,6 +595,7 @@ function publicTcp(tcp: Tcp): Record<string, unknown> {
 		name: tcp.name,
 		tags: tcp.tags,
 		tools: tcp.tools,
+		origin: tcp.origin,
 		createdAt: tcp.createdAt,
 		updatedAt: tcp.updatedAt,
 	};
@@ -606,6 +607,7 @@ function publicResourceSet(set: ResourceSet): Record<string, unknown> {
 		name: set.name,
 		tags: set.tags,
 		resources: set.resources,
+		origin: set.origin,
 		createdAt: set.createdAt,
 		updatedAt: set.updatedAt,
 	};
@@ -1535,6 +1537,15 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			if (!requirePermission(cfg, req, res, "client.tcp-tools.edit")) {
 				return;
 			}
+			const existingTcp = getTcp(tcpId);
+			if (!existingTcp) {
+				sendJson(res, 404, { error: "unknown_tcp" });
+				return;
+			}
+			if (existingTcp.origin === "server") {
+				sendJson(res, 409, { error: "server_managed" });
+				return;
+			}
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
 				const input: { name?: string; tags?: unknown; tools?: unknown } = {};
 				if (typeof body.name === "string") {
@@ -1559,6 +1570,15 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 
 		if (!parts[3] && req.method === "DELETE") {
 			if (!requirePermission(cfg, req, res, "client.tcp-tools.delete")) {
+				return;
+			}
+			const existingTcp = getTcp(tcpId);
+			if (!existingTcp) {
+				sendJson(res, 404, { error: "unknown_tcp" });
+				return;
+			}
+			if (existingTcp.origin === "server") {
+				sendJson(res, 409, { error: "server_managed" });
 				return;
 			}
 			const removed = deleteTcp(tcpId);
@@ -1689,6 +1709,15 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			if (!requirePermission(cfg, req, res, "client.rci.edit")) {
 				return;
 			}
+			const existingSet = getResourceSet(resourceSetId);
+			if (!existingSet) {
+				sendJson(res, 404, { error: "unknown_resource_set" });
+				return;
+			}
+			if (existingSet.origin === "server") {
+				sendJson(res, 409, { error: "server_managed" });
+				return;
+			}
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
 				const input: { name?: string; tags?: unknown; resources?: unknown } = {};
 				if (typeof body.name === "string") {
@@ -1713,6 +1742,15 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 
 		if (!parts[3] && req.method === "DELETE") {
 			if (!requirePermission(cfg, req, res, "client.rci.delete")) {
+				return;
+			}
+			const existingSet = getResourceSet(resourceSetId);
+			if (!existingSet) {
+				sendJson(res, 404, { error: "unknown_resource_set" });
+				return;
+			}
+			if (existingSet.origin === "server") {
+				sendJson(res, 409, { error: "server_managed" });
 				return;
 			}
 			const removed = deleteResourceSet(resourceSetId);
