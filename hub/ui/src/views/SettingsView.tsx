@@ -15,6 +15,7 @@ import type {
 	ShortcutAction,
 	ShortcutSettings,
 	ShortcutSettingsInput,
+	SyncSettings,
 	UiSettings,
 	UiSettingsInput,
 } from "../api/types.ts";
@@ -24,8 +25,15 @@ import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { Field } from "../components/Field.tsx";
 import { Switch } from "../components/Switch.tsx";
 import { useToast } from "../components/Toast.tsx";
+import { usePermissions } from "../hooks/usePermissions.ts";
 import { relativeTime } from "../lib/format.ts";
 import styles from "./SettingsView.module.css";
+
+const MODE_LABEL: Record<string, string> = {
+	unrestricted: "Sin vincular — todo permitido",
+	enforced: "Aplicado — el servidor recorta lo concedido",
+	read_only: "Solo lectura",
+};
 
 /**
  * Configuration: hub-wide preferences, one section per topic. Notifications is
@@ -168,6 +176,22 @@ export function SettingsView({
 	const [linkMessage, setLinkMessage] = useState<string | null>(null);
 	const [linkBrowserUrl, setLinkBrowserUrl] = useState<string | null>(null);
 	const [linkBusy, setLinkBusy] = useState(false);
+	const [syncSettings, setSyncSettings] = useState<SyncSettings | null>(null);
+	const [syncBusy, setSyncBusy] = useState(false);
+	const {
+		mode,
+		can,
+		readOnly,
+		reason,
+		granted,
+		origin: permissionsOrigin,
+		ownerId,
+		linkState,
+		receivedAt,
+	} = usePermissions();
+	const canManage = can("remote.workflows.manage");
+	const manageTitle = "Requiere remote.workflows.manage";
+	const permissionsId = useId();
 
 	const notificationsId = useId();
 	const catalogNavId = useId();
@@ -204,6 +228,9 @@ export function SettingsView({
 				if (status.origin) setLinkOrigin(status.origin);
 			})
 			.catch(() => setLinkMessage("Could not read server connection status. Local workflows and tools continue unchanged."));
+		void api.getSyncSettings().then(setSyncSettings).catch(() => {
+			/* Sync prefs are optional; the panel still renders. */
+		});
 	}, []);
 
 	useEffect(() => {
@@ -403,6 +430,57 @@ export function SettingsView({
 				</p>
 			</div>
 
+			<section className={styles.section} aria-labelledby={`${permissionsId}-section`}>
+				<h3 className={styles.sectionHeading} id={`${permissionsId}-section`}>
+					Permisos de tu rol
+				</h3>
+				<p className="hint">
+					Estado del modo: <strong>{MODE_LABEL[mode] ?? mode}</strong>
+					{reason ? ` · ${reason.replaceAll("_", " ")}` : ""}
+					{ownerId ? ` · owner ${ownerId}` : ""}
+					{` · vínculo ${linkState.replaceAll("_", " ")}`}
+				</p>
+				<p className="hint">
+					Origen del servidor:{" "}
+					<strong>{permissionsOrigin ?? linkStatus?.origin ?? "ninguno"}</strong>
+					{receivedAt ? ` · recibido ${relativeTime(receivedAt)}` : ""}
+				</p>
+				{readOnly && (
+					<p className="msg msg--error" role="note">
+						Este hub está en solo-lectura: las mutaciones quedan bloqueadas hasta que el owner
+						vuelva a estar vivo o el dispositivo se desvincule.
+					</p>
+				)}
+				{granted.groups.length > 0 ? (
+					<ul className={styles.granted}>
+						{granted.groups.map((group) => (
+							<li key={group.id}>
+								<strong>{group.label}</strong>
+								<ul>
+									{group.permissions.map((perm) => (
+										<li key={perm.id}>
+											<code>{perm.id}</code>
+											{perm.label ? ` — ${perm.label}` : ""}
+										</li>
+									))}
+								</ul>
+							</li>
+						))}
+					</ul>
+				) : (
+					<p className="hint">
+						{mode === "unrestricted"
+							? "Sin owner: no hay lista recortada porque este hub no aplica rol."
+							: "El servidor no envió grupos concedidos (o el snapshot aún no llegó)."}
+					</p>
+				)}
+				<p className="msg msg--error" role="note">
+					Esto es gobernanza de UI, no una frontera de seguridad. Quien tenga una shell en esta
+					máquina puede saltárselo: token de admin, CLI, <code>~/.target/target.db</code> o
+					borrar <code>device-link.json</code>. El límite real sigue en target-server.
+				</p>
+			</section>
+
 			<section className={styles.section} aria-labelledby={`${linkId}-section`}>
 				<h3 className={styles.sectionHeading} id={`${linkId}-section`}>Optional server connection</h3>
 				<p className="hint">
@@ -427,12 +505,48 @@ export function SettingsView({
 						<p className="hint"><strong>{linkStatus.origin}</strong> · device {linkStatus.deviceName ?? "unnamed"} · scopes: {linkStatus.scopes.join(", ") || "none"}{linkStatus.lastRemoteActivityAt ? ` · last remote activity ${relativeTime(linkStatus.lastRemoteActivityAt)}` : ""}</p>
 						{linkStatus.scopes.includes("sync:write") && <p className="hint">Remote Sync is active automatically for this linked device.</p>}
 						{linkStatus.scopes.includes("ingest:write") && <p className="hint">Activity reporting is active automatically and includes full conversation text, as accepted when this hub was linked.</p>}
+						<div className={styles.toggleRow} title={canManage ? undefined : manageTitle}>
+							<div className={styles.toggleText}>
+								<span className="label">Remote Sync</span>
+								<p className="hint" id={`${linkId}-sync`}>
+									Activa o pausa la sincronización remota. Mientras el dispositivo está vinculado exige{" "}
+									<code>remote.workflows.manage</code>.
+								</p>
+							</div>
+							<Switch
+								checked={syncSettings?.enabled ?? linkStatus.scopes.includes("sync:write")}
+								onChange={(next) => {
+									if (!canManage || syncBusy) return;
+									setSyncBusy(true);
+									void api
+										.saveSyncSettings({ enabled: next })
+										.then(setSyncSettings)
+										.catch(() => {
+											/* toast from the 403 interceptor */
+										})
+										.finally(() => setSyncBusy(false));
+								}}
+								label="Remote Sync"
+								describedBy={`${linkId}-sync`}
+								disabled={!canManage || syncBusy}
+							/>
+						</div>
 						<div className={styles.actions}>
-						<button type="button" className="btn btn--secondary" disabled={linkBusy} onClick={async () => {
+						<button
+							type="button"
+							className="btn btn--secondary"
+							disabled={linkBusy || !canManage}
+							title={canManage ? undefined : manageTitle}
+							onClick={async () => {
 							setLinkBusy(true);
 							try { applyLinkOutcome(await api.cancelDeviceLink()); } finally { setLinkBusy(false); }
 						}}>{linkBusy ? "Disconnecting…" : "Disconnect this device"}</button>
-						<button type="button" className="btn btn--primary" disabled={linkBusy} onClick={async () => {
+						<button
+							type="button"
+							className="btn btn--primary"
+							disabled={linkBusy || !canManage}
+							title={canManage ? undefined : manageTitle}
+							onClick={async () => {
 							setLinkBusy(true);
 							try { applyLinkOutcome(await api.cancelDeviceLink()); setLinkMessage("Previous link removed. Connect this hub again to link a replacement."); }
 							finally { setLinkBusy(false); }

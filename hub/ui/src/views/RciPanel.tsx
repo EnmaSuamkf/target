@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { ResourceSelection, ResourceSet, Workflow } from "../api/types.ts";
+import { usePermissions, requires } from "../hooks/usePermissions.ts";
 import { initialResourceDraftState, isResourceDraftDirty, markResourceDraftSaved, reconcileResourceDraft } from "./rciDraft.ts";
 import { ResourceSelectionEditor } from "./ResourceSelectionEditor.tsx";
 import styles from "./DetailPanels.module.css";
@@ -18,6 +19,8 @@ export function RciPanel({
 	const serverSelections = workflow.resourceSelections ?? [];
 
 	const [state, setState] = useState(() => initialResourceDraftState(workflow.id, serverSelections));
+	const { can } = usePermissions();
+	const canManage = can("remote.workflows.manage");
 	const [saving, setSaving] = useState(false);
 
 	// Reconcile during render so the 2s poll never wipes unsaved checkbox toggles.
@@ -51,13 +54,14 @@ export function RciPanel({
 			<ResourceSelectionEditor
 				resourceSets={resourceSets}
 				selections={selected}
-				disabled={locked}
+				disabled={locked || !canManage}
 				onChange={(next) => setState((prev) => ({ ...prev, draft: next }))}
 			/>
 			<button
 				type="button"
 				className="btn btn--sm btn--primary"
-				disabled={locked || saving || !dirty || resourceSets.length === 0}
+				disabled={locked || saving || !dirty || resourceSets.length === 0 || !canManage}
+				title={canManage ? undefined : requires("remote.workflows.manage")}
 				onClick={() => void save()}
 			>
 				{saving ? "Saving…" : "Save RCI selection"}

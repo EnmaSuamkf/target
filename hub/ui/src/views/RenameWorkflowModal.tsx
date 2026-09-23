@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Field } from "../components/Field.tsx";
 import { Modal } from "../components/Modal.tsx";
+import { usePermissions, requires } from "../hooks/usePermissions.ts";
 import styles from "./RenameWorkflowModal.module.css";
 
 /**
@@ -34,6 +35,8 @@ export function RenameWorkflowModal({
 }): React.JSX.Element {
 	const [value, setValue] = useState(name);
 	const [saving, setSaving] = useState(false);
+	const { can } = usePermissions();
+	const canManage = can("remote.workflows.manage");
 
 	useEffect(() => {
 		if (!open) return;
@@ -46,7 +49,7 @@ export function RenameWorkflowModal({
 	const trimmed = value.trim();
 	// Saving the name it already has is a no-op the server would accept anyway;
 	// disabling it keeps the button honest about what it's for.
-	const canSubmit = trimmed !== "" && trimmed !== name && !saving;
+	const canSubmit = trimmed !== "" && trimmed !== name && !saving && canManage;
 
 	const submit = async (ev: React.FormEvent): Promise<void> => {
 		ev.preventDefault();
@@ -71,7 +74,13 @@ export function RenameWorkflowModal({
 					<button type="button" className="btn" onClick={onClose} disabled={saving}>
 						Cancel
 					</button>
-					<button type="submit" form="rename-workflow" className="btn btn--primary" disabled={!canSubmit}>
+					<button
+						type="submit"
+						form="rename-workflow"
+						className="btn btn--primary"
+						disabled={!canSubmit}
+						title={canManage ? undefined : requires("remote.workflows.manage")}
+					>
 						{saving ? "Saving…" : "Save"}
 					</button>
 				</>

@@ -4,6 +4,7 @@ import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { Field } from "../components/Field.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { Switch } from "../components/Switch.tsx";
+import { usePermissions, requires } from "../hooks/usePermissions.ts";
 import { useStagedImages } from "../hooks/useStagedImages.ts";
 import styles from "./AddStepModal.module.css";
 
@@ -62,8 +63,10 @@ export function AddStepModal({
 	}, [open]);
 
 	// The wait between retries only means something with more than one retry.
+	const { can } = usePermissions();
+	const canAdd = can("remote.workflows.steps.add");
 	const intervalEnabled = (parseInt(maxRetries, 10) || 0) > 1;
-	const canSubmit = description.trim() !== "" && !saving;
+	const canSubmit = description.trim() !== "" && !saving && canAdd;
 
 	const submit = async (ev: React.FormEvent): Promise<void> => {
 		ev.preventDefault();
@@ -99,7 +102,13 @@ export function AddStepModal({
 					<button type="button" className="btn" onClick={onClose} disabled={saving}>
 						Cancel
 					</button>
-					<button type="submit" form="add-step-after" className="btn btn--primary" disabled={!canSubmit}>
+					<button
+						type="submit"
+						form="add-step-after"
+						className="btn btn--primary"
+						disabled={!canSubmit}
+						title={canAdd ? undefined : requires("remote.workflows.steps.add")}
+					>
 						{saving ? "Adding…" : "Add step"}
 					</button>
 				</>

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { usePermissions, requires } from "../hooks/usePermissions.ts";
 import type {
 	AttachmentField,
 	OverridableStepStatus,
@@ -142,6 +143,11 @@ export function StepItem({
 	// that still reported something), and expanding one shouldn't expand the other.
 	const [errorExpanded, setErrorExpanded] = useState(false);
 	const [adding, setAdding] = useState(false);
+	const { can } = usePermissions();
+	const canExecute = can("remote.workflows.execute");
+	const canEdit = can("remote.workflows.steps.edit");
+	const canAdd = can("remote.workflows.steps.add");
+	const canManage = can("remote.workflows.manage");
 
 	// The hub-owned conversation-context step. Everything an operator can do to a
 	// step is refused for it by the server (edit, remove, Continue, Set status),
@@ -217,7 +223,11 @@ export function StepItem({
 				{!isContext && (
 					<label
 						className={styles.checkWrap}
-						title="Check to run only the selected steps on Start. Leave all unchecked to run nothing."
+						title={
+							canManage
+								? "Check to run only the selected steps on Start. Leave all unchecked to run nothing."
+								: requires("remote.workflows.manage")
+						}
 					>
 						<input
 							type="checkbox"
@@ -225,6 +235,7 @@ export function StepItem({
 							checked={selected}
 							onChange={(ev) => onToggleSelected(step.id, ev.target.checked)}
 							aria-label={`Include step ${step.orderIndex + 1} in the next run`}
+							disabled={!canManage}
 						/>
 					</label>
 				)}
@@ -238,12 +249,14 @@ export function StepItem({
 							type="button"
 							className={styles.moveBtn}
 							onClick={() => onMove(step.id, "up")}
-							disabled={!canMoveUp || busy}
+							disabled={!canMoveUp || busy || !canEdit}
 							aria-label={`Move step ${step.orderIndex + 1} up, so it runs earlier`}
 							title={
-								canMoveUp
-									? "Move up — this step runs one place earlier."
-									: "Can't move up: this step is already first, or it (or the step above) has already run. Only pending steps can be reordered."
+								!canEdit
+									? requires("remote.workflows.steps.edit")
+									: canMoveUp
+										? "Move up — this step runs one place earlier."
+										: "Can't move up: this step is already first, or it (or the step above) has already run. Only pending steps can be reordered."
 							}
 							data-move-step="up"
 						>
@@ -255,12 +268,14 @@ export function StepItem({
 							type="button"
 							className={styles.moveBtn}
 							onClick={() => onMove(step.id, "down")}
-							disabled={!canMoveDown || busy}
+							disabled={!canMoveDown || busy || !canEdit}
 							aria-label={`Move step ${step.orderIndex + 1} down, so it runs later`}
 							title={
-								canMoveDown
-									? "Move down — this step runs one place later."
-									: "Can't move down: this step is already last, or it (or the step below) has already run. Only pending steps can be reordered."
+								!canEdit
+									? requires("remote.workflows.steps.edit")
+									: canMoveDown
+										? "Move down — this step runs one place later."
+										: "Can't move down: this step is already last, or it (or the step below) has already run. Only pending steps can be reordered."
 							}
 							data-move-step="down"
 						>
@@ -406,6 +421,8 @@ export function StepItem({
 				<StepNotes
 					notes={step.notes ?? []}
 					busy={busy}
+					disabled={!canEdit}
+					disabledTitle={requires("remote.workflows.steps.edit")}
 					{...(onAddNote
 						? { onAdd: (content, theme) => onAddNote(step.id, content, theme) }
 						: {})}
@@ -467,8 +484,8 @@ export function StepItem({
 						type="button"
 						className="btn btn--sm btn--danger"
 						onClick={() => onAbort(step.id)}
-						disabled={busy}
-						title={QUEUED_RECOVERY_TOOLTIP}
+						disabled={busy || !canExecute}
+						title={canExecute ? QUEUED_RECOVERY_TOOLTIP : requires("remote.workflows.execute")}
 					>
 						Abort
 					</button>
@@ -487,8 +504,12 @@ export function StepItem({
 						type="button"
 						className="btn btn--primary btn--sm"
 						onClick={() => onContinue(step.id)}
-						disabled={busy}
-						title="Approve this step's result: it's marked done and the workflow carries on with the next step. Alt/Shift+C presses this button."
+						disabled={busy || !canExecute}
+						title={
+							canExecute
+								? "Approve this step's result: it's marked done and the workflow carries on with the next step. Alt/Shift+C presses this button."
+								: "Requiere remote.workflows.execute"
+						}
 						data-continue-step
 					>
 						Continue
@@ -503,13 +524,15 @@ export function StepItem({
 						type="button"
 						className="btn btn--sm"
 						onClick={() => onOpenConversation(step.id)}
-						disabled={!step.sessionId || busy}
+						disabled={!step.sessionId || busy || !canExecute}
 						title={
-							!step.sessionId
-								? "This step never reported a session, so there's no conversation to resume."
-								: failed
-									? "Opens a terminal resuming this step's own conversation, so you can ask the agent what it actually did before it failed."
-									: "Opens a terminal resuming this step's own conversation, so you can ask the agent about what it just did before you decide."
+							!canExecute
+								? requires("remote.workflows.execute")
+								: !step.sessionId
+									? "This step never reported a session, so there's no conversation to resume."
+									: failed
+										? "Opens a terminal resuming this step's own conversation, so you can ask the agent what it actually did before it failed."
+										: "Opens a terminal resuming this step's own conversation, so you can ask the agent about what it just did before you decide."
 						}
 						data-open-conversation-step
 					>
@@ -521,8 +544,12 @@ export function StepItem({
 						type="button"
 						className="btn btn--sm"
 						onClick={() => setAdding(true)}
-						disabled={busy}
-						title="Insert a new step right after this one — it becomes the next thing the agent does when you press Continue."
+						disabled={busy || !canAdd}
+						title={
+							canAdd
+								? "Insert a new step right after this one — it becomes the next thing the agent does when you press Continue."
+								: requires("remote.workflows.steps.add")
+						}
 					>
 						Add step
 					</button>
@@ -544,8 +571,12 @@ export function StepItem({
 						type="button"
 						className="btn btn--sm btn--primary"
 						onClick={() => onRunStep(step.id)}
-						disabled={busy}
-						title="Re-run this step now. Use after Abort cleared a stuck queue, or any time a failed step should be tried again."
+						disabled={busy || !canExecute}
+						title={
+							canExecute
+								? "Re-run this step now. Use after Abort cleared a stuck queue, or any time a failed step should be tried again."
+								: requires("remote.workflows.execute")
+						}
 					>
 						Retry
 					</button>
@@ -555,18 +586,26 @@ export function StepItem({
 						type="button"
 						className="btn btn--sm btn--danger"
 						onClick={() => onAbort(step.id)}
-						disabled={busy}
+						disabled={busy || !canExecute}
 						title={
-							waiting
-								? "Refuse this step's result: it's recorded failed and the workflow stops here instead of carrying on. The result and the session are kept."
-								: "Force-fail this stuck step so it can be re-run, without restarting the whole workflow. Also kills the spawned agent process on the broker, freeing the workdir lock. Its session is preserved."
+							!canExecute
+								? requires("remote.workflows.execute")
+								: waiting
+									? "Refuse this step's result: it's recorded failed and the workflow stops here instead of carrying on. The result and the session are kept."
+									: "Force-fail this stuck step so it can be re-run, without restarting the whole workflow. Also kills the spawned agent process on the broker, freeing the workdir lock. Its session is preserved."
 						}
 					>
 						Abort
 					</button>
 				)}
 				{!isContext && (
-					<button type="button" className="btn btn--sm" onClick={() => setEditing(true)} disabled={!editable || busy}>
+					<button
+						type="button"
+						className="btn btn--sm"
+						onClick={() => setEditing(true)}
+						disabled={!editable || busy || !canEdit}
+						title={canEdit ? undefined : requires("remote.workflows.steps.edit")}
+					>
 						Edit
 					</button>
 				)}
@@ -575,8 +614,14 @@ export function StepItem({
 						type="button"
 						className="btn btn--sm btn--ghost"
 						onClick={() => onRemove(step.id)}
-						disabled={!removable || busy}
-						title={removable ? "Remove this step" : "Only a pending step can be removed."}
+						disabled={!removable || busy || !canEdit}
+						title={
+							!canEdit
+								? requires("remote.workflows.steps.edit")
+								: removable
+									? "Remove this step"
+									: "Only a pending step can be removed."
+						}
 					>
 						Remove
 					</button>
@@ -592,12 +637,14 @@ export function StepItem({
 				<select
 					className={`select ${styles.statusSelect}`}
 					value=""
-					disabled={inFlight || busy}
+					disabled={inFlight || busy || !canManage}
 					aria-label={`Set the status of step ${step.orderIndex + 1} by hand`}
 					title={
-						inFlight
-							? "This step still has a job in flight — abort it first."
-							: "Say what really happened: mark this step done, failed or pending by hand. Nothing is run."
+						!canManage
+							? requires("remote.workflows.manage")
+							: inFlight
+								? "This step still has a job in flight — abort it first."
+								: "Say what really happened: mark this step done, failed or pending by hand. Nothing is run."
 					}
 					onChange={(ev) => {
 						const next = ev.target.value as OverridableStepStatus | "";
@@ -656,6 +703,8 @@ function StepEditor({
 	const [interval, setInterval] = useState(String(step.retryIntervalSeconds ?? 0));
 	const [saving, setSaving] = useState(false);
 	const [attaching, setAttaching] = useState(false);
+	const { can } = usePermissions();
+	const canEdit = can("remote.workflows.steps.edit");
 
 	// The wait between retries only means something with more than one retry.
 	const intervalEnabled = (parseInt(maxRetries, 10) || 0) > 1;
@@ -807,7 +856,12 @@ function StepEditor({
 			</div>
 
 			<div className={styles.actions}>
-				<button type="submit" className="btn btn--primary btn--sm" disabled={description.trim() === "" || saving}>
+				<button
+					type="submit"
+					className="btn btn--primary btn--sm"
+					disabled={description.trim() === "" || saving || !canEdit}
+					title={canEdit ? undefined : requires("remote.workflows.steps.edit")}
+				>
 					{saving ? "Saving…" : "Save"}
 				</button>
 				<button type="button" className="btn btn--sm" onClick={onCancel} disabled={saving}>

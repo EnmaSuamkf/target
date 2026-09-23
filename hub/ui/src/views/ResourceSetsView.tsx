@@ -4,6 +4,7 @@ import { DirectoryBrowser } from "../components/DirectoryBrowser.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { Field } from "../components/Field.tsx";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
+import { usePermissions, requires } from "../hooks/usePermissions.ts";
 import { defaultEntryFile, isMarkdownFile, KIND_LABELS, RESOURCE_KINDS } from "../rciKinds.ts";
 import { relativeTime } from "../lib/format.ts";
 import styles from "./TemplatesView.module.css";
@@ -52,6 +53,8 @@ export function ResourceSetsView({
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const [creating, setCreating] = useState(false);
 	const isMobile = useIsMobile();
+	const { can } = usePermissions();
+	const canCreate = can("remote.rci.create");
 
 	const visible = useMemo(() => {
 		const q = query.trim().toLowerCase();
@@ -88,6 +91,8 @@ export function ResourceSetsView({
 									setEditingId(null);
 									setCreating(true);
 								}}
+								disabled={!canCreate}
+								title={canCreate ? undefined : "Requiere remote.rci.create"}
 							>
 								New
 							</button>
@@ -194,6 +199,13 @@ function ResourceSetForm({
 	// so sending the operator back to $HOME for every resource after the first
 	// would mean re-walking the same six directories.
 	const [browsePath, setBrowsePath] = useState("");
+	const { can } = usePermissions();
+	const canCreate = can("remote.rci.create");
+	const canEdit = can("remote.rci.edit");
+	const canDelete = can("remote.rci.delete");
+	const canSave = resourceSet ? canEdit : canCreate;
+	// Scan is create on the API; the folder picker is the RCI "import".
+	const canScan = can("remote.rci.create");
 
 	const updateResource = (index: number, patch: Partial<Resource>): void => {
 		setResources((current) => current.map((resource, i) => (i === index ? { ...resource, ...patch } : resource)));
@@ -249,7 +261,7 @@ function ResourceSetForm({
 	const submit = async (ev: React.FormEvent): Promise<void> => {
 		ev.preventDefault();
 		const trimmedName = name.trim();
-		if (!trimmedName || saving) return;
+		if (!trimmedName || saving || !canSave) return;
 		setSaving(true);
 		try {
 			await onSubmit(
@@ -281,7 +293,13 @@ function ResourceSetForm({
 				<h2 className={styles.heading}>{resourceSet ? "Edit Resource Set" : "New Resource Set"}</h2>
 				<div className={styles.formHeadActions}>
 					{onDelete && (
-						<button type="button" className="btn btn--sm btn--danger" onClick={onDelete} disabled={busy || saving}>
+						<button
+							type="button"
+							className="btn btn--sm btn--danger"
+							onClick={onDelete}
+							disabled={busy || saving || !canDelete}
+							title={canDelete ? undefined : requires("remote.rci.delete")}
+						>
 							Delete
 						</button>
 					)}
@@ -310,12 +328,19 @@ function ResourceSetForm({
 					type="button"
 					className="btn btn--sm"
 					onClick={() => setBrowsing((open) => !open)}
-					disabled={busy || saving || importing}
+					disabled={busy || saving || importing || !canScan}
 					aria-expanded={browsing}
+					title={canScan ? undefined : requires("remote.rci.create")}
 				>
 					{importing ? "Importing…" : "Import"}
 				</button>
-				<button type="button" className="btn btn--sm" onClick={addResource} disabled={importing}>
+				<button
+					type="button"
+					className="btn btn--sm"
+					onClick={addResource}
+					disabled={importing || !canSave}
+					title={canSave ? undefined : requires(resourceSet ? "remote.rci.edit" : "remote.rci.create")}
+				>
 					Add resource
 				</button>
 			</div>
@@ -452,7 +477,12 @@ function ResourceSetForm({
 				<button type="button" className="btn" onClick={onCancel} disabled={saving}>
 					Cancel
 				</button>
-				<button type="submit" className="btn btn--primary" disabled={saving || busy}>
+				<button
+					type="submit"
+					className="btn btn--primary"
+					disabled={saving || busy || !canSave}
+					title={canSave ? undefined : requires(resourceSet ? "remote.rci.edit" : "remote.rci.create")}
+				>
 					{saving ? "Saving…" : "Save"}
 				</button>
 			</div>

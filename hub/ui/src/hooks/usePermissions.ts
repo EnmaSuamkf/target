@@ -1,5 +1,5 @@
 import { useCallback, useSyncExternalStore } from "react";
-import type { PermissionsMode, PermissionsState } from "../api/types.ts";
+import type { DeviceLinkState, PermissionCatalogGroup, PermissionsMode, PermissionsState } from "../api/types.ts";
 
 /**
  * Linked-owner role as reactive state.
@@ -42,6 +42,11 @@ export function getPermissionsOrigin(): string | null {
 	return origin;
 }
 
+/** Tooltip on a disabled control — names the missing permission(s). */
+export function requires(...ids: string[]): string {
+	return ids.length === 1 ? `Requiere ${ids[0]}` : `Requiere ${ids.join(" o ")}`;
+}
+
 function getSnapshot(): PermissionsState | null {
 	return snapshot;
 }
@@ -60,6 +65,11 @@ export function usePermissions(): {
 	can: (...ids: string[]) => boolean;
 	readOnly: boolean;
 	reason: PermissionReason | null;
+	granted: { groups: PermissionCatalogGroup[] };
+	origin: string | null;
+	ownerId: string | null;
+	linkState: DeviceLinkState;
+	receivedAt: string | null;
 } {
 	const state = useSyncExternalStore(subscribe, getSnapshot, () => null);
 	const mode: PermissionsMode = state?.mode ?? "unrestricted";
@@ -77,5 +87,15 @@ export function usePermissions(): {
 
 	const readOnly = mode === "read_only" || (mode === "enforced" && (state?.permissions.length ?? 0) === 0);
 
-	return { mode, can, readOnly, reason: deriveReason(state) };
+	return {
+		mode,
+		can,
+		readOnly,
+		reason: deriveReason(state),
+		granted: state?.granted ?? { groups: [] },
+		origin,
+		ownerId: state?.ownerId ?? null,
+		linkState: state?.linkState ?? "local_unconfigured",
+		receivedAt: state?.receivedAt ?? null,
+	};
 }

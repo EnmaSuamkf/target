@@ -3,6 +3,7 @@ import type { Tcp, TcpInput, TcpTool, TcpToolInput } from "../api/types.ts";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { Field } from "../components/Field.tsx";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
+import { usePermissions, requires } from "../hooks/usePermissions.ts";
 import { relativeTime } from "../lib/format.ts";
 import styles from "./TemplatesView.module.css";
 
@@ -69,6 +70,10 @@ export function TcpsView({
 	const [creating, setCreating] = useState(false);
 	const isMobile = useIsMobile();
 	const fileInput = useRef<HTMLInputElement>(null);
+	const { can } = usePermissions();
+	const canCreate = can("remote.tcp-tools.create");
+	const canImport = can("remote.tcp-tools.import");
+	const canExport = can("remote.tcp-tools.export");
 
 	const visible = useMemo(() => {
 		const q = query.trim().toLowerCase();
@@ -98,13 +103,35 @@ export function TcpsView({
 								TCP
 								{tcps.length > 0 && <span className={styles.count}>{tcps.length}</span>}
 							</h2>
-							<button type="button" className="btn btn--primary btn--sm" onClick={() => { setEditingId(null); setCreating(true); }}>
+							<button
+								type="button"
+								className="btn btn--primary btn--sm"
+								onClick={() => { setEditingId(null); setCreating(true); }}
+								disabled={!canCreate}
+								title={canCreate ? undefined : "Requiere remote.tcp-tools.create"}
+							>
 								New
 							</button>
 						</div>
 						<div className={styles.ioRow}>
-							<button type="button" className="btn btn--sm" onClick={() => fileInput.current?.click()} disabled={busy}>Import</button>
-							<button type="button" className="btn btn--sm" onClick={onExportAll} disabled={busy || tcps.length === 0}>Export all</button>
+							<button
+								type="button"
+								className="btn btn--sm"
+								onClick={() => fileInput.current?.click()}
+								disabled={busy || !canImport}
+								title={canImport ? undefined : requires("remote.tcp-tools.import")}
+							>
+								Import
+							</button>
+							<button
+								type="button"
+								className="btn btn--sm"
+								onClick={onExportAll}
+								disabled={busy || tcps.length === 0 || !canExport}
+								title={canExport ? undefined : requires("remote.tcp-tools.export")}
+							>
+								Export all
+							</button>
 						</div>
 						<input ref={fileInput} type="file" accept="application/json,.json" className={styles.fileInput} onChange={(ev) => { const f = ev.target.files?.[0]; if (f) onImport(f); ev.target.value = ""; }} />
 						<input type="search" className="input" placeholder="Search TCP…" value={query} onChange={(ev) => setQuery(ev.target.value)} />
@@ -185,6 +212,12 @@ function TcpForm({
 	const [inputsText, setInputsText] = useState(() => initialToolDrafts(initialTools).inputsText);
 	const [jsonError, setJsonError] = useState<string | null>(null);
 	const [saving, setSaving] = useState(false);
+	const { can } = usePermissions();
+	const canCreate = can("remote.tcp-tools.create");
+	const canEdit = can("remote.tcp-tools.edit");
+	const canDelete = can("remote.tcp-tools.delete");
+	const canExport = can("remote.tcp-tools.export");
+	const canSave = tcp ? canEdit : canCreate;
 
 	const updateTool = (index: number, patch: Partial<TcpTool>): void => {
 		setTools((current) => current.map((tool, i) => (i === index ? { ...tool, ...patch } : tool)));
@@ -226,7 +259,7 @@ function TcpForm({
 	const submit = async (ev: React.FormEvent): Promise<void> => {
 		ev.preventDefault();
 		const trimmedName = name.trim();
-		if (!trimmedName || saving) return;
+		if (!trimmedName || saving || !canSave) return;
 		const syncedTools = syncJsonDraftsToTools();
 		if (!syncedTools) return;
 		setSaving(true);
@@ -257,8 +290,28 @@ function TcpForm({
 			<div className={styles.formHead}>
 				<h2 className={styles.heading}>{tcp ? "Edit TCP" : "New TCP"}</h2>
 				<div className={styles.formHeadActions}>
-					{onExport && <button type="button" className="btn btn--sm" onClick={onExport} disabled={busy || saving}>Export</button>}
-					{onDelete && <button type="button" className="btn btn--sm btn--danger" onClick={onDelete} disabled={busy || saving}>Delete</button>}
+					{onExport && (
+						<button
+							type="button"
+							className="btn btn--sm"
+							onClick={onExport}
+							disabled={busy || saving || !canExport}
+							title={canExport ? undefined : requires("remote.tcp-tools.export")}
+						>
+							Export
+						</button>
+					)}
+					{onDelete && (
+						<button
+							type="button"
+							className="btn btn--sm btn--danger"
+							onClick={onDelete}
+							disabled={busy || saving || !canDelete}
+							title={canDelete ? undefined : requires("remote.tcp-tools.delete")}
+						>
+							Delete
+						</button>
+					)}
 				</div>
 			</div>
 			<Field label="Name" required>{(props) => <input {...props} type="text" className="input" value={name} onChange={(ev) => setName(ev.target.value)} required />}</Field>
@@ -308,7 +361,14 @@ function TcpForm({
 			))}
 			<div className={styles.formActions}>
 				<button type="button" className="btn" onClick={onCancel} disabled={saving}>Cancel</button>
-				<button type="submit" className="btn btn--primary" disabled={saving || busy}>{saving ? "Saving…" : "Save"}</button>
+				<button
+					type="submit"
+					className="btn btn--primary"
+					disabled={saving || busy || !canSave}
+					title={canSave ? undefined : requires(tcp ? "remote.tcp-tools.edit" : "remote.tcp-tools.create")}
+				>
+					{saving ? "Saving…" : "Save"}
+				</button>
 			</div>
 		</form>
 	);
