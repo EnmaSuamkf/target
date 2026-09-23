@@ -46,6 +46,7 @@ import type {
 	ShortcutSettingsInput,
 	UiSettings,
 	UiSettingsInput,
+	PermissionsState,
 	Step,
 	StepConfigInput,
 	StepNote,
@@ -72,11 +73,18 @@ export class ApiError extends Error {
 	readonly status: number;
 	/** The server's parsed body, when there was one — some errors carry more than the `error` string (e.g. `retryAfterSec` on a 429). */
 	readonly payload: unknown;
+	/** Role id the hub required, when the server answered 403 `{ error: "forbidden", permission }`. */
+	readonly permission: string | null;
+	/** Permission mode from that same 403 (`enforced` / `read_only`). */
+	readonly mode: string | null;
 	constructor(status: number, message: string, payload?: unknown) {
 		super(message);
 		this.name = "ApiError";
 		this.status = status;
 		this.payload = payload;
+		const body = payload && typeof payload === "object" ? (payload as { permission?: unknown; mode?: unknown }) : null;
+		this.permission = status === 403 && typeof body?.permission === "string" ? body.permission : null;
+		this.mode = status === 403 && typeof body?.mode === "string" ? body.mode : null;
 	}
 	/** True when the call failed only because the admin token is missing/wrong. */
 	get isAuth(): boolean {
@@ -780,6 +788,11 @@ export async function setWorkflowResourceSelections(
 export async function getDeviceLinkStatus(): Promise<DeviceLinkStatus> {
 	const data = await request<{ status: DeviceLinkStatus }>("/api/device-link", { admin: true });
 	return data.status;
+}
+
+/** Owner-role mode for the UI. Admin-gated, not role-gated. */
+export async function getPermissions(): Promise<PermissionsState> {
+	return request<PermissionsState>("/api/permissions", { admin: true });
 }
 
 export async function startDeviceLink(input: { origin: string; deviceName?: string }): Promise<DeviceLinkOutcome> {

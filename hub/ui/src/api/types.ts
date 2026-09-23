@@ -726,6 +726,64 @@ export interface DeviceLinkOutcome {
 	browserUrl?: string;
 }
 
+/**
+ * Client-scoped permission IDs from target-server's `remote.*` catalogue.
+ * The workflow-agent setting `PermissionMode` (acceptEdits / …) is unrelated.
+ */
+export const CLIENT_PERMISSIONS = [
+	"remote.read",
+	"remote.workflows.create",
+	"remote.workflows.steps.add",
+	"remote.workflows.steps.edit",
+	"remote.workflows.manage",
+	"remote.workflows.execute",
+	"remote.templates.create",
+	"remote.templates.edit",
+	"remote.templates.delete",
+	"remote.templates.import",
+	"remote.templates.export",
+	"remote.tcp-tools.create",
+	"remote.tcp-tools.edit",
+	"remote.tcp-tools.delete",
+	"remote.tcp-tools.import",
+	"remote.tcp-tools.export",
+	"remote.rci.create",
+	"remote.rci.edit",
+	"remote.rci.delete",
+	"remote.rci.import",
+	"remote.rci.export",
+] as const;
+
+export type ClientPermission = (typeof CLIENT_PERMISSIONS)[number];
+
+/** Owner-role enforcement mode from GET /api/permissions. */
+export type PermissionsMode = "unrestricted" | "enforced" | "read_only";
+
+export interface PermissionCatalogEntry {
+	id: string;
+	label: string;
+	description: string;
+}
+
+export interface PermissionCatalogGroup {
+	id: string;
+	scope: string;
+	label: string;
+	description: string;
+	permissions: PermissionCatalogEntry[];
+}
+
+/** Body of GET /api/permissions. */
+export interface PermissionsState {
+	mode: PermissionsMode;
+	linkState: DeviceLinkState;
+	ownerId: string | null;
+	permissions: string[];
+	granted: { groups: PermissionCatalogGroup[] };
+	receivedAt: string | null;
+	staleAfter: string | null;
+}
+
 /** Token usage for the workflow's session, read off the harness transcript. */
 export interface TokenUsage {
 	turns: number;

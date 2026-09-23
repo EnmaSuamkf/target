@@ -49,6 +49,7 @@ import { Header, type View } from "./components/Header.tsx";
 import { useToast } from "./components/Toast.tsx";
 import { VoiceDock } from "./components/VoiceDock.tsx";
 import { useAdminToken } from "./hooks/useAdminToken.ts";
+import { getPermissionsOrigin, setPermissionsSnapshot } from "./hooks/usePermissions.ts";
 import { useDictation } from "./hooks/useDictation.ts";
 import { useIsMobile } from "./hooks/useIsMobile.ts";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts.ts";
@@ -253,6 +254,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	const [railResetKey, setRailResetKey] = useState(0);
 
 	const toast = useToast();
+	const lastForbiddenToast = useRef<string | null>(null);
 	const dictation = useDictation();
 	const isMobile = useIsMobile();
 	const { hasToken, saveToken } = useAdminToken();
@@ -296,6 +298,15 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		(err: unknown, context: string) => {
 			if (err instanceof ApiError && err.isAuth) {
 				toast.error(`${context}: admin token missing or invalid. Set it from the header.`);
+				return;
+			}
+			if (err instanceof ApiError && err.status === 403 && err.permission) {
+				const origin = getPermissionsOrigin() ?? "el servidor";
+				const message = `Tu rol en ${origin} no permite esta accion`;
+				if (lastForbiddenToast.current !== message) {
+					lastForbiddenToast.current = message;
+					toast.error(message);
+				}
 				return;
 			}
 			toast.error(`${context}: ${err instanceof Error ? err.message : String(err)}`);
@@ -352,6 +363,14 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		setUiSettings(await api.getUiSettings());
 	}, []);
 
+	const refreshPermissions = useCallback(async (): Promise<void> => {
+		const [permissions, link] = await Promise.all([
+			api.getPermissions(),
+			api.getDeviceLinkStatus().catch(() => null),
+		]);
+		setPermissionsSnapshot(permissions, link?.origin ?? null);
+	}, []);
+
 	// Leaving the workflows view closes the "All workflows" page so a return to
 	// the Workflows tab starts on the rail, not stranded on the page.
 	useEffect(() => {
@@ -401,6 +420,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 					refreshDockerFriendlySettings(),
 					refreshDockerMountSettings(),
 					refreshUiSettings(),
+					refreshPermissions(),
 				]);
 			} catch (err) {
 				reportError(err, "Could not load data");
@@ -420,6 +440,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		refreshDockerFriendlySettings,
 		refreshDockerMountSettings,
 		refreshUiSettings,
+		refreshPermissions,
 		reportError,
 	]);
 
@@ -475,6 +496,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		await refreshWorkflows();
 		const id = selectedRef.current;
 		if (id) await refreshDetail(id);
+		await refreshPermissions();
 		// Templates change only through this UI, so they don't need the 2s poll.
 	}, POLL_INTERVAL_MS);
 
