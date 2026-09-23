@@ -166,9 +166,15 @@ test("mock server: heartbeat reports idle availability", async () => {
 	assert.equal(mock.state.heartbeats.length, 1);
 	const hb = mock.state.heartbeats[0] as {
 		status: string;
-		capabilities?: { runners?: Array<{ id: string; installed: boolean }> };
+		capabilities?: {
+			runners?: Array<{ id: string; installed: boolean }>;
+			resources?: { version: number; tcp_tools?: boolean; resource_sets?: boolean };
+			commands?: string[];
+		};
 	};
 	assert.equal(hb.status, "idle");
 	assert.ok(Array.isArray(hb.capabilities?.runners));
 	assert.ok(hb.capabilities!.runners!.some((r) => r.id === "claude" || r.id === "free-code" || r.id === "cursor"));
+	assert.deepEqual(hb.capabilities?.resources, { version: 2, tcp_tools: true, resource_sets: true });
+	assert.ok(hb.capabilities?.commands?.includes("tcp-tool.upsert"));
 });

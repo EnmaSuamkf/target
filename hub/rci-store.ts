@@ -64,13 +64,26 @@ export interface Resource {
 	files: ResourceFile[];
 }
 
+export type CatalogOrigin = "local" | "server";
+
 export interface ResourceSet {
 	id: string;
 	name: string;
 	tags: string[];
 	resources: Resource[];
+	/** `server` copies are pushed by remote sync and are read-only locally. */
+	origin: CatalogOrigin;
 	createdAt: string;
 	updatedAt: string;
+}
+
+export class ResourceSetStoreError extends Error {
+	readonly code: string;
+	constructor(code: string) {
+		super(code);
+		this.name = "ResourceSetStoreError";
+		this.code = code;
+	}
 }
 
 
@@ -109,6 +122,7 @@ export function ensureRciSchema(): void {
 			name TEXT NOT NULL,
 			tags TEXT NOT NULL DEFAULT '[]',
 			resources TEXT NOT NULL DEFAULT '[]',
+			origin TEXT NOT NULL DEFAULT 'local',
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
@@ -120,6 +134,10 @@ export function ensureRciSchema(): void {
 			PRIMARY KEY (workflow_id, resource_set_id)
 		);
 	`);
+	const setCols = new Set(
+		(db.prepare("PRAGMA table_info(resource_sets)").all() as Record<string, unknown>[]).map((c) => String(c.name)),
+	);
+	if (!setCols.has("origin")) db.exec("ALTER TABLE resource_sets ADD COLUMN origin TEXT NOT NULL DEFAULT 'local';");
 }
 
 function normalizeTags(tags: unknown): string[] {
@@ -235,6 +253,7 @@ function rowToResourceSet(row: Record<string, unknown>): ResourceSet {
 		name: String(row.name),
 		tags,
 		resources,
+		origin: row.origin === "server" ? "server" : "local",
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
 	};
@@ -248,13 +267,48 @@ export function insertResourceSet(input: { name: string; tags?: unknown; resourc
 		name: input.name.trim(),
 		tags: normalizeTags(input.tags),
 		resources: normalizeResources(input.resources),
+		origin: "local",
 		createdAt: now,
 		updatedAt: now,
 	};
 	open()
-		.prepare(`INSERT INTO resource_sets (id, name, tags, resources, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
-		.run(set.id, set.name, JSON.stringify(set.tags), JSON.stringify(set.resources), set.createdAt, set.updatedAt);
+		.prepare(`INSERT INTO resource_sets (id, name, tags, resources, origin, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+		.run(set.id, set.name, JSON.stringify(set.tags), JSON.stringify(set.resources), set.origin, set.createdAt, set.updatedAt);
 	return set;
+}
+
+/**
+ * Insert or replace a Resource Set under the server's id. A later upsert
+ * overwrites the copy and keeps origin=server.
+ */
+export function upsertServerResourceSet(
+	id: string,
+	input: { name: string; tags?: unknown; resources?: unknown },
+): ResourceSet {
+	ensureRciSchema();
+	const existing = getResourceSet(id);
+	const now = new Date().toISOString();
+	const set: ResourceSet = {
+		id,
+		name: input.name.trim(),
+		tags: normalizeTags(input.tags),
+		resources: normalizeResources(input.resources),
+		origin: "server",
+		createdAt: existing?.createdAt ?? now,
+		updatedAt: now,
+	};
+	open()
+		.prepare(
+			`INSERT INTO resource_sets (id, name, tags, resources, origin, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+			   name = excluded.name,
+			   tags = excluded.tags,
+			   resources = excluded.resources,
+			   origin = 'server',
+			   updated_at = excluded.updated_at`,
+		)
+		.run(set.id, set.name, JSON.stringify(set.tags), JSON.stringify(set.resources), set.origin, set.createdAt, set.updatedAt);
+	return getResourceSet(id)!;
 }
 
 export function getResourceSet(id: string): ResourceSet | null {
@@ -272,6 +326,7 @@ export function listResourceSets(): ResourceSet[] {
 export function updateResourceSet(id: string, input: { name?: string; tags?: unknown; resources?: unknown }): ResourceSet | null {
 	const existing = getResourceSet(id);
 	if (!existing) return null;
+	if (existing.origin === "server") throw new ResourceSetStoreError("server_managed");
 	const name = input.name !== undefined ? input.name.trim() : existing.name;
 	const tags = input.tags !== undefined ? normalizeTags(input.tags) : existing.tags;
 	const resources = input.resources !== undefined ? normalizeResources(input.resources) : existing.resources;
@@ -282,8 +337,13 @@ export function updateResourceSet(id: string, input: { name?: string; tags?: unk
 	return { ...existing, name, tags, resources, updatedAt };
 }
 
-export function deleteResourceSet(id: string): boolean {
+export function deleteResourceSet(id: string, options: { allowServerManaged?: boolean } = {}): boolean {
 	ensureRciSchema();
+	const existing = getResourceSet(id);
+	if (!existing) return false;
+	if (existing.origin === "server" && !options.allowServerManaged) {
+		throw new ResourceSetStoreError("server_managed");
+	}
 	open().prepare("DELETE FROM workflow_resource_sets WHERE resource_set_id = ?").run(id);
 	return open().prepare("DELETE FROM resource_sets WHERE id = ?").run(id).changes > 0;
 }

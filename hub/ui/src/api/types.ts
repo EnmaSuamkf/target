@@ -420,6 +420,8 @@ export interface Tcp {
 	name: string;
 	tags: string[];
 	tools: TcpTool[];
+	/** `server` copies are pushed by remote sync and are read-only locally. */
+	origin?: "local" | "server";
 	createdAt: string;
 	updatedAt: string;
 }
@@ -500,6 +502,8 @@ export interface ResourceSet {
 	name: string;
 	tags: string[];
 	resources: Resource[];
+	/** `server` copies are pushed by remote sync and are read-only locally. */
+	origin?: "local" | "server";
 	createdAt: string;
 	updatedAt: string;
 }

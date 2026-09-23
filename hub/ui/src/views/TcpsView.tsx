@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Tcp, TcpInput, TcpTool, TcpToolInput } from "../api/types.ts";
+import { ServerManagedBadge } from "../components/Badge.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { Field } from "../components/Field.tsx";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
@@ -142,7 +143,10 @@ export function TcpsView({
 						) : (
 							visible.map((tcp) => (
 								<button key={tcp.id} type="button" className={`${styles.card} ${tcp.id === editingId ? styles.cardSelected : ""}`} onClick={() => { setCreating(false); setEditingId(tcp.id); }}>
-									<span className={styles.cardName}>{tcp.name}</span>
+									<span className={styles.cardNameRow}>
+										<span className={styles.cardName}>{tcp.name}</span>
+										{tcp.origin === "server" && <ServerManagedBadge />}
+									</span>
 									<span className={styles.cardMeta}>{tcp.tools.length} tool{tcp.tools.length === 1 ? "" : "s"} · {relativeTime(tcp.updatedAt)}</span>
 								</button>
 							))
@@ -217,7 +221,9 @@ function TcpForm({
 	const canEdit = can("client.tcp-tools.edit");
 	const canDelete = can("client.tcp-tools.delete");
 	const canExport = can("client.tcp-tools.export");
-	const canSave = tcp ? canEdit : canCreate;
+	const serverManaged = tcp?.origin === "server";
+	const canSave = !serverManaged && (tcp ? canEdit : canCreate);
+	const canDeleteItem = !serverManaged && canDelete;
 
 	const updateTool = (index: number, patch: Partial<TcpTool>): void => {
 		setTools((current) => current.map((tool, i) => (i === index ? { ...tool, ...patch } : tool)));
@@ -288,7 +294,10 @@ function TcpForm({
 		<form className={styles.form} onSubmit={submit}>
 			{onBack && <button type="button" className={styles.back} onClick={onBack}>TCP</button>}
 			<div className={styles.formHead}>
-				<h2 className={styles.heading}>{tcp ? "Edit TCP" : "New TCP"}</h2>
+				<h2 className={styles.heading}>
+					{tcp ? (serverManaged ? "TCP" : "Edit TCP") : "New TCP"}
+					{serverManaged && <ServerManagedBadge />}
+				</h2>
 				<div className={styles.formHeadActions}>
 					{onExport && (
 						<button
@@ -306,26 +315,32 @@ function TcpForm({
 							type="button"
 							className="btn btn--sm btn--danger"
 							onClick={onDelete}
-							disabled={busy || saving || !canDelete}
-							title={canDelete ? undefined : requires("client.tcp-tools.delete")}
+							disabled={busy || saving || !canDeleteItem}
+							title={
+								serverManaged
+									? "Managed by the server — local delete is disabled"
+									: canDelete
+										? undefined
+										: requires("client.tcp-tools.delete")
+							}
 						>
 							Delete
 						</button>
 					)}
 				</div>
 			</div>
-			<Field label="Name" required>{(props) => <input {...props} type="text" className="input" value={name} onChange={(ev) => setName(ev.target.value)} required />}</Field>
-			<Field label="Tags">{(props) => <input {...props} type="text" className="input" value={tags} onChange={(ev) => setTags(ev.target.value)} placeholder="github, api" />}</Field>
+			<Field label="Name" required>{(props) => <input {...props} type="text" className="input" value={name} onChange={(ev) => setName(ev.target.value)} required disabled={serverManaged} />}</Field>
+			<Field label="Tags">{(props) => <input {...props} type="text" className="input" value={tags} onChange={(ev) => setTags(ev.target.value)} placeholder="github, api" disabled={serverManaged} />}</Field>
 			<div className={styles.stepsHead}>
 				<h3 className={styles.stepsTitle}>Tools</h3>
-				<button type="button" className="btn btn--sm" onClick={addTool}>Add tool</button>
+				<button type="button" className="btn btn--sm" onClick={addTool} disabled={serverManaged}>Add tool</button>
 			</div>
 			{jsonError && <p className="hint" role="alert">{jsonError}</p>}
 			{tools.map((tool, index) => (
 				<div key={index} className={styles.stepCard}>
-					<Field label="Tool name">{(props) => <input {...props} type="text" className="input" value={tool.name} onChange={(ev) => updateTool(index, { name: ev.target.value })} placeholder="get_me" />}</Field>
-					<Field label="Description">{(props) => <input {...props} type="text" className="input" value={tool.description} onChange={(ev) => updateTool(index, { description: ev.target.value })} />}</Field>
-					<Field label="Request template (curl)">{(props) => <textarea {...props} className="input" rows={4} value={tool.requestTemplate} onChange={(ev) => updateTool(index, { requestTemplate: ev.target.value })} placeholder="curl -X GET https://api.github.com/user -H 'Authorization: Bearer $TOKEN_1'" />}</Field>
+					<Field label="Tool name">{(props) => <input {...props} type="text" className="input" value={tool.name} onChange={(ev) => updateTool(index, { name: ev.target.value })} placeholder="get_me" disabled={serverManaged} />}</Field>
+					<Field label="Description">{(props) => <input {...props} type="text" className="input" value={tool.description} onChange={(ev) => updateTool(index, { description: ev.target.value })} disabled={serverManaged} />}</Field>
+					<Field label="Request template (curl)">{(props) => <textarea {...props} className="input" rows={4} value={tool.requestTemplate} onChange={(ev) => updateTool(index, { requestTemplate: ev.target.value })} placeholder="curl -X GET https://api.github.com/user -H 'Authorization: Bearer $TOKEN_1'" disabled={serverManaged} />}</Field>
 					<Field label="Tokens (JSON)" hint="Keys like TOKEN_1 map to $TOKEN_1 in the template.">{(props) => (
 						<textarea
 							{...props}
@@ -337,6 +352,7 @@ function TcpForm({
 								setTokensText((current) => current.map((text, i) => (i === index ? ev.target.value : text)));
 							}}
 							onBlur={() => { void syncJsonDraftsToTools(); }}
+							disabled={serverManaged}
 						/>
 					)}</Field>
 					<Field label="Inputs (JSON)" hint='Array of { name, placeholder, description, required }. Leave [] if none.'>{(props) => (
@@ -350,10 +366,11 @@ function TcpForm({
 								setInputsText((current) => current.map((text, i) => (i === index ? ev.target.value : text)));
 							}}
 							onBlur={() => { void syncJsonDraftsToTools(); }}
+							disabled={serverManaged}
 						/>
 					)}</Field>
 					{tools.length > 1 && (
-						<button type="button" className="btn btn--sm btn--danger" onClick={() => void removeTool(index)}>
+						<button type="button" className="btn btn--sm btn--danger" onClick={() => void removeTool(index)} disabled={serverManaged}>
 							Remove tool
 						</button>
 					)}
@@ -365,7 +382,13 @@ function TcpForm({
 					type="submit"
 					className="btn btn--primary"
 					disabled={saving || busy || !canSave}
-					title={canSave ? undefined : requires(tcp ? "client.tcp-tools.edit" : "client.tcp-tools.create")}
+					title={
+						serverManaged
+							? "Managed by the server — local edit is disabled"
+							: canSave
+								? undefined
+								: requires(tcp ? "client.tcp-tools.edit" : "client.tcp-tools.create")
+					}
 				>
 					{saving ? "Saving…" : "Save"}
 				</button>
