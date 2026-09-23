@@ -96,8 +96,8 @@ export function StepItem({
 	onAddStepAfter,
 	onSetStatus,
 	onMove,
-	canMoveUp,
-	canMoveDown,
+	canMoveUp: canMoveUpAllowed,
+	canMoveDown: canMoveDownAllowed,
 	onAttachImages,
 	onRemoveAttachment,
 	onAddNote,
@@ -148,6 +148,8 @@ export function StepItem({
 	const canEdit = can("remote.workflows.steps.edit");
 	const canAdd = can("remote.workflows.steps.add");
 	const canManage = can("remote.workflows.manage");
+	const canMoveUp = canMoveUpAllowed && canEdit;
+	const canMoveDown = canMoveDownAllowed && canEdit;
 
 	// The hub-owned conversation-context step. Everything an operator can do to a
 	// step is refused for it by the server (edit, remove, Continue, Set status),
@@ -249,13 +251,13 @@ export function StepItem({
 							type="button"
 							className={styles.moveBtn}
 							onClick={() => onMove(step.id, "up")}
-							disabled={!canMoveUp || busy || !canEdit}
+							disabled={!canMoveUp || busy}
 							aria-label={`Move step ${step.orderIndex + 1} up, so it runs earlier`}
 							title={
-								!canEdit
-									? requires("remote.workflows.steps.edit")
-									: canMoveUp
-										? "Move up — this step runs one place earlier."
+								canMoveUp
+									? "Move up — this step runs one place earlier."
+									: !canEdit
+										? requires("remote.workflows.steps.edit")
 										: "Can't move up: this step is already first, or it (or the step above) has already run. Only pending steps can be reordered."
 							}
 							data-move-step="up"
@@ -268,13 +270,13 @@ export function StepItem({
 							type="button"
 							className={styles.moveBtn}
 							onClick={() => onMove(step.id, "down")}
-							disabled={!canMoveDown || busy || !canEdit}
+							disabled={!canMoveDown || busy}
 							aria-label={`Move step ${step.orderIndex + 1} down, so it runs later`}
 							title={
-								!canEdit
-									? requires("remote.workflows.steps.edit")
-									: canMoveDown
-										? "Move down — this step runs one place later."
+								canMoveDown
+									? "Move down — this step runs one place later."
+									: !canEdit
+										? requires("remote.workflows.steps.edit")
 										: "Can't move down: this step is already last, or it (or the step below) has already run. Only pending steps can be reordered."
 							}
 							data-move-step="down"
@@ -520,11 +522,12 @@ export function StepItem({
 				    first of the row. `data-open-conversation-step` is the stable hook
 				    the tests read, for the hashed-class-name reason above. */}
 				{conversational && (
+					((busy) => (
 					<button
 						type="button"
 						className="btn btn--sm"
 						onClick={() => onOpenConversation(step.id)}
-						disabled={!step.sessionId || busy || !canExecute}
+						disabled={!step.sessionId || busy}
 						title={
 							!canExecute
 								? requires("remote.workflows.execute")
@@ -538,6 +541,7 @@ export function StepItem({
 					>
 						Open conversation
 					</button>
+					))(busy || !canExecute)
 				)}
 				{waiting && (
 					<button

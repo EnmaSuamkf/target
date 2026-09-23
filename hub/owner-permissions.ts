@@ -233,6 +233,13 @@ export function clearOwnerSnapshot(): void {
 	}
 }
 
+/** Drop the process cache so the next read reloads `owner_permissions_v1` from settings. */
+export function resetOwnerPermissionsCache(): void {
+	loaded = false;
+	live = false;
+	memory = null;
+}
+
 /** Safe payload for GET /api/permissions — no device secret, no private key. */
 export function publicPermissionsState(): {
 	mode: PermissionMode["mode"];

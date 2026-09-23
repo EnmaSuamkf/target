@@ -507,9 +507,9 @@ export function SettingsView({
 						{linkStatus.scopes.includes("ingest:write") && <p className="hint">Activity reporting is active automatically and includes full conversation text, as accepted when this hub was linked.</p>}
 						<div className={styles.toggleRow} title={canManage ? undefined : manageTitle}>
 							<div className={styles.toggleText}>
-								<span className="label">Remote Sync</span>
+								<span className="label">Sincronización remota</span>
 								<p className="hint" id={`${linkId}-sync`}>
-									Activa o pausa la sincronización remota. Mientras el dispositivo está vinculado exige{" "}
+									Activa o pausa el pull remoto. Mientras el dispositivo está vinculado exige{" "}
 									<code>remote.workflows.manage</code>.
 								</p>
 							</div>
@@ -519,14 +519,14 @@ export function SettingsView({
 									if (!canManage || syncBusy) return;
 									setSyncBusy(true);
 									void api
-										.saveSyncSettings({ enabled: next })
+										.writeSyncEnabled(next)
 										.then(setSyncSettings)
 										.catch(() => {
 											/* toast from the 403 interceptor */
 										})
 										.finally(() => setSyncBusy(false));
 								}}
-								label="Remote Sync"
+								label="Sincronización remota"
 								describedBy={`${linkId}-sync`}
 								disabled={!canManage || syncBusy}
 							/>

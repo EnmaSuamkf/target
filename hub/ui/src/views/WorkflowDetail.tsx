@@ -333,7 +333,7 @@ export function WorkflowDetail({
 	const canManage = can("remote.workflows.manage");
 	const canCreate = can("remote.workflows.create");
 
-	const startAction = startActionFor(workflow.status);
+	const startAction = canExecute ? startActionFor(workflow.status) : null;
 	const running = workflow.status === "running";
 	// The server refuses a workflow override while a step still has a callback
 	// coming — that callback would write a status over it seconds later.
@@ -575,7 +575,7 @@ export function WorkflowDetail({
 						type="button"
 						className="btn btn--primary"
 						onClick={startRun}
-						disabled={!startAction || busy || selectedCount === 0 || !stepsFullyLoaded || !canExecute}
+						disabled={!startAction || busy || selectedCount === 0 || !stepsFullyLoaded}
 						data-start-workflow
 						title={
 							!canExecute

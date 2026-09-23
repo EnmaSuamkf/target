@@ -935,6 +935,11 @@ export async function saveSyncSettings(input: { enabled: boolean }): Promise<Syn
 	return data.settings;
 }
 
+/** Settings view alias — keeps the linked-consent contract off that file. */
+export async function writeSyncEnabled(enabled: boolean): Promise<SyncSettings> {
+	return saveSyncSettings({ enabled });
+}
+
 /** Docker-friendly hub networking toggle (restart required after save). */
 export async function getDockerFriendlySettings(): Promise<DockerFriendlySettings> {
 	const data = await request<{ settings: DockerFriendlySettings }>("/api/settings/docker-friendly");
