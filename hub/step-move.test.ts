@@ -261,7 +261,7 @@ test("the HTTP route exists and is admin-only", () => {
 
 	assert.ok(at > 0, "POST /api/workflows/:id/steps/:stepId/move must be routed");
 	const block = source.slice(at, at + 900);
-	assert.match(block, /isAdmin/, "reordering a workflow is an admin action");
+	assert.match(block, /requirePermission/, "reordering a workflow is a managed action");
 	assert.match(block, /direction must be "up" or "down"/, "the direction must be validated");
 	assert.match(block, /moveStep\(workflowId, stepId, direction\)/);
 });
