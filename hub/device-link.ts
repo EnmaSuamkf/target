@@ -10,6 +10,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadReportConfig, loadSyncConfig, targetDir, ensureTargetDirSecure } from "./config.ts";
+import { clearOwnerSnapshot } from "./owner-permissions.ts";
 
 const IDENTITY_FILE = "device-link.json";
 const CLEANUP_FILE = "device-link-cleanup.json";
@@ -274,6 +275,7 @@ export function setDeviceLinkRemoteState(
 		link.expiresAt = null;
 		link.pollAfterSeconds = null;
 		link.deviceSecret = null;
+		clearOwnerSnapshot();
 	}
 	link.updatedAt = new Date().toISOString();
 	writeStored(link);
@@ -472,6 +474,7 @@ export function getPendingRemoteCleanup(): PendingRemoteCleanup | null {
 }
 
 export function beginRemoteDisconnect(): DeviceLinkPublicStatus {
+	clearOwnerSnapshot();
 	const credential = getDeviceCredential();
 	if (credential) {
 		ensureTargetDirSecure();
@@ -496,6 +499,7 @@ export function completeRemoteCleanup(): DeviceLinkPublicStatus {
 
 /** Remove all private pairing/device material. The caller may retain local workflows and queues. */
 export function deleteDeviceLink(): DeviceLinkPublicStatus {
+	clearOwnerSnapshot();
 	try {
 		fs.rmSync(identityFile(), { force: true });
 	} catch {
