@@ -232,3 +232,30 @@ export function clearOwnerSnapshot(): void {
 		memory = null;
 	}
 }
+
+/** Safe payload for GET /api/permissions — no device secret, no private key. */
+export function publicPermissionsState(): {
+	mode: PermissionMode["mode"];
+	linkState: string;
+	ownerId: string | null;
+	permissions: string[];
+	granted: { groups: PermissionGroup[] };
+	receivedAt: string | null;
+	staleAfter: string | null;
+} {
+	const link = getDeviceLinkStatus();
+	const resolved = resolvePermissionMode();
+	const snapshot = resolved.mode === "enforced" ? resolved.snapshot : memory;
+	const receivedAt = snapshot?.receivedAt ?? null;
+	const receivedMs = receivedAt ? Date.parse(receivedAt) : Number.NaN;
+	const staleAfter = Number.isFinite(receivedMs) ? new Date(receivedMs + graceMs()).toISOString() : null;
+	return {
+		mode: resolved.mode,
+		linkState: link.state,
+		ownerId: snapshot?.ownerId ?? null,
+		permissions: resolved.mode === "enforced" ? [...resolved.permissions] : [],
+		granted: snapshot?.granted ?? { groups: [] },
+		receivedAt,
+		staleAfter,
+	};
+}

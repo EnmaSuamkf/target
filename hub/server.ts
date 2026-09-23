@@ -9,6 +9,7 @@
  *   POST   /api/auth/logout                           → kill the session (cookie + row)
  *   GET    /api/auth/me                               → the account, session-gated
  *   POST   /api/auth/password/reset                   → recovery-token password reset (open, per-IP throttled)
+ *   GET    /api/permissions                           → owner-role mode for the UI (admin token; no permission required)
  *   GET    /api/workflows                             → list (with progress %)
  *   GET    /api/runners                               → which agent CLIs (claude/free-code) are installed on this host, for the create form
  *   POST   /api/workflows                             → create (admin token) — makes the awb hook too; optional templateId seeds its steps
@@ -107,7 +108,7 @@ import {
 } from "./config.ts";
 import { disconnectDeviceLink, pollDeviceLink, startDeviceLink } from "./device-link-client.ts";
 import { getDeviceLinkStatus } from "./device-link.ts";
-import { resolvePermissionMode } from "./owner-permissions.ts";
+import { publicPermissionsState, resolvePermissionMode } from "./owner-permissions.ts";
 import { adoptability, findConversation, listConversations, readConversationPreview } from "./conversations.ts";
 import {
 	AccountError,
@@ -899,6 +900,19 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			return;
 		}
 		void disconnectDeviceLink().then((outcome) => sendJson(res, 200, { outcome }));
+		return;
+	}
+
+	// --- /api/permissions ---------------------------------------------------
+	// The UI reads this to know what the linked owner's role allows. It is
+	// operator-gated (same as GET /api/device-link) but not role-gated: this
+	// is how the client learns the role. The body is only public metadata.
+	if (parts[1] === "permissions" && !parts[2] && req.method === "GET") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		sendJson(res, 200, publicPermissionsState());
 		return;
 	}
 
