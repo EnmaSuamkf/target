@@ -24,6 +24,7 @@ import { DirectoryBrowser } from "../components/DirectoryBrowser.tsx";
 import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { Field } from "../components/Field.tsx";
 import { Modal } from "../components/Modal.tsx";
+import { usePermissions, requires } from "../hooks/usePermissions.ts";
 import { prettyPath, relativeTime, truncate } from "../lib/format.ts";
 import styles from "./CreateWorkflowModal.module.css";
 
@@ -156,6 +157,8 @@ export function CreateWorkflowModal({
 	/** Called instead of `onCreate` in clone mode. */
 	onClone: (input: CloneWorkflowInput) => Promise<void>;
 }): React.JSX.Element {
+	const { can } = usePermissions();
+	const canCreate = can("client.workflows.create");
 	const cloning = !!source;
 	const [name, setName] = useState("");
 	const [workdir, setWorkdir] = useState("");
@@ -443,7 +446,8 @@ export function CreateWorkflowModal({
 		name.trim() !== "" &&
 		!unusableConversation &&
 		(!bypass || acceptRisk) &&
-		!saving;
+		!saving &&
+		canCreate;
 
 	const submit = async (ev: React.FormEvent): Promise<void> => {
 		ev.preventDefault();
@@ -505,7 +509,13 @@ export function CreateWorkflowModal({
 					<button type="button" className="btn" onClick={onClose} disabled={saving}>
 						Cancel
 					</button>
-					<button type="submit" form="create-workflow" className="btn btn--primary" disabled={!canSubmit}>
+					<button
+						type="submit"
+						form="create-workflow"
+						className="btn btn--primary"
+						disabled={!canSubmit}
+						title={canCreate ? undefined : requires("client.workflows.create")}
+					>
 						{source ? (saving ? "Cloning…" : "Clone workflow") : saving ? "Creating…" : "Create workflow"}
 					</button>
 				</>

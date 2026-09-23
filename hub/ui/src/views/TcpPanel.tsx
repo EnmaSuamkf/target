@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Tcp, TcpSelection, Workflow } from "../api/types.ts";
+import { usePermissions, requires } from "../hooks/usePermissions.ts";
 import { initialTcpDraftState, isTcpDirty, markTcpSaved, reconcileTcpDraft } from "./tcpDraft.ts";
 import { TcpSelectionEditor } from "./TcpSelectionEditor.tsx";
 import styles from "./DetailPanels.module.css";
@@ -19,6 +20,8 @@ export function TcpPanel({
 
 	const [state, setState] = useState(() => initialTcpDraftState(workflow.id, serverSelections));
 	const [saving, setSaving] = useState(false);
+	const { can } = usePermissions();
+	const canManage = can("client.workflows.manage");
 
 	// Reconcile during render so the 2s poll never wipes unsaved checkbox toggles.
 	const current = reconcileTcpDraft(state, workflow.id, serverSelections);
@@ -47,10 +50,16 @@ export function TcpPanel({
 			<TcpSelectionEditor
 				tcps={tcps}
 				selections={selected}
-				disabled={locked}
+				disabled={locked || !canManage}
 				onChange={(next) => setState((prev) => ({ ...prev, draft: next }))}
 			/>
-			<button type="button" className="btn btn--sm btn--primary" disabled={locked || saving || !dirty || tcps.length === 0} onClick={() => void save()}>
+			<button
+				type="button"
+				className="btn btn--sm btn--primary"
+				disabled={locked || saving || !dirty || tcps.length === 0 || !canManage}
+				title={canManage ? undefined : requires("client.workflows.manage")}
+				onClick={() => void save()}
+			>
 				{saving ? "Saving…" : "Save TCP selection"}
 			</button>
 		</section>

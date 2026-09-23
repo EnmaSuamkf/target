@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Account } from "../api/types.ts";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
+import { usePermissions, type PermissionReason } from "../hooks/usePermissions.ts";
 import { Field } from "./Field.tsx";
 import { Modal } from "./Modal.tsx";
 import { filterCatalogNavViews, type NavView } from "../lib/catalogNav.ts";
@@ -15,6 +16,19 @@ const VIEW_LABELS: Record<View, string> = {
 	rci: "RCI",
 	settings: "Settings",
 };
+
+const READ_ONLY_TITLES: Record<PermissionReason, string> = {
+	not_linked: "This hub is not linked to a server role.",
+	stale: "The last known role expired — waiting for the server.",
+	no_owner: "This linked hub has no owner role, so it is read-only.",
+	relink_required: "The device must be linked again before writes are allowed.",
+	awaiting_authorization: "Waiting for the server to approve this device.",
+};
+
+function readOnlyTitle(reason: PermissionReason | null): string {
+	if (reason && reason in READ_ONLY_TITLES) return READ_ONLY_TITLES[reason];
+	return "Your role does not allow changes on this hub.";
+}
 
 /**
  * Icons for the phone tab bar. A bottom bar with text alone reads as a row of
@@ -103,6 +117,7 @@ export function Header({
 	const [draft, setDraft] = useState("");
 	const isMobile = useIsMobile();
 	const tabs = filterCatalogNavViews(showTcpCatalog, showRciCatalog);
+	const { readOnly, reason } = usePermissions();
 
 	// Start each visit to the dialog from an empty field rather than showing
 	// the stored secret back.
@@ -149,6 +164,11 @@ export function Header({
 					)}
 
 					<div className={styles.accountArea}>
+						{readOnly && (
+							<span className={styles.readOnly} title={readOnlyTitle(reason)}>
+								Read-only
+							</span>
+						)}
 						<button
 							type="button"
 							className={`${styles.token} ${hasToken ? styles.tokenSet : styles.tokenMissing}`}

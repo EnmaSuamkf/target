@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Workflow } from "../api/types.ts";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
+import { usePermissions, requires } from "../hooks/usePermissions.ts";
 import { initialDraftState, isDirty, markSaved, reconcileDraft } from "./contextDraft.ts";
 import styles from "./DetailPanels.module.css";
 
@@ -43,6 +44,8 @@ export function ContextPanel({
 	const [state, setState] = useState(() => initialDraftState(workflow.id, serverValue));
 	const [saving, setSaving] = useState(false);
 	const [attaching, setAttaching] = useState(false);
+	const { can } = usePermissions();
+	const canManage = can("client.workflows.manage");
 
 	// Reconcile during render (React's derived-state pattern) rather than in an
 	// effect, so adoption can never land between a blur and the click that
@@ -56,7 +59,7 @@ export function ContextPanel({
 	const setDraft = (value: string): void => setState((prev) => ({ ...prev, draft: value }));
 
 	const save = async (): Promise<void> => {
-		if (saving || injected) return;
+		if (saving || injected || !canManage) return;
 		setSaving(true);
 		try {
 			// Only treat the draft as saved when the server actually took it —
@@ -84,7 +87,7 @@ export function ContextPanel({
 
 			<ExpandableTextarea
 				value={draft}
-				readOnly={injected}
+				readOnly={injected || !canManage}
 				placeholder="Optional — constraints, definitions or a persona every step should share."
 				onChange={setDraft}
 				aria-label="Conversation context"
@@ -95,6 +98,7 @@ export function ContextPanel({
 					// draft's Save: they're files, not text, so there's nothing to merge —
 					// and the server has to assign the path before the strip can show it.
 					onAdd: async (files) => {
+						if (!canManage) return;
 						setAttaching(true);
 						try {
 							await onAttach(files);
@@ -103,7 +107,7 @@ export function ContextPanel({
 						}
 					},
 					onRemove: onRemoveAttachment,
-					busy: attaching,
+					busy: attaching || !canManage,
 					label: "the conversation context",
 					idPrefix: `context-${workflow.id}`,
 				}}
@@ -111,7 +115,13 @@ export function ContextPanel({
 
 			{!injected && (
 				<div className={styles.blockActions}>
-					<button type="button" className="btn btn--sm btn--primary" onClick={save} disabled={!dirty || saving}>
+					<button
+						type="button"
+						className="btn btn--sm btn--primary"
+						onClick={save}
+						disabled={!dirty || saving || !canManage}
+						title={canManage ? undefined : requires("client.workflows.manage")}
+					>
 						{saving ? "Saving…" : "Save context"}
 					</button>
 					{dirty && !saving && (

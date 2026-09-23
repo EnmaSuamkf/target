@@ -9,6 +9,7 @@
  *   POST   /api/auth/logout                           → kill the session (cookie + row)
  *   GET    /api/auth/me                               → the account, session-gated
  *   POST   /api/auth/password/reset                   → recovery-token password reset (open, per-IP throttled)
+ *   GET    /api/permissions                           → owner-role mode for the UI (admin token; no permission required)
  *   GET    /api/workflows                             → list (with progress %)
  *   GET    /api/runners                               → which agent CLIs (claude/free-code) are installed on this host, for the create form
  *   POST   /api/workflows                             → create (admin token) — makes the awb hook too; optional templateId seeds its steps
@@ -107,6 +108,7 @@ import {
 } from "./config.ts";
 import { disconnectDeviceLink, pollDeviceLink, startDeviceLink } from "./device-link-client.ts";
 import { getDeviceLinkStatus } from "./device-link.ts";
+import { publicPermissionsState, resolvePermissionMode } from "./owner-permissions.ts";
 import { adoptability, findConversation, listConversations, readConversationPreview } from "./conversations.ts";
 import {
 	AccountError,
@@ -425,6 +427,27 @@ function isAdmin(cfg: HubConfig, headers: http.IncomingHttpHeaders): boolean {
 	const provided = bearerToken(headers);
 	if (provided.length > 0 && timingSafeEqualStr(provided, cfg.adminToken)) return true;
 	return hasSession(headers);
+}
+
+/**
+ * Operator auth plus the linked owner's role. Replaces the per-route `isAdmin`
+ * check on mutating (and export) paths. Unlinked hubs stay unrestricted.
+ */
+function requirePermission(
+	cfg: HubConfig,
+	req: http.IncomingMessage,
+	res: http.ServerResponse,
+	...ids: string[]
+): boolean {
+	if (!isAdmin(cfg, req.headers)) {
+		sendJson(res, 401, { error: "unauthorized" });
+		return false;
+	}
+	const mode = resolvePermissionMode();
+	if (mode.mode === "unrestricted") return true;
+	if (mode.mode === "enforced" && ids.some((id) => mode.permissions.has(id))) return true;
+	sendJson(res, 403, { error: "forbidden", permission: ids[0], mode: mode.mode });
+	return false;
 }
 
 /**
@@ -873,11 +896,23 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		return;
 	}
 	if (parts[1] === "device-link" && !parts[2] && req.method === "DELETE") {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
+			return;
+		}
+		void disconnectDeviceLink().then((outcome) => sendJson(res, 200, { outcome }));
+		return;
+	}
+
+	// --- /api/permissions ---------------------------------------------------
+	// The UI reads this to know what the linked owner's role allows. It is
+	// operator-gated (same as GET /api/device-link) but not role-gated: this
+	// is how the client learns the role. The body is only public metadata.
+	if (parts[1] === "permissions" && !parts[2] && req.method === "GET") {
 		if (!isAdmin(cfg, req.headers)) {
 			sendJson(res, 401, { error: "unauthorized" });
 			return;
 		}
-		void disconnectDeviceLink().then((outcome) => sendJson(res, 200, { outcome }));
+		sendJson(res, 200, publicPermissionsState());
 		return;
 	}
 
@@ -1098,8 +1133,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		const callingStep = stepId ? getStep(stepId) : null;
 		const viaStep =
 			callingStep !== null && stepToken !== "" && timingSafeEqualStr(stepToken, callingStep.callbackToken);
-		if (!viaStep && !isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!viaStep && !requirePermission(cfg, req, res, "client.workflows.execute")) {
 			return;
 		}
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
@@ -1191,15 +1225,20 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// --- /api/attachments/:id (remove an attached image) ---
 
 	if (parts[1] === "attachments" && parts[2] && !parts[3] && req.method === "DELETE") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
-			return;
-		}
 		// Read the row BEFORE deleting it: removing the last context image can leave
 		// a workflow with no background at all, and the context step then has to go
 		// with it — but afterwards there's nothing left to say which workflow that
 		// was, or that this was a context attachment in the first place.
 		const doomed = getAttachment(parts[2]);
+		if (!doomed) {
+			sendJson(res, 404, { error: "unknown_attachment" });
+			return;
+		}
+		const attachmentPermission =
+			doomed.field === "context" ? "client.workflows.manage" : "client.workflows.steps.edit";
+		if (!requirePermission(cfg, req, res, attachmentPermission)) {
+			return;
+		}
 		if (!removeAttachment(parts[2])) {
 			sendJson(res, 404, { error: "unknown_attachment" });
 			return;
@@ -1231,8 +1270,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return;
 			}
 			if (req.method === "POST") {
-				if (!isAdmin(cfg, req.headers)) {
-					sendJson(res, 401, { error: "unauthorized" });
+				if (!requirePermission(cfg, req, res, "client.templates.create")) {
 					return;
 				}
 				readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1270,13 +1308,15 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		// creates rows and is admin-gated like every other write here.
 
 		if (parts[2] === "export" && !parts[3] && req.method === "GET") {
+			if (!requirePermission(cfg, req, res, "client.templates.export")) {
+				return;
+			}
 			sendJson(res, 200, templateBundle(listTemplates()));
 			return;
 		}
 
 		if (parts[2] === "import" && !parts[3] && req.method === "POST") {
-			if (!isAdmin(cfg, req.headers)) {
-				sendJson(res, 401, { error: "unauthorized" });
+			if (!requirePermission(cfg, req, res, "client.templates.import")) {
 				return;
 			}
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1303,6 +1343,9 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		const templateId = parts[2];
 
 		if (parts[3] === "export" && !parts[4] && req.method === "GET") {
+			if (!requirePermission(cfg, req, res, "client.templates.export")) {
+				return;
+			}
 			const template = getTemplate(templateId);
 			if (!template) {
 				sendJson(res, 404, { error: "unknown_template" });
@@ -1323,8 +1366,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (!parts[3] && (req.method === "PATCH" || req.method === "PUT")) {
-			if (!isAdmin(cfg, req.headers)) {
-				sendJson(res, 401, { error: "unauthorized" });
+			if (!requirePermission(cfg, req, res, "client.templates.edit")) {
 				return;
 			}
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1360,8 +1402,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (!parts[3] && req.method === "DELETE") {
-			if (!isAdmin(cfg, req.headers)) {
-				sendJson(res, 401, { error: "unauthorized" });
+			if (!requirePermission(cfg, req, res, "client.templates.delete")) {
 				return;
 			}
 			const removed = deleteTemplate(templateId);
@@ -1394,8 +1435,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return;
 			}
 			if (req.method === "POST") {
-				if (!isAdmin(cfg, req.headers)) {
-					sendJson(res, 401, { error: "unauthorized" });
+				if (!requirePermission(cfg, req, res, "client.tcp-tools.create")) {
 					return;
 				}
 				readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1415,13 +1455,15 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (parts[2] === "export" && !parts[3] && req.method === "GET") {
+			if (!requirePermission(cfg, req, res, "client.tcp-tools.export")) {
+				return;
+			}
 			sendJson(res, 200, tcpBundle(listTcps()));
 			return;
 		}
 
 		if (parts[2] === "import" && !parts[3] && req.method === "POST") {
-			if (!isAdmin(cfg, req.headers)) {
-				sendJson(res, 401, { error: "unauthorized" });
+			if (!requirePermission(cfg, req, res, "client.tcp-tools.import")) {
 				return;
 			}
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1467,6 +1509,9 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (parts[3] === "export" && !parts[4] && req.method === "GET") {
+			if (!requirePermission(cfg, req, res, "client.tcp-tools.export")) {
+				return;
+			}
 			const tcp = getTcp(tcpId);
 			if (!tcp) {
 				sendJson(res, 404, { error: "unknown_tcp" });
@@ -1487,8 +1532,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (!parts[3] && (req.method === "PATCH" || req.method === "PUT")) {
-			if (!isAdmin(cfg, req.headers)) {
-				sendJson(res, 401, { error: "unauthorized" });
+			if (!requirePermission(cfg, req, res, "client.tcp-tools.edit")) {
 				return;
 			}
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1514,8 +1558,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (!parts[3] && req.method === "DELETE") {
-			if (!isAdmin(cfg, req.headers)) {
-				sendJson(res, 401, { error: "unauthorized" });
+			if (!requirePermission(cfg, req, res, "client.tcp-tools.delete")) {
 				return;
 			}
 			const removed = deleteTcp(tcpId);
@@ -1561,8 +1604,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return;
 			}
 			if (req.method === "POST") {
-				if (!isAdmin(cfg, req.headers)) {
-					sendJson(res, 401, { error: "unauthorized" });
+				if (!requirePermission(cfg, req, res, "client.rci.create")) {
 					return;
 				}
 				readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1589,8 +1631,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		// disk is left untouched either way: RCI copies the resource in, it never
 		// installs it.
 		if (parts[2] === "scan" && !parts[3] && req.method === "POST") {
-			if (!isAdmin(cfg, req.headers)) {
-				sendJson(res, 401, { error: "unauthorized" });
+			if (!requirePermission(cfg, req, res, "client.rci.create")) {
 				return;
 			}
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1645,8 +1686,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (!parts[3] && (req.method === "PATCH" || req.method === "PUT")) {
-			if (!isAdmin(cfg, req.headers)) {
-				sendJson(res, 401, { error: "unauthorized" });
+			if (!requirePermission(cfg, req, res, "client.rci.edit")) {
 				return;
 			}
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1672,8 +1712,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (!parts[3] && req.method === "DELETE") {
-			if (!isAdmin(cfg, req.headers)) {
-				sendJson(res, 401, { error: "unauthorized" });
+			if (!requirePermission(cfg, req, res, "client.rci.delete")) {
 				return;
 			}
 			const removed = deleteResourceSet(resourceSetId);
@@ -2006,8 +2045,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			return;
 		}
 		if (req.method === "PUT") {
-			if (!isAdmin(cfg, req.headers)) {
-				sendJson(res, 401, { error: "unauthorized" });
+			if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 				return;
 			}
 			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
@@ -2304,6 +2342,9 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		// conversation's OWN workdir, which for claude is what makes `--resume`
 		// find the transcript at all.
 		if (parts[2] === "open-terminal" && !parts[3] && req.method === "POST") {
+			if (!requirePermission(cfg, req, res, "client.workflows.execute")) {
+				return;
+			}
 			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
 				const bodyRunner = typeof body.runner === "string" ? body.runner : "";
 				if (!PUBLISHABLE_RUNNERS.includes(bodyRunner as PublishableRunner)) {
@@ -2360,8 +2401,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			return;
 		}
 		if (req.method === "POST") {
-			if (!isAdmin(cfg, req.headers)) {
-				sendJson(res, 401, { error: "unauthorized" });
+			if (!requirePermission(cfg, req, res, "client.workflows.create")) {
 				return;
 			}
 			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
@@ -2590,8 +2630,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	if (workflowId && !parts[3] && req.method === "DELETE") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		try {
@@ -2622,8 +2661,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// done. Steps and context are not settable here — copying them is the point.
 
 	if (workflowId && parts[3] === "clone" && !parts[4] && req.method === "POST") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.create")) {
 			return;
 		}
 		if (!getWorkflow(workflowId)) {
@@ -2654,8 +2692,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// at any status, including mid-run.
 
 	if (workflowId && parts[3] === "name" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		if (!getWorkflow(workflowId)) {
@@ -2678,8 +2715,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// --- /api/workflows/:id/docker-mounts ---
 
 	if (workflowId && parts[3] === "docker-mounts" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		if (!getWorkflow(workflowId)) {
@@ -2714,8 +2750,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// empty string to clear it (only while still editable).
 
 	if (workflowId && parts[3] === "tcps" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		const workflow = getWorkflow(workflowId);
@@ -2759,8 +2794,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	if (workflowId && parts[3] === "resourcesets" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		const workflow = getWorkflow(workflowId);
@@ -2798,8 +2832,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	if (workflowId && parts[3] === "context" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
@@ -2830,10 +2863,6 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// `data:image/png;base64,...` URL, since that's what the browser's FileReader
 	// hands back.
 	if (workflowId && parts[3] === "attachments" && !parts[4] && req.method === "POST") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
-			return;
-		}
 		const workflow = getWorkflow(workflowId);
 		if (!workflow) {
 			sendJson(res, 404, { error: "unknown_workflow" });
@@ -2843,6 +2872,11 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			const field = String(body.field ?? "");
 			if (!ATTACHMENT_FIELDS.includes(field as AttachmentField)) {
 				sendJson(res, 400, { error: `invalid field (allowed: ${ATTACHMENT_FIELDS.join(", ")})` });
+				return;
+			}
+			const attachmentPermission =
+				field === "context" ? "client.workflows.manage" : "client.workflows.steps.edit";
+			if (!requirePermission(cfg, req, res, attachmentPermission)) {
 				return;
 			}
 			const stepId = typeof body.stepId === "string" && body.stepId !== "" ? body.stepId : null;
@@ -2971,8 +3005,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// action even though nothing in the DB changes.
 
 	if (workflowId && parts[3] === "open-terminal" && !parts[4] && req.method === "POST") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.execute")) {
 			return;
 		}
 		const workflow = getWorkflow(workflowId);
@@ -3013,8 +3046,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// --- /api/workflows/:id/steps ---
 
 	if (workflowId && parts[3] === "steps" && !parts[4] && req.method === "POST") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.steps.add")) {
 			return;
 		}
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
@@ -3037,8 +3069,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// --- /api/workflows/:id/steps/from-template (append a template's steps to an existing workflow) ---
 
 	if (workflowId && parts[3] === "steps" && parts[4] === "from-template" && !parts[5] && req.method === "POST") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.steps.add")) {
 			return;
 		}
 		const workflow = getWorkflow(workflowId);
@@ -3086,8 +3117,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "notes" && parts[6] && req.method === "PATCH") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.steps.edit")) {
 			return;
 		}
 		const stepId = parts[4];
@@ -3106,8 +3136,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "notes" && parts[6] && req.method === "DELETE") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.steps.edit")) {
 			return;
 		}
 		const stepId = parts[4];
@@ -3122,8 +3151,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "notes" && !parts[6] && req.method === "POST") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.steps.edit")) {
 			return;
 		}
 		const stepId = parts[4];
@@ -3141,8 +3169,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	if (workflowId && parts[3] === "steps" && parts[4] && req.method === "PATCH") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.steps.edit")) {
 			return;
 		}
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
@@ -3158,8 +3185,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	if (workflowId && parts[3] === "steps" && parts[4] && req.method === "DELETE") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		try {
@@ -3174,8 +3200,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// --- /api/workflows/:id/steps/:stepId/run (run this step now, outside the sequential order) ---
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "run" && !parts[6] && req.method === "POST") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.execute")) {
 			return;
 		}
 		const stepId = parts[4];
@@ -3205,8 +3230,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// gate advances the workflow, which dispatches the next step.
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "continue" && !parts[6] && req.method === "POST") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.execute")) {
 			return;
 		}
 		(async () => {
@@ -3237,8 +3261,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// Admin-gated (mutating). Async because the broker kill is a network call.
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "abort" && !parts[6] && req.method === "POST") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.execute")) {
 			return;
 		}
 		(async () => {
@@ -3267,8 +3290,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// Admin-gated: it launches a real process on the operator's desktop.
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "open-terminal" && !parts[6] && req.method === "POST") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.execute")) {
 			return;
 		}
 		const workflow = getWorkflow(workflowId);
@@ -3317,8 +3339,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// semantics. Synchronous: it's a DB write plus the .md rewrite.
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "status" && !parts[6] && req.method === "POST") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		const stepId = parts[4];
@@ -3347,8 +3368,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// and the UI renders them by order.
 
 	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "move" && !parts[6] && req.method === "POST") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		const stepId = parts[4];
@@ -3377,8 +3397,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// with the step route above; the paths don't overlap.
 
 	if (workflowId && parts[3] === "status" && !parts[4] && req.method === "POST") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
@@ -3407,8 +3426,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// status.
 
 	if (workflowId && parts[3] === "selection" && !parts[4] && (req.method === "PUT" || req.method === "PATCH")) {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
 			return;
 		}
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
@@ -3429,11 +3447,14 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// --- /api/workflows/:id/{start,pause,resume,restart} ---
 
 	if (workflowId && ["start", "pause", "resume", "restart"].includes(parts[3]) && !parts[4] && req.method === "POST") {
-		if (!isAdmin(cfg, req.headers)) {
-			sendJson(res, 401, { error: "unauthorized" });
+		const action = parts[3] as "start" | "pause" | "resume" | "restart";
+		if (action === "pause") {
+			if (!requirePermission(cfg, req, res, "client.workflows.execute", "client.workflows.manage")) {
+				return;
+			}
+		} else if (!requirePermission(cfg, req, res, "client.workflows.execute")) {
 			return;
 		}
-		const action = parts[3] as "start" | "pause" | "resume" | "restart";
 		// Start/resume/restart may carry a `stepIds` selection: run only those
 		// steps. Pause ignores the body. An empty/missing selection = run none
 		// (see `setStepSelection` in db.ts).

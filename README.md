@@ -721,13 +721,15 @@ credentials. If approval expires, is denied, the server is offline, or the
 server revokes the device, choose **Connect with my server** / **Link a
 replacement** to make a fresh request.
 
-All local features remain available in every connection state: workflows keep
-running, and templates, TCP tools, RCI resources and local report queues are
-never deleted or blocked. Linked hubs require target-server's `device-link/v1`
-contract and its `optional` or `required` device-linking mode. Legacy report
-and sync environment settings continue to work only with a server deployment
-that explicitly permits its legacy mode; they are never converted into device
-credentials.
+Local data is never deleted, and reads stay open in every connection state:
+workflows keep running, and templates, TCP tools, RCI resources and local
+report queues remain on disk. While the hub is linked, mutating actions follow
+the linked owner's role ([`docs/hub-permissions.md`](docs/hub-permissions.md)).
+An unlinked hub has no role restrictions. Linked hubs require target-server's
+`device-link/v1` contract and its `optional` or `required` device-linking mode.
+Legacy report and sync environment settings continue to work only with a
+server deployment that explicitly permits its legacy mode; they are never
+converted into device credentials.
 
 ### Updating a linked hub
 

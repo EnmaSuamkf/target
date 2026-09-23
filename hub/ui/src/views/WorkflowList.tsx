@@ -3,6 +3,7 @@ import type { Workflow, WorkflowOrigin, WorkflowStatus } from "../api/types.ts";
 import { Badge, OriginBadge } from "../components/Badge.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { ProgressBar } from "../components/Progress.tsx";
+import { usePermissions } from "../hooks/usePermissions.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
 import styles from "./WorkflowList.module.css";
 
@@ -105,6 +106,9 @@ export function WorkflowList({
 	const [filter, setFilter] = useState<Filter>("all");
 	const [originFilter, setOriginFilter] = useState<OriginFilter>("all");
 	const railRef = useRef<HTMLDivElement | null>(null);
+	const { can } = usePermissions();
+	const canCreate = can("client.workflows.create");
+	const createTitle = canCreate ? undefined : "Requires client.workflows.create";
 
 	const visible = useMemo(() => filterAndSort(workflows, query, filter, originFilter), [workflows, query, filter, originFilter]);
 	const statuses = useMemo(() => presentStatuses(workflows), [workflows]);
@@ -200,7 +204,13 @@ export function WorkflowList({
 					{/* Classed so the phone can give it a row of its own: sharing the
 					    line with the horizontally-scrolling status chips left the last
 					    chip sliding under it (see `.newBtn` in the media query). */}
-					<button type="button" className={`btn btn--primary btn--sm ${styles.newBtn}`} onClick={onCreate}>
+					<button
+						type="button"
+						className={`btn btn--primary btn--sm ${styles.newBtn}`}
+						onClick={onCreate}
+						disabled={!canCreate}
+						title={createTitle}
+					>
 						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
 							<path d="M12 5v14M5 12h14" />
 						</svg>
@@ -241,7 +251,13 @@ export function WorkflowList({
 								title="No workflows yet"
 								description="A workflow creates its own agent and runs its steps in order on one shared session."
 								action={
-									<button type="button" className="btn btn--primary btn--sm" onClick={onCreate}>
+									<button
+										type="button"
+										className="btn btn--primary btn--sm"
+										onClick={onCreate}
+										disabled={!canCreate}
+										title={createTitle}
+									>
 										Create your first workflow
 									</button>
 								}

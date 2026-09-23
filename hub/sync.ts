@@ -16,7 +16,8 @@ import {
 } from "./awb.ts";
 import { type HubConfig, type SyncConfig } from "./config.ts";
 import { deviceHeaders, handleDeviceAuthResponse, remoteAuth } from "./device-auth.ts";
-import { markDeviceRemoteRecovered, setDeviceLinkRemoteState } from "./device-link.ts";
+import { getDeviceLinkStatus, markDeviceRemoteRecovered, setDeviceLinkRemoteState } from "./device-link.ts";
+import { recordOwnerSnapshot } from "./owner-permissions.ts";
 import { loadEffectiveSyncConfig } from "./remote-config.ts";
 import {
 	clearAppliedSyncCommands,
@@ -294,8 +295,10 @@ async function ensureRegistered(
 		logMessage(log, `remote sync registration failed at /api/sync/register (${res.status})`, "warning");
 		throw new Error(`sync register failed (${res.status})`);
 	}
-	const response = (await res.json()) as { client_id?: string; client_token?: string };
+	const response = (await res.json()) as { client_id?: string; client_token?: string; owner?: unknown };
 	if (!response.client_id) throw new Error("sync register returned no client id");
+	const link = getDeviceLinkStatus();
+	recordOwnerSnapshot(response.owner, link.deviceId ?? "", link.origin ?? config.url);
 	if (device) {
 		markDeviceRemoteRecovered();
 		logMessage(log, `remote sync registered as device client ${response.client_id}`);
@@ -347,6 +350,22 @@ async function sendHeartbeat(
 	handleDeviceAuthResponse(res.status);
 	if (!res.ok) {
 		throw new Error(`sync heartbeat failed (${res.status})`);
+	}
+	let payload: unknown = null;
+	try {
+		payload = await res.json();
+	} catch {
+		return;
+	}
+	try {
+		const owner =
+			payload && typeof payload === "object" && "owner" in payload
+				? (payload as { owner?: unknown }).owner
+				: undefined;
+		const link = getDeviceLinkStatus();
+		recordOwnerSnapshot(owner, link.deviceId ?? "", link.origin ?? config.url);
+	} catch {
+		// A missing or malformed owner field must not fail the tick.
 	}
 }
 

@@ -24,6 +24,7 @@ import { EmptyState } from "../components/EmptyState.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { ProgressBar } from "../components/Progress.tsx";
 import { Switch } from "../components/Switch.tsx";
+import { usePermissions, requires } from "../hooks/usePermissions.ts";
 import { useStagedImages } from "../hooks/useStagedImages.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
 import { canMoveStep } from "../lib/stepMove.ts";
@@ -326,7 +327,13 @@ export function WorkflowDetail({
 		});
 	}, [taskSteps]);
 
-	const startAction = startActionFor(workflow.status);
+	const { can } = usePermissions();
+	const canExecute = can("client.workflows.execute");
+	const canPause = can("client.workflows.execute", "client.workflows.manage");
+	const canManage = can("client.workflows.manage");
+	const canCreate = can("client.workflows.create");
+
+	const startAction = canExecute ? startActionFor(workflow.status) : null;
 	const running = workflow.status === "running";
 	// The server refuses a workflow override while a step still has a callback
 	// coming — that callback would write a status over it seconds later.
@@ -458,8 +465,8 @@ export function WorkflowDetail({
 						type="button"
 						className={`btn btn--sm btn--ghost ${styles.rename}`}
 						onClick={() => setRenaming(true)}
-						disabled={busy}
-						title="Change this workflow's name."
+						disabled={busy || !canManage}
+						title={canManage ? "Change this workflow's name." : requires("client.workflows.manage")}
 					>
 						Change
 					</button>
@@ -521,13 +528,14 @@ export function WorkflowDetail({
 						<DockerMountEditor
 							mounts={dockerMounts}
 							onChange={setDockerMounts}
-							disabled={busy || savingDockerMounts}
+							disabled={busy || savingDockerMounts || !canManage}
 						/>
 						<div className={styles.dockerMountsActions}>
 							<button
 								type="button"
 								className="btn btn--sm btn--primary"
-								disabled={busy || savingDockerMounts}
+								disabled={busy || savingDockerMounts || !canManage}
+								title={canManage ? undefined : requires("client.workflows.manage")}
 								onClick={() => {
 									void (async () => {
 										setSavingDockerMounts(true);
@@ -570,22 +578,34 @@ export function WorkflowDetail({
 						disabled={!startAction || busy || selectedCount === 0 || !stepsFullyLoaded}
 						data-start-workflow
 						title={
-							!startAction
-								? workflow.status === "waiting"
-									? "A step is waiting for your review — Continue it to carry on, or Abort it to stop here."
-									: "Already running."
-								: !stepsFullyLoaded
-									? "Loading steps — wait until every step is listed before starting."
-									: selectedCount === 0
-										? "Select at least one step to run."
-										: `${startLabel} the ${selectedCount} selected step${selectedCount === 1 ? "" : "s"}. Alt/Shift+S presses this button.`
+							!canExecute
+								? "Requires client.workflows.execute"
+								: !startAction
+									? workflow.status === "waiting"
+										? "A step is waiting for your review — Continue it to carry on, or Abort it to stop here."
+										: "Already running."
+									: !stepsFullyLoaded
+										? "Loading steps — wait until every step is listed before starting."
+										: selectedCount === 0
+											? "Select at least one step to run."
+											: `${startLabel} the ${selectedCount} selected step${selectedCount === 1 ? "" : "s"}. Alt/Shift+S presses this button.`
 						}
 					>
 						{startLabel}
 						{selectedCount > 0 && startAction && <span className={styles.countPill}>{selectedCount}</span>}
 					</button>
 
-					<button type="button" className="btn" onClick={onStop} disabled={!running || busy} title="Stops dispatching further steps. The step already in flight finishes on its own.">
+					<button
+						type="button"
+						className="btn"
+						onClick={onStop}
+						disabled={!running || busy || !canPause}
+						title={
+							canPause
+								? "Stops dispatching further steps. The step already in flight finishes on its own."
+								: requires("client.workflows.execute", "client.workflows.manage")
+						}
+					>
 						Stop
 					</button>
 
@@ -598,8 +618,12 @@ export function WorkflowDetail({
 						type="button"
 						className={`btn ${styles.clone}`}
 						onClick={onClone}
-						disabled={busy}
-						title="Copy this workflow — all of its steps, in order, and its context — into a new one. Opens the new-workflow form seeded from this workflow, so the copy's name, directory, agent and permissions can be changed before it is created."
+						disabled={busy || !canCreate}
+						title={
+							canCreate
+								? "Copy this workflow — all of its steps, in order, and its context — into a new one. Opens the new-workflow form seeded from this workflow, so the copy's name, directory, agent and permissions can be changed before it is created."
+								: requires("client.workflows.create")
+						}
 					>
 						Clone
 					</button>
@@ -611,12 +635,14 @@ export function WorkflowDetail({
 					<select
 						className={`select ${styles.statusSelect}`}
 						value=""
-						disabled={busy || stepInFlight}
+						disabled={busy || stepInFlight || !canManage}
 						aria-label="Set this workflow's status by hand"
 						title={
-							stepInFlight
-								? "A step is still in flight — stop or abort it first."
-								: "Correct the status by hand when a step really succeeded but was recorded as failed. Nothing is run."
+							!canManage
+								? requires("client.workflows.manage")
+								: stepInFlight
+									? "A step is still in flight — stop or abort it first."
+									: "Correct the status by hand when a step really succeeded but was recorded as failed. Nothing is run."
 						}
 						onChange={(ev) => {
 							const next = ev.target.value as OverridableWorkflowStatus | "";
@@ -634,7 +660,13 @@ export function WorkflowDetail({
 
 					<div className={styles.controlsSpacer} />
 
-					<button type="button" className={`btn btn--danger ${styles.delete}`} onClick={onDelete} disabled={busy}>
+					<button
+						type="button"
+						className={`btn btn--danger ${styles.delete}`}
+						onClick={onDelete}
+						disabled={busy || !canManage}
+						title={canManage ? undefined : requires("client.workflows.manage")}
+					>
 						Delete
 					</button>
 				</div>
@@ -688,7 +720,13 @@ export function WorkflowDetail({
 							</div>
 
 							{taskSteps.length > 0 && stepsView === "list" && (
-								<button type="button" className="btn btn--sm btn--ghost" onClick={toggleAll}>
+								<button
+									type="button"
+									className="btn btn--sm btn--ghost"
+									onClick={toggleAll}
+									disabled={!canManage}
+									title={canManage ? undefined : requires("client.workflows.manage")}
+								>
 									{allSelected ? "Deselect all" : "Select all"}
 								</button>
 							)}
@@ -832,6 +870,8 @@ function AddStepForm({
 	const [interval, setInterval] = useState("0");
 	const [templateId, setTemplateId] = useState("");
 	const [saving, setSaving] = useState(false);
+	const { can } = usePermissions();
+	const canAdd = can("client.workflows.steps.add");
 
 	const intervalEnabled = (parseInt(maxRetries, 10) || 0) > 1;
 
@@ -881,7 +921,13 @@ function AddStepForm({
 
 	if (!open) {
 		return (
-			<button type="button" className={styles.addTrigger} onClick={() => setOpen(true)}>
+			<button
+				type="button"
+				className={styles.addTrigger}
+				onClick={() => setOpen(true)}
+				disabled={!canAdd}
+				title={canAdd ? undefined : requires("client.workflows.steps.add")}
+			>
 				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
 					<path d="M12 5v14M5 12h14" />
 				</svg>
@@ -995,7 +1041,12 @@ function AddStepForm({
 				</div>
 
 				<div className={styles.addActions}>
-					<button type="submit" className="btn btn--primary btn--sm" disabled={description.trim() === "" || saving}>
+					<button
+						type="submit"
+						className="btn btn--primary btn--sm"
+						disabled={description.trim() === "" || saving || !canAdd}
+						title={canAdd ? undefined : requires("client.workflows.steps.add")}
+					>
 						{saving ? "Adding…" : "Add step"}
 					</button>
 					<button
@@ -1035,7 +1086,8 @@ function AddStepForm({
 							type="button"
 							className="btn btn--sm"
 							onClick={() => void applyTemplate()}
-							disabled={!templateId || saving}
+							disabled={!templateId || saving || !canAdd}
+							title={canAdd ? undefined : requires("client.workflows.steps.add")}
 						>
 							Append
 						</button>

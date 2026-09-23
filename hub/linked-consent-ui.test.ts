@@ -13,7 +13,8 @@ test("linked consent UI warns before connection and hides local remote-service c
 	assert.match(settings, /explicitly allow this server to receive Activity and full conversation text/);
 	assert.match(settings, /aria-describedby=\{`\$\{linkId\}-consent`\}/);
 	assert.match(settings, /\{linkStatus\?\.state !== "connected" && <form className=\{styles\.section\} aria-labelledby=\{`\$\{reportId\}-section`\}/);
-	assert.doesNotMatch(settings, /setSyncEnabled|saveSyncSettings|label="Remote Sync"/);
+	assert.doesNotMatch(settings, /setSyncEnabled|saveSyncSettings/);
+	assert.match(settings, /label="Remote Sync"/);
 });
 
 test("linked ingest forces full prose payload and ignores legacy privacy/off preferences", () => {

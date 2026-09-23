@@ -33,12 +33,16 @@ type WorkflowNote = StepNote | TemplateStepNote;
 export function StepNotes({
 	notes,
 	busy = false,
+	disabled = false,
+	disabledTitle,
 	onAdd,
 	onEdit,
 	onRemove,
 }: {
 	notes: WorkflowNote[];
 	busy?: boolean;
+	disabled?: boolean;
+	disabledTitle?: string;
 	onAdd?: (content: string, theme: StepNoteTheme) => Promise<void>;
 	onEdit?: (noteId: string, content: string, theme: StepNoteTheme) => Promise<void>;
 	onRemove?: (noteId: string) => Promise<void>;
@@ -77,6 +81,7 @@ export function StepNotes({
 	};
 
 	const canMutate = !!(onAdd || onEdit || onRemove);
+	const locked = disabled || busy;
 
 	return (
 		<div className={styles.stepNotes} data-step-notes>
@@ -87,7 +92,8 @@ export function StepNotes({
 						type="button"
 						className="btn btn--sm btn--ghost"
 						onClick={() => setOpen(true)}
-						disabled={busy}
+						disabled={locked}
+						title={disabled ? disabledTitle : undefined}
 						data-add-note
 					>
 						+ Add note
@@ -102,7 +108,13 @@ export function StepNotes({
 							{note.content}
 							{canMutate && (
 								<div className={styles.noteActions}>
-									<button type="button" className={styles.noteBtn} onClick={() => startEdit(note)} disabled={busy || saving}>
+									<button
+										type="button"
+										className={styles.noteBtn}
+										onClick={() => startEdit(note)}
+										disabled={locked || saving}
+										title={disabled ? disabledTitle : undefined}
+									>
 										Edit
 									</button>
 									{onRemove && (
@@ -110,7 +122,7 @@ export function StepNotes({
 											type="button"
 											className={styles.noteBtn}
 											onClick={async () => {
-												if (saving) return;
+												if (saving || disabled) return;
 												setSaving(true);
 												try {
 													await onRemove(note.id);
@@ -119,7 +131,8 @@ export function StepNotes({
 													setSaving(false);
 												}
 											}}
-											disabled={busy || saving}
+											disabled={locked || saving}
+											title={disabled ? disabledTitle : undefined}
 											data-remove-note
 										>
 											Delete

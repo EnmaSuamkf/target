@@ -726,6 +726,64 @@ export interface DeviceLinkOutcome {
 	browserUrl?: string;
 }
 
+/**
+ * Client-scoped permission IDs from target-server's `client.*` catalogue.
+ * The workflow-agent setting `PermissionMode` (acceptEdits / …) is unrelated.
+ */
+export const CLIENT_PERMISSIONS = [
+	"client.read",
+	"client.workflows.create",
+	"client.workflows.steps.add",
+	"client.workflows.steps.edit",
+	"client.workflows.manage",
+	"client.workflows.execute",
+	"client.templates.create",
+	"client.templates.edit",
+	"client.templates.delete",
+	"client.templates.import",
+	"client.templates.export",
+	"client.tcp-tools.create",
+	"client.tcp-tools.edit",
+	"client.tcp-tools.delete",
+	"client.tcp-tools.import",
+	"client.tcp-tools.export",
+	"client.rci.create",
+	"client.rci.edit",
+	"client.rci.delete",
+	"client.rci.import",
+	"client.rci.export",
+] as const;
+
+export type ClientPermission = (typeof CLIENT_PERMISSIONS)[number];
+
+/** Owner-role enforcement mode from GET /api/permissions. */
+export type PermissionsMode = "unrestricted" | "enforced" | "read_only";
+
+export interface PermissionCatalogEntry {
+	id: string;
+	label: string;
+	description: string;
+}
+
+export interface PermissionCatalogGroup {
+	id: string;
+	scope: string;
+	label: string;
+	description: string;
+	permissions: PermissionCatalogEntry[];
+}
+
+/** Body of GET /api/permissions. */
+export interface PermissionsState {
+	mode: PermissionsMode;
+	linkState: DeviceLinkState;
+	ownerId: string | null;
+	permissions: string[];
+	granted: { groups: PermissionCatalogGroup[] };
+	receivedAt: string | null;
+	staleAfter: string | null;
+}
+
 /** Token usage for the workflow's session, read off the harness transcript. */
 export interface TokenUsage {
 	turns: number;

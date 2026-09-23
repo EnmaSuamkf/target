@@ -1,4 +1,5 @@
 import type { SessionInfo } from "../api/types.ts";
+import { usePermissions, requires } from "../hooks/usePermissions.ts";
 import styles from "./DetailPanels.module.css";
 import { UsageMeter } from "./UsageMeter.tsx";
 
@@ -37,6 +38,8 @@ export function SessionPanel({
 	// conversation context on the next step, but this is the panel where an
 	// operator finds out it happened at all.
 	const compactedAt = info?.lastCompactionAt ?? usage?.lastCompactionAt ?? null;
+	const { can } = usePermissions();
+	const canExecute = can("client.workflows.execute");
 
 	return (
 		<section className={styles.block}>
@@ -46,13 +49,15 @@ export function SessionPanel({
 					type="button"
 					className="btn btn--sm"
 					onClick={onOpenTerminal}
-					disabled={!canOpen || opening}
+					disabled={!canOpen || opening || !canExecute}
 					title={
-						canOpen
-							? info?.sandbox === "docker"
-								? "Opens a terminal on this machine running `docker run -it …` in the same container image the steps used, resuming this session."
-								: "Opens a terminal on this machine, cd'd into the workflow's workdir, resuming this session."
-							: "No session yet — run a step first."
+						!canExecute
+							? requires("client.workflows.execute")
+							: canOpen
+								? info?.sandbox === "docker"
+									? "Opens a terminal on this machine running `docker run -it …` in the same container image the steps used, resuming this session."
+									: "Opens a terminal on this machine, cd'd into the workflow's workdir, resuming this session."
+								: "No session yet — run a step first."
 					}
 				>
 					{opening ? "Opening…" : "Open conversation"}

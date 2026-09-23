@@ -9,7 +9,28 @@ The current version is reported by every instance to the central server (see
 
 ## [Unreleased]
 
+### Changed
+
+- **Client permission IDs are `client.*`, not `remote.*`.** The hub gate, UI
+  types, tooltips and `docs/hub-permissions.md` now use IDs such as
+  `client.workflows.execute` and `client.workflows.manage`. Semantics are
+  unchanged: pause still accepts execute or manage; disconnect and Remote
+  Sync still need manage. The old `remote.*` prefix is only mentioned here
+  as the previous name.
+
 ### Added
+
+- **Linked-owner permissions on the local hub.** A hub that is not linked to
+  a server is unchanged: every local action still works. Once it is linked,
+  target-server already sends the owner's `client.*` role on register and
+  heartbeat; the hub now stores that snapshot, expires it after
+  `max(30s, 3 × sync)`, and applies it. Mutating HTTP routes answer 403 with
+  the missing permission instead of doing the work. GET reads stay open
+  (exports are the exception). The UI greys the same controls and names the
+  missing id rather than hiding the button. Settings shows the granted list
+  and says this is governance, not a security boundary: the admin token, the
+  CLI, `~/.target/target.db` and `device-link.json` still sit on the machine.
+  See [`docs/hub-permissions.md`](docs/hub-permissions.md).
 
 - **Token usage on the workflow detail page, in the Conversation panel.** A
   workflow now shows the same readout its operator's client shows for the same

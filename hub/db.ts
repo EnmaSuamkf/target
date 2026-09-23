@@ -3094,6 +3094,7 @@ export interface NewReportEvent {
 const INSTANCE_ID_SETTING = "report:instance_id";
 const SYNC_CLIENT_TOKEN_KEY = "sync:client_token";
 const SYNC_CLIENT_ID_KEY = "sync:client_id";
+const OWNER_PERMISSIONS_KEY = "owner_permissions_v1";
 const SYNC_STEP_MAP_PREFIX = "sync:step_map:";
 const SYNC_APPLIED_COMMANDS_KEY = "sync:applied_commands";
 
@@ -3178,6 +3179,28 @@ export function saveSyncCredentials(clientId: string, token: string): void {
 	);
 	upsert.run(SYNC_CLIENT_ID_KEY, clientId.trim(), now);
 	upsert.run(SYNC_CLIENT_TOKEN_KEY, token.trim(), now);
+}
+
+/** Last owner-permissions payload from register/heartbeat (JSON). */
+export function getOwnerPermissionsJson(): string | null {
+	const row = open().prepare("SELECT value FROM settings WHERE key = ?").get(OWNER_PERMISSIONS_KEY) as
+		| { value: string }
+		| undefined;
+	return row?.value ?? null;
+}
+
+export function saveOwnerPermissionsJson(value: string): void {
+	const now = new Date().toISOString();
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(OWNER_PERMISSIONS_KEY, value, now);
+}
+
+export function clearOwnerPermissionsJson(): void {
+	open().prepare("DELETE FROM settings WHERE key = ?").run(OWNER_PERMISSIONS_KEY);
 }
 
 /** Stable remote step_key → local step id map for one remote workflow. */
