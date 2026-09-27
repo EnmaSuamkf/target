@@ -1,5 +1,7 @@
 import { useMemo, useState } from "react";
 import type { Tcp, TcpSelection } from "../api/types.ts";
+import { UsagePill } from "../components/Badge.tsx";
+import { isUsableCopy } from "../lib/catalogCopy.ts";
 import { Modal } from "../components/Modal.tsx";
 import {
 	attachTcpAllTools,
@@ -25,6 +27,7 @@ export function TcpToolPickerModal({
 }): React.JSX.Element {
 	const [query, setQuery] = useState("");
 	const toolNames = useMemo(() => tcp.tools.map((tool) => tool.name), [tcp.tools]);
+	const unusable = !isUsableCopy(tcp);
 
 	const filtered = useMemo(() => {
 		const q = query.trim().toLowerCase();
@@ -52,6 +55,11 @@ export function TcpToolPickerModal({
 				</button>
 			}
 		>
+			{tcp.origin === "server" && (
+				<p className="hint">
+					<UsagePill enabled={!unusable} revoked={tcp.revoked === true} />
+				</p>
+			)}
 			<div className={styles.toolbar}>
 				<input
 					type="search"
@@ -65,7 +73,7 @@ export function TcpToolPickerModal({
 					<button
 						type="button"
 						className="btn btn--sm btn--ghost"
-						disabled={disabled || filtered.length === 0 || allInViewSelected}
+						disabled={disabled || unusable || filtered.length === 0 || allInViewSelected}
 						onClick={() => {
 							let next = selections;
 							for (const tool of filtered) {
@@ -107,7 +115,7 @@ export function TcpToolPickerModal({
 								<input
 									type="checkbox"
 									checked={isToolSelected(selections, tcp.id, tool.name)}
-									disabled={disabled}
+									disabled={disabled || (unusable && !isToolSelected(selections, tcp.id, tool.name))}
 									onChange={() => onChange(toggleTcpTool(selections, tcp.id, tool.name, toolNames))}
 								/>
 								<span className={styles.toolName}>{tool.name}</span>
@@ -122,7 +130,7 @@ export function TcpToolPickerModal({
 				<button
 					type="button"
 					className="btn btn--sm btn--ghost"
-					disabled={disabled}
+					disabled={disabled || unusable}
 					onClick={() => onChange(attachTcpAllTools(selections, tcp.id))}
 				>
 					Include all {tcp.tools.length} tools

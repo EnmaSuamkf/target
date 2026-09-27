@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Resource, ResourceKind, ResourceSet, ResourceSetInput } from "../api/types.ts";
 import { DirectoryBrowser } from "../components/DirectoryBrowser.tsx";
-import { ServerManagedBadge } from "../components/Badge.tsx";
+import { CatalogCopyBadges } from "../components/Badge.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { Field } from "../components/Field.tsx";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { usePermissions, requires } from "../hooks/usePermissions.ts";
 import { defaultEntryFile, isMarkdownFile, KIND_LABELS, RESOURCE_KINDS } from "../rciKinds.ts";
+import { type CatalogOriginFilter, matchesOriginFilter } from "../lib/catalogCopy.ts";
 import { relativeTime } from "../lib/format.ts";
 import styles from "./TemplatesView.module.css";
 
@@ -51,6 +52,7 @@ export function ResourceSetsView({
 	onScan: (path: string) => Promise<{ suggestedName: string; resources: Resource[] } | null>;
 }): React.JSX.Element {
 	const [query, setQuery] = useState("");
+	const [originFilter, setOriginFilter] = useState<CatalogOriginFilter>("all");
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const [creating, setCreating] = useState(false);
 	const isMobile = useIsMobile();
@@ -60,9 +62,10 @@ export function ResourceSetsView({
 	const visible = useMemo(() => {
 		const q = query.trim().toLowerCase();
 		return resourceSets
+			.filter((s) => matchesOriginFilter(s, originFilter))
 			.filter((s) => (q === "" ? true : s.name.toLowerCase().includes(q) || s.tags.some((t) => t.toLowerCase().includes(q))))
 			.sort((a, b) => a.name.localeCompare(b.name));
-	}, [resourceSets, query]);
+	}, [resourceSets, query, originFilter]);
 
 	const editing = editingId ? (resourceSets.find((s) => s.id === editingId) ?? null) : null;
 	const showForm = creating || editing !== null;
@@ -105,6 +108,27 @@ export function ResourceSetsView({
 							value={query}
 							onChange={(ev) => setQuery(ev.target.value)}
 						/>
+						{resourceSets.length > 0 && (
+							<div className={styles.tags} role="group" aria-label="Filter by origin">
+								{(
+									[
+										["all", "All"],
+										["own", "Own"],
+										["synced", "Synced"],
+									] as const
+								).map(([id, label]) => (
+									<button
+										key={id}
+										type="button"
+										className={`${styles.tag} ${originFilter === id ? styles.tagActive : ""}`}
+										onClick={() => setOriginFilter(id)}
+										aria-pressed={originFilter === id}
+									>
+										{label}
+									</button>
+								))}
+							</div>
+						)}
 					</div>
 					<div className={styles.list}>
 						{visible.length === 0 ? (
@@ -125,7 +149,7 @@ export function ResourceSetsView({
 								>
 									<span className={styles.cardNameRow}>
 										<span className={styles.cardName}>{set.name}</span>
-										{set.origin === "server" && <ServerManagedBadge />}
+										<CatalogCopyBadges item={set} />
 									</span>
 									<span className={styles.cardMeta}>
 										{kindSummary(set.resources)} · {relativeTime(set.updatedAt)}
@@ -298,28 +322,27 @@ function ResourceSetForm({
 			<div className={styles.formHead}>
 				<h2 className={styles.heading}>
 					{resourceSet ? (serverManaged ? "Resource Set" : "Edit Resource Set") : "New Resource Set"}
-					{serverManaged && <ServerManagedBadge />}
+					{resourceSet && <CatalogCopyBadges item={resourceSet} />}
 				</h2>
 				<div className={styles.formHeadActions}>
-					{onDelete && (
+					{onDelete && !serverManaged && (
 						<button
 							type="button"
 							className="btn btn--sm btn--danger"
 							onClick={onDelete}
 							disabled={busy || saving || !canDeleteItem}
-							title={
-								serverManaged
-									? "Managed by the server — local delete is disabled"
-									: canDelete
-										? undefined
-										: requires("client.rci.delete")
-							}
+							title={canDelete ? undefined : requires("client.rci.delete")}
 						>
 							Delete
 						</button>
 					)}
 				</div>
 			</div>
+			{serverManaged && (
+				<p className="hint" role="note">
+					This Resource Set was pulled from the Target server and is read-only on this hub.
+				</p>
+			)}
 			<Field label="Name" required>
 				{(props) => (
 					<input {...props} type="text" className="input" value={name} onChange={(ev) => setName(ev.target.value)} required disabled={serverManaged} />
@@ -499,20 +522,16 @@ function ResourceSetForm({
 				<button type="button" className="btn" onClick={onCancel} disabled={saving}>
 					Cancel
 				</button>
-				<button
-					type="submit"
-					className="btn btn--primary"
-					disabled={saving || busy || !canSave}
-					title={
-						serverManaged
-							? "Managed by the server — local edit is disabled"
-							: canSave
-								? undefined
-								: requires(resourceSet ? "client.rci.edit" : "client.rci.create")
-					}
-				>
-					{saving ? "Saving…" : "Save"}
-				</button>
+				{!serverManaged && (
+					<button
+						type="submit"
+						className="btn btn--primary"
+						disabled={saving || busy || !canSave}
+						title={canSave ? undefined : requires(resourceSet ? "client.rci.edit" : "client.rci.create")}
+					>
+						{saving ? "Saving…" : "Save"}
+					</button>
+				)}
 			</div>
 		</form>
 	);

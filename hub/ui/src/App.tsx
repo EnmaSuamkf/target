@@ -49,6 +49,7 @@ import { Header, type View } from "./components/Header.tsx";
 import { useToast } from "./components/Toast.tsx";
 import { VoiceDock } from "./components/VoiceDock.tsx";
 import { useAdminToken } from "./hooks/useAdminToken.ts";
+import { setCatalogSyncStatusSnapshot } from "./hooks/useCatalogSyncStatus.ts";
 import { getPermissionsOrigin, setPermissionsSnapshot } from "./hooks/usePermissions.ts";
 import { useDictation } from "./hooks/useDictation.ts";
 import { useIsMobile } from "./hooks/useIsMobile.ts";
@@ -364,11 +365,13 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	}, []);
 
 	const refreshPermissions = useCallback(async (): Promise<void> => {
-		const [permissions, link] = await Promise.all([
+		const [permissions, link, catalog] = await Promise.all([
 			api.getPermissions(),
 			api.getDeviceLinkStatus().catch(() => null),
+			api.getCatalogSyncStatus().catch(() => null),
 		]);
 		setPermissionsSnapshot(permissions, link?.origin ?? null);
+		setCatalogSyncStatusSnapshot(catalog);
 	}, []);
 
 	// Leaving the workflows view closes the "All workflows" page so a return to
@@ -1363,6 +1366,10 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		});
 	};
 
+	const handleCatalogSynced = async (): Promise<void> => {
+		await Promise.all([refreshTemplates(), refreshTcps(), refreshResourceSets(), refreshPermissions()]);
+	};
+
 	const handleSaveWorkflowDockerMounts = async (mounts: string[]): Promise<boolean> => {
 		if (!selectedWorkflow) return false;
 		return await act("Could not save docker bind mounts", async () => {
@@ -1540,6 +1547,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 						onSaveDockerFriendly={handleSaveDockerFriendlySettings}
 						onSaveDockerMounts={handleSaveDockerMountSettings}
 						onSaveUi={handleSaveUiSettings}
+						onCatalogSynced={handleCatalogSynced}
 					/>
 				) : (
 					<section className={styles.placeholder}>

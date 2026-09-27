@@ -25,6 +25,7 @@ import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { Field } from "../components/Field.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { usePermissions, requires } from "../hooks/usePermissions.ts";
+import { isUsableCopy, templateOptionLabel } from "../lib/catalogCopy.ts";
 import { prettyPath, relativeTime, truncate } from "../lib/format.ts";
 import styles from "./CreateWorkflowModal.module.css";
 
@@ -860,8 +861,8 @@ export function CreateWorkflowModal({
 							>
 								<option value="">No template — start empty</option>
 								{templates.map((template) => (
-									<option key={template.id} value={template.id}>
-										{template.name} ({template.steps.length} steps)
+									<option key={template.id} value={template.id} disabled={!isUsableCopy(template)}>
+										{templateOptionLabel(template)}
 									</option>
 								))}
 							</select>

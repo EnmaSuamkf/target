@@ -1,5 +1,7 @@
 import { useState } from "react";
 import type { ResourceSelection, ResourceSet } from "../api/types.ts";
+import { UsagePill } from "../components/Badge.tsx";
+import { isUsableCopy } from "../lib/catalogCopy.ts";
 import { describeResourceSelection, isSetFullySelected, isSetPartiallySelected, toggleSetAll } from "../rciSelection.ts";
 import styles from "./DetailPanels.module.css";
 import { ResourcePickerModal } from "./ResourcePickerModal.tsx";
@@ -35,6 +37,9 @@ export function ResourceSelectionEditor({
 				{resourceSets.map((set) => {
 					const summary = describeResourceSelection(selections, set.id, set.resources.length);
 					const label = selectionLabel(summary);
+					const attached = isSetFullySelected(selections, set.id) || isSetPartiallySelected(selections, set.id);
+					const unusable = !isUsableCopy(set);
+					const rowDisabled = disabled || (unusable && !attached);
 
 					return (
 						<li key={set.id} className={styles.tcpRow}>
@@ -45,13 +50,14 @@ export function ResourceSelectionEditor({
 									ref={(el) => {
 										if (el) el.indeterminate = isSetPartiallySelected(selections, set.id);
 									}}
-									disabled={disabled}
+									disabled={rowDisabled}
 									onChange={() => onChange(toggleSetAll(selections, set.id))}
 								/>
 								<span className={styles.tcpName}>{set.name}</span>
 								<span className="hint">
 									({set.resources.length} resource{set.resources.length === 1 ? "" : "s"})
 								</span>
+								{set.origin === "server" && <UsagePill enabled={!unusable} revoked={set.revoked === true} />}
 							</label>
 							<div className={styles.tcpActions}>
 								{label ? (
@@ -61,7 +67,7 @@ export function ResourceSelectionEditor({
 									<button
 										type="button"
 										className="btn btn--sm btn--ghost"
-										disabled={disabled}
+										disabled={rowDisabled}
 										onClick={() => setPickerId(set.id)}
 									>
 										Choose resources…

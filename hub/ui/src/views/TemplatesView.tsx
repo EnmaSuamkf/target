@@ -9,6 +9,7 @@ import type {
 	TemplateStep,
 	TemplateStepNote,
 } from "../api/types.ts";
+import { CatalogCopyBadges } from "../components/Badge.tsx";
 import { StepNotes } from "../components/StepNotes.tsx";
 import { ResourceSelectionEditor } from "./ResourceSelectionEditor.tsx";
 import { TcpSelectionEditor } from "./TcpSelectionEditor.tsx";
@@ -18,6 +19,7 @@ import { Field } from "../components/Field.tsx";
 import { Switch } from "../components/Switch.tsx";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { usePermissions, requires } from "../hooks/usePermissions.ts";
+import { type CatalogOriginFilter, isServerCopy, matchesOriginFilter } from "../lib/catalogCopy.ts";
 import { relativeTime } from "../lib/format.ts";
 import styles from "./TemplatesView.module.css";
 
@@ -67,6 +69,7 @@ export function TemplatesView({
 }): React.JSX.Element {
 	const [query, setQuery] = useState("");
 	const [tagFilter, setTagFilter] = useState("");
+	const [originFilter, setOriginFilter] = useState<CatalogOriginFilter>("all");
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const [creating, setCreating] = useState(false);
 	const isMobile = useIsMobile();
@@ -88,12 +91,13 @@ export function TemplatesView({
 	const visible = useMemo(() => {
 		const q = query.trim().toLowerCase();
 		return templates
+			.filter((t) => matchesOriginFilter(t, originFilter))
 			.filter((t) => (tagFilter === "" ? true : t.tags.includes(tagFilter)))
 			.filter((t) =>
 				q === "" ? true : t.name.toLowerCase().includes(q) || t.tags.some((tag) => tag.toLowerCase().includes(q)),
 			)
 			.sort((a, b) => a.name.localeCompare(b.name));
-	}, [templates, query, tagFilter]);
+	}, [templates, query, tagFilter, originFilter]);
 
 	const editing = editingId ? (templates.find((t) => t.id === editingId) ?? null) : null;
 
@@ -187,6 +191,25 @@ export function TemplatesView({
 								onChange={(ev) => setQuery(ev.target.value)}
 								aria-label="Search templates"
 							/>
+							<div className={styles.tags} role="group" aria-label="Filter by origin">
+								{(
+									[
+										["all", "All"],
+										["own", "Own"],
+										["synced", "Synced"],
+									] as const
+								).map(([id, label]) => (
+									<button
+										key={id}
+										type="button"
+										className={`${styles.tag} ${originFilter === id ? styles.tagActive : ""}`}
+										onClick={() => setOriginFilter(id)}
+										aria-pressed={originFilter === id}
+									>
+										{label}
+									</button>
+								))}
+							</div>
 							{allTags.length > 0 && (
 								<div className={styles.tags} role="group" aria-label="Filter by tag">
 									<button
@@ -247,7 +270,10 @@ export function TemplatesView({
 								}}
 								aria-current={template.id === editingId ? "true" : undefined}
 							>
-								<span className={styles.cardName}>{template.name}</span>
+								<span className={styles.cardNameRow}>
+									<span className={styles.cardName}>{template.name}</span>
+									<CatalogCopyBadges item={template} />
+								</span>
 								<span className={styles.cardMeta}>
 									{template.steps.length} step{template.steps.length === 1 ? "" : "s"} ·{" "}
 									{relativeTime(template.updatedAt)}
@@ -357,7 +383,8 @@ function TemplateForm({
 	const canEdit = can("client.templates.edit");
 	const canDelete = can("client.templates.delete");
 	const canExport = can("client.templates.export");
-	const canSave = template ? canEdit : canCreate;
+	const readOnly = isServerCopy(template ?? {});
+	const canSave = !readOnly && (template ? canEdit : canCreate);
 
 	const updateStep = (index: number, patch: Partial<TemplateStep>): void => {
 		setSteps((current) => current.map((step, i) => (i === index ? { ...step, ...patch } : step)));
@@ -410,9 +437,12 @@ function TemplateForm({
 			)}
 
 			<div className={styles.formHead}>
-				<h2 className={styles.heading}>{template ? "Edit template" : "New template"}</h2>
+				<h2 className={styles.heading}>
+					{template ? (readOnly ? "Template" : "Edit template") : "New template"}
+					{template && <CatalogCopyBadges item={template} />}
+				</h2>
 				<div className={styles.formHeadActions}>
-					{onExport && (
+					{onExport && !readOnly && (
 						<button
 							type="button"
 							className="btn btn--sm"
@@ -423,7 +453,7 @@ function TemplateForm({
 							Export
 						</button>
 					)}
-					{onDelete && (
+					{onDelete && !readOnly && (
 						<button
 							type="button"
 							className="btn btn--sm btn--danger"
@@ -437,6 +467,12 @@ function TemplateForm({
 				</div>
 			</div>
 
+			{readOnly && (
+				<p className="hint" role="note">
+					This template was pulled from the Target server and is read-only on this hub.
+				</p>
+			)}
+
 			<Field label="Name" required>
 				{(props) => (
 					<input
@@ -447,6 +483,7 @@ function TemplateForm({
 						placeholder="e.g. release checklist"
 						onChange={(ev) => setName(ev.target.value)}
 						required
+						disabled={readOnly}
 					/>
 				)}
 			</Field>
@@ -460,6 +497,7 @@ function TemplateForm({
 						value={tags}
 						placeholder="release, docs"
 						onChange={(ev) => setTags(ev.target.value)}
+						disabled={readOnly}
 					/>
 				)}
 			</Field>
@@ -468,7 +506,7 @@ function TemplateForm({
 				<div className={styles.stepsBlock}>
 					<span className="label">TCP packs</span>
 					<p className="hint">Attached to the workflow when this template is used. Select a whole pack or individual tools.</p>
-					<TcpSelectionEditor tcps={tcps} selections={tcpSelections} onChange={setTcpSelections} />
+					<TcpSelectionEditor tcps={tcps} selections={tcpSelections} disabled={readOnly} onChange={setTcpSelections} />
 				</div>
 			)}
 
@@ -479,7 +517,7 @@ function TemplateForm({
 						Injected into the workflow's conversation when this template is used — nothing is installed in the agent.
 						Select a whole set or individual resources.
 					</p>
-					<ResourceSelectionEditor resourceSets={resourceSets} selections={resourceSelections} onChange={setResourceSelections} />
+					<ResourceSelectionEditor resourceSets={resourceSets} selections={resourceSelections} disabled={readOnly} onChange={setResourceSelections} />
 				</div>
 			)}
 
@@ -503,7 +541,7 @@ function TemplateForm({
 										type="button"
 										className="btn btn--sm btn--ghost"
 										onClick={() => move(index, -1)}
-										disabled={index === 0}
+										disabled={readOnly || index === 0}
 										aria-label={`Move step ${index + 1} up`}
 									>
 										↑
@@ -512,7 +550,7 @@ function TemplateForm({
 										type="button"
 										className="btn btn--sm btn--ghost"
 										onClick={() => move(index, 1)}
-										disabled={index === steps.length - 1}
+										disabled={readOnly || index === steps.length - 1}
 										aria-label={`Move step ${index + 1} down`}
 									>
 										↓
@@ -521,6 +559,7 @@ function TemplateForm({
 										type="button"
 										className="btn btn--sm btn--ghost"
 										onClick={() => setSteps((current) => current.filter((_, i) => i !== index))}
+										disabled={readOnly}
 										aria-label={`Remove step ${index + 1}`}
 									>
 										✕
@@ -532,6 +571,7 @@ function TemplateForm({
 								value={step.description}
 								placeholder="What the agent should do in this step…"
 								onChange={(value) => updateStep(index, { description: value })}
+								disabled={readOnly}
 								aria-label={`Step ${index + 1} description`}
 								expandTitle={`Edit step ${index + 1} description`}
 							/>
@@ -539,6 +579,7 @@ function TemplateForm({
 								value={step.acceptanceCriteria ?? ""}
 								placeholder="Optional acceptance criteria — empty = no judge."
 								onChange={(value) => updateStep(index, { acceptanceCriteria: value || null })}
+								disabled={readOnly}
 								aria-label={`Step ${index + 1} acceptance criteria`}
 								expandTitle={`Edit step ${index + 1} acceptance criteria`}
 							/>
@@ -555,6 +596,7 @@ function TemplateForm({
 										onChange={(ev) =>
 											updateStep(index, { maxRetries: Math.max(0, parseInt(ev.target.value, 10) || 0) })
 										}
+										disabled={readOnly}
 									/>
 								</label>
 								<label className={styles.smallField}>
@@ -565,7 +607,7 @@ function TemplateForm({
 										min={0}
 										step={1}
 										value={step.maxRetries > 1 ? step.retryIntervalSeconds : 0}
-										disabled={step.maxRetries <= 1}
+										disabled={readOnly || step.maxRetries <= 1}
 										onChange={(ev) =>
 											updateStep(index, {
 												retryIntervalSeconds: Math.max(0, parseInt(ev.target.value, 10) || 0),
@@ -584,6 +626,7 @@ function TemplateForm({
 									checked={step.manualReview}
 									onChange={(next) => updateStep(index, { manualReview: next })}
 									label={`Step ${index + 1} manual review`}
+									disabled={readOnly}
 								/>
 							</div>
 
@@ -595,11 +638,13 @@ function TemplateForm({
 									checked={step.useSubagent !== false}
 									onChange={(next) => updateStep(index, { useSubagent: next })}
 									label={`Step ${index + 1} use subagent`}
+									disabled={readOnly}
 								/>
 							</div>
 
 							<StepNotes
 								notes={step.notes ?? []}
+								disabled={readOnly}
 								onAdd={async (content, theme) => {
 									const note: TemplateStepNote = { id: crypto.randomUUID(), content, theme };
 									updateStep(index, { notes: [...(step.notes ?? []), note] });
@@ -622,6 +667,7 @@ function TemplateForm({
 				<button
 					type="button"
 					className={styles.addStep}
+					disabled={readOnly}
 					onClick={() =>
 						setSteps((current) => [
 							...current,
@@ -641,18 +687,20 @@ function TemplateForm({
 			</div>
 
 			<div className={styles.formActions}>
-				<button
-					type="submit"
-					className="btn btn--primary"
-					disabled={name.trim() === "" || saving || !canSave}
-					title={
-						canSave
-							? undefined
-							: requires(template ? "client.templates.edit" : "client.templates.create")
-					}
-				>
-					{saving ? "Saving…" : template ? "Save changes" : "Create template"}
-				</button>
+				{!readOnly && (
+					<button
+						type="submit"
+						className="btn btn--primary"
+						disabled={name.trim() === "" || saving || !canSave}
+						title={
+							canSave
+								? undefined
+								: requires(template ? "client.templates.edit" : "client.templates.create")
+						}
+					>
+						{saving ? "Saving…" : template ? "Save changes" : "Create template"}
+					</button>
+				)}
 				<button type="button" className="btn" onClick={onCancel} disabled={saving}>
 					Cancel
 				</button>

@@ -66,3 +66,48 @@ export function ServerManagedBadge(): React.JSX.Element {
 		</span>
 	);
 }
+
+/** Marks a catalog copy pulled onto this hub. */
+export function SyncedBadge(): React.JSX.Element {
+	return (
+		<span className="badge badge--synced" title="Pulled from the Target server; read-only on this hub">
+			Synced
+		</span>
+	);
+}
+
+/** Whether a server copy can be attached or applied from this hub. */
+export function UsagePill({
+	enabled,
+	revoked = false,
+}: {
+	enabled: boolean;
+	revoked?: boolean;
+}): React.JSX.Element {
+	if (enabled) {
+		return <span className="badge badge--enabled">Enabled</span>;
+	}
+	return (
+		<span
+			className="badge badge--disabled"
+			title={revoked ? "Access revoked by the server" : "Requires a workflow create/edit permission"}
+		>
+			Disabled
+		</span>
+	);
+}
+
+/** Synced + usage pills for a server-origin catalog row. Local rows render nothing. */
+export function CatalogCopyBadges({
+	item,
+}: {
+	item: { origin?: string; usable?: boolean; revoked?: boolean };
+}): React.JSX.Element | null {
+	if (item.origin !== "server") return null;
+	return (
+		<>
+			<SyncedBadge />
+			<UsagePill enabled={item.usable !== false} revoked={item.revoked === true} />
+		</>
+	);
+}

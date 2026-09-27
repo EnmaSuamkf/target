@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Tcp, TcpInput, TcpTool, TcpToolInput } from "../api/types.ts";
-import { ServerManagedBadge } from "../components/Badge.tsx";
+import { CatalogCopyBadges } from "../components/Badge.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { Field } from "../components/Field.tsx";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { usePermissions, requires } from "../hooks/usePermissions.ts";
+import { type CatalogOriginFilter, matchesOriginFilter } from "../lib/catalogCopy.ts";
 import { relativeTime } from "../lib/format.ts";
 import styles from "./TemplatesView.module.css";
 
@@ -67,6 +68,7 @@ export function TcpsView({
 	onImport: (file: File) => void;
 }): React.JSX.Element {
 	const [query, setQuery] = useState("");
+	const [originFilter, setOriginFilter] = useState<CatalogOriginFilter>("all");
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const [creating, setCreating] = useState(false);
 	const isMobile = useIsMobile();
@@ -79,9 +81,10 @@ export function TcpsView({
 	const visible = useMemo(() => {
 		const q = query.trim().toLowerCase();
 		return tcps
+			.filter((m) => matchesOriginFilter(m, originFilter))
 			.filter((m) => (q === "" ? true : m.name.toLowerCase().includes(q) || m.tags.some((t) => t.toLowerCase().includes(q))))
 			.sort((a, b) => a.name.localeCompare(b.name));
-	}, [tcps, query]);
+	}, [tcps, query, originFilter]);
 
 	const editing = editingId ? (tcps.find((m) => m.id === editingId) ?? null) : null;
 	const showForm = creating || editing !== null;
@@ -136,6 +139,27 @@ export function TcpsView({
 						</div>
 						<input ref={fileInput} type="file" accept="application/json,.json" className={styles.fileInput} onChange={(ev) => { const f = ev.target.files?.[0]; if (f) onImport(f); ev.target.value = ""; }} />
 						<input type="search" className="input" placeholder="Search TCP…" value={query} onChange={(ev) => setQuery(ev.target.value)} />
+						{tcps.length > 0 && (
+							<div className={styles.tags} role="group" aria-label="Filter by origin">
+								{(
+									[
+										["all", "All"],
+										["own", "Own"],
+										["synced", "Synced"],
+									] as const
+								).map(([id, label]) => (
+									<button
+										key={id}
+										type="button"
+										className={`${styles.tag} ${originFilter === id ? styles.tagActive : ""}`}
+										onClick={() => setOriginFilter(id)}
+										aria-pressed={originFilter === id}
+									>
+										{label}
+									</button>
+								))}
+							</div>
+						)}
 					</div>
 					<div className={styles.list}>
 						{visible.length === 0 ? (
@@ -145,7 +169,7 @@ export function TcpsView({
 								<button key={tcp.id} type="button" className={`${styles.card} ${tcp.id === editingId ? styles.cardSelected : ""}`} onClick={() => { setCreating(false); setEditingId(tcp.id); }}>
 									<span className={styles.cardNameRow}>
 										<span className={styles.cardName}>{tcp.name}</span>
-										{tcp.origin === "server" && <ServerManagedBadge />}
+										<CatalogCopyBadges item={tcp} />
 									</span>
 									<span className={styles.cardMeta}>{tcp.tools.length} tool{tcp.tools.length === 1 ? "" : "s"} · {relativeTime(tcp.updatedAt)}</span>
 								</button>
@@ -296,10 +320,10 @@ function TcpForm({
 			<div className={styles.formHead}>
 				<h2 className={styles.heading}>
 					{tcp ? (serverManaged ? "TCP" : "Edit TCP") : "New TCP"}
-					{serverManaged && <ServerManagedBadge />}
+					{tcp && <CatalogCopyBadges item={tcp} />}
 				</h2>
 				<div className={styles.formHeadActions}>
-					{onExport && (
+					{onExport && !serverManaged && (
 						<button
 							type="button"
 							className="btn btn--sm"
@@ -310,25 +334,24 @@ function TcpForm({
 							Export
 						</button>
 					)}
-					{onDelete && (
+					{onDelete && !serverManaged && (
 						<button
 							type="button"
 							className="btn btn--sm btn--danger"
 							onClick={onDelete}
 							disabled={busy || saving || !canDeleteItem}
-							title={
-								serverManaged
-									? "Managed by the server — local delete is disabled"
-									: canDelete
-										? undefined
-										: requires("client.tcp-tools.delete")
-							}
+							title={canDelete ? undefined : requires("client.tcp-tools.delete")}
 						>
 							Delete
 						</button>
 					)}
 				</div>
 			</div>
+			{serverManaged && (
+				<p className="hint" role="note">
+					This TCP pack was pulled from the Target server and is read-only on this hub.
+				</p>
+			)}
 			<Field label="Name" required>{(props) => <input {...props} type="text" className="input" value={name} onChange={(ev) => setName(ev.target.value)} required disabled={serverManaged} />}</Field>
 			<Field label="Tags">{(props) => <input {...props} type="text" className="input" value={tags} onChange={(ev) => setTags(ev.target.value)} placeholder="github, api" disabled={serverManaged} />}</Field>
 			<div className={styles.stepsHead}>
@@ -378,20 +401,16 @@ function TcpForm({
 			))}
 			<div className={styles.formActions}>
 				<button type="button" className="btn" onClick={onCancel} disabled={saving}>Cancel</button>
-				<button
-					type="submit"
-					className="btn btn--primary"
-					disabled={saving || busy || !canSave}
-					title={
-						serverManaged
-							? "Managed by the server — local edit is disabled"
-							: canSave
-								? undefined
-								: requires(tcp ? "client.tcp-tools.edit" : "client.tcp-tools.create")
-					}
-				>
-					{saving ? "Saving…" : "Save"}
-				</button>
+				{!serverManaged && (
+					<button
+						type="submit"
+						className="btn btn--primary"
+						disabled={saving || busy || !canSave}
+						title={canSave ? undefined : requires(tcp ? "client.tcp-tools.edit" : "client.tcp-tools.create")}
+					>
+						{saving ? "Saving…" : "Save"}
+					</button>
+				)}
 			</div>
 		</form>
 	);

@@ -369,6 +369,8 @@ export interface Template {
 	origin?: "local" | "server";
 	/** False when a server copy is revoked or the owner cannot use synced resources. */
 	usable?: boolean;
+	/** True when the server dropped this copy from the role's catalog. */
+	revoked?: boolean;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -428,6 +430,8 @@ export interface Tcp {
 	origin?: "local" | "server";
 	/** False when a server copy is revoked or the owner cannot use synced resources. */
 	usable?: boolean;
+	/** True when the server dropped this copy from the role's catalog. */
+	revoked?: boolean;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -512,6 +516,8 @@ export interface ResourceSet {
 	origin?: "local" | "server";
 	/** False when a server copy is revoked or the owner cannot use synced resources. */
 	usable?: boolean;
+	/** True when the server dropped this copy from the role's catalog. */
+	revoked?: boolean;
 	createdAt: string;
 	updatedAt: string;
 }

@@ -283,10 +283,23 @@ kbd,
 	border-color: var(--danger-200);
 	color: var(--danger-700);
 }
-.badge--remote {
+.badge--remote,
+.badge--synced {
 	background: #eef2ff;
 	border-color: #c7d2fe;
 	color: #4338ca;
+}
+
+.badge--enabled {
+	background: var(--success-50);
+	border-color: var(--success-200);
+	color: var(--success-700);
+}
+
+.badge--disabled {
+	background: var(--gray-100);
+	border-color: var(--gray-200);
+	color: var(--gray-500);
 }
 
 .badge--pending {

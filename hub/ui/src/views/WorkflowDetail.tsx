@@ -26,6 +26,7 @@ import { ProgressBar } from "../components/Progress.tsx";
 import { Switch } from "../components/Switch.tsx";
 import { usePermissions, requires } from "../hooks/usePermissions.ts";
 import { useStagedImages } from "../hooks/useStagedImages.ts";
+import { isUsableCopy, templateOptionLabel } from "../lib/catalogCopy.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
 import { canMoveStep } from "../lib/stepMove.ts";
 import {
@@ -1077,8 +1078,8 @@ function AddStepForm({
 						>
 							<option value="">Choose a template…</option>
 							{templates.map((template) => (
-								<option key={template.id} value={template.id}>
-									{template.name} ({template.steps.length} steps)
+								<option key={template.id} value={template.id} disabled={!isUsableCopy(template)}>
+									{templateOptionLabel(template)}
 								</option>
 							))}
 						</select>

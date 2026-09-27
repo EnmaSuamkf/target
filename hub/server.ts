@@ -649,6 +649,7 @@ function publicTcp(tcp: Tcp): Record<string, unknown> {
 		tools: tcp.tools,
 		origin: tcp.origin,
 		usable: catalogCopyUsable(tcp),
+		revoked: tcp.revoked === true,
 		createdAt: tcp.createdAt,
 		updatedAt: tcp.updatedAt,
 	};
@@ -662,6 +663,7 @@ function publicResourceSet(set: ResourceSet): Record<string, unknown> {
 		resources: set.resources,
 		origin: set.origin,
 		usable: catalogCopyUsable(set),
+		revoked: set.revoked === true,
 		createdAt: set.createdAt,
 		updatedAt: set.updatedAt,
 	};
@@ -678,6 +680,7 @@ function publicTemplate(template: Template): Record<string, unknown> {
 		resourceSelections: template.resourceSelections,
 		origin: template.origin,
 		usable: catalogCopyUsable(template),
+		revoked: template.revoked === true,
 		createdAt: template.createdAt,
 		updatedAt: template.updatedAt,
 	};
