@@ -42,6 +42,8 @@
  *   POST   /api/workflows/:id/restart                  → reset all steps, start over (admin token)
  *   POST   /api/steps/:id/result                       → awb's result callback (?token=<per-step token>)
  *   GET    /api/templates                              → list templates (optional ?q= filters by name/tag)
+ *   POST   /api/catalog/sync                            → pull the linked server's catalog (operator + a client.*.sync permission; 409 if not linked; 502 if the server is too old)
+ *   GET    /api/catalog/sync/status                     → last catalog pull time and per-domain summary
  *   POST   /api/templates                               → create a template (admin token)
  *   GET    /api/templates/:id                            → template detail
  *   GET    /api/fs/dirs?path=<dir>&files=1                → list subdirectories (+files with files=1; admin token; for the UI's pickers)
@@ -108,6 +110,7 @@ import {
 } from "./config.ts";
 import { disconnectDeviceLink, pollDeviceLink, startDeviceLink } from "./device-link-client.ts";
 import { getDeviceLinkStatus } from "./device-link.ts";
+import { CatalogSyncError, getCatalogSyncStatus, syncServerCatalog } from "./catalog-sync.ts";
 import { publicPermissionsState, resolvePermissionMode } from "./owner-permissions.ts";
 import { adoptability, findConversation, listConversations, readConversationPreview } from "./conversations.ts";
 import {
@@ -910,6 +913,45 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// The UI reads this to know what the linked owner's role allows. It is
 	// operator-gated (same as GET /api/device-link) but not role-gated: this
 	// is how the client learns the role. The body is only public metadata.
+	if (parts[1] === "catalog" && parts[2] === "sync" && parts[3] === "status" && !parts[4] && req.method === "GET") {
+		sendJson(res, 200, getCatalogSyncStatus());
+		return;
+	}
+
+	if (parts[1] === "catalog" && parts[2] === "sync" && !parts[3] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		if (resolvePermissionMode().mode !== "enforced") {
+			sendJson(res, 409, { error: "not_linked" });
+			return;
+		}
+		if (!requirePermission(cfg, req, res, "client.templates.sync", "client.tcp-tools.sync", "client.rci.sync")) {
+			return;
+		}
+		void syncServerCatalog()
+			.then((result) => sendJson(res, 200, result))
+			.catch((err) => {
+				if (err instanceof CatalogSyncError) {
+					if (err.code === "catalog_sync_unsupported") {
+						sendJson(res, 502, { error: "catalog_sync_unsupported" });
+						return;
+					}
+					if (err.code === "not_linked") {
+						sendJson(res, 409, { error: "not_linked" });
+						return;
+					}
+					if (err.code === "forbidden" || err.code === "owner_required") {
+						sendJson(res, 403, { error: err.code });
+						return;
+					}
+				}
+				sendJson(res, 502, { error: String((err as Error).message ?? err) });
+			});
+		return;
+	}
+
 	if (parts[1] === "permissions" && !parts[2] && req.method === "GET") {
 		if (!isAdmin(cfg, req.headers)) {
 			sendJson(res, 401, { error: "unauthorized" });

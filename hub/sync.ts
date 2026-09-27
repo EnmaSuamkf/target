@@ -160,11 +160,11 @@ function logMessage(
 	log?.(message, level);
 }
 
-function syncUrl(base: string, path: string): string {
+export function syncUrl(base: string, path: string): string {
 	return `${base.replace(/\/$/, "")}${path}`;
 }
 
-async function syncFetch(
+export async function syncFetch(
 	url: string,
 	init: RequestInit,
 	fetchImpl: FetchLike,
@@ -178,7 +178,7 @@ async function syncFetch(
 	}
 }
 
-function authHeaders(token: string, method: string, path: string, body = ""): Record<string, string> {
+export function authHeaders(token: string, method: string, path: string, body = ""): Record<string, string> {
 	const signed = remoteAuth("sync:write").kind === "device" ? deviceHeaders(method, path, body) : null;
 	return {
 		...(signed ?? { authorization: `Bearer ${token}` }),

@@ -18,6 +18,8 @@ import type {
 	Attachment,
 	AttachmentField,
 	AuthStatus,
+	CatalogSyncResult,
+	CatalogSyncStatus,
 	CloneWorkflowInput,
 	Conversation,
 	ConversationPreview,
@@ -784,6 +786,14 @@ export async function setWorkflowResourceSelections(
 }
 
 // --- settings ---
+
+export function syncServerResources(): Promise<CatalogSyncResult> {
+	return request<CatalogSyncResult>("/api/catalog/sync", { method: "POST", admin: true });
+}
+
+export function getCatalogSyncStatus(): Promise<CatalogSyncStatus> {
+	return request<CatalogSyncStatus>("/api/catalog/sync/status");
+}
 
 export async function getDeviceLinkStatus(): Promise<DeviceLinkStatus> {
 	const data = await request<{ status: DeviceLinkStatus }>("/api/device-link", { admin: true });

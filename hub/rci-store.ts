@@ -458,12 +458,25 @@ export function setWorkflowResourceSelections(workflowId: string, selections: Re
 	return valid;
 }
 
-/** Adds a template's resource selections to a workflow, merging resource subsets. */
+/** Adds a template's resource selections to a workflow, merging resource subsets. Missing sets are skipped. */
 export function applyTemplateResourcesToWorkflow(workflowId: string, templateSelections: ResourceSelection[]): ResourceSelection[] {
-	const incoming = validateSelections(templateSelections);
+	const present = templateSelections.filter((selection) => getResourceSet(selection.resourceSetId));
+	const incoming = validateSelections(present);
 	if (incoming.length === 0) return listWorkflowResourceSelections(workflowId);
 	return setWorkflowResourceSelections(
 		workflowId,
 		mergeResourceSelections(listWorkflowResourceSelections(workflowId), incoming),
 	);
+}
+
+export function setResourceSetSyncMeta(id: string, input: { syncSource: string | null; revoked: boolean }): void {
+	ensureRciSchema();
+	open()
+		.prepare("UPDATE resource_sets SET sync_source = ?, revoked = ?, updated_at = ? WHERE id = ?")
+		.run(input.syncSource, input.revoked ? 1 : 0, new Date().toISOString(), id);
+}
+
+export function isResourceSetAttachedToWorkflow(id: string): boolean {
+	ensureRciSchema();
+	return open().prepare("SELECT 1 FROM workflow_resource_sets WHERE resource_set_id = ? LIMIT 1").get(id) != null;
 }

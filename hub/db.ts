@@ -358,6 +358,33 @@ export function mergeCatalogSyncSources(existing: string | null | undefined, inc
 	return (["workflow", "catalog"] as const).filter((part) => parts.has(part)).join(",");
 }
 
+export function dropCatalogSyncSource(existing: string | null | undefined): string | null {
+	const parts = new Set(
+		String(existing ?? "")
+			.split(",")
+			.map((part) => part.trim())
+			.filter((part) => part === "workflow" || part === "catalog"),
+	);
+	parts.delete("catalog");
+	const next = (["workflow", "catalog"] as const).filter((part) => parts.has(part)).join(",");
+	return next === "" ? null : next;
+}
+
+export function catalogSyncSourceIncludes(existing: string | null | undefined, source: CatalogSyncSource): boolean {
+	return String(existing ?? "")
+		.split(",")
+		.map((part) => part.trim())
+		.includes(source);
+}
+
+export function setTemplateSyncMeta(id: string, input: { syncSource: string | null; revoked: boolean }): void {
+	const existing = getTemplate(id);
+	if (!existing) return;
+	open()
+		.prepare("UPDATE templates SET sync_source = ?, revoked = ?, updated_at = ? WHERE id = ?")
+		.run(input.syncSource, input.revoked ? 1 : 0, new Date().toISOString(), id);
+}
+
 export class TemplateStoreError extends Error {
 	readonly code: string;
 	constructor(code: string) {

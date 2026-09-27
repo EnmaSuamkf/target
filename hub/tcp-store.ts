@@ -491,11 +491,24 @@ export function setWorkflowTcps(workflowId: string, tcpIds: string[]): string[] 
 	return selectionsToTcpIds(setWorkflowTcpSelections(workflowId, tcpIdsToSelections(tcpIds)));
 }
 
-/** Adds template TCP selections to a workflow, merging tool subsets. */
+/** Adds template TCP selections to a workflow, merging tool subsets. Missing TCP ids are skipped. */
 export function applyTemplateTcpsToWorkflow(workflowId: string, templateSelections: TcpSelection[]): TcpSelection[] {
-	const incoming = validateSelections(templateSelections);
+	const present = templateSelections.filter((selection) => getTcp(selection.tcpId));
+	const incoming = validateSelections(present);
 	if (incoming.length === 0) return listWorkflowTcpSelections(workflowId);
 	return setWorkflowTcpSelections(workflowId, mergeTcpSelections(listWorkflowTcpSelections(workflowId), incoming));
+}
+
+export function setTcpSyncMeta(id: string, input: { syncSource: string | null; revoked: boolean }): void {
+	ensureTcpSchema();
+	open()
+		.prepare("UPDATE tcps SET sync_source = ?, revoked = ?, updated_at = ? WHERE id = ?")
+		.run(input.syncSource, input.revoked ? 1 : 0, new Date().toISOString(), id);
+}
+
+export function isTcpAttachedToWorkflow(id: string): boolean {
+	ensureTcpSchema();
+	return open().prepare("SELECT 1 FROM workflow_tcps WHERE tcp_id = ? LIMIT 1").get(id) != null;
 }
 
 /** @deprecated Use applyTemplateTcpsToWorkflow with selections. */

@@ -534,6 +534,28 @@ export interface ResourceSetUsage {
 	templates: ResourceSetUsageTemplate[];
 }
 
+export interface CatalogSyncDomainResult {
+	added: number;
+	updated: number;
+	removed: number;
+	revoked: number;
+	skipped: number;
+	syncedAt: string;
+}
+
+export interface CatalogSyncResult {
+	templates: CatalogSyncDomainResult;
+	tcp_tools: CatalogSyncDomainResult;
+	resource_sets: CatalogSyncDomainResult;
+}
+
+export interface CatalogSyncStatus {
+	syncedAt: string | null;
+	templates: CatalogSyncDomainResult | null;
+	tcp_tools: CatalogSyncDomainResult | null;
+	resource_sets: CatalogSyncDomainResult | null;
+}
+
 /**
  * Per-channel notification config, keyed by channel id.
  *
