@@ -9,6 +9,20 @@ The current version is reported by every instance to the central server (see
 
 ## [Unreleased]
 
+### Added
+
+- **Role-based catalog sync from the linked server.** Settings → Catalog
+  navigation offers **Sync resources** when the owner's role includes any of
+  `client.templates.sync`, `client.tcp-tools.sync`, or `client.rci.sync`. The
+  hub pulls `GET /api/sync/catalog` (`catalog-sync/v1`), stores copies with
+  `origin=server` / `sync_source=catalog`, and marks them Enabled only while
+  `canUseServerResources()` holds (enforced mode plus a workflow
+  create/edit/manage permission) and the copy is not revoked. Using an
+  unusable copy from the operator HTTP API returns
+  `403 { "error": "server_resource_disabled" }`. An old server that lacks the
+  catalog route surfaces “The server does not support resource sync”. See
+  [`docs/hub-permissions.md`](docs/hub-permissions.md).
+
 ### Changed
 
 - **Client permission IDs are `client.*`, not `remote.*`.** The hub gate, UI

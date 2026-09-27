@@ -76,6 +76,51 @@ Other `/api/settings/*` writes stay operator-gated only (`isAdmin`). Linking
 (`POST /api/device-link/start`, `POST /api/device-link/poll`) is operator-gated
 and not role-gated: there is no owner yet.
 
+### Catalog sync
+
+| Method | Path | Permission |
+| --- | --- | --- |
+| `POST` | `/api/catalog/sync` | any of `client.templates.sync`, `client.tcp-tools.sync`, `client.rci.sync` (and `enforced`; `409 not_linked` otherwise) |
+| `GET` | `/api/catalog/sync/status` | operator gate only |
+
+`POST` calls the linked server's `GET /api/sync/catalog`. An old server that
+404s that path becomes `502 { "error": "catalog_sync_unsupported" }`. The hub
+upserts TCP/RCI then templates in one SQLite transaction, then prunes copies
+that lost the `catalog` source.
+
+### Synced copies (`origin` / `sync_source` / `revoked`)
+
+Templates, TCP packs and resource sets store:
+
+- `origin`: `local` or `server`
+- `sync_source`: `workflow`, `catalog`, or `workflow,catalog` (a row can arrive
+  both from a remote workflow attach and from a catalog pull)
+- `revoked`: `1` when the catalog drop could not delete the row because a
+  workflow still references it
+
+Local PATCH/DELETE of an `origin=server` row returns `409 { "error":
+"server_managed" }` (templates included — the same rule TCP/RCI already had).
+GET export bundles omit `origin=server` rows. Sync command handlers write the
+store directly and skip the HTTP usage gate.
+
+List and detail include `usable: boolean` (local rows are always `true`) so
+the MCP sees the same flag as the UI.
+
+### Enabled / Disabled (`canUseServerResources`)
+
+A server copy is **usable** only when `canUseServerResources()` is true and
+`revoked` is not set. `canUseServerResources()` is true only in `enforced`
+mode when the owner has any of `client.workflows.create`,
+`client.workflows.steps.add`, `client.workflows.steps.edit`, or
+`client.workflows.manage`. Unrestricted and `read_only` hubs mark every
+server copy Disabled.
+
+Operator HTTP returns `403 { "error": "server_resource_disabled", "resourceId" }`
+when creating a workflow from a server template, appending a server template,
+**adding** a server TCP/RCI to a workflow or a local template, or referencing
+them from `POST`/`PATCH` `/api/templates`. Removing an already-attached server
+TCP/RCI stays allowed.
+
 ### Workflows
 
 | Method | Path | Permission |
@@ -158,7 +203,15 @@ The UI polls `GET /api/permissions` on the existing 2s tick. Controls are
 (`Requires client.workflows.execute`). Settings → **Your role permissions**
 shows the mode, the server origin, the `granted` list the server already
 trimmed, and the read-only warning. Disconnect and the Remote Sync switch
-require `client.workflows.manage` (D5).
+require `client.workflows.manage` (D5). Settings → **Catalog navigation**
+shows a **Sync resources** button when the mode is `enforced` and the owner
+has any `client.*.sync` permission; it polls `GET /api/catalog/sync/status`
+on the same 2s tick and toasts the per-domain added/updated/removed/revoked
+counts (or “The server does not support resource sync”). Template, TCP and
+RCI lists filter All / Own / Synced and show a Synced badge plus an
+Enabled/Disabled pill. Unusable server templates appear as disabled options
+suffixed “ — Disabled”; unusable TCP/RCI checkboxes stay off unless they are
+already selected (so they can still be removed).
 
 ## This is not a security boundary
 
