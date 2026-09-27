@@ -111,7 +111,7 @@ import {
 import { disconnectDeviceLink, pollDeviceLink, startDeviceLink } from "./device-link-client.ts";
 import { getDeviceLinkStatus } from "./device-link.ts";
 import { CatalogSyncError, getCatalogSyncStatus, syncServerCatalog } from "./catalog-sync.ts";
-import { publicPermissionsState, resolvePermissionMode } from "./owner-permissions.ts";
+import { canUseServerResources, publicPermissionsState, resolvePermissionMode } from "./owner-permissions.ts";
 import { adoptability, findConversation, listConversations, readConversationPreview } from "./conversations.ts";
 import {
 	AccountError,
@@ -189,12 +189,14 @@ import {
 	tcpBundle,
 	TcpBundleError,
 	normalizeTcpSelections,
+	tcpIdsToSelections,
 	parseTcpBundle,
 	applyTemplateTcpsToWorkflow,
 	setWorkflowTcpSelections,
 	updateTcp,
 	workflowMayExecuteTool,
 	type Tcp,
+	type TcpSelection,
 } from "./tcp-store.ts";
 import { getTcpUsage } from "./tcp-usage.ts";
 import {
@@ -208,6 +210,7 @@ import {
 	setWorkflowResourceSelections,
 	updateResourceSet,
 	type ResourceSet,
+	type ResourceSelection,
 } from "./rci-store.ts";
 import { getResourceSetUsage } from "./rci-usage.ts";
 import { importResourcesFromFolder, MAX_RESOURCE_SET_BYTES, ResourceImportError } from "./rci-import.ts";
@@ -592,6 +595,52 @@ function publicTcpUsage(usage: import("./tcp-usage.ts").TcpUsage): import("./tcp
 	return usage;
 }
 
+function catalogCopyUsable(item: { origin?: string; revoked?: boolean }): boolean {
+	if (item.origin !== "server") return true;
+	return canUseServerResources() && item.revoked !== true;
+}
+
+function rejectUnusableServerResource(res: http.ServerResponse, resourceId: string): true {
+	sendJson(res, 403, { error: "server_resource_disabled", resourceId });
+	return true;
+}
+
+function firstUnusableAddedTcp(workflowId: string, selections: TcpSelection[]): string | null {
+	const current = new Set(listWorkflowTcpSelections(workflowId).map((selection) => selection.tcpId));
+	for (const selection of selections) {
+		if (current.has(selection.tcpId)) continue;
+		const tcp = getTcp(selection.tcpId);
+		if (tcp && !catalogCopyUsable(tcp)) return tcp.id;
+	}
+	return null;
+}
+
+function firstUnusableAddedResourceSet(workflowId: string, selections: ResourceSelection[]): string | null {
+	const current = new Set(listWorkflowResourceSelections(workflowId).map((selection) => selection.resourceSetId));
+	for (const selection of selections) {
+		if (current.has(selection.resourceSetId)) continue;
+		const set = getResourceSet(selection.resourceSetId);
+		if (set && !catalogCopyUsable(set)) return set.id;
+	}
+	return null;
+}
+
+function firstUnusableTemplateRef(tcpSelections: unknown, resourceSelections: unknown): string | null {
+	const tcpList =
+		Array.isArray(tcpSelections) && tcpSelections.every((item) => typeof item === "string")
+			? tcpIdsToSelections(tcpSelections as string[])
+			: normalizeTcpSelections(tcpSelections);
+	for (const selection of tcpList) {
+		const tcp = getTcp(selection.tcpId);
+		if (tcp && !catalogCopyUsable(tcp)) return tcp.id;
+	}
+	for (const selection of normalizeResourceSelections(resourceSelections)) {
+		const set = getResourceSet(selection.resourceSetId);
+		if (set && !catalogCopyUsable(set)) return set.id;
+	}
+	return null;
+}
+
 function publicTcp(tcp: Tcp): Record<string, unknown> {
 	return {
 		id: tcp.id,
@@ -599,6 +648,7 @@ function publicTcp(tcp: Tcp): Record<string, unknown> {
 		tags: tcp.tags,
 		tools: tcp.tools,
 		origin: tcp.origin,
+		usable: catalogCopyUsable(tcp),
 		createdAt: tcp.createdAt,
 		updatedAt: tcp.updatedAt,
 	};
@@ -611,6 +661,7 @@ function publicResourceSet(set: ResourceSet): Record<string, unknown> {
 		tags: set.tags,
 		resources: set.resources,
 		origin: set.origin,
+		usable: catalogCopyUsable(set),
 		createdAt: set.createdAt,
 		updatedAt: set.updatedAt,
 	};
@@ -626,6 +677,7 @@ function publicTemplate(template: Template): Record<string, unknown> {
 		tcpSelections: template.tcpSelections,
 		resourceSelections: template.resourceSelections,
 		origin: template.origin,
+		usable: catalogCopyUsable(template),
 		createdAt: template.createdAt,
 		updatedAt: template.updatedAt,
 	};
@@ -1324,6 +1376,11 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						sendJson(res, 400, { error: "name is required" });
 						return;
 					}
+					const blockedRef = firstUnusableTemplateRef(body.tcpSelections ?? body.tcpIds, body.resourceSelections);
+					if (blockedRef) {
+						rejectUnusableServerResource(res, blockedRef);
+						return;
+					}
 					const template = insertTemplate({
 						name,
 						tags: body.tags,
@@ -1449,6 +1506,13 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				if ("tcpSelections" in body) input.tcpSelections = body.tcpSelections;
 				else if ("tcpIds" in body) input.tcpIds = body.tcpIds;
 				if ("resourceSelections" in body) input.resourceSelections = body.resourceSelections;
+				const nextTcp = "tcpSelections" in input || "tcpIds" in input ? input.tcpSelections ?? input.tcpIds : existingTemplate.tcpSelections;
+				const nextRci = "resourceSelections" in input ? input.resourceSelections : existingTemplate.resourceSelections;
+				const blockedRef = firstUnusableTemplateRef(nextTcp, nextRci);
+				if (blockedRef) {
+					rejectUnusableServerResource(res, blockedRef);
+					return;
+				}
 				const template = updateTemplate(templateId, input);
 				if (!template) {
 					sendJson(res, 404, { error: "unknown_template" });
@@ -2686,6 +2750,15 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						sendJson(res, 404, { error: "unknown_template" });
 						return;
 					}
+					if (!catalogCopyUsable(template)) {
+						rejectUnusableServerResource(res, template.id);
+						return;
+					}
+					const blockedRef = firstUnusableTemplateRef(template.tcpSelections, template.resourceSelections);
+					if (blockedRef) {
+						rejectUnusableServerResource(res, blockedRef);
+						return;
+					}
 				}
 				try {
 					const workflow = createWorkflow(name, {
@@ -2888,6 +2961,11 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, 400, { error: "tcpSelections or tcpIds is required" });
 				return;
 			}
+			const blockedTcp = firstUnusableAddedTcp(workflowId, selections);
+			if (blockedTcp) {
+				rejectUnusableServerResource(res, blockedTcp);
+				return;
+			}
 			try {
 				setWorkflowTcpSelections(workflowId, selections);
 				log(`workflow ${workflowId} TCP attachments updated (${selections.length})`);
@@ -2926,6 +3004,11 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return;
 			}
 			const selections = normalizeResourceSelections(body.resourceSelections);
+			const blockedSet = firstUnusableAddedResourceSet(workflowId, selections);
+			if (blockedSet) {
+				rejectUnusableServerResource(res, blockedSet);
+				return;
+			}
 			try {
 				setWorkflowResourceSelections(workflowId, selections);
 				log(`workflow ${workflowId} RCI attachments updated (${selections.length})`);
@@ -3189,6 +3272,15 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			const template = getTemplate(templateId);
 			if (!template) {
 				sendJson(res, 404, { error: "unknown_template" });
+				return;
+			}
+			if (!catalogCopyUsable(template)) {
+				rejectUnusableServerResource(res, template.id);
+				return;
+			}
+			const blockedRef = firstUnusableTemplateRef(template.tcpSelections, template.resourceSelections);
+			if (blockedRef) {
+				rejectUnusableServerResource(res, blockedRef);
 				return;
 			}
 			try {

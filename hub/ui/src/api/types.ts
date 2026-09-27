@@ -367,6 +367,8 @@ export interface Template {
 	resourceSelections: ResourceSelection[];
 	/** `server` copies are pulled from the catalog and are read-only locally. */
 	origin?: "local" | "server";
+	/** False when a server copy is revoked or the owner cannot use synced resources. */
+	usable?: boolean;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -424,6 +426,8 @@ export interface Tcp {
 	tools: TcpTool[];
 	/** `server` copies are pushed by remote sync and are read-only locally. */
 	origin?: "local" | "server";
+	/** False when a server copy is revoked or the owner cannot use synced resources. */
+	usable?: boolean;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -506,6 +510,8 @@ export interface ResourceSet {
 	resources: Resource[];
 	/** `server` copies are pushed by remote sync and are read-only locally. */
 	origin?: "local" | "server";
+	/** False when a server copy is revoked or the owner cannot use synced resources. */
+	usable?: boolean;
 	createdAt: string;
 	updatedAt: string;
 }

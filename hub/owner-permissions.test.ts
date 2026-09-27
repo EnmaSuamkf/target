@@ -21,6 +21,7 @@ const {
 	deleteDeviceLink,
 } = await import("./device-link.ts");
 const {
+	canUseServerResources,
 	clearOwnerSnapshot,
 	hasPermission,
 	recordOwnerSnapshot,
@@ -111,6 +112,30 @@ test("disconnecting the device clears the snapshot", () => {
 	deleteDeviceLink();
 	assert.equal(getOwnerPermissionsJson(), null);
 	assert.equal(resolvePermissionMode().mode, "unrestricted");
+});
+
+test("canUseServerResources is true only when enforced with a workflow permission", () => {
+	deleteDeviceLink();
+	clearOwnerSnapshot();
+	assert.equal(resolvePermissionMode().mode, "unrestricted");
+	assert.equal(canUseServerResources(), false);
+
+	link("dev_use_none");
+	assert.equal(resolvePermissionMode().mode, "read_only");
+	assert.equal(canUseServerResources(), false);
+
+	recordOwnerSnapshot(owner(["client.read", "client.templates.create"]), "dev_use_none", ORIGIN);
+	assert.equal(resolvePermissionMode().mode, "enforced");
+	assert.equal(canUseServerResources(), false);
+
+	recordOwnerSnapshot(owner(["client.workflows.create"]), "dev_use_none", ORIGIN);
+	assert.equal(canUseServerResources(), true);
+	recordOwnerSnapshot(owner(["client.workflows.steps.add"]), "dev_use_none", ORIGIN);
+	assert.equal(canUseServerResources(), true);
+	recordOwnerSnapshot(owner(["client.workflows.steps.edit"]), "dev_use_none", ORIGIN);
+	assert.equal(canUseServerResources(), true);
+	recordOwnerSnapshot(owner(["client.workflows.manage"]), "dev_use_none", ORIGIN);
+	assert.equal(canUseServerResources(), true);
 });
 
 test("a different deviceId invalidates the stored snapshot", () => {
