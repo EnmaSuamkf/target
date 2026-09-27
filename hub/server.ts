@@ -622,6 +622,7 @@ function publicTemplate(template: Template): Record<string, unknown> {
 		tcpIds: template.tcpIds,
 		tcpSelections: template.tcpSelections,
 		resourceSelections: template.resourceSelections,
+		origin: template.origin,
 		createdAt: template.createdAt,
 		updatedAt: template.updatedAt,
 	};
@@ -1313,7 +1314,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			if (!requirePermission(cfg, req, res, "client.templates.export")) {
 				return;
 			}
-			sendJson(res, 200, templateBundle(listTemplates()));
+			sendJson(res, 200, templateBundle(listTemplates().filter((template) => template.origin !== "server")));
 			return;
 		}
 
@@ -1353,6 +1354,10 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, 404, { error: "unknown_template" });
 				return;
 			}
+			if (template.origin === "server") {
+				sendJson(res, 409, { error: "server_managed" });
+				return;
+			}
 			sendJson(res, 200, templateBundle([template]));
 			return;
 		}
@@ -1369,6 +1374,15 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 
 		if (!parts[3] && (req.method === "PATCH" || req.method === "PUT")) {
 			if (!requirePermission(cfg, req, res, "client.templates.edit")) {
+				return;
+			}
+			const existingTemplate = getTemplate(templateId);
+			if (!existingTemplate) {
+				sendJson(res, 404, { error: "unknown_template" });
+				return;
+			}
+			if (existingTemplate.origin === "server") {
+				sendJson(res, 409, { error: "server_managed" });
 				return;
 			}
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1405,6 +1419,15 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 
 		if (!parts[3] && req.method === "DELETE") {
 			if (!requirePermission(cfg, req, res, "client.templates.delete")) {
+				return;
+			}
+			const existingTemplate = getTemplate(templateId);
+			if (!existingTemplate) {
+				sendJson(res, 404, { error: "unknown_template" });
+				return;
+			}
+			if (existingTemplate.origin === "server") {
+				sendJson(res, 409, { error: "server_managed" });
 				return;
 			}
 			const removed = deleteTemplate(templateId);
@@ -1460,7 +1483,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			if (!requirePermission(cfg, req, res, "client.tcp-tools.export")) {
 				return;
 			}
-			sendJson(res, 200, tcpBundle(listTcps()));
+			sendJson(res, 200, tcpBundle(listTcps().filter((tcp) => tcp.origin !== "server")));
 			return;
 		}
 
@@ -1517,6 +1540,10 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			const tcp = getTcp(tcpId);
 			if (!tcp) {
 				sendJson(res, 404, { error: "unknown_tcp" });
+				return;
+			}
+			if (tcp.origin === "server") {
+				sendJson(res, 409, { error: "server_managed" });
 				return;
 			}
 			sendJson(res, 200, tcpBundle([tcp]));

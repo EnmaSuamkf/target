@@ -805,11 +805,15 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 	},
 	"tcp-tool.upsert": (command) => {
 		const resource = parseResourceEnvelope(command.payload);
-		const tcp = upsertServerTcp(resource.id, {
-			name: resource.name,
-			tags: resource.data.tags,
-			tools: resource.data.tools,
-		});
+		const tcp = upsertServerTcp(
+			resource.id,
+			{
+				name: resource.name,
+				tags: resource.data.tags,
+				tools: resource.data.tools,
+			},
+			"workflow",
+		);
 		queueEvent({
 			type: "tcp-tool.upserted",
 			payload: { resource: { id: tcp.id, name: tcp.name, data: { tags: tcp.tags, tools: tcp.tools } } },
@@ -827,11 +831,15 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 	},
 	"resource-set.upsert": (command) => {
 		const resource = parseResourceEnvelope(command.payload);
-		const set = upsertServerResourceSet(resource.id, {
-			name: resource.name,
-			tags: resource.data.tags,
-			resources: resource.data.resources,
-		});
+		const set = upsertServerResourceSet(
+			resource.id,
+			{
+				name: resource.name,
+				tags: resource.data.tags,
+				resources: resource.data.resources,
+			},
+			"workflow",
+		);
 		queueEvent({
 			type: "resource-set.upserted",
 			payload: {

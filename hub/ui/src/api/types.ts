@@ -365,6 +365,8 @@ export interface Template {
 	tcpIds: string[];
 	tcpSelections: TcpSelection[];
 	resourceSelections: ResourceSelection[];
+	/** `server` copies are pulled from the catalog and are read-only locally. */
+	origin?: "local" | "server";
 	createdAt: string;
 	updatedAt: string;
 }

@@ -1,7 +1,7 @@
 /**
  * Persistence for TCP (Tool Context Protocol) definitions and workflow attachments.
  */
-import { open } from "./db.ts";
+import { mergeCatalogSyncSources, open, type CatalogSyncSource } from "./db.ts";
 import {
 	type TcpSelection,
 	mergeTcpSelections,
@@ -45,6 +45,11 @@ export interface Tcp {
 	tools: TcpTool[];
 	/** `server` copies are pushed by remote sync and are read-only locally. */
 	origin: CatalogOrigin;
+	/** How this copy arrived: `workflow`, `catalog`, or `workflow,catalog`. */
+	syncSource: string | null;
+	syncedAt: string | null;
+	/** True when the server no longer grants this copy but something still references it. */
+	revoked: boolean;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -99,6 +104,9 @@ export function ensureTcpSchema(): void {
 			tags TEXT NOT NULL DEFAULT '[]',
 			tools TEXT NOT NULL DEFAULT '[]',
 			origin TEXT NOT NULL DEFAULT 'local',
+			sync_source TEXT,
+			synced_at TEXT,
+			revoked INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
@@ -122,6 +130,9 @@ export function ensureTcpSchema(): void {
 		(db.prepare("PRAGMA table_info(tcps)").all() as Record<string, unknown>[]).map((c) => String(c.name)),
 	);
 	if (!tcpCols.has("origin")) db.exec("ALTER TABLE tcps ADD COLUMN origin TEXT NOT NULL DEFAULT 'local';");
+	if (!tcpCols.has("sync_source")) db.exec("ALTER TABLE tcps ADD COLUMN sync_source TEXT;");
+	if (!tcpCols.has("synced_at")) db.exec("ALTER TABLE tcps ADD COLUMN synced_at TEXT;");
+	if (!tcpCols.has("revoked")) db.exec("ALTER TABLE tcps ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0;");
 }
 
 function normalizeTags(tags: unknown): string[] {
@@ -200,6 +211,9 @@ function rowToTcp(row: Record<string, unknown>): Tcp {
 		tags,
 		tools,
 		origin: row.origin === "server" ? "server" : "local",
+		syncSource: typeof row.sync_source === "string" && row.sync_source !== "" ? String(row.sync_source) : null,
+		syncedAt: row.synced_at == null || row.synced_at === "" ? null : String(row.synced_at),
+		revoked: row.revoked === 1 || row.revoked === true,
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
 	};
@@ -214,12 +228,15 @@ export function insertTcp(input: { name: string; tags?: unknown; tools?: unknown
 		tags: normalizeTags(input.tags),
 		tools: normalizeTcpTools(input.tools),
 		origin: "local",
+		syncSource: null,
+		syncedAt: null,
+		revoked: false,
 		createdAt: now,
 		updatedAt: now,
 	};
 	open()
-		.prepare(`INSERT INTO tcps (id, name, tags, tools, origin, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-		.run(tcp.id, tcp.name, JSON.stringify(tcp.tags), JSON.stringify(tcp.tools), tcp.origin, tcp.createdAt, tcp.updatedAt);
+		.prepare(`INSERT INTO tcps (id, name, tags, tools, origin, sync_source, synced_at, revoked, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		.run(tcp.id, tcp.name, JSON.stringify(tcp.tags), JSON.stringify(tcp.tools), tcp.origin, tcp.syncSource, tcp.syncedAt, 0, tcp.createdAt, tcp.updatedAt);
 	return tcp;
 }
 
@@ -227,7 +244,11 @@ export function insertTcp(input: { name: string; tags?: unknown; tools?: unknown
  * Insert or replace a TCP pack under the server's id. A later upsert overwrites
  * the copy and keeps origin=server.
  */
-export function upsertServerTcp(id: string, input: { name: string; tags?: unknown; tools?: unknown }): Tcp {
+export function upsertServerTcp(
+	id: string,
+	input: { name: string; tags?: unknown; tools?: unknown },
+	source: CatalogSyncSource = "workflow",
+): Tcp {
 	ensureTcpSchema();
 	const existing = getTcp(id);
 	const now = new Date().toISOString();
@@ -237,20 +258,37 @@ export function upsertServerTcp(id: string, input: { name: string; tags?: unknow
 		tags: normalizeTags(input.tags),
 		tools: normalizeTcpTools(input.tools),
 		origin: "server",
+		syncSource: mergeCatalogSyncSources(existing?.syncSource, source),
+		syncedAt: now,
+		revoked: false,
 		createdAt: existing?.createdAt ?? now,
 		updatedAt: now,
 	};
 	open()
 		.prepare(
-			`INSERT INTO tcps (id, name, tags, tools, origin, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO tcps (id, name, tags, tools, origin, sync_source, synced_at, revoked, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 			   name = excluded.name,
 			   tags = excluded.tags,
 			   tools = excluded.tools,
 			   origin = 'server',
+			   sync_source = excluded.sync_source,
+			   synced_at = excluded.synced_at,
+			   revoked = 0,
 			   updated_at = excluded.updated_at`,
 		)
-		.run(tcp.id, tcp.name, JSON.stringify(tcp.tags), JSON.stringify(tcp.tools), tcp.origin, tcp.createdAt, tcp.updatedAt);
+		.run(
+			tcp.id,
+			tcp.name,
+			JSON.stringify(tcp.tags),
+			JSON.stringify(tcp.tools),
+			tcp.origin,
+			tcp.syncSource,
+			tcp.syncedAt,
+			0,
+			tcp.createdAt,
+			tcp.updatedAt,
+		);
 	return getTcp(id)!;
 }
 
