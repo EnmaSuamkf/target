@@ -1,5 +1,7 @@
 import { useState } from "react";
 import type { Tcp, TcpSelection } from "../api/types.ts";
+import { UsagePill } from "../components/Badge.tsx";
+import { isUsableCopy } from "../lib/catalogCopy.ts";
 import {
 	describeTcpSelection,
 	isTcpFullySelected,
@@ -42,6 +44,9 @@ export function TcpSelectionEditor({
 					const partiallySelected = isTcpPartiallySelected(selections, tcp.id);
 					const summary = describeTcpSelection(selections, tcp.id, tcp.tools.length);
 					const label = selectionLabel(summary);
+					const attached = fullySelected || partiallySelected;
+					const unusable = !isUsableCopy(tcp);
+					const rowDisabled = disabled || (unusable && !attached);
 
 					return (
 						<li key={tcp.id} className={styles.tcpRow}>
@@ -52,13 +57,14 @@ export function TcpSelectionEditor({
 									ref={(el) => {
 										if (el) el.indeterminate = partiallySelected;
 									}}
-									disabled={disabled}
+									disabled={rowDisabled}
 									onChange={() => onChange(toggleTcpAll(selections, tcp.id))}
 								/>
 								<span className={styles.tcpName}>{tcp.name}</span>
 								<span className="hint">
 									({tcp.tools.length} tool{tcp.tools.length === 1 ? "" : "s"})
 								</span>
+								{tcp.origin === "server" && <UsagePill enabled={!unusable} revoked={tcp.revoked === true} />}
 							</label>
 							<div className={styles.tcpActions}>
 								{label ? <span className={`badge ${summary.allTools ? "badge--completed" : "badge--pending"}`}>{label}</span> : null}
@@ -66,7 +72,7 @@ export function TcpSelectionEditor({
 									<button
 										type="button"
 										className="btn btn--sm btn--ghost"
-										disabled={disabled}
+										disabled={rowDisabled}
 										onClick={() => setPickerTcpId(tcp.id)}
 									>
 										Choose tools…

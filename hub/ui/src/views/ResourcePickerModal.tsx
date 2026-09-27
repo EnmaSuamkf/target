@@ -1,5 +1,7 @@
 import { useMemo, useState } from "react";
 import type { ResourceSelection, ResourceSet } from "../api/types.ts";
+import { UsagePill } from "../components/Badge.tsx";
+import { isUsableCopy } from "../lib/catalogCopy.ts";
 import { Modal } from "../components/Modal.tsx";
 import { KIND_LABELS } from "../rciKinds.ts";
 import { attachSetAllResources, detachSet, isResourceSelected, toggleResource } from "../rciSelection.ts";
@@ -21,6 +23,7 @@ export function ResourcePickerModal({
 }): React.JSX.Element {
 	const [query, setQuery] = useState("");
 	const resourceNames = useMemo(() => resourceSet.resources.map((resource) => resource.name), [resourceSet.resources]);
+	const unusable = !isUsableCopy(resourceSet);
 
 	const filtered = useMemo(() => {
 		const q = query.trim().toLowerCase();
@@ -51,6 +54,11 @@ export function ResourcePickerModal({
 				</button>
 			}
 		>
+			{resourceSet.origin === "server" && (
+				<p className="hint">
+					<UsagePill enabled={!unusable} revoked={resourceSet.revoked === true} />
+				</p>
+			)}
 			<div className={styles.toolbar}>
 				<input
 					type="search"
@@ -64,7 +72,7 @@ export function ResourcePickerModal({
 					<button
 						type="button"
 						className="btn btn--sm btn--ghost"
-						disabled={disabled || filtered.length === 0 || allInViewSelected}
+						disabled={disabled || unusable || filtered.length === 0 || allInViewSelected}
 						onClick={() => {
 							let next = selections;
 							for (const resource of filtered) {
@@ -106,7 +114,7 @@ export function ResourcePickerModal({
 								<input
 									type="checkbox"
 									checked={isResourceSelected(selections, resourceSet.id, resource.name)}
-									disabled={disabled}
+									disabled={disabled || (unusable && !isResourceSelected(selections, resourceSet.id, resource.name))}
 									onChange={() => onChange(toggleResource(selections, resourceSet.id, resource.name, resourceNames))}
 								/>
 								<span className={styles.toolName}>{resource.name}</span>
@@ -122,7 +130,7 @@ export function ResourcePickerModal({
 				<button
 					type="button"
 					className="btn btn--sm btn--ghost"
-					disabled={disabled}
+					disabled={disabled || unusable}
 					onClick={() => onChange(attachSetAllResources(selections, resourceSet.id))}
 				>
 					Include all {resourceSet.resources.length} resources

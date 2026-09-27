@@ -160,11 +160,11 @@ function logMessage(
 	log?.(message, level);
 }
 
-function syncUrl(base: string, path: string): string {
+export function syncUrl(base: string, path: string): string {
 	return `${base.replace(/\/$/, "")}${path}`;
 }
 
-async function syncFetch(
+export async function syncFetch(
 	url: string,
 	init: RequestInit,
 	fetchImpl: FetchLike,
@@ -178,7 +178,7 @@ async function syncFetch(
 	}
 }
 
-function authHeaders(token: string, method: string, path: string, body = ""): Record<string, string> {
+export function authHeaders(token: string, method: string, path: string, body = ""): Record<string, string> {
 	const signed = remoteAuth("sync:write").kind === "device" ? deviceHeaders(method, path, body) : null;
 	return {
 		...(signed ?? { authorization: `Bearer ${token}` }),
@@ -805,11 +805,15 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 	},
 	"tcp-tool.upsert": (command) => {
 		const resource = parseResourceEnvelope(command.payload);
-		const tcp = upsertServerTcp(resource.id, {
-			name: resource.name,
-			tags: resource.data.tags,
-			tools: resource.data.tools,
-		});
+		const tcp = upsertServerTcp(
+			resource.id,
+			{
+				name: resource.name,
+				tags: resource.data.tags,
+				tools: resource.data.tools,
+			},
+			"workflow",
+		);
 		queueEvent({
 			type: "tcp-tool.upserted",
 			payload: { resource: { id: tcp.id, name: tcp.name, data: { tags: tcp.tags, tools: tcp.tools } } },
@@ -827,11 +831,15 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 	},
 	"resource-set.upsert": (command) => {
 		const resource = parseResourceEnvelope(command.payload);
-		const set = upsertServerResourceSet(resource.id, {
-			name: resource.name,
-			tags: resource.data.tags,
-			resources: resource.data.resources,
-		});
+		const set = upsertServerResourceSet(
+			resource.id,
+			{
+				name: resource.name,
+				tags: resource.data.tags,
+				resources: resource.data.resources,
+			},
+			"workflow",
+		);
 		queueEvent({
 			type: "resource-set.upserted",
 			payload: {

@@ -365,6 +365,12 @@ export interface Template {
 	tcpIds: string[];
 	tcpSelections: TcpSelection[];
 	resourceSelections: ResourceSelection[];
+	/** `server` copies are pulled from the catalog and are read-only locally. */
+	origin?: "local" | "server";
+	/** False when a server copy is revoked or the owner cannot use synced resources. */
+	usable?: boolean;
+	/** True when the server dropped this copy from the role's catalog. */
+	revoked?: boolean;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -422,6 +428,10 @@ export interface Tcp {
 	tools: TcpTool[];
 	/** `server` copies are pushed by remote sync and are read-only locally. */
 	origin?: "local" | "server";
+	/** False when a server copy is revoked or the owner cannot use synced resources. */
+	usable?: boolean;
+	/** True when the server dropped this copy from the role's catalog. */
+	revoked?: boolean;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -504,6 +514,10 @@ export interface ResourceSet {
 	resources: Resource[];
 	/** `server` copies are pushed by remote sync and are read-only locally. */
 	origin?: "local" | "server";
+	/** False when a server copy is revoked or the owner cannot use synced resources. */
+	usable?: boolean;
+	/** True when the server dropped this copy from the role's catalog. */
+	revoked?: boolean;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -530,6 +544,28 @@ export interface ResourceSetUsageTemplate {
 export interface ResourceSetUsage {
 	workflows: ResourceSetUsageWorkflow[];
 	templates: ResourceSetUsageTemplate[];
+}
+
+export interface CatalogSyncDomainResult {
+	added: number;
+	updated: number;
+	removed: number;
+	revoked: number;
+	skipped: number;
+	syncedAt: string;
+}
+
+export interface CatalogSyncResult {
+	templates: CatalogSyncDomainResult;
+	tcp_tools: CatalogSyncDomainResult;
+	resource_sets: CatalogSyncDomainResult;
+}
+
+export interface CatalogSyncStatus {
+	syncedAt: string | null;
+	templates: CatalogSyncDomainResult | null;
+	tcp_tools: CatalogSyncDomainResult | null;
+	resource_sets: CatalogSyncDomainResult | null;
 }
 
 /**

@@ -44,6 +44,15 @@
 	min-width: 0;
 }
 
+.syncResources {
+	display: grid;
+	gap: var(--space-2);
+	padding: var(--space-4);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--gray-50);
+}
+
 .channels {
 	display: grid;
 	gap: var(--space-3);

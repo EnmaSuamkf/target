@@ -334,8 +334,64 @@ export interface Template {
 	tcpIds: string[];
 	tcpSelections: TcpSelection[];
 	resourceSelections: ResourceSelection[];
+	/** `server` copies are pulled from the catalog and are read-only locally. */
+	origin: "local" | "server";
+	/** How this copy arrived: `workflow`, `catalog`, or `workflow,catalog`. */
+	syncSource: string | null;
+	syncedAt: string | null;
+	/** True when the server no longer grants this copy but something still references it. */
+	revoked: boolean;
 	createdAt: string;
 	updatedAt: string;
+}
+
+export type CatalogSyncSource = "workflow" | "catalog";
+
+export function mergeCatalogSyncSources(existing: string | null | undefined, incoming: CatalogSyncSource): string {
+	const parts = new Set(
+		String(existing ?? "")
+			.split(",")
+			.map((part) => part.trim())
+			.filter((part) => part === "workflow" || part === "catalog"),
+	);
+	parts.add(incoming);
+	return (["workflow", "catalog"] as const).filter((part) => parts.has(part)).join(",");
+}
+
+export function dropCatalogSyncSource(existing: string | null | undefined): string | null {
+	const parts = new Set(
+		String(existing ?? "")
+			.split(",")
+			.map((part) => part.trim())
+			.filter((part) => part === "workflow" || part === "catalog"),
+	);
+	parts.delete("catalog");
+	const next = (["workflow", "catalog"] as const).filter((part) => parts.has(part)).join(",");
+	return next === "" ? null : next;
+}
+
+export function catalogSyncSourceIncludes(existing: string | null | undefined, source: CatalogSyncSource): boolean {
+	return String(existing ?? "")
+		.split(",")
+		.map((part) => part.trim())
+		.includes(source);
+}
+
+export function setTemplateSyncMeta(id: string, input: { syncSource: string | null; revoked: boolean }): void {
+	const existing = getTemplate(id);
+	if (!existing) return;
+	open()
+		.prepare("UPDATE templates SET sync_source = ?, revoked = ?, updated_at = ? WHERE id = ?")
+		.run(input.syncSource, input.revoked ? 1 : 0, new Date().toISOString(), id);
+}
+
+export class TemplateStoreError extends Error {
+	readonly code: string;
+	constructor(code: string) {
+		super(code);
+		this.name = "TemplateStoreError";
+		this.code = code;
+	}
 }
 
 let db: DatabaseSync | null = null;
@@ -415,6 +471,10 @@ export function open(): DatabaseSync {
 			tcp_ids TEXT NOT NULL DEFAULT '[]',
 			tcp_selections TEXT NOT NULL DEFAULT '[]',
 			resource_selections TEXT NOT NULL DEFAULT '[]',
+			origin TEXT NOT NULL DEFAULT 'local',
+			sync_source TEXT,
+			synced_at TEXT,
+			revoked INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
@@ -562,6 +622,10 @@ export function open(): DatabaseSync {
 	addTemplateColumn("tcp_ids", "tcp_ids TEXT NOT NULL DEFAULT '[]'");
 	addTemplateColumn("tcp_selections", "tcp_selections TEXT NOT NULL DEFAULT '[]'");
 	addTemplateColumn("resource_selections", "resource_selections TEXT NOT NULL DEFAULT '[]'");
+	addTemplateColumn("origin", "origin TEXT NOT NULL DEFAULT 'local'");
+	addTemplateColumn("sync_source", "sync_source TEXT");
+	addTemplateColumn("synced_at", "synced_at TEXT");
+	addTemplateColumn("revoked", "revoked INTEGER NOT NULL DEFAULT 0");
 	// RCI was first shipped as SCI, storing the same value in `skill_selections`.
 	// Carry it across so a template built then still attaches its set.
 	if (existingTemplateColumns.has("skill_selections")) {
@@ -1966,6 +2030,10 @@ function rowToTemplate(row: Record<string, unknown>): Template {
 		tcpIds: selectionsToTcpIds(tcpSelections),
 		tcpSelections,
 		resourceSelections,
+		origin: row.origin === "server" ? "server" : "local",
+		syncSource: typeof row.sync_source === "string" && row.sync_source !== "" ? String(row.sync_source) : null,
+		syncedAt: row.synced_at == null || row.synced_at === "" ? null : String(row.synced_at),
+		revoked: row.revoked === 1 || row.revoked === true,
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
 	};
@@ -1992,12 +2060,16 @@ export function insertTemplate(input: {
 		tcpIds: selectionsToTcpIds(tcpSelections),
 		tcpSelections,
 		resourceSelections: normalizeResourceSelections(input.resourceSelections),
+		origin: "local",
+		syncSource: null,
+		syncedAt: null,
+		revoked: false,
 		createdAt: now,
 		updatedAt: now,
 	};
 	open()
 		.prepare(
-			`INSERT INTO templates (id, name, tags, steps, tcp_ids, tcp_selections, resource_selections, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO templates (id, name, tags, steps, tcp_ids, tcp_selections, resource_selections, origin, sync_source, synced_at, revoked, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			template.id,
@@ -2007,10 +2079,86 @@ export function insertTemplate(input: {
 			JSON.stringify(template.tcpIds),
 			JSON.stringify(template.tcpSelections),
 			JSON.stringify(template.resourceSelections),
+			template.origin,
+			template.syncSource,
+			template.syncedAt,
+			template.revoked ? 1 : 0,
 			template.createdAt,
 			template.updatedAt,
 		);
 	return template;
+}
+
+/**
+ * Insert or replace a template under the server's id. A later upsert overwrites
+ * the copy and keeps origin=server.
+ */
+export function upsertServerTemplate(
+	id: string,
+	input: {
+		name: string;
+		tags?: unknown;
+		steps?: unknown;
+		tcpIds?: unknown;
+		tcpSelections?: unknown;
+		resourceSelections?: unknown;
+	},
+	source: CatalogSyncSource = "catalog",
+): Template {
+	const existing = getTemplate(id);
+	const now = new Date().toISOString();
+	const tcpSelections =
+		input.tcpSelections !== undefined
+			? normalizeTcpSelections(input.tcpSelections)
+			: tcpIdsToSelections(normalizeTemplateTcpIds(input.tcpIds));
+	const template: Template = {
+		id,
+		name: input.name,
+		tags: normalizeTemplateTags(input.tags),
+		steps: normalizeTemplateSteps(input.steps),
+		tcpIds: selectionsToTcpIds(tcpSelections),
+		tcpSelections,
+		resourceSelections: normalizeResourceSelections(input.resourceSelections),
+		origin: "server",
+		syncSource: mergeCatalogSyncSources(existing?.syncSource, source),
+		syncedAt: now,
+		revoked: false,
+		createdAt: existing?.createdAt ?? now,
+		updatedAt: now,
+	};
+	open()
+		.prepare(
+			`INSERT INTO templates (id, name, tags, steps, tcp_ids, tcp_selections, resource_selections, origin, sync_source, synced_at, revoked, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+			   name = excluded.name,
+			   tags = excluded.tags,
+			   steps = excluded.steps,
+			   tcp_ids = excluded.tcp_ids,
+			   tcp_selections = excluded.tcp_selections,
+			   resource_selections = excluded.resource_selections,
+			   origin = 'server',
+			   sync_source = excluded.sync_source,
+			   synced_at = excluded.synced_at,
+			   revoked = 0,
+			   updated_at = excluded.updated_at`,
+		)
+		.run(
+			template.id,
+			template.name,
+			JSON.stringify(template.tags),
+			JSON.stringify(template.steps),
+			JSON.stringify(template.tcpIds),
+			JSON.stringify(template.tcpSelections),
+			JSON.stringify(template.resourceSelections),
+			template.origin,
+			template.syncSource,
+			template.syncedAt,
+			0,
+			template.createdAt,
+			template.updatedAt,
+		);
+	return getTemplate(id)!;
 }
 
 export function getTemplate(id: string): Template | null {
@@ -2035,9 +2183,13 @@ export function updateTemplate(
 		tcpSelections?: unknown;
 		resourceSelections?: unknown;
 	},
+	options: { allowServerManaged?: boolean } = {},
 ): Template | null {
 	const existing = getTemplate(id);
 	if (!existing) return null;
+	if (existing.origin === "server" && !options.allowServerManaged) {
+		throw new TemplateStoreError("server_managed");
+	}
 	const name = input.name !== undefined ? input.name : existing.name;
 	const tags = input.tags !== undefined ? normalizeTemplateTags(input.tags) : existing.tags;
 	const steps = input.steps !== undefined ? normalizeTemplateSteps(input.steps) : existing.steps;
@@ -2065,7 +2217,12 @@ export function updateTemplate(
 	return { ...existing, name, tags, steps, tcpIds, tcpSelections, resourceSelections, updatedAt };
 }
 
-export function deleteTemplate(id: string): boolean {
+export function deleteTemplate(id: string, options: { allowServerManaged?: boolean } = {}): boolean {
+	const existing = getTemplate(id);
+	if (!existing) return false;
+	if (existing.origin === "server" && !options.allowServerManaged) {
+		throw new TemplateStoreError("server_managed");
+	}
 	return open().prepare("DELETE FROM templates WHERE id = ?").run(id).changes > 0;
 }
 

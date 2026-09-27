@@ -42,6 +42,8 @@
  *   POST   /api/workflows/:id/restart                  → reset all steps, start over (admin token)
  *   POST   /api/steps/:id/result                       → awb's result callback (?token=<per-step token>)
  *   GET    /api/templates                              → list templates (optional ?q= filters by name/tag)
+ *   POST   /api/catalog/sync                            → pull the linked server's catalog (operator + a client.*.sync permission; 409 if not linked; 502 if the server is too old)
+ *   GET    /api/catalog/sync/status                     → last catalog pull time and per-domain summary
  *   POST   /api/templates                               → create a template (admin token)
  *   GET    /api/templates/:id                            → template detail
  *   GET    /api/fs/dirs?path=<dir>&files=1                → list subdirectories (+files with files=1; admin token; for the UI's pickers)
@@ -108,7 +110,8 @@ import {
 } from "./config.ts";
 import { disconnectDeviceLink, pollDeviceLink, startDeviceLink } from "./device-link-client.ts";
 import { getDeviceLinkStatus } from "./device-link.ts";
-import { publicPermissionsState, resolvePermissionMode } from "./owner-permissions.ts";
+import { CatalogSyncError, getCatalogSyncStatus, syncServerCatalog } from "./catalog-sync.ts";
+import { canUseServerResources, publicPermissionsState, resolvePermissionMode } from "./owner-permissions.ts";
 import { adoptability, findConversation, listConversations, readConversationPreview } from "./conversations.ts";
 import {
 	AccountError,
@@ -186,12 +189,14 @@ import {
 	tcpBundle,
 	TcpBundleError,
 	normalizeTcpSelections,
+	tcpIdsToSelections,
 	parseTcpBundle,
 	applyTemplateTcpsToWorkflow,
 	setWorkflowTcpSelections,
 	updateTcp,
 	workflowMayExecuteTool,
 	type Tcp,
+	type TcpSelection,
 } from "./tcp-store.ts";
 import { getTcpUsage } from "./tcp-usage.ts";
 import {
@@ -205,6 +210,7 @@ import {
 	setWorkflowResourceSelections,
 	updateResourceSet,
 	type ResourceSet,
+	type ResourceSelection,
 } from "./rci-store.ts";
 import { getResourceSetUsage } from "./rci-usage.ts";
 import { importResourcesFromFolder, MAX_RESOURCE_SET_BYTES, ResourceImportError } from "./rci-import.ts";
@@ -589,6 +595,52 @@ function publicTcpUsage(usage: import("./tcp-usage.ts").TcpUsage): import("./tcp
 	return usage;
 }
 
+function catalogCopyUsable(item: { origin?: string; revoked?: boolean }): boolean {
+	if (item.origin !== "server") return true;
+	return canUseServerResources() && item.revoked !== true;
+}
+
+function rejectUnusableServerResource(res: http.ServerResponse, resourceId: string): true {
+	sendJson(res, 403, { error: "server_resource_disabled", resourceId });
+	return true;
+}
+
+function firstUnusableAddedTcp(workflowId: string, selections: TcpSelection[]): string | null {
+	const current = new Set(listWorkflowTcpSelections(workflowId).map((selection) => selection.tcpId));
+	for (const selection of selections) {
+		if (current.has(selection.tcpId)) continue;
+		const tcp = getTcp(selection.tcpId);
+		if (tcp && !catalogCopyUsable(tcp)) return tcp.id;
+	}
+	return null;
+}
+
+function firstUnusableAddedResourceSet(workflowId: string, selections: ResourceSelection[]): string | null {
+	const current = new Set(listWorkflowResourceSelections(workflowId).map((selection) => selection.resourceSetId));
+	for (const selection of selections) {
+		if (current.has(selection.resourceSetId)) continue;
+		const set = getResourceSet(selection.resourceSetId);
+		if (set && !catalogCopyUsable(set)) return set.id;
+	}
+	return null;
+}
+
+function firstUnusableTemplateRef(tcpSelections: unknown, resourceSelections: unknown): string | null {
+	const tcpList =
+		Array.isArray(tcpSelections) && tcpSelections.every((item) => typeof item === "string")
+			? tcpIdsToSelections(tcpSelections as string[])
+			: normalizeTcpSelections(tcpSelections);
+	for (const selection of tcpList) {
+		const tcp = getTcp(selection.tcpId);
+		if (tcp && !catalogCopyUsable(tcp)) return tcp.id;
+	}
+	for (const selection of normalizeResourceSelections(resourceSelections)) {
+		const set = getResourceSet(selection.resourceSetId);
+		if (set && !catalogCopyUsable(set)) return set.id;
+	}
+	return null;
+}
+
 function publicTcp(tcp: Tcp): Record<string, unknown> {
 	return {
 		id: tcp.id,
@@ -596,6 +648,8 @@ function publicTcp(tcp: Tcp): Record<string, unknown> {
 		tags: tcp.tags,
 		tools: tcp.tools,
 		origin: tcp.origin,
+		usable: catalogCopyUsable(tcp),
+		revoked: tcp.revoked === true,
 		createdAt: tcp.createdAt,
 		updatedAt: tcp.updatedAt,
 	};
@@ -608,6 +662,8 @@ function publicResourceSet(set: ResourceSet): Record<string, unknown> {
 		tags: set.tags,
 		resources: set.resources,
 		origin: set.origin,
+		usable: catalogCopyUsable(set),
+		revoked: set.revoked === true,
 		createdAt: set.createdAt,
 		updatedAt: set.updatedAt,
 	};
@@ -622,6 +678,9 @@ function publicTemplate(template: Template): Record<string, unknown> {
 		tcpIds: template.tcpIds,
 		tcpSelections: template.tcpSelections,
 		resourceSelections: template.resourceSelections,
+		origin: template.origin,
+		usable: catalogCopyUsable(template),
+		revoked: template.revoked === true,
 		createdAt: template.createdAt,
 		updatedAt: template.updatedAt,
 	};
@@ -909,6 +968,45 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// The UI reads this to know what the linked owner's role allows. It is
 	// operator-gated (same as GET /api/device-link) but not role-gated: this
 	// is how the client learns the role. The body is only public metadata.
+	if (parts[1] === "catalog" && parts[2] === "sync" && parts[3] === "status" && !parts[4] && req.method === "GET") {
+		sendJson(res, 200, getCatalogSyncStatus());
+		return;
+	}
+
+	if (parts[1] === "catalog" && parts[2] === "sync" && !parts[3] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		if (resolvePermissionMode().mode !== "enforced") {
+			sendJson(res, 409, { error: "not_linked" });
+			return;
+		}
+		if (!requirePermission(cfg, req, res, "client.templates.sync", "client.tcp-tools.sync", "client.rci.sync")) {
+			return;
+		}
+		void syncServerCatalog()
+			.then((result) => sendJson(res, 200, result))
+			.catch((err) => {
+				if (err instanceof CatalogSyncError) {
+					if (err.code === "catalog_sync_unsupported") {
+						sendJson(res, 502, { error: "catalog_sync_unsupported" });
+						return;
+					}
+					if (err.code === "not_linked") {
+						sendJson(res, 409, { error: "not_linked" });
+						return;
+					}
+					if (err.code === "forbidden" || err.code === "owner_required") {
+						sendJson(res, 403, { error: err.code });
+						return;
+					}
+				}
+				sendJson(res, 502, { error: String((err as Error).message ?? err) });
+			});
+		return;
+	}
+
 	if (parts[1] === "permissions" && !parts[2] && req.method === "GET") {
 		if (!isAdmin(cfg, req.headers)) {
 			sendJson(res, 401, { error: "unauthorized" });
@@ -1281,6 +1379,11 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						sendJson(res, 400, { error: "name is required" });
 						return;
 					}
+					const blockedRef = firstUnusableTemplateRef(body.tcpSelections ?? body.tcpIds, body.resourceSelections);
+					if (blockedRef) {
+						rejectUnusableServerResource(res, blockedRef);
+						return;
+					}
 					const template = insertTemplate({
 						name,
 						tags: body.tags,
@@ -1313,7 +1416,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			if (!requirePermission(cfg, req, res, "client.templates.export")) {
 				return;
 			}
-			sendJson(res, 200, templateBundle(listTemplates()));
+			sendJson(res, 200, templateBundle(listTemplates().filter((template) => template.origin !== "server")));
 			return;
 		}
 
@@ -1353,6 +1456,10 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, 404, { error: "unknown_template" });
 				return;
 			}
+			if (template.origin === "server") {
+				sendJson(res, 409, { error: "server_managed" });
+				return;
+			}
 			sendJson(res, 200, templateBundle([template]));
 			return;
 		}
@@ -1369,6 +1476,15 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 
 		if (!parts[3] && (req.method === "PATCH" || req.method === "PUT")) {
 			if (!requirePermission(cfg, req, res, "client.templates.edit")) {
+				return;
+			}
+			const existingTemplate = getTemplate(templateId);
+			if (!existingTemplate) {
+				sendJson(res, 404, { error: "unknown_template" });
+				return;
+			}
+			if (existingTemplate.origin === "server") {
+				sendJson(res, 409, { error: "server_managed" });
 				return;
 			}
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
@@ -1393,6 +1509,13 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				if ("tcpSelections" in body) input.tcpSelections = body.tcpSelections;
 				else if ("tcpIds" in body) input.tcpIds = body.tcpIds;
 				if ("resourceSelections" in body) input.resourceSelections = body.resourceSelections;
+				const nextTcp = "tcpSelections" in input || "tcpIds" in input ? input.tcpSelections ?? input.tcpIds : existingTemplate.tcpSelections;
+				const nextRci = "resourceSelections" in input ? input.resourceSelections : existingTemplate.resourceSelections;
+				const blockedRef = firstUnusableTemplateRef(nextTcp, nextRci);
+				if (blockedRef) {
+					rejectUnusableServerResource(res, blockedRef);
+					return;
+				}
 				const template = updateTemplate(templateId, input);
 				if (!template) {
 					sendJson(res, 404, { error: "unknown_template" });
@@ -1405,6 +1528,15 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 
 		if (!parts[3] && req.method === "DELETE") {
 			if (!requirePermission(cfg, req, res, "client.templates.delete")) {
+				return;
+			}
+			const existingTemplate = getTemplate(templateId);
+			if (!existingTemplate) {
+				sendJson(res, 404, { error: "unknown_template" });
+				return;
+			}
+			if (existingTemplate.origin === "server") {
+				sendJson(res, 409, { error: "server_managed" });
 				return;
 			}
 			const removed = deleteTemplate(templateId);
@@ -1460,7 +1592,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			if (!requirePermission(cfg, req, res, "client.tcp-tools.export")) {
 				return;
 			}
-			sendJson(res, 200, tcpBundle(listTcps()));
+			sendJson(res, 200, tcpBundle(listTcps().filter((tcp) => tcp.origin !== "server")));
 			return;
 		}
 
@@ -1517,6 +1649,10 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			const tcp = getTcp(tcpId);
 			if (!tcp) {
 				sendJson(res, 404, { error: "unknown_tcp" });
+				return;
+			}
+			if (tcp.origin === "server") {
+				sendJson(res, 409, { error: "server_managed" });
 				return;
 			}
 			sendJson(res, 200, tcpBundle([tcp]));
@@ -2617,6 +2753,15 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						sendJson(res, 404, { error: "unknown_template" });
 						return;
 					}
+					if (!catalogCopyUsable(template)) {
+						rejectUnusableServerResource(res, template.id);
+						return;
+					}
+					const blockedRef = firstUnusableTemplateRef(template.tcpSelections, template.resourceSelections);
+					if (blockedRef) {
+						rejectUnusableServerResource(res, blockedRef);
+						return;
+					}
 				}
 				try {
 					const workflow = createWorkflow(name, {
@@ -2819,6 +2964,11 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, 400, { error: "tcpSelections or tcpIds is required" });
 				return;
 			}
+			const blockedTcp = firstUnusableAddedTcp(workflowId, selections);
+			if (blockedTcp) {
+				rejectUnusableServerResource(res, blockedTcp);
+				return;
+			}
 			try {
 				setWorkflowTcpSelections(workflowId, selections);
 				log(`workflow ${workflowId} TCP attachments updated (${selections.length})`);
@@ -2857,6 +3007,11 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return;
 			}
 			const selections = normalizeResourceSelections(body.resourceSelections);
+			const blockedSet = firstUnusableAddedResourceSet(workflowId, selections);
+			if (blockedSet) {
+				rejectUnusableServerResource(res, blockedSet);
+				return;
+			}
 			try {
 				setWorkflowResourceSelections(workflowId, selections);
 				log(`workflow ${workflowId} RCI attachments updated (${selections.length})`);
@@ -3120,6 +3275,15 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			const template = getTemplate(templateId);
 			if (!template) {
 				sendJson(res, 404, { error: "unknown_template" });
+				return;
+			}
+			if (!catalogCopyUsable(template)) {
+				rejectUnusableServerResource(res, template.id);
+				return;
+			}
+			const blockedRef = firstUnusableTemplateRef(template.tcpSelections, template.resourceSelections);
+			if (blockedRef) {
+				rejectUnusableServerResource(res, blockedRef);
 				return;
 			}
 			try {

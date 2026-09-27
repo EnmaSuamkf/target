@@ -220,6 +220,24 @@ export function hasPermission(...ids: string[]): boolean {
 	return ids.some((id) => mode.permissions.has(id));
 }
 
+const SERVER_RESOURCE_USE_PERMISSIONS = [
+	"client.workflows.create",
+	"client.workflows.steps.add",
+	"client.workflows.steps.edit",
+	"client.workflows.manage",
+] as const;
+
+/**
+ * Server-origin catalog copies may be attached or applied only while the
+ * linked owner's role is live and includes any workflow-authoring permission.
+ * Unrestricted and read-only hubs cannot use them.
+ */
+export function canUseServerResources(): boolean {
+	const mode = resolvePermissionMode();
+	if (mode.mode !== "enforced") return false;
+	return SERVER_RESOURCE_USE_PERMISSIONS.some((id) => mode.permissions.has(id));
+}
+
 export function clearOwnerSnapshot(): void {
 	try {
 		loaded = true;

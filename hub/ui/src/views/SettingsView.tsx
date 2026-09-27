@@ -20,11 +20,14 @@ import type {
 	UiSettingsInput,
 } from "../api/types.ts";
 import * as api from "../api/client.ts";
+import { ApiError } from "../api/client.ts";
+import type { CatalogSyncDomainResult, CatalogSyncResult } from "../api/types.ts";
 import { CollapsibleSection } from "../components/CollapsibleSection.tsx";
 import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { Field } from "../components/Field.tsx";
 import { Switch } from "../components/Switch.tsx";
 import { useToast } from "../components/Toast.tsx";
+import { useCatalogSyncStatus } from "../hooks/useCatalogSyncStatus.ts";
 import { usePermissions } from "../hooks/usePermissions.ts";
 import { relativeTime } from "../lib/format.ts";
 import styles from "./SettingsView.module.css";
@@ -84,6 +87,24 @@ function SecretVisibilityIcon({ revealed }: { revealed: boolean }): React.JSX.El
 	);
 }
 
+function catalogDomainSummary(label: string, domain: CatalogSyncDomainResult): string {
+	return `${label} ${domain.added} added, ${domain.updated} updated, ${domain.removed} removed, ${domain.revoked} revoked, ${domain.skipped} skipped`;
+}
+
+function catalogSyncToast(result: CatalogSyncResult): string {
+	return [
+		catalogDomainSummary("Templates:", result.templates),
+		catalogDomainSummary("TCP:", result.tcp_tools),
+		catalogDomainSummary("RCI:", result.resource_sets),
+	].join("; ");
+}
+
+function catalogSyncErrorMessage(err: unknown): string {
+	const code = err instanceof ApiError ? err.message : err instanceof Error ? err.message : String(err);
+	if (code === "catalog_sync_unsupported") return "The server does not support resource sync";
+	return code;
+}
+
 export function SettingsView({
 	settings,
 	shortcutSettings,
@@ -100,6 +121,7 @@ export function SettingsView({
 	onSaveDockerFriendly,
 	onSaveDockerMounts,
 	onSaveUi,
+	onCatalogSynced,
 }: {
 	settings: NotificationSettings;
 	shortcutSettings: ShortcutSettings;
@@ -116,6 +138,7 @@ export function SettingsView({
 	onSaveDockerFriendly: (input: DockerFriendlySettingsInput) => Promise<boolean>;
 	onSaveDockerMounts: (input: DockerMountSettingsInput) => Promise<boolean>;
 	onSaveUi: (input: UiSettingsInput) => Promise<boolean>;
+	onCatalogSynced?: () => Promise<void>;
 }): React.JSX.Element {
 	const [enabled, setEnabled] = useState(settings.enabled);
 	const [slackUsername, setSlackUsername] = useState(settings.channels.slack.username);
@@ -191,6 +214,9 @@ export function SettingsView({
 	} = usePermissions();
 	const canManage = can("client.workflows.manage");
 	const manageTitle = "Requires client.workflows.manage";
+	const canSyncCatalog = mode === "enforced" && can("client.templates.sync", "client.tcp-tools.sync", "client.rci.sync");
+	const catalogSyncStatus = useCatalogSyncStatus();
+	const [catalogSyncing, setCatalogSyncing] = useState(false);
 	const permissionsId = useId();
 
 	const notificationsId = useId();
@@ -604,6 +630,43 @@ export function SettingsView({
 					header, on workflows, and on templates. When hidden, existing attachments on the server are
 					unchanged — the hub API and MCP tools still work.
 				</p>
+
+				{canSyncCatalog && (
+					<div className={styles.syncResources}>
+						<span className="label">Sync resources</span>
+						<p className="hint">
+							Pull the templates, TCP tools and RCI resources your role is allowed to sync from{" "}
+							{permissionsOrigin ?? linkStatus?.origin ?? "the server"}.
+						</p>
+						<p className="hint">
+							{catalogSyncStatus?.syncedAt
+								? `Last synced ${relativeTime(catalogSyncStatus.syncedAt)}`
+								: "Not synced yet"}
+						</p>
+						<div className={styles.actions}>
+							<button
+								type="button"
+								className="btn btn--primary"
+								disabled={catalogSyncing || busy}
+								onClick={async () => {
+									if (catalogSyncing) return;
+									setCatalogSyncing(true);
+									try {
+										const result = await api.syncServerResources();
+										toast.success(catalogSyncToast(result));
+										await onCatalogSynced?.();
+									} catch (err) {
+										toast.error(catalogSyncErrorMessage(err));
+									} finally {
+										setCatalogSyncing(false);
+									}
+								}}
+							>
+								{catalogSyncing ? "Syncing…" : "Sync resources"}
+							</button>
+						</div>
+					</div>
+				)}
 
 				<div className={styles.toggleRow}>
 					<div className={styles.toggleText}>

@@ -11,7 +11,7 @@
  * materialised and quoted into the conversation only when a workflow that
  * attached it actually runs. See `rci-catalog.ts` for that half.
  */
-import { open } from "./db.ts";
+import { mergeCatalogSyncSources, open, type CatalogSyncSource } from "./db.ts";
 import {
 	type ResourceSelection,
 	mergeResourceSelections,
@@ -73,6 +73,11 @@ export interface ResourceSet {
 	resources: Resource[];
 	/** `server` copies are pushed by remote sync and are read-only locally. */
 	origin: CatalogOrigin;
+	/** How this copy arrived: `workflow`, `catalog`, or `workflow,catalog`. */
+	syncSource: string | null;
+	syncedAt: string | null;
+	/** True when the server no longer grants this copy but something still references it. */
+	revoked: boolean;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -123,6 +128,9 @@ export function ensureRciSchema(): void {
 			tags TEXT NOT NULL DEFAULT '[]',
 			resources TEXT NOT NULL DEFAULT '[]',
 			origin TEXT NOT NULL DEFAULT 'local',
+			sync_source TEXT,
+			synced_at TEXT,
+			revoked INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
@@ -138,6 +146,9 @@ export function ensureRciSchema(): void {
 		(db.prepare("PRAGMA table_info(resource_sets)").all() as Record<string, unknown>[]).map((c) => String(c.name)),
 	);
 	if (!setCols.has("origin")) db.exec("ALTER TABLE resource_sets ADD COLUMN origin TEXT NOT NULL DEFAULT 'local';");
+	if (!setCols.has("sync_source")) db.exec("ALTER TABLE resource_sets ADD COLUMN sync_source TEXT;");
+	if (!setCols.has("synced_at")) db.exec("ALTER TABLE resource_sets ADD COLUMN synced_at TEXT;");
+	if (!setCols.has("revoked")) db.exec("ALTER TABLE resource_sets ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0;");
 }
 
 function normalizeTags(tags: unknown): string[] {
@@ -254,6 +265,9 @@ function rowToResourceSet(row: Record<string, unknown>): ResourceSet {
 		tags,
 		resources,
 		origin: row.origin === "server" ? "server" : "local",
+		syncSource: typeof row.sync_source === "string" && row.sync_source !== "" ? String(row.sync_source) : null,
+		syncedAt: row.synced_at == null || row.synced_at === "" ? null : String(row.synced_at),
+		revoked: row.revoked === 1 || row.revoked === true,
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
 	};
@@ -268,12 +282,15 @@ export function insertResourceSet(input: { name: string; tags?: unknown; resourc
 		tags: normalizeTags(input.tags),
 		resources: normalizeResources(input.resources),
 		origin: "local",
+		syncSource: null,
+		syncedAt: null,
+		revoked: false,
 		createdAt: now,
 		updatedAt: now,
 	};
 	open()
-		.prepare(`INSERT INTO resource_sets (id, name, tags, resources, origin, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-		.run(set.id, set.name, JSON.stringify(set.tags), JSON.stringify(set.resources), set.origin, set.createdAt, set.updatedAt);
+		.prepare(`INSERT INTO resource_sets (id, name, tags, resources, origin, sync_source, synced_at, revoked, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		.run(set.id, set.name, JSON.stringify(set.tags), JSON.stringify(set.resources), set.origin, set.syncSource, set.syncedAt, 0, set.createdAt, set.updatedAt);
 	return set;
 }
 
@@ -284,6 +301,7 @@ export function insertResourceSet(input: { name: string; tags?: unknown; resourc
 export function upsertServerResourceSet(
 	id: string,
 	input: { name: string; tags?: unknown; resources?: unknown },
+	source: CatalogSyncSource = "workflow",
 ): ResourceSet {
 	ensureRciSchema();
 	const existing = getResourceSet(id);
@@ -294,20 +312,37 @@ export function upsertServerResourceSet(
 		tags: normalizeTags(input.tags),
 		resources: normalizeResources(input.resources),
 		origin: "server",
+		syncSource: mergeCatalogSyncSources(existing?.syncSource, source),
+		syncedAt: now,
+		revoked: false,
 		createdAt: existing?.createdAt ?? now,
 		updatedAt: now,
 	};
 	open()
 		.prepare(
-			`INSERT INTO resource_sets (id, name, tags, resources, origin, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO resource_sets (id, name, tags, resources, origin, sync_source, synced_at, revoked, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 			   name = excluded.name,
 			   tags = excluded.tags,
 			   resources = excluded.resources,
 			   origin = 'server',
+			   sync_source = excluded.sync_source,
+			   synced_at = excluded.synced_at,
+			   revoked = 0,
 			   updated_at = excluded.updated_at`,
 		)
-		.run(set.id, set.name, JSON.stringify(set.tags), JSON.stringify(set.resources), set.origin, set.createdAt, set.updatedAt);
+		.run(
+			set.id,
+			set.name,
+			JSON.stringify(set.tags),
+			JSON.stringify(set.resources),
+			set.origin,
+			set.syncSource,
+			set.syncedAt,
+			0,
+			set.createdAt,
+			set.updatedAt,
+		);
 	return getResourceSet(id)!;
 }
 
@@ -423,12 +458,25 @@ export function setWorkflowResourceSelections(workflowId: string, selections: Re
 	return valid;
 }
 
-/** Adds a template's resource selections to a workflow, merging resource subsets. */
+/** Adds a template's resource selections to a workflow, merging resource subsets. Missing sets are skipped. */
 export function applyTemplateResourcesToWorkflow(workflowId: string, templateSelections: ResourceSelection[]): ResourceSelection[] {
-	const incoming = validateSelections(templateSelections);
+	const present = templateSelections.filter((selection) => getResourceSet(selection.resourceSetId));
+	const incoming = validateSelections(present);
 	if (incoming.length === 0) return listWorkflowResourceSelections(workflowId);
 	return setWorkflowResourceSelections(
 		workflowId,
 		mergeResourceSelections(listWorkflowResourceSelections(workflowId), incoming),
 	);
+}
+
+export function setResourceSetSyncMeta(id: string, input: { syncSource: string | null; revoked: boolean }): void {
+	ensureRciSchema();
+	open()
+		.prepare("UPDATE resource_sets SET sync_source = ?, revoked = ?, updated_at = ? WHERE id = ?")
+		.run(input.syncSource, input.revoked ? 1 : 0, new Date().toISOString(), id);
+}
+
+export function isResourceSetAttachedToWorkflow(id: string): boolean {
+	ensureRciSchema();
+	return open().prepare("SELECT 1 FROM workflow_resource_sets WHERE resource_set_id = ? LIMIT 1").get(id) != null;
 }
