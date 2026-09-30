@@ -10,6 +10,7 @@ import type {
 	StepNoteTheme,
 	ResourceSelection,
 	ResourceSet,
+	ScheduleInput,
 	Tcp,
 	TcpSelection,
 	Template,
@@ -29,6 +30,7 @@ import { useStagedImages } from "../hooks/useStagedImages.ts";
 import { isUsableCopy, templateOptionLabel } from "../lib/catalogCopy.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
 import { canMoveStep } from "../lib/stepMove.ts";
+import { hasLiveSchedule, scheduleAvailability } from "../lib/scheduleForm.ts";
 import { isArchivable } from "../lib/workflowFilter.ts";
 import {
 	adoptNewlyVisibleSteps,
@@ -47,6 +49,7 @@ import { ContextPanel } from "./ContextPanel.tsx";
 import { RciPanel } from "./RciPanel.tsx";
 import { TcpPanel } from "./TcpPanel.tsx";
 import { RenameWorkflowModal } from "./RenameWorkflowModal.tsx";
+import { ScheduleModal, type ScheduleSaveResult } from "./ScheduleModal.tsx";
 import { SessionPanel } from "./SessionPanel.tsx";
 import { StepItem } from "./StepItem.tsx";
 import { WorkflowCanvas } from "./WorkflowCanvas.tsx";
@@ -123,6 +126,8 @@ export function WorkflowDetail({
 	onDelete,
 	onArchive,
 	onUnarchive,
+	onSaveSchedule,
+	onCancelSchedule,
 	onSetStatus,
 	onSaveContext,
 	onSaveTcps,
@@ -170,6 +175,10 @@ export function WorkflowDetail({
 	onArchive: () => void;
 	/** Brings an archived workflow back so it can run again. */
 	onUnarchive: () => void;
+	/** Schedules this workflow, or changes the schedule of its armed instance. */
+	onSaveSchedule: (input: ScheduleInput) => Promise<ScheduleSaveResult>;
+	/** Cancels its schedule; resolves true when the hub did. */
+	onCancelSchedule: () => Promise<boolean>;
 	/** Forces the workflow's status by hand; never runs anything. */
 	onSetStatus: (status: OverridableWorkflowStatus) => void;
 	/** Resolves true only when the server really stored the context. */
@@ -219,6 +228,7 @@ export function WorkflowDetail({
 	const [opening, setOpening] = useState(false);
 	// The rename dialog opened by "Change", next to the title.
 	const [renaming, setRenaming] = useState(false);
+	const [scheduling, setScheduling] = useState(false);
 	const [dockerMounts, setDockerMounts] = useState<string[]>(workflow.dockerMounts);
 	const [savingDockerMounts, setSavingDockerMounts] = useState(false);
 	// How the steps are drawn: the list, or the canvas. A way of LOOKING at the
@@ -344,6 +354,11 @@ export function WorkflowDetail({
 	const canPause = can("client.workflows.execute", "client.workflows.manage");
 	const canManage = can("client.workflows.manage");
 	const canCreate = can("client.workflows.create");
+	// Scheduling is running work unattended AND managing the workflow (D22), so
+	// both are required — `can` answers "any of", hence two calls.
+	const canSchedule = canExecute && canManage;
+	const schedulePermissionHint = "Requires client.workflows.execute and client.workflows.manage";
+	const scheduleMode = scheduleAvailability(workflow);
 
 	// Archived work runs nothing until unarchived (the hub answers 409 `archived`).
 	const archived = Boolean(workflow.archivedAt);
@@ -646,6 +661,35 @@ export function WorkflowDetail({
 						Clone
 					</button>
 
+					{/* Opens the schedule dialog: create, edit or cancel a schedule — or,
+					    for a series the server manages, see it read-only. Disabled only
+					    where the dialog would have nothing to offer: an adopted
+					    conversation can never be scheduled (D23). */}
+					<button
+						type="button"
+						className="btn"
+						onClick={() => setScheduling(true)}
+						disabled={
+							busy ||
+							Boolean(workflow.adoptedSessionId) ||
+							(!canSchedule && scheduleMode.mode !== "readonly")
+						}
+						title={
+							workflow.adoptedSessionId
+								? "This workflow continues an adopted conversation, so it can't be scheduled — every scheduled run is a clone, and a clone can't continue that conversation."
+								: scheduleMode.mode === "readonly"
+									? "See this workflow's schedule. It is managed by the server."
+									: !canSchedule
+										? schedulePermissionHint
+										: hasLiveSchedule(workflow)
+											? "Change or cancel this workflow's schedule."
+											: "Run this workflow on a schedule: once, daily or weekly."
+						}
+						data-schedule-workflow
+					>
+						{hasLiveSchedule(workflow) ? "Edit schedule" : "Schedule"}
+					</button>
+
 					{/* Says what really happened when the engine's verdict is wrong.
 					    Deliberately NOT a run control: it dispatches nothing, and it's a
 					    picker rather than four buttons so the run controls stay the
@@ -890,6 +934,17 @@ export function WorkflowDetail({
 					opening={opening}
 				/>
 			</div>
+
+			<ScheduleModal
+				open={scheduling}
+				workflow={workflow}
+				steps={steps}
+				canSchedule={canSchedule}
+				permissionHint={schedulePermissionHint}
+				onClose={() => setScheduling(false)}
+				onSave={onSaveSchedule}
+				onCancelSchedule={onCancelSchedule}
+			/>
 
 			<RenameWorkflowModal
 				open={renaming}

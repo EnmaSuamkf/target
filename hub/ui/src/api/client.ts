@@ -46,6 +46,9 @@ import type {
 	OverridableStepStatus,
 	OverridableWorkflowStatus,
 	Runner,
+	ScheduleInput,
+	SchedulePreview,
+	ScheduleSpec,
 	SessionInfo,
 	ShortcutSettings,
 	ShortcutSettingsInput,
@@ -70,6 +73,7 @@ import type {
 	TemplateBundle,
 	TemplateInput,
 	Workflow,
+	WorkflowScheduleDetail,
 } from "./types.ts";
 
 const TOKEN_KEY = "targetAdminToken";
@@ -322,6 +326,46 @@ export async function unarchiveWorkflow(id: string): Promise<Workflow> {
 		admin: true,
 	});
 	return data.workflow;
+}
+
+// --- schedules ---
+
+/** The workflow's schedule series (null when never scheduled) and the series' instances. */
+export async function getWorkflowSchedule(id: string): Promise<WorkflowScheduleDetail> {
+	return request<WorkflowScheduleDetail>(`/api/workflows/${id}/schedule`);
+}
+
+/**
+ * Schedules a workflow, or changes the schedule of its armed instance. Needs
+ * client.workflows.execute AND client.workflows.manage. 400 `invalid_schedule`
+ * carries `fields` in the error payload; 409 `server_managed` for a series the
+ * server owns.
+ */
+export async function setWorkflowSchedule(id: string, input: ScheduleInput): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/schedule`, {
+		method: "PUT",
+		admin: true,
+		body: json(input),
+	});
+	return data.workflow;
+}
+
+/** Cancels the schedule: the armed instance becomes a normal workflow again. */
+export async function cancelWorkflowSchedule(id: string): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/schedule`, {
+		method: "DELETE",
+		admin: true,
+	});
+	return data.workflow;
+}
+
+/** The next (up to) three runs a schedule would produce — nothing is saved. */
+export async function previewSchedule(spec: ScheduleSpec, timezone: string): Promise<SchedulePreview> {
+	return request<SchedulePreview>("/api/schedule/preview", {
+		method: "POST",
+		admin: true,
+		body: json({ spec, timezone }),
+	});
 }
 
 /**

@@ -36,6 +36,8 @@ import type {
 	ResourceSet,
 	ResourceSetInput,
 	ResourceSetUsage,
+	ScheduleFieldError,
+	ScheduleInput,
 	Tcp,
 	TcpInput,
 	TcpSelection,
@@ -69,6 +71,7 @@ import { CreateWorkflowModal } from "./views/CreateWorkflowModal.tsx";
 import { LandingView } from "./views/LandingView.tsx";
 import { LoginView } from "./views/LoginView.tsx";
 import { ResetPasswordView } from "./views/ResetPasswordView.tsx";
+import type { ScheduleSaveResult } from "./views/ScheduleModal.tsx";
 import { SettingsView } from "./views/SettingsView.tsx";
 import { SetupView } from "./views/SetupView.tsx";
 import { ResourceSetsView } from "./views/ResourceSetsView.tsx";
@@ -686,6 +689,51 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 			async () => {
 				await api.archiveWorkflow(workflow.id);
 				toast.success(`Workflow "${workflow.name}" archived.`);
+			},
+			refreshCurrent,
+		);
+	};
+
+	/**
+	 * Saves the schedule dialog. Not through `act`: a 400 `invalid_schedule`
+	 * carries per-field errors the dialog puts next to their fields, and the
+	 * hub's `message` (not its error code) is what the toast should say for
+	 * that and for a 409 such as `server_managed`.
+	 */
+	const handleSaveSchedule = async (input: ScheduleInput): Promise<ScheduleSaveResult> => {
+		const workflow = selectedWorkflow;
+		if (!workflow) return { ok: false };
+		setBusy(true);
+		try {
+			const saved = await api.setWorkflowSchedule(workflow.id, input);
+			toast.success(
+				saved.nextRunAt
+					? `Workflow "${workflow.name}" scheduled — next run ${new Date(saved.nextRunAt).toLocaleString()}.`
+					: `Workflow "${workflow.name}" scheduled.`,
+			);
+			await refreshCurrent();
+			return { ok: true };
+		} catch (err) {
+			const payload = err instanceof ApiError ? (err.payload as { message?: unknown; fields?: unknown } | null) : null;
+			if (err instanceof ApiError && (err.status === 400 || err.status === 409) && typeof payload?.message === "string") {
+				toast.error(`Could not schedule the workflow: ${payload.message}`);
+				return { ok: false, ...(Array.isArray(payload.fields) ? { fields: payload.fields as ScheduleFieldError[] } : {}) };
+			}
+			reportError(err, "Could not schedule the workflow");
+			return { ok: false };
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	const handleCancelSchedule = async (): Promise<boolean> => {
+		const workflow = selectedWorkflow;
+		if (!workflow) return false;
+		return act(
+			"Could not cancel the schedule",
+			async () => {
+				await api.cancelWorkflowSchedule(workflow.id);
+				toast.success(`Schedule of "${workflow.name}" cancelled — it is a normal workflow again.`);
 			},
 			refreshCurrent,
 		);
@@ -1496,6 +1544,8 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								onDelete={() => void handleDelete()}
 								onArchive={() => void handleArchive()}
 								onUnarchive={() => void handleUnarchive()}
+								onSaveSchedule={handleSaveSchedule}
+								onCancelSchedule={handleCancelSchedule}
 								onSetStatus={(status) => void handleSetWorkflowStatus(status)}
 								onSaveContext={handleSaveContext}
 								onSaveTcps={handleSaveTcps}
