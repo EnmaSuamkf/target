@@ -18,6 +18,7 @@ import { type HubConfig, type SyncConfig } from "./config.ts";
 import { deviceHeaders, handleDeviceAuthResponse, remoteAuth } from "./device-auth.ts";
 import { getDeviceLinkStatus, markDeviceRemoteRecovered, setDeviceLinkRemoteState } from "./device-link.ts";
 import { recordOwnerSnapshot } from "./owner-permissions.ts";
+import { recordServerCapabilities, resetServerCapabilitiesCache, serverSupportsEvent } from "./server-capabilities.ts";
 import { loadEffectiveSyncConfig } from "./remote-config.ts";
 import {
 	clearAppliedSyncCommands,
@@ -73,6 +74,7 @@ import {
 	resumeWorkflow,
 	runStep,
 	setConversationContext,
+	setWorkflowArchiveListener,
 	startWorkflow,
 	type StepMoveDirection,
 	WorkflowError,
@@ -150,7 +152,11 @@ interface SyncOutboundEvent {
 	remote_id?: string;
 	payload: Record<string, unknown>;
 	created_at: string;
+	/** Queued through `queueGatedEvent` — re-checked against the server's list at flush. Not sent. */
+	gated?: boolean;
 }
+
+export { serverSupportsEvent };
 
 function logMessage(
 	log: SyncTickOptions["log"],
@@ -193,6 +199,47 @@ function queueEvent(event: Omit<SyncOutboundEvent, "id" | "created_at">): void {
 		...event,
 	});
 }
+
+/**
+ * THE gate for every event type newer than the original sync contract
+ * (design D13). The server rejects a WHOLE `POST /api/sync/events` batch with
+ * 400 when one event has a type it doesn't know, and since the hub re-queues a
+ * failed batch, a single unknown type stalls all event sync for this client.
+ * So a new type is only queued when the server's last register/heartbeat
+ * listed it in `server_capabilities.events`, and `pushEvents` drops any gated
+ * event the server stopped advertising before it flushes (e.g. a downgrade
+ * between queue and flush). Returns whether the event was queued.
+ *
+ * Every event type added from now on MUST go through here. The pre-existing
+ * types (client.heartbeat, command.ack, workflow.created/status_changed,
+ * step.status_changed, resource upsert/delete events, …) use `queueEvent`
+ * directly: every server version accepts them, including older servers that
+ * send no `server_capabilities` at all.
+ */
+function queueGatedEvent(event: Omit<SyncOutboundEvent, "id" | "created_at" | "gated">): boolean {
+	if (!serverSupportsEvent(event.type)) return false;
+	queueEvent({ ...event, gated: true });
+	return true;
+}
+
+/**
+ * `workflow.archived` / `workflow.unarchived` for a remote-origin workflow whose
+ * archive flag just changed (registered below as workflow.ts's archive
+ * listener, so the manual routes and the daemon's auto-archive sweep all land
+ * here). Local-origin workflows never reach the server. Gated: only sent to a
+ * server that advertises the type.
+ */
+export function emitWorkflowArchiveEvent(workflow: Workflow): boolean {
+	if (workflow.origin !== "remote" || !workflow.remoteId) return false;
+	const archived = workflow.archivedAt !== null;
+	return queueGatedEvent({
+		type: archived ? "workflow.archived" : "workflow.unarchived",
+		remote_id: workflow.remoteId,
+		payload: { archived_at: archived ? workflow.archivedAt : null },
+	});
+}
+
+setWorkflowArchiveListener(emitWorkflowArchiveEvent);
 
 function parseRunner(agent: unknown): PublishableRunner | undefined {
 	if (typeof agent !== "string" || !agent.trim()) return undefined;
@@ -347,6 +394,7 @@ async function ensureRegistered(
 	}
 	const response = (await res.json()) as { client_id?: string; client_token?: string; owner?: unknown };
 	if (!response.client_id) throw new Error("sync register returned no client id");
+	recordServerCapabilities(response);
 	const link = getDeviceLinkStatus();
 	recordOwnerSnapshot(response.owner, link.deviceId ?? "", link.origin ?? config.url);
 	if (device) {
@@ -405,8 +453,10 @@ async function sendHeartbeat(
 	try {
 		payload = await res.json();
 	} catch {
+		// Unparseable body: keep the last known capabilities/owner.
 		return;
 	}
+	recordServerCapabilities(payload);
 	try {
 		const owner =
 			payload && typeof payload === "object" && "owner" in payload
@@ -476,6 +526,10 @@ async function pushEvents(
 	fetchImpl: FetchLike,
 ): Promise<void> {
 	collectLocalStateEvents();
+	for (let i = pendingEvents.length - 1; i >= 0; i--) {
+		const event = pendingEvents[i]!;
+		if (event.gated && !serverSupportsEvent(event.type)) pendingEvents.splice(i, 1);
+	}
 	if (pendingEvents.length === 0) return;
 	const batch = pendingEvents.splice(0, 100);
 	const body = JSON.stringify({
@@ -930,6 +984,8 @@ export async function runSyncTick(options: SyncTickOptions = {}): Promise<void> 
 
 /** Seed status cache for workflows already on disk (daemon startup). */
 export function initSyncStateCache(): void {
+	// Re-read the persisted server capabilities (survives restarts).
+	resetServerCapabilitiesCache();
 	for (const workflow of listWorkflows()) {
 		workflowStatusCache.set(workflow.id, workflow.status);
 		if (workflow.origin !== "remote" || !workflow.remoteId) continue;
@@ -948,4 +1004,9 @@ export function resetSyncExecutorState(): void {
 	stepStatusCache.clear();
 	pendingEvents.length = 0;
 	clearAppliedSyncCommands();
+}
+
+/** Copy of the queued, not-yet-pushed events (tests / diagnostics). */
+export function pendingSyncEvents(): Array<{ type: string; remote_id?: string; payload: Record<string, unknown> }> {
+	return pendingEvents.map((e) => ({ type: e.type, remote_id: e.remote_id, payload: { ...e.payload } }));
 }

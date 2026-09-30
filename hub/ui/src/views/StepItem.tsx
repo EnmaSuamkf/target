@@ -104,6 +104,7 @@ export function StepItem({
 	onEditNote,
 	onRemoveNote,
 	onSelectWorkflow,
+	archived = false,
 	busy,
 }: {
 	step: Step;
@@ -135,6 +136,8 @@ export function StepItem({
 	onRemoveNote?: (stepId: string, noteId: string) => Promise<void>;
 	/** Opens another workflow — used when a queued step is blocked on a shared workdir. */
 	onSelectWorkflow?: ((workflowId: string) => void) | undefined;
+	/** The workflow is archived: the hub refuses to run its steps (409 `archived`) until it's unarchived. */
+	archived?: boolean;
 	busy: boolean;
 }): React.JSX.Element {
 	const [editing, setEditing] = useState(false);
@@ -575,11 +578,13 @@ export function StepItem({
 						type="button"
 						className="btn btn--sm btn--primary"
 						onClick={() => onRunStep(step.id)}
-						disabled={busy || !canExecute}
+						disabled={busy || !canExecute || archived}
 						title={
-							canExecute
-								? "Re-run this step now. Use after Abort cleared a stuck queue, or any time a failed step should be tried again."
-								: requires("client.workflows.execute")
+							!canExecute
+								? requires("client.workflows.execute")
+								: archived
+									? "This workflow is archived — unarchive it to run this step again."
+									: "Re-run this step now. Use after Abort cleared a stuck queue, or any time a failed step should be tried again."
 						}
 					>
 						Retry

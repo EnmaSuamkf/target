@@ -175,6 +175,14 @@ export interface Workflow {
 	remoteSyncedAt: string | null;
 	/** Extra host paths bind-mounted in a docker sandbox, on top of Settings defaults. */
 	dockerMounts: string[];
+	/**
+	 * When the workflow was archived, or null when it isn't. A FLAG, not a
+	 * status: `reconcileStatus` re-derives `status` from the steps on every read
+	 * and would overwrite an `archived` status, and the completed/failed outcome
+	 * has to survive archiving anyway. See `archiveWorkflow`/`autoArchive`
+	 * (workflow.ts).
+	 */
+	archivedAt: string | null;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -613,6 +621,13 @@ export function open(): DatabaseSync {
 	addWorkflowColumn("remote_id", "remote_id TEXT");
 	addWorkflowColumn("remote_synced_at", "remote_synced_at TEXT");
 	addWorkflowColumn("docker_mounts", "docker_mounts TEXT NOT NULL DEFAULT '[]'");
+	// Archive flag (ISO timestamp). Nullable with no default, so an existing DB
+	// upgrades to "nothing archived". Indexed because list views filter on it
+	// (archived vs not) and the auto-archive sweep selects `archived_at IS NULL`.
+	// Created here, after the column is guaranteed to exist, not in the CREATE
+	// TABLE block above (which an older DB skips).
+	addWorkflowColumn("archived_at", "archived_at TEXT");
+	database.exec("CREATE INDEX IF NOT EXISTS idx_workflows_archived ON workflows(archived_at);");
 	const existingTemplateColumns = new Set(
 		(database.prepare("PRAGMA table_info(templates)").all() as Record<string, unknown>[]).map((c) => String(c.name)),
 	);
@@ -681,6 +696,7 @@ function rowToWorkflow(row: Record<string, unknown>): Workflow {
 		remoteId: row.remote_id == null ? null : String(row.remote_id),
 		remoteSyncedAt: row.remote_synced_at == null ? null : String(row.remote_synced_at),
 		dockerMounts: parseStoredDockerMounts(row.docker_mounts),
+		archivedAt: row.archived_at == null ? null : String(row.archived_at),
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
 	};
@@ -743,6 +759,7 @@ export function insertWorkflow(input: {
 		remoteId,
 		remoteSyncedAt,
 		dockerMounts,
+		archivedAt: null,
 		createdAt: now,
 		updatedAt: now,
 	};
@@ -826,11 +843,29 @@ export function getWorkflowByRemoteId(remoteId: string): Workflow | null {
 	return row ? rowToWorkflow(row as Record<string, unknown>) : null;
 }
 
-export function listWorkflows(): Workflow[] {
+/**
+ * Which workflows a listing returns with respect to the archive flag:
+ * `exclude` hides archived ones, `include` returns everything, `only` returns
+ * just the archived ones.
+ */
+export type ArchivedFilter = "exclude" | "include" | "only";
+
+export const ARCHIVED_FILTERS: readonly ArchivedFilter[] = ["exclude", "include", "only"];
+
+/**
+ * Every workflow, newest first. Defaults to `include` (archived ones too):
+ * internal callers — sync state, busy checks, sweeps, heartbeats — must keep
+ * seeing archived workflows. Only the user-facing list (GET /api/workflows)
+ * narrows it, and it opts in explicitly.
+ */
+export function listWorkflows(options: { archived?: ArchivedFilter } = {}): Workflow[] {
+	const archived = options.archived ?? "include";
+	const where =
+		archived === "exclude" ? "WHERE archived_at IS NULL " : archived === "only" ? "WHERE archived_at IS NOT NULL " : "";
 	// `rowid DESC` is the tiebreaker: `created_at` is an ISO string with only
 	// millisecond precision, so two rows created in the same millisecond compare
 	// equal and would otherwise come back in an arbitrary (insertion) order.
-	const rows = open().prepare("SELECT * FROM workflows ORDER BY created_at DESC, rowid DESC").all();
+	const rows = open().prepare(`SELECT * FROM workflows ${where}ORDER BY created_at DESC, rowid DESC`).all();
 	return (rows as Record<string, unknown>[]).map(rowToWorkflow);
 }
 
@@ -864,6 +899,58 @@ export function setWorkflowStatus(id: string, status: WorkflowStatus, options: {
 			 WHERE id = ?`,
 		)
 		.run(status, now, status, manual ? 1 : 0, manual ? now : null, id);
+}
+
+/**
+ * Sets a workflow's archive flag, only if it isn't archived already — so the
+ * ORIGINAL archive timestamp is kept and a repeat call is a no-op. Returns
+ * whether a row changed.
+ *
+ * Deliberately does NOT touch `updated_at`: archiving is filing, not activity,
+ * and `updated_at` is half of the "last activity" clock the auto-archive sweep
+ * reads. Eligibility (completed/failed only) is decided by the caller —
+ * `archiveWorkflow`/`autoArchive` in workflow.ts — not here.
+ */
+export function markWorkflowArchived(id: string, archivedAt: string): boolean {
+	return (
+		open().prepare("UPDATE workflows SET archived_at = ? WHERE id = ? AND archived_at IS NULL").run(archivedAt, id)
+			.changes > 0
+	);
+}
+
+/**
+ * Clears a workflow's archive flag. Unlike archiving this DOES bump
+ * `updated_at`: un-archiving is a deliberate operator action, and without
+ * resetting the activity clock an old workflow would be re-archived by the very
+ * next auto-archive sweep (≤ 60s later), undoing the operator's choice.
+ * Returns whether a row changed (false when it wasn't archived).
+ */
+export function clearWorkflowArchived(id: string): boolean {
+	return (
+		open()
+			.prepare("UPDATE workflows SET archived_at = NULL, updated_at = ? WHERE id = ? AND archived_at IS NOT NULL")
+			.run(new Date().toISOString(), id).changes > 0
+	);
+}
+
+/**
+ * Not-yet-archived workflows in a terminal status, each with its latest step
+ * `finished_at` (null when no step ever finished) — the input to the
+ * auto-archive sweep's "last activity" computation. Pre-filtered in SQL only
+ * as a cheap narrowing; `isArchivable` (workflow.ts) remains the authority.
+ */
+export function listArchiveCandidates(): { workflow: Workflow; lastStepFinishedAt: string | null }[] {
+	const rows = open()
+		.prepare(
+			`SELECT w.*, (SELECT MAX(s.finished_at) FROM steps s WHERE s.workflow_id = w.id) AS last_step_finished_at
+			 FROM workflows w
+			 WHERE w.archived_at IS NULL AND w.status IN ('completed', 'failed')`,
+		)
+		.all() as Record<string, unknown>[];
+	return rows.map((row) => ({
+		workflow: rowToWorkflow(row),
+		lastStepFinishedAt: row.last_step_finished_at == null ? null : String(row.last_step_finished_at),
+	}));
 }
 
 /**
@@ -3028,6 +3115,72 @@ export function saveDockerMountSettings(mounts: string[]): DockerMountSettings {
 	return settings;
 }
 
+// --- Workflow auto-archive (Settings) -------------------------------------
+//
+// `archive_after_days`: completed/failed workflows idle for longer than this
+// many days are archived by the daemon sweep (see `autoArchive`, workflow.ts).
+// 0 disables auto-archiving. Stored like every other setting — one JSON blob
+// under its own `settings` key.
+
+const ARCHIVE_SETTINGS_KEY = "archive";
+
+/** Default `archive_after_days` when the operator never saved one. */
+export const DEFAULT_ARCHIVE_AFTER_DAYS = 30;
+
+export interface ArchiveSettings {
+	/** Days of inactivity before a completed/failed workflow is auto-archived; 0 = disabled. */
+	archiveAfterDays: number;
+	updatedAt: string | null;
+}
+
+export function defaultArchiveSettings(): ArchiveSettings {
+	return { archiveAfterDays: DEFAULT_ARCHIVE_AFTER_DAYS, updatedAt: null };
+}
+
+/**
+ * Validates an `archive_after_days` value: a non-negative integer (numeric
+ * strings accepted, as a form field would send). Returns null when invalid.
+ */
+export function normalizeArchiveAfterDays(raw: unknown): number | null {
+	const n = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : raw;
+	if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0) return null;
+	return n;
+}
+
+/**
+ * The stored setting, or the default (30) when none was ever saved. A stored
+ * value that is malformed/negative reads as 0 (disabled): an unreadable
+ * setting must never cause workflows to be archived that the operator didn't
+ * ask to archive.
+ */
+export function getArchiveSettings(): ArchiveSettings {
+	const row = open().prepare("SELECT * FROM settings WHERE key = ?").get(ARCHIVE_SETTINGS_KEY) as
+		| Record<string, unknown>
+		| undefined;
+	if (!row) return defaultArchiveSettings();
+	const updatedAt = row.updated_at == null ? null : String(row.updated_at);
+	try {
+		const parsed = JSON.parse(String(row.value)) as Record<string, unknown>;
+		return { archiveAfterDays: normalizeArchiveAfterDays(parsed.archiveAfterDays) ?? 0, updatedAt };
+	} catch {
+		return { archiveAfterDays: 0, updatedAt };
+	}
+}
+
+/** Persists `archive_after_days`. Throws a RangeError for anything but a non-negative integer. */
+export function saveArchiveSettings(input: { archiveAfterDays: unknown }): ArchiveSettings {
+	const archiveAfterDays = normalizeArchiveAfterDays(input.archiveAfterDays);
+	if (archiveAfterDays === null) throw new RangeError("archive_after_days must be a non-negative integer");
+	const settings: ArchiveSettings = { archiveAfterDays, updatedAt: new Date().toISOString() };
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(ARCHIVE_SETTINGS_KEY, JSON.stringify({ archiveAfterDays }), settings.updatedAt);
+	return settings;
+}
+
 // --- UI catalog visibility (Settings) -----------------------------------
 
 const UI_SETTINGS_KEY = "ui";
@@ -3358,6 +3511,29 @@ export function saveOwnerPermissionsJson(value: string): void {
 
 export function clearOwnerPermissionsJson(): void {
 	open().prepare("DELETE FROM settings WHERE key = ?").run(OWNER_PERMISSIONS_KEY);
+}
+
+const SERVER_CAPABILITIES_KEY = "server_capabilities_v1";
+
+/** Last `server_capabilities` seen on a sync register/heartbeat response (JSON), or null. */
+export function getServerCapabilitiesJson(): string | null {
+	const row = open().prepare("SELECT value FROM settings WHERE key = ?").get(SERVER_CAPABILITIES_KEY) as
+		| { value: string }
+		| undefined;
+	return row?.value ?? null;
+}
+
+export function saveServerCapabilitiesJson(value: string): void {
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(SERVER_CAPABILITIES_KEY, value, new Date().toISOString());
+}
+
+export function clearServerCapabilitiesJson(): void {
+	open().prepare("DELETE FROM settings WHERE key = ?").run(SERVER_CAPABILITIES_KEY);
 }
 
 /** Stable remote step_key → local step id map for one remote workflow. */

@@ -1,5 +1,7 @@
 import { useEffect, useId, useState } from "react";
 import type {
+	ArchiveSettings,
+	ArchiveSettingsInput,
 	DeviceLinkOutcome,
 	DeviceLinkStatus,
 	DockerFriendlySettings,
@@ -29,6 +31,7 @@ import { Switch } from "../components/Switch.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { useCatalogSyncStatus } from "../hooks/useCatalogSyncStatus.ts";
 import { usePermissions } from "../hooks/usePermissions.ts";
+import { parseArchiveAfterDays } from "../lib/archiveSettings.ts";
 import { relativeTime } from "../lib/format.ts";
 import styles from "./SettingsView.module.css";
 
@@ -113,6 +116,7 @@ export function SettingsView({
 	dockerFriendlySettings,
 	dockerMountSettings,
 	uiSettings,
+	archiveSettings,
 	busy,
 	onSave,
 	onSaveShortcuts,
@@ -121,6 +125,7 @@ export function SettingsView({
 	onSaveDockerFriendly,
 	onSaveDockerMounts,
 	onSaveUi,
+	onSaveArchive,
 	onCatalogSynced,
 }: {
 	settings: NotificationSettings;
@@ -130,6 +135,7 @@ export function SettingsView({
 	dockerFriendlySettings: DockerFriendlySettings;
 	dockerMountSettings: DockerMountSettings;
 	uiSettings: UiSettings;
+	archiveSettings: ArchiveSettings;
 	busy: boolean;
 	onSave: (input: NotificationSettingsInput) => Promise<boolean>;
 	onSaveShortcuts: (input: ShortcutSettingsInput) => Promise<boolean>;
@@ -138,6 +144,7 @@ export function SettingsView({
 	onSaveDockerFriendly: (input: DockerFriendlySettingsInput) => Promise<boolean>;
 	onSaveDockerMounts: (input: DockerMountSettingsInput) => Promise<boolean>;
 	onSaveUi: (input: UiSettingsInput) => Promise<boolean>;
+	onSaveArchive: (input: ArchiveSettingsInput) => Promise<boolean>;
 	onCatalogSynced?: () => Promise<void>;
 }): React.JSX.Element {
 	const [enabled, setEnabled] = useState(settings.enabled);
@@ -189,6 +196,9 @@ export function SettingsView({
 	const [dockerMounts, setDockerMounts] = useState<string[]>(dockerMountSettings.mounts);
 	const [dockerMountError, setDockerMountError] = useState<string | null>(null);
 	const [savingDockerMounts, setSavingDockerMounts] = useState(false);
+	const [archiveAfterDays, setArchiveAfterDays] = useState(String(archiveSettings.archive_after_days));
+	const [archiveError, setArchiveError] = useState<string | null>(null);
+	const [savingArchive, setSavingArchive] = useState(false);
 
 	const [showTcpCatalog, setShowTcpCatalog] = useState(uiSettings.showTcpCatalog);
 	const [showRciCatalog, setShowRciCatalog] = useState(uiSettings.showRciCatalog);
@@ -227,6 +237,7 @@ export function SettingsView({
 	const reportId = useId();
 	const dockerFriendlyId = useId();
 	const dockerMountsId = useId();
+	const archiveId = useId();
 	const linkId = useId();
 
 	const applyLinkOutcome = (outcome: DeviceLinkOutcome): void => {
@@ -412,6 +423,24 @@ export function SettingsView({
 			if (!ok) setDockerMountError("Could not save docker bind mounts.");
 		} finally {
 			setSavingDockerMounts(false);
+		}
+	};
+
+	const submitArchive = async (ev: React.FormEvent): Promise<void> => {
+		ev.preventDefault();
+		if (savingArchive) return;
+		const parsed = parseArchiveAfterDays(archiveAfterDays);
+		if (!parsed.ok) {
+			setArchiveError(parsed.error);
+			return;
+		}
+		setArchiveError(null);
+		setSavingArchive(true);
+		try {
+			const ok = await onSaveArchive({ archive_after_days: parsed.value });
+			if (!ok) setArchiveError("Could not save the auto-archive setting.");
+		} finally {
+			setSavingArchive(false);
 		}
 	};
 
@@ -1113,6 +1142,62 @@ export function SettingsView({
 					</button>
 					{dockerMountSettings.updatedAt && (
 						<span className="hint">Last saved {relativeTime(dockerMountSettings.updatedAt)}</span>
+					)}
+				</div>
+			</form>
+
+			{/* Auto-archive: one number, committed by its own Save (a single PUT to
+			    /api/settings/archive) like every other section. */}
+			<form className={styles.section} aria-labelledby={`${archiveId}-section`} onSubmit={submitArchive}>
+				<h3 className={styles.sectionHeading} id={`${archiveId}-section`}>
+					Auto-archive
+				</h3>
+				<p className="hint">
+					Completed or failed workflows that haven't changed for this many days are archived automatically:
+					hidden from the workflow list (the <strong>Archived</strong> filter still shows them) and not
+					runnable until unarchived. Nothing is deleted.
+				</p>
+
+				<Field
+					label="Archive after (days)"
+					hint={
+						archiveAfterDays.trim() === "0"
+							? "0 — auto-archiving is off. Workflows are only archived by hand."
+							: "A whole number of days. Set 0 to turn auto-archiving off."
+					}
+				>
+					{(props) => (
+						<input
+							{...props}
+							type="number"
+							className="input"
+							min={0}
+							step={1}
+							inputMode="numeric"
+							value={archiveAfterDays}
+							onChange={(ev) => {
+								setArchiveAfterDays(ev.target.value);
+								if (archiveError) setArchiveError(null);
+							}}
+							aria-invalid={archiveError ? true : undefined}
+							disabled={savingArchive || busy}
+							data-archive-after-days
+						/>
+					)}
+				</Field>
+
+				{archiveError && (
+					<p className="msg msg--error" role="alert">
+						{archiveError}
+					</p>
+				)}
+
+				<div className={styles.actions}>
+					<button type="submit" className="btn btn--primary" disabled={savingArchive || busy}>
+						{savingArchive ? "Saving…" : "Save"}
+					</button>
+					{archiveSettings.updatedAt && (
+						<span className="hint">Last saved {relativeTime(archiveSettings.updatedAt)}</span>
 					)}
 				</div>
 			</form>

@@ -193,6 +193,42 @@ Both flags default to **`false`** (catalogs hidden) until the operator turns the
 on in Settings. Saved preferences override that default. Hiding a catalog does
 not remove stored selections on workflows or templates — it only hides the UI.
 
+### Archiving workflows
+
+Archiving is a flag (`archivedAt`), not a status: only a **completed** or
+**failed** workflow can be archived, and it keeps that status. Running,
+waiting, paused and draft workflows are never archived.
+
+- **Automatic.** The daemon's 60s sweep archives completed/failed workflows
+  whose last activity — the later of `updated_at` and the steps' latest
+  `finished_at` — is older than `archive_after_days` (default 30, `0` turns it
+  off; Settings → Auto-archive, or `/api/settings/archive`).
+- **Manual.** Archive / Unarchive in the workflow detail, the routes below, or
+  the MCP tools. Unarchiving bumps `updated_at`, so the sweep doesn't
+  immediately re-archive it.
+- **Listing.** `GET /api/workflows` hides archived workflows by default
+  (`?archived=exclude`); `?archived=include` returns everything and
+  `?archived=only` just the archive (anything else is a 400). The UI rail and
+  All workflows page have an **Archived** filter.
+- **Refusals.** An archived workflow answers 409 `{"error":"archived"}` to
+  start/resume/restart/step run until unarchived (enforced in the engine, so
+  sync commands and MCP get the same refusal).
+
+| Method | Path | Auth | Body / response |
+|--------|------|------|-----------------|
+| `POST` | `/api/workflows/:id/archive` | admin Bearer (`client.workflows.manage`) | → `{ "workflow" }` with `archivedAt`; 409 `not_archivable` unless completed/failed; 404 `unknown_workflow` |
+| `POST` | `/api/workflows/:id/unarchive` | admin Bearer (`client.workflows.manage`) | → `{ "workflow" }` with `archivedAt: null` |
+| `GET` | `/api/settings/archive` | session or admin Bearer | `{ "settings": { "archive_after_days": 30, "updatedAt": null \| ISO } }` |
+| `PUT` | `/api/settings/archive` | admin Bearer | `{ "archive_after_days": 7 }` → saved settings; 400 unless a non-negative integer |
+
+MCP: `archive_workflow`, `unarchive_workflow`, and `list_workflows { archived }`.
+
+Archiving or unarchiving a remote-origin workflow (by hand or by the sweep)
+queues a `workflow.archived` / `workflow.unarchived` sync event with the
+workflow's `remote_id` and payload `{ "archived_at": ISO | null }` — only
+when the linked server advertises that event type (see Remote sync below).
+Local workflows never emit it.
+
 `ui:dev` gives hot reload while proxying API calls to a hub started separately
 with `npm start`. Point it at a hub on another port with `TARGET_HUB_ORIGIN`.
 
@@ -686,6 +722,16 @@ TARGET_SYNC_ENABLED=true
 Presence on the server is derived from this heartbeat traffic (not an explicit
 online/offline event); the server's online TTL is expected to be ~3× the hub
 interval (30s when the default is 10s).
+
+Register and heartbeat responses carry `server_capabilities.events`, the
+event types the server accepts. One unknown type makes the server reject the
+whole event batch with 400 (and the hub re-queues it, stalling all sync), so
+event types newer than the original contract (currently `workflow.archived` /
+`workflow.unarchived`) are queued only if listed there — see `queueGatedEvent`
+in `hub/sync.ts`; the original types are always sent. The last value is kept in
+the `settings` table (`server_capabilities_v1`), replaced on every parsed
+register/heartbeat response (a response without the field, i.e. an older
+server, clears it), kept on a failed heartbeat, and cleared on unlink.
 
 Wire contract: `target-server/docs/remote-sync.md`. Moving this into Settings is
 future work; there is no checked-in env template for it.

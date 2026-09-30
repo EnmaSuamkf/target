@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadReportConfig, loadSyncConfig, targetDir, ensureTargetDirSecure } from "./config.ts";
 import { clearOwnerSnapshot } from "./owner-permissions.ts";
+import { clearServerCapabilities } from "./server-capabilities.ts";
 
 const IDENTITY_FILE = "device-link.json";
 const CLEANUP_FILE = "device-link-cleanup.json";
@@ -475,6 +476,7 @@ export function getPendingRemoteCleanup(): PendingRemoteCleanup | null {
 
 export function beginRemoteDisconnect(): DeviceLinkPublicStatus {
 	clearOwnerSnapshot();
+	clearServerCapabilities();
 	const credential = getDeviceCredential();
 	if (credential) {
 		ensureTargetDirSecure();
@@ -500,6 +502,7 @@ export function completeRemoteCleanup(): DeviceLinkPublicStatus {
 /** Remove all private pairing/device material. The caller may retain local workflows and queues. */
 export function deleteDeviceLink(): DeviceLinkPublicStatus {
 	clearOwnerSnapshot();
+	clearServerCapabilities();
 	try {
 		fs.rmSync(identityFile(), { force: true });
 	} catch {

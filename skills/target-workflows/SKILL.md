@@ -67,7 +67,7 @@ Omit `useSubagent` / `manualReview` only when you intentionally leave the stored
 
 | Intent | Method | Path |
 |--------|--------|------|
-| List | GET | `/api/workflows` |
+| List | GET | `/api/workflows` (archived hidden; `?archived=include\|only`) or MCP `list_workflows` `{ archived? }` |
 | Detail | GET | `/api/workflows/:id` |
 | Create | POST | `/api/workflows` body `{ "name", "workdir"? }` |
 | Delete | DELETE | `/api/workflows/:id` |
@@ -77,6 +77,10 @@ Omit `useSubagent` / `manualReview` only when you intentionally leave the stored
 | Edit step | PATCH | `/api/workflows/:id/steps/:stepId` or MCP `edit_step` |
 | Delete step | DELETE | `/api/workflows/:id/steps/:stepId` |
 | Start | POST | `/api/workflows/:id/start` |
+| Archive | POST | `/api/workflows/:id/archive` (completed/failed only; 409 `not_archivable`) or MCP `archive_workflow` |
+| Unarchive | POST | `/api/workflows/:id/unarchive` or MCP `unarchive_workflow` |
+
+An archived workflow answers 409 `{"error":"archived"}` to start/resume/restart/step run — unarchive it first.
 
 ## Workflow steps (Target engine)
 

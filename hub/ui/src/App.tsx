@@ -25,6 +25,8 @@ import type {
 	ShortcutSettingsInput,
 	UiSettings,
 	UiSettingsInput,
+	ArchiveSettings,
+	ArchiveSettingsInput,
 	StagedStepImages,
 	Step,
 	StepConfigInput,
@@ -231,6 +233,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	const [dockerFriendlySettings, setDockerFriendlySettings] = useState<DockerFriendlySettings | null>(null);
 	const [dockerMountSettings, setDockerMountSettings] = useState<DockerMountSettings | null>(null);
 	const [uiSettings, setUiSettings] = useState<UiSettings | null>(null);
+	const [archiveSettings, setArchiveSettings] = useState<ArchiveSettings | null>(null);
 	const [selectedId, setSelectedId] = useState<string | null>(readHashSelection);
 	const [steps, setSteps] = useState<Step[]>([]);
 	const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
@@ -315,8 +318,14 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		[toast],
 	);
 
+	// `archived=include`: the hub hides archived workflows by default, but the
+	// shell needs them — the rail and the All workflows page filter them out
+	// client-side (and their "Archived" filter shows only them), an archived
+	// workflow that's open (or linked by #/w/<id>) must stay resolvable, and
+	// archiving the open workflow must not drop the selection. One list, one
+	// poll — the same payload the hub returned before archiving existed.
 	const refreshWorkflows = useCallback(async (): Promise<void> => {
-		const list = await api.listWorkflows();
+		const list = await api.listWorkflows({ archived: "include" });
 		setWorkflows(list);
 	}, []);
 
@@ -362,6 +371,10 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 
 	const refreshUiSettings = useCallback(async (): Promise<void> => {
 		setUiSettings(await api.getUiSettings());
+	}, []);
+
+	const refreshArchiveSettings = useCallback(async (): Promise<void> => {
+		setArchiveSettings(await api.getArchiveSettings());
 	}, []);
 
 	const refreshPermissions = useCallback(async (): Promise<void> => {
@@ -423,6 +436,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 					refreshDockerFriendlySettings(),
 					refreshDockerMountSettings(),
 					refreshUiSettings(),
+					refreshArchiveSettings(),
 					refreshPermissions(),
 				]);
 			} catch (err) {
@@ -443,6 +457,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		refreshDockerFriendlySettings,
 		refreshDockerMountSettings,
 		refreshUiSettings,
+		refreshArchiveSettings,
 		refreshPermissions,
 		reportError,
 	]);
@@ -655,6 +670,38 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 			setSelectedId(null);
 			toast.success("Workflow deleted.");
 		}
+	};
+
+	/**
+	 * Archiving is reversible and deletes nothing, so it isn't confirmed. The
+	 * workflow stays selected: the shell's list includes archived ones, so the
+	 * detail pane keeps showing it (now badged, with Unarchive) while the rail
+	 * drops it from its default view.
+	 */
+	const handleArchive = async (): Promise<void> => {
+		const workflow = selectedWorkflow;
+		if (!workflow) return;
+		await act(
+			"Could not archive the workflow",
+			async () => {
+				await api.archiveWorkflow(workflow.id);
+				toast.success(`Workflow "${workflow.name}" archived.`);
+			},
+			refreshCurrent,
+		);
+	};
+
+	const handleUnarchive = async (): Promise<void> => {
+		const workflow = selectedWorkflow;
+		if (!workflow) return;
+		await act(
+			"Could not unarchive the workflow",
+			async () => {
+				await api.unarchiveWorkflow(workflow.id);
+				toast.success(`Workflow "${workflow.name}" unarchived.`);
+			},
+			refreshCurrent,
+		);
 	};
 
 	/**
@@ -1366,6 +1413,17 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		});
 	};
 
+	const handleSaveArchiveSettings = async (input: ArchiveSettingsInput): Promise<boolean> => {
+		return await act("Could not save the auto-archive setting", async () => {
+			setArchiveSettings(await api.saveArchiveSettings(input));
+			toast.success(
+				input.archive_after_days === 0
+					? "Auto-archive turned off."
+					: `Auto-archive saved: after ${input.archive_after_days} day${input.archive_after_days === 1 ? "" : "s"}.`,
+			);
+		});
+	};
+
 	const handleCatalogSynced = async (): Promise<void> => {
 		await Promise.all([refreshTemplates(), refreshTcps(), refreshResourceSets(), refreshPermissions()]);
 	};
@@ -1436,6 +1494,8 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								onClone={handleClone}
 								onRename={handleRename}
 								onDelete={() => void handleDelete()}
+								onArchive={() => void handleArchive()}
+								onUnarchive={() => void handleUnarchive()}
 								onSetStatus={(status) => void handleSetWorkflowStatus(status)}
 								onSaveContext={handleSaveContext}
 								onSaveTcps={handleSaveTcps}
@@ -1527,11 +1587,12 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 				  slackDeliverySettings &&
 				  dockerFriendlySettings &&
 				  dockerMountSettings &&
-				  uiSettings ? (
+				  uiSettings &&
+				  archiveSettings ? (
 					// Keyed on all save stamps: a successful save in any section re-seeds
 					// that form's local fields from what the hub actually stored.
 					<SettingsView
-						key={`${settings.updatedAt ?? "unsaved"}|${shortcutSettings.updatedAt ?? "unsaved"}|${reportSettings.updatedAt ?? "unsaved"}|${reportSettings.envConfigured}|${slackDeliverySettings.updatedAt ?? "unsaved"}|${slackDeliverySettings.envConfigured}|${dockerFriendlySettings.updatedAt ?? "unsaved"}|${dockerFriendlySettings.envConfigured}|${dockerMountSettings.updatedAt ?? "unsaved"}|${uiSettings.updatedAt ?? "unsaved"}`}
+						key={`${settings.updatedAt ?? "unsaved"}|${shortcutSettings.updatedAt ?? "unsaved"}|${reportSettings.updatedAt ?? "unsaved"}|${reportSettings.envConfigured}|${slackDeliverySettings.updatedAt ?? "unsaved"}|${slackDeliverySettings.envConfigured}|${dockerFriendlySettings.updatedAt ?? "unsaved"}|${dockerFriendlySettings.envConfigured}|${dockerMountSettings.updatedAt ?? "unsaved"}|${uiSettings.updatedAt ?? "unsaved"}|${archiveSettings.updatedAt ?? "unsaved"}`}
 						settings={settings}
 						shortcutSettings={shortcutSettings}
 						reportSettings={reportSettings}
@@ -1539,6 +1600,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 						dockerFriendlySettings={dockerFriendlySettings}
 						dockerMountSettings={dockerMountSettings}
 						uiSettings={uiSettings}
+						archiveSettings={archiveSettings}
 						busy={busy}
 						onSave={handleSaveNotificationSettings}
 						onSaveShortcuts={handleSaveShortcutSettings}
@@ -1547,6 +1609,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 						onSaveDockerFriendly={handleSaveDockerFriendlySettings}
 						onSaveDockerMounts={handleSaveDockerMountSettings}
 						onSaveUi={handleSaveUiSettings}
+						onSaveArchive={handleSaveArchiveSettings}
 						onCatalogSynced={handleCatalogSynced}
 					/>
 				) : (

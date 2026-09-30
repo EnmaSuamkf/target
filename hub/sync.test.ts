@@ -26,6 +26,12 @@ interface MockSyncState {
 	acks: Array<{ commandId: string; body: unknown }>;
 	eventBatches: unknown[];
 	heartbeats: unknown[];
+	/** `server_capabilities` on the register response (omitted when undefined, like an older server). */
+	registerCapabilities?: unknown;
+	/** `server_capabilities` on heartbeat responses (omitted when undefined). */
+	heartbeatCapabilities?: unknown;
+	/** Answer heartbeats with 503 (a failed heartbeat). */
+	failHeartbeat?: boolean;
 }
 
 function createMockSyncServer(): { fetchImpl: FetchLike; state: MockSyncState; enqueue(cmd: SyncCommand): void } {
@@ -52,6 +58,7 @@ function createMockSyncServer(): { fetchImpl: FetchLike; state: MockSyncState; e
 					client_id: state.clientId,
 					client_token: state.clientToken,
 					created_at: new Date().toISOString(),
+					...(state.registerCapabilities !== undefined ? { server_capabilities: state.registerCapabilities } : {}),
 				}),
 				{ status: 201, headers: { "content-type": "application/json" } },
 			);
@@ -63,7 +70,13 @@ function createMockSyncServer(): { fetchImpl: FetchLike; state: MockSyncState; e
 
 		if (method === "POST" && u.pathname === "/api/sync/heartbeat") {
 			state.heartbeats.push(JSON.parse(String(init?.body ?? "{}")));
-			return new Response(JSON.stringify({ ok: true, server_time: new Date().toISOString() }), {
+			if (state.failHeartbeat) return new Response(JSON.stringify({ error: "unavailable" }), { status: 503 });
+			const hb = {
+				ok: true,
+				server_time: new Date().toISOString(),
+				...(state.heartbeatCapabilities !== undefined ? { server_capabilities: state.heartbeatCapabilities } : {}),
+			};
+			return new Response(JSON.stringify(hb), {
 				status: 200,
 				headers: { "content-type": "application/json" },
 			});
@@ -177,4 +190,201 @@ test("mock server: heartbeat reports idle availability", async () => {
 	assert.ok(hb.capabilities!.runners!.some((r) => r.id === "claude" || r.id === "free-code" || r.id === "cursor"));
 	assert.deepEqual(hb.capabilities?.resources, { version: 2, tcp_tools: true, resource_sets: true });
 	assert.ok(hb.capabilities?.commands?.includes("tcp-tool.upsert"));
+});
+
+// --- server_capabilities + gated archive events (D13) ----------------------
+
+const {
+	pendingSyncEvents,
+	serverSupportsEvent,
+} = await import("./sync.ts");
+const {
+	clearServerCapabilities,
+	recordServerCapabilities,
+	resetServerCapabilitiesCache,
+	serverAdvertisedEvents,
+} = await import("./server-capabilities.ts");
+const { getServerCapabilitiesJson, insertWorkflow, open, setWorkflowRemoteMeta, setWorkflowStatus } = await import(
+	"./db.ts"
+);
+const { archiveWorkflow, autoArchive, unarchiveWorkflow } = await import("./workflow.ts");
+const { deleteDeviceLink } = await import("./device-link.ts");
+
+const ARCHIVE_EVENTS = ["workflow.archived", "workflow.unarchived"];
+const syncCfg = (token: string) => ({ enabled: true, url: MOCK_BASE, token, intervalMs: 10_000 });
+let archiveSeq = 0;
+
+/** A completed (archivable) workflow; remote-origin with a remote_id unless `local`. */
+function makeCompletedWorkflow(local = false): { id: string; remoteId: string | null } {
+	archiveSeq += 1;
+	const id = `wf-sync-archive-${archiveSeq}`;
+	insertWorkflow({
+		id,
+		name: `sync archive ${archiveSeq}`,
+		agentName: `sync-archive-agent-${archiveSeq}`,
+		hookUrl: "http://127.0.0.1:1/hook",
+		secret: "s",
+		mdPath: path.join(tmpHome, `${id}.md`),
+	});
+	setWorkflowStatus(id, "completed");
+	if (local) return { id, remoteId: null };
+	const remoteId = `rwf_archive_${archiveSeq}`;
+	setWorkflowRemoteMeta(id, { origin: "remote", remoteId, remoteSyncedAt: new Date().toISOString() });
+	return { id, remoteId };
+}
+
+function archiveEventsFor(remoteId: string | null) {
+	return pendingSyncEvents().filter((e) => ARCHIVE_EVENTS.includes(e.type) && e.remote_id === (remoteId ?? undefined));
+}
+
+test("server_capabilities: parsed from heartbeat, non-strings ignored, persisted across a cache reload; missing → empty", async () => {
+	clearServerCapabilities();
+	const mock = createMockSyncServer();
+	const hubCfg = loadConfig();
+	mock.state.heartbeatCapabilities = { events: ["client.heartbeat", "workflow.archived", 42, null, { x: 1 }] };
+
+	await runSyncTick({ hubConfig: hubCfg, fetchImpl: mock.fetchImpl, config: syncCfg("") });
+	assert.equal(serverSupportsEvent("workflow.archived"), true);
+	assert.equal(serverSupportsEvent("workflow.unarchived"), false);
+	assert.deepEqual(serverAdvertisedEvents(), ["client.heartbeat", "workflow.archived"]);
+
+	// Survives a restart: drop the in-memory cache and re-read from settings.
+	resetServerCapabilitiesCache();
+	assert.ok(getServerCapabilitiesJson());
+	assert.equal(serverSupportsEvent("workflow.archived"), true);
+
+	// An older server (no server_capabilities) clears support.
+	const { token } = getSyncCredentials();
+	mock.state.heartbeatCapabilities = undefined;
+	await runSyncTick({ hubConfig: hubCfg, fetchImpl: mock.fetchImpl, config: syncCfg(token!) });
+	assert.equal(serverSupportsEvent("workflow.archived"), false);
+	assert.deepEqual(serverAdvertisedEvents(), []);
+
+	// server_capabilities present but without `events` → empty too.
+	recordServerCapabilities({ server_capabilities: { events: ["workflow.archived"] } });
+	mock.state.heartbeatCapabilities = {};
+	await runSyncTick({ hubConfig: hubCfg, fetchImpl: mock.fetchImpl, config: syncCfg(token!) });
+	assert.deepEqual(serverAdvertisedEvents(), []);
+	resetServerCapabilitiesCache();
+	assert.deepEqual(serverAdvertisedEvents(), []);
+});
+
+test("server_capabilities: parsed from the register response", async () => {
+	clearServerCapabilities();
+	const mock = createMockSyncServer();
+	mock.state.registerCapabilities = { events: ["workflow.unarchived"] };
+	mock.state.failHeartbeat = true;
+	await assert.rejects(
+		runSyncTick({ hubConfig: loadConfig(), fetchImpl: mock.fetchImpl, config: syncCfg("") }),
+		/heartbeat failed \(503\)/,
+	);
+	assert.equal(serverSupportsEvent("workflow.unarchived"), true);
+});
+
+test("server_capabilities: a failed heartbeat keeps the last known value", async () => {
+	const mock = createMockSyncServer();
+	const hubCfg = loadConfig();
+	mock.state.heartbeatCapabilities = { events: ARCHIVE_EVENTS };
+	await runSyncTick({ hubConfig: hubCfg, fetchImpl: mock.fetchImpl, config: syncCfg("") });
+	assert.equal(serverSupportsEvent("workflow.archived"), true);
+
+	const { token } = getSyncCredentials();
+	mock.state.heartbeatCapabilities = undefined;
+	mock.state.failHeartbeat = true;
+	await assert.rejects(runSyncTick({ hubConfig: hubCfg, fetchImpl: mock.fetchImpl, config: syncCfg(token!) }));
+	assert.equal(serverSupportsEvent("workflow.archived"), true);
+});
+
+test("archive/unarchive of a remote workflow emits workflow.archived / workflow.unarchived when advertised", async () => {
+	recordServerCapabilities({ server_capabilities: { events: ARCHIVE_EVENTS } });
+	const { id, remoteId } = makeCompletedWorkflow();
+	const at = new Date("2026-09-30T12:00:00.000Z");
+
+	archiveWorkflow(id, at);
+	archiveWorkflow(id, new Date("2026-10-01T00:00:00.000Z")); // idempotent no-op → no second event
+	assert.deepEqual(archiveEventsFor(remoteId), [
+		{ type: "workflow.archived", remote_id: remoteId!, payload: { archived_at: at.toISOString() } },
+	]);
+
+	unarchiveWorkflow(id);
+	unarchiveWorkflow(id); // no-op → nothing
+	assert.deepEqual(archiveEventsFor(remoteId).at(-1), {
+		type: "workflow.unarchived",
+		remote_id: remoteId!,
+		payload: { archived_at: null },
+	});
+	assert.equal(archiveEventsFor(remoteId).length, 2);
+
+	// The daemon sweep goes through the same hook.
+	open().prepare("UPDATE workflows SET updated_at = ? WHERE id = ?").run("2020-01-01T00:00:00.000Z", id);
+	const sweepAt = new Date("2026-09-30T12:00:00.000Z");
+	assert.ok(autoArchive(sweepAt).includes(id));
+	assert.deepEqual(archiveEventsFor(remoteId).at(-1), {
+		type: "workflow.archived",
+		remote_id: remoteId!,
+		payload: { archived_at: sweepAt.toISOString() },
+	});
+
+	// They flush with the batch like any other event (ids/created_at attached).
+	const mock = createMockSyncServer();
+	mock.state.heartbeatCapabilities = { events: ARCHIVE_EVENTS };
+	await runSyncTick({ hubConfig: loadConfig(), fetchImpl: mock.fetchImpl, config: syncCfg("") });
+	const pushed = mock.state.eventBatches.flatMap(
+		(b) => (b as { events: Array<{ id: string; type: string; remote_id?: string; created_at: string }> }).events,
+	);
+	const mine = pushed.filter((e) => e.remote_id === remoteId && ARCHIVE_EVENTS.includes(e.type));
+	assert.deepEqual(
+		mine.map((e) => e.type),
+		["workflow.archived", "workflow.unarchived", "workflow.archived"],
+	);
+	for (const e of mine) {
+		assert.equal(typeof e.id, "string");
+		assert.ok(e.created_at);
+	}
+});
+
+test("archive events are not queued when the server doesn't advertise them", () => {
+	recordServerCapabilities({ server_capabilities: { events: ["client.heartbeat", "command.ack"] } });
+	const { id, remoteId } = makeCompletedWorkflow();
+	archiveWorkflow(id);
+	unarchiveWorkflow(id);
+	assert.deepEqual(archiveEventsFor(remoteId), []);
+
+	clearServerCapabilities(); // older server: no server_capabilities at all
+	archiveWorkflow(id);
+	assert.deepEqual(archiveEventsFor(remoteId), []);
+});
+
+test("a gated event is dropped at flush when the server stopped advertising it", async () => {
+	recordServerCapabilities({ server_capabilities: { events: ARCHIVE_EVENTS } });
+	const { id, remoteId } = makeCompletedWorkflow();
+	archiveWorkflow(id);
+	assert.equal(archiveEventsFor(remoteId).length, 1);
+
+	const mock = createMockSyncServer(); // heartbeat without server_capabilities → downgrade
+	await runSyncTick({ hubConfig: loadConfig(), fetchImpl: mock.fetchImpl, config: syncCfg("") });
+	const pushed = mock.state.eventBatches.flatMap((b) => (b as { events: Array<{ type: string }> }).events);
+	assert.ok(!pushed.some((e) => ARCHIVE_EVENTS.includes(e.type)));
+	assert.deepEqual(archiveEventsFor(remoteId), []);
+});
+
+test("local-origin workflows never emit archive events, even when advertised", () => {
+	recordServerCapabilities({ server_capabilities: { events: ARCHIVE_EVENTS } });
+	const { id } = makeCompletedWorkflow(true);
+	archiveWorkflow(id);
+	unarchiveWorkflow(id);
+	assert.deepEqual(
+		pendingSyncEvents().filter((e) => ARCHIVE_EVENTS.includes(e.type)),
+		[],
+	);
+});
+
+test("unlinking the hub clears the advertised server capabilities", () => {
+	recordServerCapabilities({ server_capabilities: { events: ARCHIVE_EVENTS } });
+	assert.equal(serverSupportsEvent("workflow.archived"), true);
+	deleteDeviceLink();
+	assert.equal(serverSupportsEvent("workflow.archived"), false);
+	resetServerCapabilitiesCache();
+	assert.equal(getServerCapabilitiesJson(), null);
+	assert.equal(serverSupportsEvent("workflow.archived"), false);
 });

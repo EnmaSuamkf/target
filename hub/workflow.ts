@@ -50,15 +50,19 @@ import {
 	failTimedOutStep,
 	findTimeoutCandidates,
 	finishStepDone,
+	getArchiveSettings,
 	getContextStep,
 	getStep,
 	getWorkflow,
 	insertStep,
 	insertWorkflow,
+	clearWorkflowArchived,
+	listArchiveCandidates,
 	listRunningSteps,
 	listSteps,
 	listWorkflows,
 	markStepJudging,
+	markWorkflowArchived,
 	markStepWaiting,
 	nextPendingStep,
 	overrideStepStatus,
@@ -100,6 +104,38 @@ import { dispatchStep, type Logger } from "./runner.ts";
 import { stepResultsDir, writeStepResults } from "./step-results.ts";
 
 export class WorkflowError extends Error {}
+
+/**
+ * Thrown by the run entry points (start/resume/restart/▶ step run) when the
+ * workflow is archived. A `WorkflowError` subclass so every existing caller that
+ * treats engine refusals generically (sync command acks, MCP) keeps working,
+ * while the HTTP layer can map it to 409 `{"error":"archived"}` by type rather
+ * than by matching the message.
+ */
+export class WorkflowArchivedError extends WorkflowError {
+	constructor(message = "workflow is archived — unarchive it before running it") {
+		super(message);
+		this.name = "WorkflowArchivedError";
+	}
+}
+
+/** Thrown by `archiveWorkflow` when the workflow isn't archivable (see `isArchivable`). */
+export class WorkflowNotArchivableError extends WorkflowError {
+	constructor(message: string) {
+		super(message);
+		this.name = "WorkflowNotArchivableError";
+	}
+}
+
+/**
+ * Archived workflows are filed away, not runnable: refuse every way of
+ * dispatching work on one (start, resume, restart, a manual step run) until the
+ * operator unarchives it. Checked BEFORE any other status rule so the refusal
+ * reads the same regardless of the archived workflow's completed/failed outcome.
+ */
+function refuseArchived(workflow: Workflow): void {
+	if (workflow.archivedAt !== null) throw new WorkflowArchivedError();
+}
 
 /**
  * Refreshes the progress clock of every in-flight step from the artifacts its
@@ -536,6 +572,128 @@ export function forceWorkflowStatus(workflowId: string, status: OverridableWorkf
 	const updated = getWorkflow(workflowId);
 	if (!updated) throw new WorkflowError("workflow disappeared");
 	return updated;
+}
+
+// --- Archiving ------------------------------------------------------------
+//
+// Archiving is the `archived_at` FLAG, never a status: `reconcileStatus`
+// re-derives the status on every read and would overwrite one, and the
+// completed/failed outcome must still read back after archiving.
+
+/**
+ * The single "may this workflow be archived?" rule, shared by the manual
+ * `archiveWorkflow` and the daemon's `autoArchive` so the two can never drift.
+ * Only terminal outcomes qualify: a running/waiting/paused/draft workflow is
+ * still work in progress, and archiving it would hide something that needs
+ * attention. Extend HERE (e.g. to exclude armed scheduled instances) rather
+ * than at the call sites.
+ */
+export function isArchivable(workflow: Workflow): boolean {
+	return workflow.status === "completed" || workflow.status === "failed";
+}
+
+/**
+ * Called after a workflow's archive flag ACTUALLY changed (never on the
+ * idempotent no-ops), with the workflow as it now reads (`archivedAt` set when
+ * archived, null when unarchived). Covers `archiveWorkflow`,
+ * `unarchiveWorkflow` and `autoArchive`. sync.ts registers the one listener at
+ * module load to emit `workflow.archived` / `workflow.unarchived` for
+ * remote-origin workflows — a hook rather than an import because sync.ts
+ * already imports this module. A throwing listener never fails the archive.
+ */
+export type WorkflowArchiveListener = (workflow: Workflow) => void;
+let archiveListener: WorkflowArchiveListener | null = null;
+
+export function setWorkflowArchiveListener(listener: WorkflowArchiveListener | null): void {
+	archiveListener = listener;
+}
+
+function notifyArchiveChange(workflow: Workflow): void {
+	try {
+		archiveListener?.(workflow);
+	} catch {
+		// Sync bookkeeping must never undo or fail the local archive.
+	}
+}
+
+/**
+ * Archives a workflow by hand. Throws `WorkflowError` when it doesn't exist or
+ * isn't archivable. Idempotent: archiving an already-archived workflow is a
+ * no-op that returns it unchanged, keeping the ORIGINAL `archivedAt`. Does not
+ * touch `updated_at` (see `markWorkflowArchived`).
+ */
+export function archiveWorkflow(workflowId: string, now: Date = new Date()): Workflow {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	if (workflow.archivedAt !== null) return workflow;
+	if (!isArchivable(workflow)) {
+		throw new WorkflowNotArchivableError(
+			`only a completed or failed workflow can be archived (this one is ${workflow.status})`,
+		);
+	}
+	const changed = markWorkflowArchived(workflowId, now.toISOString());
+	const updated = getWorkflow(workflowId);
+	if (!updated) throw new WorkflowError("workflow disappeared");
+	if (changed) notifyArchiveChange(updated);
+	return updated;
+}
+
+/**
+ * Clears the archive flag. Throws `WorkflowError` when the workflow doesn't
+ * exist; a no-op on one that isn't archived. Resets the activity clock
+ * (`updated_at`) so the next auto-archive sweep doesn't immediately re-archive
+ * it (see `clearWorkflowArchived`).
+ */
+export function unarchiveWorkflow(workflowId: string): Workflow {
+	if (!getWorkflow(workflowId)) throw new WorkflowError("unknown workflow");
+	const changed = clearWorkflowArchived(workflowId);
+	const updated = getWorkflow(workflowId);
+	if (!updated) throw new WorkflowError("workflow disappeared");
+	if (changed) notifyArchiveChange(updated);
+	return updated;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Epoch ms of a stored timestamp, or NaN. The hub writes ISO-8601 UTC
+ * (`toISOString`), but a bare SQLite `datetime()` value ("YYYY-MM-DD HH:MM:SS",
+ * implicitly UTC) is accepted too — `Date.parse` alone would read that one as
+ * LOCAL time.
+ */
+function timestampMs(value: string | null): number {
+	if (value == null) return Number.NaN;
+	const sqlite = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}(?:\.\d+)?)$/.exec(value.trim());
+	return Date.parse(sqlite ? `${sqlite[1]}T${sqlite[2]}Z` : value);
+}
+
+/**
+ * Daemon sweep: archives every archivable, not-yet-archived workflow whose last
+ * activity — the later of the workflow's `updated_at` and its steps' latest
+ * `finished_at` — is STRICTLY older than `now - archive_after_days` (exactly on
+ * the boundary is not archived). `archive_after_days` = 0 disables it. A
+ * workflow whose activity timestamps can't be parsed is skipped, never
+ * archived. Returns the ids it archived (empty on a repeat call).
+ */
+export function autoArchive(now: Date = new Date()): string[] {
+	const { archiveAfterDays } = getArchiveSettings();
+	if (!Number.isSafeInteger(archiveAfterDays) || archiveAfterDays <= 0) return [];
+	const cutoffMs = now.getTime() - archiveAfterDays * DAY_MS;
+	const archivedAt = now.toISOString();
+	const archived: string[] = [];
+	for (const { workflow, lastStepFinishedAt } of listArchiveCandidates()) {
+		if (!isArchivable(workflow)) continue;
+		const updatedMs = timestampMs(workflow.updatedAt);
+		if (Number.isNaN(updatedMs)) continue;
+		const finishedMs = timestampMs(lastStepFinishedAt);
+		const lastActivityMs = Number.isNaN(finishedMs) ? updatedMs : Math.max(updatedMs, finishedMs);
+		if (lastActivityMs >= cutoffMs) continue;
+		if (markWorkflowArchived(workflow.id, archivedAt)) {
+			archived.push(workflow.id);
+			notifyArchiveChange({ ...workflow, archivedAt });
+		}
+	}
+	return archived;
 }
 
 /**
@@ -1754,6 +1912,7 @@ export async function startWorkflow(
 ): Promise<Workflow> {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
+	refuseArchived(workflow);
 	if (workflow.status === "completed" || workflow.status === "failed") {
 		throw new WorkflowError(`workflow is ${workflow.status} — use restart instead`);
 	}
@@ -1800,6 +1959,7 @@ export async function resumeWorkflow(
 ): Promise<Workflow> {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
+	refuseArchived(workflow);
 	if (workflow.status !== "paused") throw new WorkflowError("only a paused workflow can be resumed");
 	setStepSelection(workflowId, stepIds);
 	// A resume mid-run finds the context step already `done` and leaves it alone —
@@ -1866,6 +2026,7 @@ export async function restartWorkflow(
 ): Promise<Workflow> {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
+	refuseArchived(workflow);
 	if (workflow.status === "running") throw new WorkflowError("pause the workflow before restarting it");
 	// Selection first, so resetSteps only wipes the chosen steps.
 	setStepSelection(workflowId, stepIds);
@@ -2675,6 +2836,7 @@ async function onJudgeVerdict(
 export async function runStep(workflowId: string, stepId: string, cfg: HubConfig, log: Logger): Promise<void> {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
+	refuseArchived(workflow);
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
 	// A ▶ on the context step would deliver the background as a one-off manual run

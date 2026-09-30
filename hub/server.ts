@@ -10,7 +10,7 @@
  *   GET    /api/auth/me                               → the account, session-gated
  *   POST   /api/auth/password/reset                   → recovery-token password reset (open, per-IP throttled)
  *   GET    /api/permissions                           → owner-role mode for the UI (admin token; no permission required)
- *   GET    /api/workflows                             → list (with progress %)
+ *   GET    /api/workflows                             → list (with progress %); ?archived=exclude|include|only (default exclude; else 400)
  *   GET    /api/runners                               → which agent CLIs (claude/free-code) are installed on this host, for the create form
  *   POST   /api/workflows                             → create (admin token) — makes the awb hook too; optional templateId seeds its steps
  *   GET    /api/workflows/:id                          → detail + steps
@@ -40,6 +40,9 @@
  *   POST   /api/workflows/:id/pause                    → stop dispatching further steps (admin token)
  *   POST   /api/workflows/:id/resume                   → undo pause (admin token)
  *   POST   /api/workflows/:id/restart                  → reset all steps, start over (admin token)
+ *                                                        (start/resume/restart and steps/:stepId/run answer 409 {error:"archived"} on an archived workflow)
+ *   POST   /api/workflows/:id/archive                  → archive a completed/failed workflow (admin token; 409 not_archivable otherwise)
+ *   POST   /api/workflows/:id/unarchive                → clear the archive flag (admin token)
  *   POST   /api/steps/:id/result                       → awb's result callback (?token=<per-step token>)
  *   GET    /api/templates                              → list templates (optional ?q= filters by name/tag)
  *   POST   /api/catalog/sync                            → pull the linked server's catalog (operator + a client.*.sync permission; 409 if not linked; 502 if the server is too old)
@@ -64,6 +67,8 @@
  *   PUT    /api/settings/docker-friendly                  → replace docker-friendly hub networking toggle (admin token; restart required)
  *   GET    /api/settings/ui                               → UI catalog visibility (TCP / RCI top-level nav)
  *   PUT    /api/settings/ui                               → replace UI catalog visibility (admin token)
+ *   GET    /api/settings/archive                          → auto-archive preference ({archive_after_days}; default 30, 0 = off)
+ *   PUT    /api/settings/archive                          → replace auto-archive preference (admin token; 400 unless a non-negative integer)
  *   GET    /                                           → ui/index.html
  *
  * Every route except /health, the /api/auth stack and the awb per-step-token
@@ -129,6 +134,8 @@ import {
 import {
 	promoteQueuedToRunning,
 	deleteTemplate,
+	ARCHIVED_FILTERS,
+	getArchiveSettings,
 	getDockerMountSettings,
 	getDockerFriendlySettings,
 	getNotificationSettings,
@@ -149,6 +156,7 @@ import {
 	OVERRIDABLE_STEP_STATUSES,
 	OVERRIDABLE_WORKFLOW_STATUSES,
 	parseTemplateBundle,
+	saveArchiveSettings,
 	saveDockerMountSettings,
 	saveDockerFriendlySettings,
 	saveNotificationSettings,
@@ -222,6 +230,7 @@ import { canReadTokenUsage, readTokenUsage } from "./transcript.ts";
 import {
 	abortStep,
 	addStep,
+	archiveWorkflow,
 	cloneWorkflow,
 	continueStep,
 	createWorkflow,
@@ -244,11 +253,14 @@ import {
 	setConversationContext,
 	setWorkflowStepSelection,
 	startWorkflow,
+	unarchiveWorkflow,
 	updateWorkflowDockerMounts,
+	WorkflowArchivedError,
 	WorkflowError,
+	WorkflowNotArchivableError,
 	type CloneOverrides,
 } from "./workflow.ts";
-import { getStep, listStepNotes, normalizeStepNoteTheme, type StepNoteTheme } from "./db.ts";
+import { getStep, listStepNotes, normalizeStepNoteTheme, type ArchivedFilter, type StepNoteTheme } from "./db.ts";
 import { addStepNote, editStepNote, removeStepNote, StepNoteError } from "./step-notes.ts";
 
 /**
@@ -531,6 +543,9 @@ function publicWorkflow(workflow: Workflow): Record<string, unknown> {
 		tcpIds: listWorkflowTcpIds(workflow.id),
 		tcpSelections: listWorkflowTcpSelections(workflow.id),
 		resourceSelections: listWorkflowResourceSelections(workflow.id),
+		// When it was archived, or null. A flag beside `status`, never a status of
+		// its own: the completed/failed outcome still reads back while archived.
+		archivedAt: workflow.archivedAt,
 		createdAt: workflow.createdAt,
 		updatedAt: workflow.updatedAt,
 	};
@@ -718,6 +733,25 @@ function readStepConfig(body: Record<string, unknown>): {
 		config.retryIntervalSeconds = Math.max(0, Math.floor(Number(body.retryIntervalSeconds)));
 	}
 	return config;
+}
+
+/**
+ * The shared error answer of the run entry points (start/resume/restart and a
+ * step's ▶ run): an archived workflow is a 409 `{"error":"archived"}` — a
+ * conflict with the workflow's state, distinguished by type (see
+ * `WorkflowArchivedError`) — any other engine refusal a 400, anything else 500.
+ */
+function sendRunError(res: http.ServerResponse, err: unknown): void {
+	if (err instanceof WorkflowArchivedError) {
+		sendJson(res, 409, { error: "archived", message: err.message });
+		return;
+	}
+	sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+}
+
+/** Wire shape of the auto-archive setting (snake_case key, as the API documents it). */
+function publicArchiveSettings(settings: { archiveAfterDays: number; updatedAt: string | null }): Record<string, unknown> {
+	return { archive_after_days: settings.archiveAfterDays, updatedAt: settings.updatedAt };
 }
 
 function sendJson(res: http.ServerResponse, status: number, payload: unknown): void {
@@ -2318,6 +2352,44 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		return;
 	}
 
+	// --- /api/settings/archive ---
+	//
+	// `archive_after_days`: completed/failed workflows idle longer than this are
+	// archived by the daemon sweep (`autoArchive`). 0 disables it; default 30.
+
+	if (parts[1] === "settings" && parts[2] === "archive" && !parts[3]) {
+		if (req.method === "GET") {
+			sendJson(res, 200, { settings: publicArchiveSettings(getArchiveSettings()) });
+			return;
+		}
+		if (req.method === "PUT" || req.method === "PATCH") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				try {
+					const settings = saveArchiveSettings({ archiveAfterDays: body.archive_after_days });
+					log(
+						settings.archiveAfterDays === 0
+							? "auto-archive disabled"
+							: `auto-archive after ${settings.archiveAfterDays} day(s) of inactivity`,
+					);
+					sendJson(res, 200, { settings: publicArchiveSettings(settings) });
+				} catch (err) {
+					if (err instanceof RangeError) {
+						sendJson(res, 400, { error: err.message });
+						return;
+					}
+					sendJson(res, 500, { error: String((err as Error).message ?? err) });
+				}
+			});
+			return;
+		}
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
 	// --- /api/settings/ui ---
 	//
 	// Whether TCP / RCI catalog UI is shown (header, workflow, template attach).
@@ -2570,8 +2642,17 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 
 	if (!parts[2]) {
 		if (req.method === "GET") {
+			// Archived workflows are hidden from the list by default; `?archived=include`
+			// adds them back, `?archived=only` is the archive view. Filtered in SQL.
+			const archivedParam = url.searchParams.get("archived") ?? "exclude";
+			if (!ARCHIVED_FILTERS.includes(archivedParam as ArchivedFilter)) {
+				sendJson(res, 400, { error: `invalid archived filter (allowed: ${ARCHIVED_FILTERS.join(", ")})` });
+				return;
+			}
 			expireStale(cfg, log);
-			sendJson(res, 200, { workflows: listWorkflows().map(publicWorkflow) });
+			sendJson(res, 200, {
+				workflows: listWorkflows({ archived: archivedParam as ArchivedFilter }).map(publicWorkflow),
+			});
 			return;
 		}
 		if (req.method === "POST") {
@@ -3416,7 +3497,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				}
 				sendJson(res, 200, { step: publicStep(step, cfg) });
 			} catch (err) {
-				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				sendRunError(res, err);
 			}
 		})();
 		return;
@@ -3676,10 +3757,39 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 									: await restartWorkflow(workflowId, cfg, log, stepIds);
 					sendJson(res, 200, { workflow: publicWorkflow(workflow) });
 				} catch (err) {
-					sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+					sendRunError(res, err);
 				}
 			})();
 		});
+		return;
+	}
+
+	// --- /api/workflows/:id/{archive,unarchive} ---
+	//
+	// Archiving files a finished (completed/failed) workflow away: hidden from the
+	// default list, refused by start/resume/restart/▶ until unarchived. A flag,
+	// not a status — see `archiveWorkflow`. Archiving an archived workflow and
+	// unarchiving a live one are both no-ops that answer 200.
+
+	if (workflowId && (parts[3] === "archive" || parts[3] === "unarchive") && !parts[4] && req.method === "POST") {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
+			return;
+		}
+		if (!getWorkflow(workflowId)) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		try {
+			const workflow = parts[3] === "archive" ? archiveWorkflow(workflowId) : unarchiveWorkflow(workflowId);
+			log(`workflow ${workflowId} ${parts[3]}d`);
+			sendJson(res, 200, { workflow: publicWorkflow(workflow) });
+		} catch (err) {
+			if (err instanceof WorkflowNotArchivableError) {
+				sendJson(res, 409, { error: "not_archivable", message: err.message });
+				return;
+			}
+			sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+		}
 		return;
 	}
 

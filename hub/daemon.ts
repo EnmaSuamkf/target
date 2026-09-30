@@ -14,7 +14,7 @@ import { emitHeartbeat, flush } from "./reporter.ts";
 import { initSyncStateCache, runSyncTick } from "./sync.ts";
 import { createServer } from "./server.ts";
 import { retryRemoteDisconnect } from "./device-link-client.ts";
-import { announceWorkflows, expireStale } from "./workflow.ts";
+import { announceWorkflows, autoArchive, expireStale } from "./workflow.ts";
 import { TARGET_VERSION } from "./version.ts";
 
 function log(message: string, type: "info" | "warning" | "error" = "info"): void {
@@ -57,6 +57,13 @@ export function startHub(): void {
 			expireStale(cfg, log);
 		} catch (err) {
 			log(`stale-step sweep failed: ${String(err)}`, "warning");
+		}
+		// Separate try: a failing stale sweep must not stop archiving, nor vice versa.
+		try {
+			const archived = autoArchive();
+			if (archived.length > 0) log(`auto-archived ${archived.length} workflow(s): ${archived.join(", ")}`);
+		} catch (err) {
+			log(`auto-archive sweep failed: ${String(err)}`, "warning");
 		}
 	}, SWEEP_INTERVAL_MS);
 	sweep.unref();
