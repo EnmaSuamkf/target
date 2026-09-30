@@ -21,6 +21,7 @@ import {
 	createAwbHook,
 	deleteAwbHook,
 	abortAwbRun,
+	ensureHookMounts,
 	hookRuntime,
 	PUBLISHABLE_RUNNERS,
 	type HookOptions,
@@ -88,6 +89,7 @@ import {
 	takeStatusBeforeReview,
 	updateStepConfig,
 	updateStepDescription,
+	updateWorkflowSchedule,
 	type Attachment,
 	type OverridableStepStatus,
 	type OverridableWorkflowStatus,
@@ -98,10 +100,17 @@ import {
 	type Workflow,
 	type WorkflowStatus,
 } from "./db.ts";
+import {
+	formatInZone,
+	nextOccurrence,
+	validateSchedule,
+	type ScheduleFieldError,
+	type ScheduleSpec,
+} from "./schedule.ts";
 import { sendManualReviewNotification, sendWorkflowCompletedNotification } from "./notifier.ts";
 import { forgetProbe, humanizeSeconds, probeStepProgress, pruneProbes, stepActivity } from "./progress.ts";
 import { dispatchStep, type Logger } from "./runner.ts";
-import { stepResultsDir, writeStepResults } from "./step-results.ts";
+import { lockStepResults, stepResultsDir, unlockStepResults, writeStepResults } from "./step-results.ts";
 
 export class WorkflowError extends Error {}
 
@@ -135,6 +144,39 @@ export class WorkflowNotArchivableError extends WorkflowError {
  */
 function refuseArchived(workflow: Workflow): void {
 	if (workflow.archivedAt !== null) throw new WorkflowArchivedError();
+}
+
+/**
+ * Thrown by the run entry points when the workflow is a schedule's ARMED
+ * instance (D2). A `WorkflowError` subclass for the same reason as
+ * `WorkflowArchivedError`: sync acks it `failed` with this message and MCP
+ * relays the hub's answer, while the HTTP layer maps it to 409
+ * `{"error":"scheduled_armed"}` by type. The message leads with that code so a
+ * sync ack (which only carries a message) is just as recognisable.
+ */
+export class WorkflowScheduledArmedError extends WorkflowError {
+	constructor(nextRunAt: string | null = null) {
+		super(
+			`scheduled_armed: this workflow is the next run of a schedule and starts on its own${
+				nextRunAt ? ` at ${nextRunAt}` : ""
+			} — cancel its schedule to run it by hand`,
+		);
+		this.name = "WorkflowScheduledArmedError";
+	}
+}
+
+/**
+ * The armed instance of a series is the NEXT execution, waiting for its time
+ * (D2): starting it by hand would run it early and then again when it fires —
+ * or, worse, have it already mid-run when the scheduler claims it. So every
+ * way of running work on it is refused (start, resume, restart, a ▶ step run),
+ * on every entry point, because they all come through here. Editing it stays
+ * allowed — the next instance is cloned from it, so edits carry forward — and
+ * once fired it is a normal workflow again. The scheduler itself only starts
+ * an instance AFTER claiming it (armed → fired), so it never trips this.
+ */
+function refuseScheduledArmed(workflow: Workflow): void {
+	if (workflow.scheduleState === "armed") throw new WorkflowScheduledArmedError(workflow.nextRunAt);
 }
 
 /**
@@ -574,6 +616,246 @@ export function forceWorkflowStatus(workflowId: string, status: OverridableWorkf
 	return updated;
 }
 
+// --- Scheduling: series ---------------------------------------------------
+//
+// A schedule is a SERIES of workflows (D1): every execution is its own
+// workflow, an instance, and the series always has exactly one `armed`
+// instance — the next execution. The series' definition (spec, zone, the
+// previous-run toggle, its name) is carried on its instances rather than in a
+// table of its own, because the next instance is cloned from the armed one
+// when it fires: whatever the operator edited on the armed instance —
+// steps, context, and the schedule itself — carries into every later run.
+
+/** Thrown by `setSchedule` when the spec or zone is invalid; `fields` says which. */
+export class ScheduleValidationError extends WorkflowError {
+	readonly fields: ScheduleFieldError[];
+	constructor(fields: ScheduleFieldError[]) {
+		super(fields.map((f) => f.message).join("; "));
+		this.name = "ScheduleValidationError";
+		this.fields = fields;
+	}
+}
+
+/**
+ * Thrown when the hub is asked to change a schedule the server owns (D15) —
+ * mapped to 409 `server_managed` by the HTTP layer.
+ */
+export class ScheduleServerManagedError extends WorkflowError {
+	constructor(message = "this schedule is managed by the server — change it there") {
+		super(message);
+		this.name = "ScheduleServerManagedError";
+	}
+}
+
+/** Who is changing a schedule: the hub's own operator, or the server via sync. */
+export interface ScheduleActor {
+	actor?: "local" | "server";
+}
+
+/** The statuses a workflow may be scheduled from: anything not in progress. */
+const SCHEDULABLE_STATUSES: readonly WorkflowStatus[] = ["draft", "completed", "failed"];
+
+export interface SetScheduleInput {
+	spec: ScheduleSpec;
+	timezone: string;
+	/** Defaults to the series' current value, or on for a new series. */
+	includePrevious?: boolean;
+}
+
+function refuseServerManaged(workflow: Workflow, options: ScheduleActor): void {
+	if (workflow.managedBy === "server" && options.actor !== "server") throw new ScheduleServerManagedError();
+}
+
+/**
+ * Schedules a workflow: turns it into the armed instance of a NEW series, or —
+ * when it already is the armed instance (or a `missed` once / `broken` series
+ * waiting to be rescheduled) — updates that series' schedule in place.
+ * Computes `next_run_at` from the spec. Refused for:
+ *  - a workflow in progress (running/waiting/paused): scheduling it would arm
+ *    something that is already executing;
+ *  - an archived one (unarchive first — archived workflows don't run);
+ *  - a workflow continuing an adopted operator conversation (D23): every
+ *    instance is a clone, and a clone can't continue someone else's thread;
+ *  - a past (`fired`) instance of a series: its series has moved on to a newer
+ *    armed instance, which is the one to reschedule; making the past run a new
+ *    series would pull it out of its series' history;
+ *  - a server-managed series, unless the server itself is asking (D15);
+ *  - an invalid spec/zone, or a `once` that is not in the future.
+ */
+export function setSchedule(
+	workflowId: string,
+	input: SetScheduleInput,
+	options: ScheduleActor & { now?: Date } = {},
+): Workflow {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	refuseServerManaged(workflow, options);
+	refuseArchived(workflow);
+	if (workflow.adoptedSessionId) {
+		throw new WorkflowError(
+			"a workflow that continues an adopted conversation can't be scheduled — every run is a clone, and a clone can't continue that conversation",
+		);
+	}
+	if (workflow.scheduleState === "fired") {
+		throw new WorkflowError(
+			"this is a past run of a schedule — change the schedule on its upcoming (armed) run, or clone this one",
+		);
+	}
+	if (!SCHEDULABLE_STATUSES.includes(workflow.status)) {
+		throw new WorkflowError(`only a draft, completed or failed workflow can be scheduled (this one is ${workflow.status})`);
+	}
+	const errors = validateSchedule(input.spec, input.timezone);
+	if (input.includePrevious !== undefined && typeof input.includePrevious !== "boolean") {
+		errors.push({ field: "includePrevious", message: "includePrevious must be a boolean" });
+	}
+	if (errors.length > 0) throw new ScheduleValidationError(errors);
+	const next = nextOccurrence(input.spec, input.timezone, options.now ?? new Date());
+	if (!next) throw new ScheduleValidationError([{ field: "at", message: "the scheduled time must be in the future" }]);
+	const nextRunAt = next.toISOString();
+	// Rescheduling keeps the series (its id, its name, its history); anything
+	// else — never scheduled, or a `cancelled` instance that went back to being
+	// a normal workflow — starts a new one, named after the workflow as it is now.
+	const keepsSeries =
+		workflow.seriesId !== null &&
+		(workflow.scheduleState === "armed" || workflow.scheduleState === "missed" || workflow.scheduleState === "broken");
+	const updated = updateWorkflowSchedule(workflowId, {
+		...(keepsSeries
+			? {}
+			: {
+					seriesId: crypto.randomUUID(),
+					seriesName: workflow.name,
+					previousInstanceId: null,
+					previousRunBlock: null,
+					managedBy: options.actor === "server" ? ("server" as const) : ("local" as const),
+				}),
+		schedule: input.spec,
+		scheduleTimezone: input.timezone,
+		includePrevious: input.includePrevious ?? (keepsSeries ? workflow.includePrevious : true),
+		scheduleState: "armed",
+		scheduledFor: nextRunAt,
+		nextRunAt,
+	});
+	if (!updated) throw new WorkflowError("workflow disappeared");
+	writeStatusMd(workflowId);
+	return updated;
+}
+
+/**
+ * Cancels a workflow's schedule. Only the armed instance (or a `missed` once
+ * waiting for a decision, or a `broken` series) carries a live schedule; it
+ * becomes a normal workflow again — `cancelled`, no `next_run_at` — while
+ * keeping its `series_id` so it still reads as part of that series' history.
+ * Past instances are untouched. A no-op on a workflow with no live schedule.
+ */
+export function cancelSchedule(workflowId: string, options: ScheduleActor = {}): Workflow {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	const live =
+		workflow.scheduleState === "armed" || workflow.scheduleState === "missed" || workflow.scheduleState === "broken";
+	if (!live) return workflow;
+	refuseServerManaged(workflow, options);
+	const updated = updateWorkflowSchedule(workflowId, { scheduleState: "cancelled", nextRunAt: null });
+	if (!updated) throw new WorkflowError("workflow disappeared");
+	writeStatusMd(workflowId);
+	return updated;
+}
+
+/**
+ * Creates the series' next instance from the one that is firing (D3/D4): a
+ * `cloneWorkflow` of it — so every edit the operator made to the armed
+ * instance (steps, context, TCP/RCI, mounts) carries into future runs — armed
+ * for `nextRunAt`.
+ *
+ * The name is always rendered from the stored `series_name`, never from the
+ * source's own name, which is itself "<series> · <date>": deriving from it
+ * would chain a date onto every generation. The previous-run block is NOT
+ * copied: it describes the run before the SOURCE, and the new instance gets its
+ * own one when it fires (`attachPreviousRun`).
+ */
+export function cloneScheduledInstance(armedId: string, nextRunAt: Date | string): Workflow {
+	const source = getWorkflow(armedId);
+	if (!source) throw new WorkflowError("unknown workflow");
+	if (!source.seriesId || !source.schedule || !source.scheduleTimezone) {
+		throw new WorkflowError("workflow is not an instance of a schedule");
+	}
+	const when = typeof nextRunAt === "string" ? new Date(nextRunAt) : nextRunAt;
+	if (Number.isNaN(when.getTime())) throw new WorkflowError("invalid next run time");
+	const seriesName = source.seriesName ?? source.name;
+	const clone = cloneWorkflow(armedId, { name: `${seriesName} · ${formatInZone(when, source.scheduleTimezone)}` });
+	const instance = updateWorkflowSchedule(clone.id, {
+		seriesId: source.seriesId,
+		seriesName,
+		schedule: source.schedule,
+		scheduleTimezone: source.scheduleTimezone,
+		includePrevious: source.includePrevious,
+		managedBy: source.managedBy,
+		scheduledFor: when.toISOString(),
+		nextRunAt: when.toISOString(),
+		scheduleState: "armed",
+		previousInstanceId: armedId,
+		previousRunBlock: null,
+	});
+	if (!instance) throw new WorkflowError("workflow disappeared");
+	writeStatusMd(instance.id);
+	return instance;
+}
+
+/**
+ * The previous-run reference a scheduled run is given (D5): which instance ran
+ * before it, how that run ended, and where its step results are on disk — the
+ * same `<NN>-<slug>.md` files that instance's own agent was pointed at, so a
+ * run can compare against, or continue from, what the last one produced.
+ */
+export function buildPreviousRunBlock(previous: Workflow): string {
+	return [
+		"Previous run of this schedule:",
+		`- Workflow: ${previous.name} (id ${previous.id})`,
+		`- Final status: ${previous.status}`,
+		`- Step results: ${stepResultsDir(previous.agentName)}`,
+		"You may read the files in that directory (one <NN>-<slug>.md per step, in order) to see what the previous run produced. Treat them as read-only reference: do not modify them.",
+	].join("\n");
+}
+
+/**
+ * Written when an instance FIRES, not when it is cloned (D5): the previous
+ * instance's outcome is only known once it has finished, and at clone time the
+ * source is the run that is just starting. Stores the block apart from the
+ * conversation context and refreshes the context step so it's delivered with
+ * the background. The previous results directory is locked read-only and, for
+ * a docker sandbox, added to this instance's hook — only when it exists, because docker would
+ * otherwise create the bind-mount source as a root-owned directory the hub
+ * could no longer write into.
+ *
+ * Clears a stale block when there is nothing to reference (no previous
+ * instance, or the series has the toggle off). Returns the instance as it now
+ * reads.
+ */
+export function attachPreviousRun(instanceId: string): Workflow {
+	const instance = getWorkflow(instanceId);
+	if (!instance) throw new WorkflowError("unknown workflow");
+	const previous =
+		instance.includePrevious && instance.previousInstanceId ? getWorkflow(instance.previousInstanceId) : null;
+	const block = previous ? buildPreviousRunBlock(previous) : null;
+	if (block !== instance.previousRunBlock) {
+		updateWorkflowSchedule(instanceId, { previousRunBlock: block }, { touch: false });
+	}
+	if (previous) {
+		const dir = stepResultsDir(previous.agentName);
+		if (fs.existsSync(dir)) {
+			// Read-only BEFORE it becomes reachable from this run's sandbox: awb has
+			// no `:ro` mount form, so the directory itself is locked (see
+			// `lockStepResults`). Locked on the host too — the block tells the agent
+			// the files are read-only, and a host run sees the same path.
+			lockStepResults(dir);
+			ensureHookMounts(instance.hookUrl, [dir]);
+		}
+	}
+	reconcileContextStep(instanceId);
+	const updated = getWorkflow(instanceId);
+	if (!updated) throw new WorkflowError("workflow disappeared");
+	return updated;
+}
+
 // --- Archiving ------------------------------------------------------------
 //
 // Archiving is the `archived_at` FLAG, never a status: `reconcileStatus`
@@ -589,6 +871,11 @@ export function forceWorkflowStatus(workflowId: string, status: OverridableWorkf
  * than at the call sites.
  */
 export function isArchivable(workflow: Workflow): boolean {
+	// An armed scheduled instance is the series' next execution — possibly an
+	// old completed workflow that was turned into a series — and archiving it
+	// would hide (and, since archived workflows refuse to run, silently stop)
+	// the schedule.
+	if (workflow.scheduleState === "armed") return false;
 	return workflow.status === "completed" || workflow.status === "failed";
 }
 
@@ -628,7 +915,9 @@ export function archiveWorkflow(workflowId: string, now: Date = new Date()): Wor
 	if (workflow.archivedAt !== null) return workflow;
 	if (!isArchivable(workflow)) {
 		throw new WorkflowNotArchivableError(
-			`only a completed or failed workflow can be archived (this one is ${workflow.status})`,
+			workflow.scheduleState === "armed"
+				? "an armed scheduled workflow can't be archived — cancel its schedule first"
+				: `only a completed or failed workflow can be archived (this one is ${workflow.status})`,
 		);
 	}
 	const changed = markWorkflowArchived(workflowId, now.toISOString());
@@ -1313,13 +1602,21 @@ function chainSession(workflowId: string, sessionId: string | undefined | null):
 const CONTEXT_STEP_IMAGES_ONLY_DESCRIPTION = "Conversation context (attached image(s))";
 
 function contextStepDescription(workflow: Workflow): string {
-	return workflow.conversationContext?.trim() || CONTEXT_STEP_IMAGES_ONLY_DESCRIPTION;
+	const text = workflow.conversationContext?.trim() || "";
+	const previous = workflow.previousRunBlock?.trim() || "";
+	// A scheduled run's previous-run block rides the context step (see
+	// `attachPreviousRun`); the label shows it so the operator can see what the
+	// agent was told about the previous run.
+	if (previous) return text ? `${text}\n\n${previous}` : previous;
+	return text || CONTEXT_STEP_IMAGES_ONLY_DESCRIPTION;
 }
 
-/** Whether the workflow has any background at all to deliver — text or images. */
+/** Whether the workflow has any background at all to deliver — text, images or
+ * a scheduled run's previous-run block. */
 function workflowHasContext(workflow: Workflow): boolean {
 	return (
 		!!workflow.conversationContext?.trim() ||
+		!!workflow.previousRunBlock?.trim() ||
 		listFieldAttachments(workflow.id, null, "context").length > 0
 	);
 }
@@ -1438,10 +1735,18 @@ export function setConversationContext(workflowId: string, context: string | nul
 export function removeWorkflow(workflowId: string): void {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
+	// Deleting the armed instance ends its series: it was the only thing that
+	// would ever run next. Cancelled through the same path as an explicit
+	// cancel so the transition is observed the same way; past instances stay.
+	if (workflow.scheduleState === "armed") cancelSchedule(workflowId, { actor: workflow.managedBy });
 	deleteAwbHook(workflow.agentName);
 	fs.rmSync(workflow.mdPath, { force: true });
 	// The agent-facing copies of its results live under ~/.target/steps/<agent
 	// name>/ — the hub's own directory, so removing the workflow removes them too.
+	// Unlocked first: a later scheduled run may have locked it read-only as its
+	// previous-run reference, and entries of a read-only directory can't be
+	// removed.
+	unlockStepResults(stepResultsDir(workflow.agentName));
 	fs.rmSync(stepResultsDir(workflow.agentName), { recursive: true, force: true });
 	// Its attached images live in ~/.target/attachments/<id>/ — delete the rows
 	// and the directory, or a removed workflow would leak both forever.
@@ -1913,6 +2218,7 @@ export async function startWorkflow(
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	refuseArchived(workflow);
+	refuseScheduledArmed(workflow);
 	if (workflow.status === "completed" || workflow.status === "failed") {
 		throw new WorkflowError(`workflow is ${workflow.status} — use restart instead`);
 	}
@@ -1960,6 +2266,7 @@ export async function resumeWorkflow(
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	refuseArchived(workflow);
+	refuseScheduledArmed(workflow);
 	if (workflow.status !== "paused") throw new WorkflowError("only a paused workflow can be resumed");
 	setStepSelection(workflowId, stepIds);
 	// A resume mid-run finds the context step already `done` and leaves it alone —
@@ -2027,6 +2334,7 @@ export async function restartWorkflow(
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	refuseArchived(workflow);
+	refuseScheduledArmed(workflow);
 	if (workflow.status === "running") throw new WorkflowError("pause the workflow before restarting it");
 	// Selection first, so resetSteps only wipes the chosen steps.
 	setStepSelection(workflowId, stepIds);
@@ -2837,6 +3145,7 @@ export async function runStep(workflowId: string, stepId: string, cfg: HubConfig
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	refuseArchived(workflow);
+	refuseScheduledArmed(workflow);
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
 	// A ▶ on the context step would deliver the background as a one-off manual run

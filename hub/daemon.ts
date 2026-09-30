@@ -11,6 +11,7 @@ import { isInsecureReportUrl, loadConfig } from "./config.ts";
 import { listWorkflows } from "./db.ts";
 import { loadEffectiveReportConfig, loadEffectiveSyncConfig } from "./remote-config.ts";
 import { emitHeartbeat, flush } from "./reporter.ts";
+import { startScheduler } from "./scheduler.ts";
 import { initSyncStateCache, runSyncTick } from "./sync.ts";
 import { createServer } from "./server.ts";
 import { retryRemoteDisconnect } from "./device-link-client.ts";
@@ -67,6 +68,11 @@ export function startHub(): void {
 		}
 	}, SWEEP_INTERVAL_MS);
 	sweep.unref();
+
+	// Scheduled workflows: one tick now (boot) and one every 30s. Boot matters:
+	// a run that came due while the hub was down is reported missed (or fired,
+	// inside the grace window) right away rather than half a minute later.
+	startScheduler(cfg, log);
 
 	// Activity reporting: drain the durable event queue on an interval and emit a
 	// periodic heartbeat. A linked device derives this from its persisted origin;

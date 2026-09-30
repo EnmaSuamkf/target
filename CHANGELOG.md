@@ -11,6 +11,37 @@ The current version is reported by every instance to the central server (see
 
 ### Added
 
+- **Scheduled workflows (engine and API).**
+  - **Model.** A workflow can be scheduled once, daily or weekly in an
+    explicit IANA timezone. Recurrence uses `Intl` only; a time skipped by a
+    daylight-saving change runs at the change, and a repeated time runs once.
+    A schedule is a series of instances with exactly one armed instance, the
+    next run.
+  - **Scheduler.** It ticks every 30s and at boot, claims each run atomically
+    and clones the next instance before starting the current run. A run more
+    than 10 minutes late is missed: recurring series move on without creating
+    workflows, and a once waits for Run now / Reschedule / Dismiss. A run is
+    skipped if the previous one is still in progress, or if the linked
+    owner's `client.workflows.execute` can't be confirmed (5-minute boot
+    wait, 7-day snapshot limit). A failed clone marks the series broken but
+    still runs the current instance.
+  - **Previous run.** Each run is told about the previous one through the
+    context step; in docker that run's results folder is mounted, made
+    non-writable because awb has no read-only mount option.
+  - **Guards.** The armed instance refuses manual runs with
+    `409 { "error": "scheduled_armed" }`, stays editable, and is never
+    archived.
+  - **Notices.** Missed, skipped, broken and failed runs are stored in
+    `schedule_notices`.
+  - **API.** `GET`/`PUT`/`DELETE /api/workflows/:id/schedule`,
+    `POST …/schedule/run-now|reschedule|dismiss`, `GET /api/schedule-notices`,
+    `POST /api/schedule-notices/:id/ack` and `POST /api/schedule/preview`.
+    Mutations need `client.workflows.execute` and `client.workflows.manage`.
+    Server-managed series answer `409 server_managed`.
+  - **MCP.** `set_schedule`, `cancel_schedule`, `list_schedule_notices`, and
+    also `get_schedule`, `preview_schedule`, `acknowledge_schedule_notice`.
+  - **Not yet.** The UI, Slack delivery and remote sync of schedules follow
+    in later releases.
 - **Archive workflows, automatically and on demand.** Archiving is an
   `archived_at` flag beside the status, allowed only on completed/failed
   workflows. The daemon's 60s sweep archives them once their last activity
