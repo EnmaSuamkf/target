@@ -120,6 +120,10 @@ export function writeStepResults(workflow: Workflow, steps: Step[]): string[] {
 	// doesn't exist with a root-owned directory the hub could no longer write to.
 	// A no-op for host and remote hooks, and idempotent for the docker ones.
 	ensureHookMounts(workflow.hookUrl, [dir]);
+	// The directory may have been locked read-only as a later scheduled run's
+	// previous-run reference (`lockStepResults`). The hub writing here again
+	// means THIS workflow is running again, so its own record takes precedence.
+	unlockStepResults(dir);
 	for (const step of withResults) {
 		const file = stepResultPath(workflow.agentName, step);
 		const body = stepResultDocument(workflow, step);
@@ -137,6 +141,64 @@ export function writeStepResults(workflow: Workflow, steps: Step[]): string[] {
 		}
 	}
 	return written;
+}
+
+// --- Read-only previous-run references ------------------------------------
+//
+// A scheduled run is pointed at the previous run's results directory (D5) and,
+// in a docker sandbox, has it bind-mounted. awb bind-mounts every entry as
+// `-v <path>:<path>` and has no read-only form — a `:ro` suffix would become an
+// invalid volume spec and break the run — so read-only is enforced on the
+// directory itself: the files lose their write bits and the directory its
+// write bit. The agent runs as the operator's uid (awb's `--user`), inside the
+// container or on the host alike, so a write, a truncate, a new file or a
+// delete in there fails with EACCES. It is a guard against a run clobbering
+// the previous run's record, not a security boundary: the same uid could chmod
+// it back on purpose, which no agent does by accident.
+
+const LOCKED_FILE_MODE = 0o444;
+const LOCKED_DIR_MODE = 0o555;
+const UNLOCKED_FILE_MODE = 0o644;
+const UNLOCKED_DIR_MODE = 0o755;
+
+function chmodTree(dir: string, dirMode: number, fileMode: number): boolean {
+	try {
+		// Files first while the directory is still listable either way.
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			if (entry.isFile()) fs.chmodSync(path.join(dir, entry.name), fileMode);
+		}
+		fs.chmodSync(dir, dirMode);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Makes a results directory read-only (see above). Returns false when it
+ * doesn't exist or can't be changed. */
+export function lockStepResults(dir: string): boolean {
+	return chmodTree(dir, LOCKED_DIR_MODE, LOCKED_FILE_MODE);
+}
+
+/** Undoes `lockStepResults`, so the hub can rewrite or delete the directory. A
+ * no-op on one that isn't locked or doesn't exist. */
+export function unlockStepResults(dir: string): void {
+	try {
+		if ((fs.statSync(dir).mode & 0o200) !== 0) return;
+	} catch {
+		return;
+	}
+	fs.chmodSync(dir, UNLOCKED_DIR_MODE);
+	chmodTree(dir, UNLOCKED_DIR_MODE, UNLOCKED_FILE_MODE);
+}
+
+/** Whether a results directory is currently locked read-only. */
+export function isStepResultsLocked(dir: string): boolean {
+	try {
+		return (fs.statSync(dir).mode & 0o222) === 0;
+	} catch {
+		return false;
+	}
 }
 
 /**

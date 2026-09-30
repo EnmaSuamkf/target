@@ -110,7 +110,7 @@ import {
 import { sendManualReviewNotification, sendWorkflowCompletedNotification } from "./notifier.ts";
 import { forgetProbe, humanizeSeconds, probeStepProgress, pruneProbes, stepActivity } from "./progress.ts";
 import { dispatchStep, type Logger } from "./runner.ts";
-import { stepResultsDir, writeStepResults } from "./step-results.ts";
+import { lockStepResults, stepResultsDir, unlockStepResults, writeStepResults } from "./step-results.ts";
 
 export class WorkflowError extends Error {}
 
@@ -788,8 +788,8 @@ export function buildPreviousRunBlock(previous: Workflow): string {
  * instance's outcome is only known once it has finished, and at clone time the
  * source is the run that is just starting. Stores the block apart from the
  * conversation context and refreshes the context step so it's delivered with
- * the background. For a docker sandbox the previous results directory is
- * added to this instance's hook — only when it exists, because docker would
+ * the background. The previous results directory is locked read-only and, for
+ * a docker sandbox, added to this instance's hook — only when it exists, because docker would
  * otherwise create the bind-mount source as a root-owned directory the hub
  * could no longer write into.
  *
@@ -808,7 +808,14 @@ export function attachPreviousRun(instanceId: string): Workflow {
 	}
 	if (previous) {
 		const dir = stepResultsDir(previous.agentName);
-		if (fs.existsSync(dir)) ensureHookMounts(instance.hookUrl, [dir]);
+		if (fs.existsSync(dir)) {
+			// Read-only BEFORE it becomes reachable from this run's sandbox: awb has
+			// no `:ro` mount form, so the directory itself is locked (see
+			// `lockStepResults`). Locked on the host too — the block tells the agent
+			// the files are read-only, and a host run sees the same path.
+			lockStepResults(dir);
+			ensureHookMounts(instance.hookUrl, [dir]);
+		}
 	}
 	reconcileContextStep(instanceId);
 	const updated = getWorkflow(instanceId);
@@ -1703,6 +1710,10 @@ export function removeWorkflow(workflowId: string): void {
 	fs.rmSync(workflow.mdPath, { force: true });
 	// The agent-facing copies of its results live under ~/.target/steps/<agent
 	// name>/ — the hub's own directory, so removing the workflow removes them too.
+	// Unlocked first: a later scheduled run may have locked it read-only as its
+	// previous-run reference, and entries of a read-only directory can't be
+	// removed.
+	unlockStepResults(stepResultsDir(workflow.agentName));
 	fs.rmSync(stepResultsDir(workflow.agentName), { recursive: true, force: true });
 	// Its attached images live in ~/.target/attachments/<id>/ — delete the rows
 	// and the directory, or a removed workflow would leak both forever.

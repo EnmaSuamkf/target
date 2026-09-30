@@ -43,7 +43,18 @@ const {
 const { composeStepInput } = await import("./runner.ts");
 const { hookRuntime } = await import("./awb.ts");
 const { syncWorkflowDockerMounts } = await import("./docker-mounts.ts");
-const { stepResultsDir } = await import("./step-results.ts");
+const { isStepResultsLocked, stepResultsDir, writeStepResults } = await import("./step-results.ts");
+const { removeWorkflow } = await import("./workflow.ts");
+const { completeStep } = await import("./db.ts");
+
+/** Root ignores permission bits, so the EACCES assertions only mean something
+ * for an ordinary user (which is what runs the hub, and CI). */
+const ENFORCES_PERMISSIONS = process.getuid?.() !== 0;
+
+function assertNotWritable(fn: () => void, what: string): void {
+	if (!ENFORCES_PERMISSIONS) return;
+	assert.throws(fn, (err: NodeJS.ErrnoException) => err.code === "EACCES" || err.code === "EPERM", what);
+}
 
 const NOW = new Date("2026-09-30T12:00:00.000Z");
 const CONTEXT = "Background for every run: the nightly report covers yesterday's orders.";
@@ -213,6 +224,42 @@ test("docker: the previous run's results dir is added to the new instance's hook
 	assert.ok(hookRuntime(fired.hookUrl).sandbox?.mounts?.includes(prevDir));
 	// The source's own hook is untouched.
 	assert.ok(!hookRuntime(first.hookUrl).sandbox?.mounts?.includes(stepResultsDir(second.agentName)));
+});
+
+test("docker: the mounted previous-run dir is read-only — nothing in it can be written, created or deleted", () => {
+	const first = armedSeries("Docker read-only", { sandbox: "docker" });
+	const prevDir = stepResultsDir(first.agentName);
+	const file = path.join(prevDir, "01-collect-the-orders.md");
+	fs.mkdirSync(prevDir, { recursive: true });
+	fs.writeFileSync(file, "# Step 1\noriginal\n");
+	assert.equal(isStepResultsLocked(prevDir), false);
+
+	const fired = attachPreviousRun(fire(first.id, "2026-10-01T07:00:00.000Z").id);
+	assert.ok(hookRuntime(fired.hookUrl).sandbox?.mounts?.includes(prevDir), "mounted");
+	// awb bind-mounts as `-v <path>:<path>`, so what the container sees is the
+	// directory's own permissions: no write bit anywhere.
+	assert.equal(isStepResultsLocked(prevDir), true);
+	assert.equal(fs.statSync(prevDir).mode & 0o222, 0, "directory has no write bits");
+	assert.equal(fs.statSync(file).mode & 0o222, 0, "files have no write bits");
+	assert.ok((fs.statSync(file).mode & 0o444) !== 0, "still readable");
+	assert.equal(fs.readFileSync(file, "utf8"), "# Step 1\noriginal\n");
+	assertNotWritable(() => fs.writeFileSync(file, "clobbered"), "overwrite a result");
+	assertNotWritable(() => fs.appendFileSync(file, "more"), "append to a result");
+	assertNotWritable(() => fs.writeFileSync(path.join(prevDir, "new.md"), "x"), "create a file");
+	assertNotWritable(() => fs.rmSync(file), "delete a result");
+	assert.equal(fs.readFileSync(file, "utf8"), "# Step 1\noriginal\n", "the previous run's record is intact");
+
+	// The hub itself can still rewrite it when the previous instance runs again…
+	const step = listSteps(first.id).find((s) => s.kind === "task")!;
+	completeStep(step.id, { ok: true, result: "re-run result" });
+	const rewritten = writeStepResults(getWorkflow(first.id)!, listSteps(first.id));
+	assert.ok(rewritten.length > 0, "writeStepResults unlocked and rewrote the directory");
+	assert.equal(isStepResultsLocked(prevDir), false);
+	// …and delete it with the workflow, even while locked.
+	attachPreviousRun(fired.id);
+	assert.equal(isStepResultsLocked(prevDir), true);
+	removeWorkflow(first.id);
+	assert.equal(fs.existsSync(prevDir), false);
 });
 
 test("docker: no mount when the previous run left no results directory", () => {
