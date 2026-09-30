@@ -319,9 +319,10 @@ const NOTICE_DETAIL_CHARS = 300;
 /**
  * Records a notice and sends it to Slack. The notice is the durable half (the
  * hub's banner shows it until acknowledged); the message is fire-and-forget,
- * so a slow or dead Slack never holds up a tick.
+ * so a slow or dead Slack never holds up a tick. Also used by sync.ts for a
+ * series the server refused to take on (D18).
  */
-function recordScheduleNotice(log: Logger, input: Parameters<typeof recordNotice>[0]): ScheduleNotice {
+export function recordScheduleNotice(log: Logger, input: Parameters<typeof recordNotice>[0]): ScheduleNotice {
 	const notice = recordNotice(input);
 	void announceNotice(notice, log);
 	return notice;

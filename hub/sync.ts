@@ -10,6 +10,7 @@ import * as crypto from "node:crypto";
 import * as os from "node:os";
 import {
 	availableRunners,
+	hookRuntime,
 	PUBLISHABLE_RUNNERS,
 	type PublishableRunner,
 	type PublishableSandbox,
@@ -21,6 +22,7 @@ import { recordOwnerSnapshot } from "./owner-permissions.ts";
 import { recordServerCapabilities, resetServerCapabilitiesCache, serverSupportsEvent } from "./server-capabilities.ts";
 import { loadEffectiveSyncConfig } from "./remote-config.ts";
 import { validateSchedule, type ScheduleSpec } from "./schedule.ts";
+import { recordScheduleNotice } from "./scheduler.ts";
 import {
 	clearAppliedSyncCommands,
 	deleteSyncStepMap,
@@ -30,6 +32,7 @@ import {
 	getStep,
 	getSyncStepMap,
 	getTemplate,
+	getWorkflow,
 	getWorkflowByRemoteId,
 	listSeriesInstances,
 	listSteps,
@@ -49,6 +52,7 @@ import { normalizeResourceSelections } from "./rci-selection.ts";
 import {
 	applyTemplateResourcesToWorkflow,
 	deleteResourceSet,
+	listWorkflowResourceSelections,
 	setWorkflowResourceSelections,
 	upsertServerResourceSet,
 } from "./rci-store.ts";
@@ -56,6 +60,7 @@ import { normalizeTcpSelections } from "./tcp-selection.ts";
 import {
 	applyTemplateTcpsToWorkflow,
 	deleteTcp,
+	listWorkflowTcpSelections,
 	setWorkflowTcpSelections,
 	upsertServerTcp,
 } from "./tcp-store.ts";
@@ -573,8 +578,10 @@ async function pushEvents(
 	config: SyncConfig,
 	token: string,
 	fetchImpl: FetchLike,
+	log?: SyncTickOptions["log"],
 ): Promise<void> {
 	collectLocalStateEvents();
+	collectInstanceAnnouncements();
 	for (let i = pendingEvents.length - 1; i >= 0; i--) {
 		const event = pendingEvents[i]!;
 		if (event.gated && !serverSupportsEvent(event.type)) pendingEvents.splice(i, 1);
@@ -605,6 +612,161 @@ async function pushEvents(
 		pendingEvents.unshift(...batch);
 		throw new Error(`sync events push failed (${res.status})`);
 	}
+	applyAnnouncementOutcomes(await res.json().catch(() => null), log);
+}
+
+// --- schedule.instance_created (D18) -------------------------------------------
+//
+// The hub mints the remote_id of every instance after a server series' first
+// (see `remoteSeriesInstance` in workflow.ts), so the server only learns of one
+// when the hub says so. The announcement is derived from STATE, not queued at
+// clone time: `pendingEvents` lives in memory and a restart would lose it, but
+// `announced_at IS NULL` survives — every tick re-announces whatever the server
+// has not confirmed yet. The deterministic event id makes a resend (after a
+// restart, or a push whose response was lost) a `duplicate` on the server
+// instead of a second instance, and `announced_at` is only ever set from the
+// server's answer.
+
+const INSTANCE_CREATED_PREFIX = "instance-created:";
+
+/**
+ * Queues `schedule.instance_created` for every server-series instance the
+ * server has not confirmed yet. Skipped:
+ *  - an instance already queued (same deterministic id) — once per cycle;
+ *  - a `cancelled` one: the server cancelled the series before hearing of it,
+ *    and would only refuse it;
+ *  - every instance of a series that is `broken`: it was refused once (or its
+ *    next run couldn't be created) and re-announcing would only repeat the
+ *    refusal and its notice on every tick until someone re-arms the series.
+ */
+function collectInstanceAnnouncements(): void {
+	if (!serverSupportsEvent("schedule.instance_created")) return;
+	const workflows = listWorkflows();
+	const brokenSeries = new Set(
+		workflows.filter((w) => w.scheduleState === "broken" && w.seriesId).map((w) => w.seriesId!),
+	);
+	for (const workflow of workflows) {
+		if (workflow.origin !== "remote" || !workflow.remoteId || workflow.managedBy !== "server") continue;
+		if (!workflow.seriesId || workflow.announcedAt !== null) continue;
+		if (workflow.scheduleState === "cancelled" || brokenSeries.has(workflow.seriesId)) continue;
+		const id = `${INSTANCE_CREATED_PREFIX}${workflow.remoteId}`;
+		if (pendingEvents.some((e) => e.id === id)) continue;
+		pendingEvents.push({
+			id,
+			type: "schedule.instance_created",
+			remote_id: workflow.remoteId,
+			payload: instanceCreatedPayload(workflow),
+			created_at: new Date().toISOString(),
+			gated: true,
+		});
+	}
+}
+
+/** The D18 payload: enough for the server to create its remote-workflow row for
+ * the instance and address its steps by step_key. */
+function instanceCreatedPayload(workflow: Workflow): Record<string, unknown> {
+	const previous = workflow.previousInstanceId ? getWorkflow(workflow.previousInstanceId) : null;
+	const runtime = hookRuntime(workflow.hookUrl);
+	const keyByStepId = new Map(
+		Object.entries(getSyncStepMap(workflow.remoteId!)).map(([key, stepId]) => [stepId, key]),
+	);
+	const steps = listSteps(workflow.id)
+		.filter((s) => s.kind === "task" && keyByStepId.has(s.id))
+		.map((s) => ({
+			step_key: keyByStepId.get(s.id)!,
+			description: s.description,
+			acceptance_criteria: s.acceptanceCriteria,
+			manual_review: s.manualReview,
+			use_subagent: s.useSubagent,
+			max_retries: s.maxRetries,
+			retry_interval_seconds: s.retryIntervalSeconds,
+		}));
+	return {
+		series_id: workflow.seriesId,
+		previous_remote_id: previous?.remoteId ?? null,
+		name: workflow.name,
+		scheduled_for: workflow.scheduledFor,
+		schedule: {
+			spec: workflow.schedule,
+			timezone: workflow.scheduleTimezone,
+			include_previous: workflow.includePrevious,
+		},
+		agent: runtime.harness,
+		sandbox: runtime.sandbox ? "docker" : "host",
+		conversation_context: workflow.conversationContext,
+		steps,
+		tcp_selections: listWorkflowTcpSelections(workflow.id),
+		resource_selections: listWorkflowResourceSelections(workflow.id),
+	};
+}
+
+/** Ids in a `{accepted, rejected, duplicates}` list: plain ids or `{id, reason}` entries. */
+function responseEntries(list: unknown): Array<{ id: string; reason: string | null }> {
+	if (!Array.isArray(list)) return [];
+	const out: Array<{ id: string; reason: string | null }> = [];
+	for (const entry of list) {
+		if (typeof entry === "string") out.push({ id: entry, reason: null });
+		else if (entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string") {
+			const reason = (entry as { reason?: unknown }).reason;
+			out.push({ id: (entry as { id: string }).id, reason: typeof reason === "string" ? reason : null });
+		}
+	}
+	return out;
+}
+
+/**
+ * Reads the server's verdict on the announcements in a pushed batch. Accepted
+ * or duplicate (it already has the instance — e.g. a resend after a restart)
+ * both mean "the server knows it": `announced_at` is set. Rejected means the
+ * server refused the instance (D19: series unknown, cancelled or not this
+ * client's) — the series can't be kept in step with the server any more, so it
+ * is marked `broken` and a critical notice says why. Only instance-created ids
+ * are acted on; every other event keeps today's handling.
+ */
+function applyAnnouncementOutcomes(response: unknown, log: SyncTickOptions["log"]): void {
+	if (!response || typeof response !== "object") return;
+	const r = response as Record<string, unknown>;
+	const remoteIdOf = (id: string) => (id.startsWith(INSTANCE_CREATED_PREFIX) ? id.slice(INSTANCE_CREATED_PREFIX.length) : null);
+	const now = new Date().toISOString();
+	for (const { id } of [...responseEntries(r.accepted), ...responseEntries(r.duplicates)]) {
+		const remoteId = remoteIdOf(id);
+		const workflow = remoteId ? getWorkflowByRemoteId(remoteId) : null;
+		if (workflow && workflow.announcedAt === null) {
+			updateWorkflowSchedule(workflow.id, { announcedAt: now }, { touch: false });
+		}
+	}
+	for (const { id, reason } of responseEntries(r.rejected)) {
+		const remoteId = remoteIdOf(id);
+		const workflow = remoteId ? getWorkflowByRemoteId(remoteId) : null;
+		if (!workflow?.seriesId) continue;
+		breakRefusedSeries(workflow, reason ?? "rejected", log);
+	}
+}
+
+function breakRefusedSeries(instance: Workflow, reason: string, log: SyncTickOptions["log"]): void {
+	// The series' live instance is the one that would fire next — the refused
+	// instance itself, or (if the refused one already fired) the clone armed
+	// after it. Breaking it stops the series until the server re-arms it.
+	const live = liveSeriesInstance(instance.seriesId!) ?? instance;
+	if (live.scheduleState === "armed" || live.scheduleState === "missed") {
+		updateWorkflowSchedule(live.id, { scheduleState: "broken", nextRunAt: null });
+	} else if (live.scheduleState !== "broken") {
+		updateWorkflowSchedule(live.id, { scheduleState: "broken" });
+	}
+	const seriesName = instance.seriesName ?? instance.name;
+	recordScheduleNotice((m, level) => logMessage(log, m, level), {
+		workflowId: live.id,
+		seriesId: instance.seriesId,
+		kind: "broken",
+		reason: "announcement_rejected",
+		detail: {
+			critical: true,
+			error: reason,
+			remoteId: instance.remoteId,
+			message: `The schedule "${seriesName}" is broken: the server refused its run "${instance.name}" (${reason}). It won't run again until it is rescheduled from the server.`,
+		},
+	});
+	logMessage(log, `sync: server refused instance ${instance.remoteId} of series ${instance.seriesId} (${reason}) — series broken`, "error");
 }
 
 function collectLocalStateEvents(): void {
@@ -1070,7 +1232,7 @@ export async function runSyncTick(options: SyncTickOptions = {}): Promise<void> 
 		}
 	}
 
-	await pushEvents(config, token, fetchImpl);
+	await pushEvents(config, token, fetchImpl, log);
 }
 
 /** Seed status cache for workflows already on disk (daemon startup). */
