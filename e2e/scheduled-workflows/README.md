@@ -78,6 +78,16 @@ timestamps through `hub.db()` (a `node:sqlite` handle on the throwaway
 | --- | --- |
 | S0 | Everything boots, the hub links and syncs with the throwaway server, and a plain (non-scheduled) two-step workflow (one step judged) runs to `completed` through the broker. |
 
+| S1 | A local daily series fires on time (1–2 min ahead): the next armed instance exists, named `<series> · YYYY-MM-DD HH:mm`; on the 2nd fire the context step carries the previous-run block while `conversation_context` is unchanged and does not accumulate. |
+| S2 | Start / resume / restart / step run on an armed instance → 409 `scheduled_armed`; nothing reaches the broker; the armed instance is still editable. |
+| S3 | Missed recurring: hub stopped, `next_run_at` rewound two days, hub started → one notice listing 2 missed occurrences, no extra workflows, re-armed in the future. |
+| S4 | Missed once → `missed` + notice → `run-now` runs it (a second `run-now` is 409 `not_missed`). |
+| S5 | Overlap: the broker holds the previous instance running when the next is due → skipped (`busy`) + notice + re-armed, no junk instance. |
+| S6 | Auto-archive (`archive_after_days=1`, rewound timestamps): old completed/failed archived, armed/running/draft/fresh not; `GET /api/workflows` excludes archived by default. |
+
+S1 takes ~3.5 minutes (two real scheduler ticks); S5/S6 ~1 minute each (they wait for a
+30s scheduler tick / the 60s archive sweep). The whole suite is ~6 minutes.
+
 See `REPORT.md` for the latest recorded results.
 
 ## Adding a scenario
@@ -86,3 +96,13 @@ Append `{ id, title, async run(ctx) }` to `SCENARIOS` in `run.mjs`. `ctx` has
 `hub`, `server` (`.api()` calls carry the operator session), `broker`,
 `createWorkflow`, `waitForStatus`, `waitFor`, `check`/`checkEq`, `log`. A
 scenario throws to fail; the harness records it and carries on.
+
+Helpers for time travel: `hub.whileStopped(db => …)` stops the hub, hands you the
+throwaway DB, and starts the hub again (its boot tick then sees your edits);
+`makeDue(db, id)` moves an armed instance's `next_run_at` back exactly 24h (UTC
+schedules), i.e. "due, inside the grace window". Note the D10 boot wait: right
+after a restart a linked hub waits for its first heartbeat, so the firing tick is
+usually the second (~30s) one.
+
+The product locks a previous run's step-results directory read-only (D5); the
+harness restores write access before deleting the temp dir.

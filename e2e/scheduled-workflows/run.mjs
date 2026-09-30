@@ -181,6 +181,40 @@ async function stopProcess(entry) {
 	}
 }
 
+/**
+ * rm -rf that survives the product's own read-only locks: attachPreviousRun
+ * chmods a previous run's step-results directory read-only (D5), so a plain
+ * recursive delete of the temp dir fails with EACCES. Restore write access
+ * first; a leftover temp dir is a warning, never a reason to change the exit code.
+ */
+function removeTree(dir) {
+	const unlock = (p) => {
+		let st;
+		try {
+			st = fs.lstatSync(p);
+		} catch {
+			return;
+		}
+		if (st.isSymbolicLink()) return;
+		try {
+			fs.chmodSync(p, st.isDirectory() ? 0o700 : 0o600);
+		} catch {
+			// best effort
+		}
+		if (st.isDirectory()) for (const name of fs.readdirSync(p)) unlock(path.join(p, name));
+	};
+	try {
+		fs.rmSync(dir, { recursive: true, force: true });
+	} catch {
+		try {
+			unlock(dir);
+			fs.rmSync(dir, { recursive: true, force: true });
+		} catch (err) {
+			console.error(`[e2e] WARNING: could not remove ${dir}: ${String(err?.message ?? err)}`);
+		}
+	}
+}
+
 let cleanedUp = false;
 let broker = null;
 async function cleanup() {
@@ -188,7 +222,7 @@ async function cleanup() {
 	cleanedUp = true;
 	for (const entry of [...children].reverse()) await stopProcess(entry).catch(() => {});
 	if (broker) await broker.close().catch(() => {});
-	if (!KEEP) fs.rmSync(TMP, { recursive: true, force: true });
+	if (!KEEP) removeTree(TMP);
 	else log(`kept ${TMP}`);
 }
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
@@ -223,6 +257,7 @@ function tailLog(name, lines = 25) {
  *   broker.delayMs = n                    delay every job's completion
  *   broker.delayFor(hookName, n)          delay one hook's jobs (overlap scenario)
  *   broker.failNext(hookName)             the next exec job of that hook answers ok:false
+ *   broker.releaseHeld(hookName)          complete now every job of that hook still being held
  *   broker.jobs                           every job received, in order
  */
 function createBroker() {
@@ -232,6 +267,7 @@ function createBroker() {
 		hookDelay: new Map(),
 		failHooks: new Set(),
 		timers: new Map(), // jobId → timeout, so /abort can cancel
+		finishers: new Map(), // jobId → { hook, finish }, so a held job can be released early
 	};
 	const JUDGE_MARKER = "end your reply with a JSON object on its own final line";
 
@@ -289,6 +325,7 @@ function createBroker() {
 			const timer = state.timers.get(body.jobId);
 			if (timer) clearTimeout(timer);
 			state.timers.delete(body.jobId);
+			state.finishers.delete(body.jobId);
 			return reply(200, { killed: Boolean(timer) });
 		}
 
@@ -314,6 +351,7 @@ function createBroker() {
 			await postJson(body.startedCallbackUrl, {});
 			const finish = async () => {
 				state.timers.delete(body.jobId);
+				state.finishers.delete(body.jobId);
 				const fail = !isJudge && state.failHooks.delete(name);
 				job.completedAt = new Date().toISOString();
 				job.ok = !fail;
@@ -328,8 +366,10 @@ function createBroker() {
 					exitCode: fail ? 1 : 0,
 				});
 			};
-			if (delay > 0) state.timers.set(body.jobId, setTimeout(() => void finish(), delay));
-			else await finish();
+			if (delay > 0) {
+				state.timers.set(body.jobId, setTimeout(() => void finish(), delay));
+				state.finishers.set(body.jobId, { hook: name, finish });
+			} else await finish();
 		})();
 	});
 
@@ -345,6 +385,13 @@ function createBroker() {
 		},
 		delayFor: (hook, ms) => (ms > 0 ? state.hookDelay.set(hook, ms) : state.hookDelay.delete(hook)),
 		failNext: (hook) => state.failHooks.add(hook),
+		async releaseHeld(hook) {
+			for (const [jobId, held] of [...state.finishers]) {
+				if (held.hook !== hook) continue;
+				clearTimeout(state.timers.get(jobId));
+				await held.finish();
+			}
+		},
 		listen: () =>
 			new Promise((resolve, reject) => {
 				server.once("error", reject);
@@ -353,6 +400,7 @@ function createBroker() {
 		close: () =>
 			new Promise((resolve) => {
 				for (const t of state.timers.values()) clearTimeout(t);
+				state.finishers.clear();
 				server.closeAllConnections?.();
 				server.close(() => resolve());
 			}),
@@ -446,6 +494,27 @@ const hub = {
 		await waitFor("the restarted hub to answer /health", async () => (await httpJson("GET", `${HUB_URL}/health`)).ok, {
 			timeoutMs: 30_000,
 		});
+		// Right after boot every linked hub reads read-only until its first heartbeat.
+		await waitForLiveOwner();
+	},
+	/**
+	 * Simulated downtime: stop the hub, let `fn` rewrite the throwaway DB
+	 * (`fn(db)`), start the hub again. The boot scheduler tick then sees whatever
+	 * `fn` left behind, exactly as after a suspended laptop or a crash.
+	 */
+	async whileStopped(fn) {
+		await this.stop();
+		const db = this.db();
+		try {
+			await fn(db);
+		} finally {
+			db.close();
+		}
+		this.spawn();
+		await waitFor("the hub to answer /health after downtime", async () => (await httpJson("GET", `${HUB_URL}/health`)).ok, {
+			timeoutMs: 30_000,
+		});
+		await waitForLiveOwner();
 	},
 	api(method, p, body) {
 		return httpJson(method, `${HUB_URL}${p}`, { headers: { authorization: `Bearer ${this.token}` }, body });
@@ -534,6 +603,60 @@ async function waitForStatus(id, statuses, timeoutMs = 60_000) {
 
 const ctx = { hub, server, get broker() { return broker; }, DIRS, HUB_URL, SERVER_URL, linkHub, createWorkflow, getWorkflow, waitForStatus, waitFor, check, checkEq, sleep, log };
 
+
+// --- time + schedule helpers (all schedules here use UTC, so "tomorrow" is exactly +24h) ---
+
+const DAY_MS = 86_400_000;
+const pad2 = (n) => String(n).padStart(2, "0");
+/** "YYYY-MM-DD HH:mm" in UTC — the name suffix cloneScheduledInstance renders for a UTC schedule. */
+const fmtUtc = (d) =>
+	`${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
+const hhmmUtc = (d) => `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
+const atUtc = (d) => `${fmtUtc(d).replace(" ", "T")}`;
+
+/** The next minute boundary at least `minMs` from now, plus `extraMinutes` — a real fire time a minute or two ahead. */
+function minuteAhead(minMs, extraMinutes = 0) {
+	const t = Math.ceil((Date.now() + minMs) / 60_000) * 60_000 + extraMinutes * 60_000;
+	return new Date(t);
+}
+
+/** A daily UTC spec whose LAST occurrence was `minutesAgo` minutes ago, so its next one is ~24h away. */
+const dailyJustPassed = (minutesAgo) => ({ kind: "daily", time: hhmmUtc(new Date(Date.now() - minutesAgo * 60_000)) });
+
+/** Make `workflowId` a one-day-late, in-grace armed instance: move its next run back by exactly 24h (inside a stopped-hub window). */
+function makeDue(db, workflowId) {
+	const row = db.prepare("SELECT next_run_at FROM workflows WHERE id = ?").get(workflowId);
+	if (!row?.next_run_at) throw new Error(`${workflowId} has no next_run_at to rewind`);
+	const due = new Date(Date.parse(row.next_run_at) - DAY_MS).toISOString();
+	db.prepare("UPDATE workflows SET next_run_at = ?, scheduled_for = ? WHERE id = ?").run(due, due, workflowId);
+	return due;
+}
+
+async function setSchedule(id, spec, extra = {}) {
+	const r = await hub.api("PUT", `/api/workflows/${id}/schedule`, { spec, timezone: "UTC", ...extra });
+	check(r.ok, `PUT schedule answered ${r.status} ${r.text}`);
+	return r.json.workflow;
+}
+
+/** The series' instances as the hub reports them (oldest first). */
+async function seriesInstances(workflowId) {
+	const r = await hub.api("GET", `/api/workflows/${workflowId}/schedule`);
+	check(r.ok, `GET schedule answered ${r.status} ${r.text}`);
+	return r.json.instances;
+}
+
+async function noticesFor(seriesId) {
+	const r = await hub.api("GET", `/api/schedule-notices?seriesId=${encodeURIComponent(seriesId)}`);
+	check(r.ok, `GET schedule-notices answered ${r.status} ${r.text}`);
+	return r.json.notices ?? r.json;
+}
+
+async function runToCompletion(w, steps, want = "completed") {
+	const started = await hub.api("POST", `/api/workflows/${w.id}/start`, { stepIds: steps.map((s) => s.id) });
+	check(started.ok, `start answered ${started.status} ${started.text}`);
+	return await waitForStatus(w.id, want, 60_000);
+}
+
 // ---------------------------------------------------------------------------
 // Scenarios
 // ---------------------------------------------------------------------------
@@ -591,6 +714,300 @@ const SCENARIOS = [
 			const resumed = jobs.filter((j) => j.sessionHeader).length;
 			c.check(resumed >= 1, "a later turn resumed the session through the sessionid header");
 			c.log(`S0: broker jobs = ${kinds}`);
+		},
+	},
+
+	{
+		id: "S1",
+		title: "local daily series fires on time; next instance is named and armed; 2nd fire carries the previous-run block",
+		async run(c) {
+			const CONTEXT = "S1 background: the team wants a short daily digest.";
+			const fireAt = minuteAhead(45_000, 1); // 1–2 minutes from now
+			const { workflow: w1, steps } = await c.createWorkflow("S1 daily series", [
+				{ description: "Write the digest." },
+				{ description: "Post the digest." },
+			]);
+			const ctxSet = await c.hub.api("PATCH", `/api/workflows/${w1.id}/context`, { conversationContext: CONTEXT });
+			c.check(ctxSet.ok, `set context answered ${ctxSet.status} ${ctxSet.text}`);
+			const armed1 = await setSchedule(w1.id, { kind: "daily", time: hhmmUtc(fireAt) });
+			c.checkEq(armed1.schedule.state, "armed", "first instance state after PUT schedule");
+			c.checkEq(armed1.nextRunAt, fireAt.toISOString(), "first next_run_at");
+			c.log(`S1: first fire due at ${fireAt.toISOString()}`);
+
+			// Real fire: wait for the scheduler tick (≤30s after the due time).
+			const first = await c.waitFor(
+				"the first instance to fire and complete",
+				async () => {
+					const d = await c.getWorkflow(w1.id);
+					return d.workflow.schedule?.state === "fired" && d.workflow.status === "completed" ? d : null;
+				},
+				{ timeoutMs: 200_000, intervalMs: 2_000 },
+			);
+			const seriesId = first.workflow.schedule.seriesId;
+			const instances = await c.waitFor(
+				"the next armed instance to exist",
+				async () => {
+					const list = await seriesInstances(w1.id);
+					return list.length === 2 && list.some((i) => i.scheduleState === "armed") ? list : null;
+				},
+				{ timeoutMs: 15_000 },
+			);
+			const armed2 = instances.find((i) => i.scheduleState === "armed");
+			const nextDue = new Date(fireAt.getTime() + DAY_MS);
+			c.checkEq(armed2.name, `S1 daily series · ${fmtUtc(nextDue)}`, "armed instance name");
+			const armed2Detail = await c.getWorkflow(armed2.id);
+			c.checkEq(armed2Detail.workflow.nextRunAt, nextDue.toISOString(), "armed instance next_run_at (tomorrow)");
+			c.checkEq(armed2Detail.workflow.conversationContext, CONTEXT, "clone keeps conversation_context");
+			c.checkEq(armed2Detail.workflow.schedule.seriesId, seriesId, "clone shares the series id");
+			c.check(!c.broker.jobs.some((j) => j.hook === w1.agentName && j.input.includes("Previous run of this schedule")), "the FIRST run has no previous-run block");
+
+			// Second fire: a day later, simulated as "the tick finds it due" after downtime.
+			await c.hub.whileStopped((db) => makeDue(db, armed2.id));
+			const second = await c.waitFor(
+				"the second instance to fire and complete",
+				async () => {
+					const d = await c.getWorkflow(armed2.id);
+					return d.workflow.schedule?.state === "fired" && d.workflow.status === "completed" ? d : null;
+				},
+				{ timeoutMs: 90_000, intervalMs: 2_000 },
+			);
+			const block = second.workflow.schedule.previousRunBlock;
+			c.check(typeof block === "string" && block.length > 0, "second instance stores a previous-run block");
+			c.check(block.includes(`id ${w1.id}`), `block names the previous instance id (got: ${block})`);
+			c.check(block.includes("Final status: completed"), "block carries the previous final status");
+			c.check(
+				block.includes(path.join(DIRS.hubHome, "steps", first.workflow.agentName)),
+				`block carries the absolute step-results path (got: ${block})`,
+			);
+			c.checkEq(second.workflow.conversationContext, CONTEXT, "conversation_context unchanged on the 2nd fire");
+			c.check(!second.workflow.conversationContext.includes("Previous run of this schedule"), "block is stored apart from conversation_context");
+			const ctxJob = c.broker.jobs.find(
+				(j) => j.hook === second.workflow.agentName && j.input.includes("Previous run of this schedule"),
+			);
+			c.check(ctxJob, "the context step sent to the agent carries the previous-run block");
+			c.check(ctxJob.input.includes(CONTEXT), "…together with the unchanged conversation context");
+			// Third instance: armed again, block NOT accumulated.
+			const third = (await seriesInstances(w1.id)).find((i) => i.scheduleState === "armed");
+			c.check(third && third.id !== armed2.id, "a third instance is armed after the 2nd fire");
+			const thirdDetail = await c.getWorkflow(third.id);
+			c.checkEq(thirdDetail.workflow.schedule.previousRunBlock, null, "new clone starts without a previous-run block");
+			c.checkEq(thirdDetail.workflow.conversationContext, CONTEXT, "conversation_context still unchanged on the clone");
+			c.checkEq((await seriesInstances(w1.id)).length, 3, "exactly three instances after two fires");
+		},
+	},
+	{
+		id: "S2",
+		title: "start / resume / restart / step run on an armed instance answer 409 scheduled_armed",
+		async run(c) {
+			const { workflow: w, steps } = await c.createWorkflow("S2 armed guard", [
+				{ description: "Only step." },
+			]);
+			await setSchedule(w.id, { kind: "daily", time: hhmmUtc(new Date(Date.now() + 2 * 3_600_000)) });
+			const ids = steps.map((s) => s.id);
+			const attempts = [
+				["start", "POST", `/api/workflows/${w.id}/start`, { stepIds: ids }],
+				["resume", "POST", `/api/workflows/${w.id}/resume`, { stepIds: ids }],
+				["restart", "POST", `/api/workflows/${w.id}/restart`, { stepIds: ids }],
+				["step run", "POST", `/api/workflows/${w.id}/steps/${ids[0]}/run`, {}],
+			];
+			for (const [what, method, url, body] of attempts) {
+				const r = await c.hub.api(method, url, body);
+				c.checkEq(r.status, 409, `${what} status (body ${r.text})`);
+				c.checkEq(r.json?.error, "scheduled_armed", `${what} error code`);
+			}
+			c.checkEq(c.broker.jobs.filter((j) => j.hook === w.agentName).length, 0, "no job reached the broker");
+			const after = await c.getWorkflow(w.id);
+			c.checkEq(after.workflow.schedule.state, "armed", "instance is still armed");
+			c.checkEq(after.workflow.status, "draft", "instance did not start");
+			// …but the armed instance IS editable (edits carry into future runs).
+			const added = await c.hub.api("POST", `/api/workflows/${w.id}/steps`, { description: "Added while armed." });
+			c.check(added.ok, `adding a step to an armed instance answered ${added.status} ${added.text}`);
+			const ctx = await c.hub.api("PATCH", `/api/workflows/${w.id}/context`, { conversationContext: "edited while armed" });
+			c.check(ctx.ok, `editing context of an armed instance answered ${ctx.status} ${ctx.text}`);
+		},
+	},
+	{
+		id: "S3",
+		title: "missed recurring: 2 missed occurrences → one notice, no extra workflows, series re-armed in the future",
+		async run(c) {
+			const { workflow: w } = await c.createWorkflow("S3 missed recurring", [{ description: "Nightly job." }]);
+			// Next occurrence is ~2h ahead; rewinding it two days leaves exactly two passed slots (F-2d, F-1d), both >10 min late.
+			const armed = await setSchedule(w.id, { kind: "daily", time: hhmmUtc(new Date(Date.now() + 2 * 3_600_000)) });
+			const seriesId = armed.schedule.seriesId;
+			const future = armed.nextRunAt;
+			const totalBefore = (await c.hub.api("GET", "/api/workflows?archived=include")).json.workflows.length;
+			const rewound = new Date(Date.parse(future) - 2 * DAY_MS).toISOString();
+			await c.hub.whileStopped((db) =>
+				db.prepare("UPDATE workflows SET next_run_at = ?, scheduled_for = ? WHERE id = ?").run(rewound, rewound, w.id),
+			);
+			const notice = await c.waitFor(
+				"a missed notice",
+				async () => (await noticesFor(seriesId)).find((n) => n.kind === "missed"),
+				{ timeoutMs: 60_000, intervalMs: 1_000 },
+			);
+			c.checkEq(notice.reason, "offline", "notice reason");
+			c.checkEq(notice.detail.count, 2, "missed occurrence count");
+			c.checkEq(notice.detail.occurrences.length, 2, "listed occurrences");
+			c.check(/2 runs missed/.test(notice.detail.message), `notice message says "2 runs missed" (got: ${notice.detail.message})`);
+			c.check(notice.detail.message.includes("because the hub was offline"), "notice message gives the reason");
+			c.check(notice.detail.message.includes("next:"), "notice message names the next run");
+			const after = await c.getWorkflow(w.id);
+			c.checkEq(after.workflow.schedule.state, "armed", "series re-armed");
+			c.checkEq(after.workflow.nextRunAt, future, "re-armed at the next FUTURE occurrence");
+			c.check(Date.parse(after.workflow.nextRunAt) > Date.now(), "next run is in the future");
+			c.checkEq((await seriesInstances(w.id)).length, 1, "no extra instances in the series");
+			const totalAfter = (await c.hub.api("GET", "/api/workflows?archived=include")).json.workflows.length;
+			c.checkEq(totalAfter, totalBefore, "no extra workflows were created");
+			c.checkEq(c.broker.jobs.filter((j) => j.hook === w.agentName).length, 0, "nothing ran");
+		},
+	},
+	{
+		id: "S4",
+		title: "missed once → state missed + notice → run-now fires it",
+		async run(c) {
+			const { workflow: w } = await c.createWorkflow("S4 missed once", [{ description: "One-off job." }]);
+			const armed = await setSchedule(w.id, { kind: "once", at: atUtc(new Date(Date.now() + 30 * 60_000)) });
+			const seriesId = armed.schedule.seriesId;
+			const past = new Date(Date.now() - 3_600_000).toISOString();
+			await c.hub.whileStopped((db) =>
+				db.prepare("UPDATE workflows SET next_run_at = ?, scheduled_for = ? WHERE id = ?").run(past, past, w.id),
+			);
+			const missed = await c.waitFor(
+				"the once to become missed",
+				async () => {
+					const d = await c.getWorkflow(w.id);
+					return d.workflow.schedule?.state === "missed" ? d : null;
+				},
+				{ timeoutMs: 60_000, intervalMs: 1_000 },
+			);
+			c.checkEq(missed.workflow.nextRunAt, null, "a missed once has no next run");
+			c.checkEq(missed.workflow.status, "draft", "a missed once did not run");
+			const notice = (await noticesFor(seriesId)).find((n) => n.kind === "missed");
+			c.check(notice, "a missed notice was recorded");
+			c.check(notice.detail.message.includes("was missed because the hub was offline"), `notice message (got: ${notice.detail.message})`);
+			c.checkEq(c.broker.jobs.filter((j) => j.hook === w.agentName).length, 0, "nothing ran while missed");
+
+			const runNow = await c.hub.api("POST", `/api/workflows/${w.id}/schedule/run-now`, {});
+			c.check(runNow.ok, `run-now answered ${runNow.status} ${runNow.text}`);
+			const done = await c.waitForStatus(w.id, ["completed", "failed"], 60_000);
+			c.checkEq(done.workflow.status, "completed", "run-now workflow status");
+			c.checkEq(done.workflow.schedule.state, "fired", "state after run-now");
+			const again = await c.hub.api("POST", `/api/workflows/${w.id}/schedule/run-now`, {});
+			c.checkEq(again.status, 409, "a second run-now is refused");
+			c.checkEq(again.json?.error, "not_missed", "second run-now error code");
+		},
+	},
+	{
+		id: "S5",
+		title: "overlap: previous instance still running when the next is due → skipped + notice + re-armed",
+		async run(c) {
+			const { workflow: w1, steps } = await c.createWorkflow("S5 overlap", [{ description: "Slow job." }]);
+			const armed1 = await setSchedule(w1.id, dailyJustPassed(2));
+			const seriesId = armed1.schedule.seriesId;
+			// The broker holds W1's job, so W1 is still running when W2 comes due.
+			c.broker.delayFor(w1.agentName, 10 * 60_000);
+			try {
+				await c.hub.whileStopped((db) => makeDue(db, w1.id));
+				const running = await c.waitFor(
+					"W1 to fire and be running with W2 armed",
+					async () => {
+						const list = await seriesInstances(w1.id);
+						const d = await c.getWorkflow(w1.id);
+						return list.length === 2 && d.workflow.schedule.state === "fired" && d.workflow.status === "running" ? list : null;
+					},
+					{ timeoutMs: 90_000, intervalMs: 2_000 },
+				);
+				const w2 = running.find((i) => i.scheduleState === "armed");
+				await c.hub.whileStopped((db) => makeDue(db, w2.id));
+				const notice = await c.waitFor(
+					"a skipped notice",
+					async () => (await noticesFor(seriesId)).find((n) => n.kind === "skipped"),
+					{ timeoutMs: 90_000, intervalMs: 1_000 },
+				);
+				c.checkEq(notice.reason, "busy", "skip reason");
+				c.checkEq(notice.detail.busyInstanceId, w1.id, "notice names the busy instance");
+				c.check(notice.detail.message.includes("still in progress"), `notice message (got: ${notice.detail.message})`);
+				const w2After = await c.getWorkflow(w2.id);
+				c.checkEq(w2After.workflow.schedule.state, "armed", "the skipped instance is re-armed");
+				c.check(Date.parse(w2After.workflow.nextRunAt) > Date.now(), "re-armed in the future");
+				c.checkEq(w2After.workflow.status, "draft", "the skipped run did not start");
+				c.checkEq(c.broker.jobs.filter((j) => j.hook === w2After.workflow.agentName).length, 0, "no job for the skipped instance");
+				c.checkEq((await seriesInstances(w1.id)).length, 2, "no junk instance was created for the skipped run");
+				c.checkEq((await c.getWorkflow(w1.id)).workflow.status, "running", "the long run is undisturbed");
+			} finally {
+				c.broker.delayFor(w1.agentName, 0);
+				await c.broker.releaseHeld(w1.agentName);
+			}
+			const done = await c.waitForStatus(w1.id, ["completed", "failed"], 60_000);
+			c.checkEq(done.workflow.status, "completed", "the long run finishes once released");
+		},
+	},
+	{
+		id: "S6",
+		title: "auto-archive: archive_after_days=1 archives old completed/failed only; armed/running/draft/fresh stay; list excludes archived",
+		async run(c) {
+			const setDays = (n) => c.hub.api("PUT", "/api/settings/archive", { archive_after_days: n });
+			c.check((await setDays(1)).ok, "set archive_after_days=1");
+			let holdHook = null;
+			try {
+				const one = (name) => c.createWorkflow(name, [{ description: `${name} step.` }]);
+				const A = await one("S6 old completed");
+				const B = await one("S6 old failed");
+				const C = await one("S6 old running");
+				const D = await one("S6 old armed");
+				const E = await one("S6 fresh completed");
+				const G = await one("S6 old draft");
+				await runToCompletion(A.workflow, A.steps);
+				c.broker.failNext(B.workflow.agentName);
+				await runToCompletion(B.workflow, B.steps, "failed");
+				await runToCompletion(E.workflow, E.steps);
+				holdHook = C.workflow.agentName;
+				c.broker.delayFor(holdHook, 10 * 60_000);
+				c.check((await c.hub.api("POST", `/api/workflows/${C.workflow.id}/start`, { stepIds: C.steps.map((s) => s.id) })).ok, "start C");
+				await c.waitForStatus(C.workflow.id, "running", 30_000);
+				await setSchedule(D.workflow.id, { kind: "daily", time: hhmmUtc(new Date(Date.now() + 2 * 3_600_000)) });
+
+				const old = new Date(Date.now() - 3 * DAY_MS).toISOString();
+				await c.hub.whileStopped((db) => {
+					for (const x of [A, B, C, D, G]) db.prepare("UPDATE workflows SET updated_at = ? WHERE id = ?").run(old, x.workflow.id);
+					for (const x of [A, B]) db.prepare("UPDATE steps SET finished_at = ? WHERE workflow_id = ?").run(old, x.workflow.id);
+				});
+				// The daemon sweep runs every 60s (not at boot).
+				await c.waitFor(
+					"the sweep to archive the old completed and failed workflows",
+					async () => {
+						const r = await c.hub.api("GET", "/api/workflows?archived=only");
+						const ids = new Set(r.json.workflows.map((w) => w.id));
+						return ids.has(A.workflow.id) && ids.has(B.workflow.id) ? ids : null;
+					},
+					{ timeoutMs: 120_000, intervalMs: 2_000 },
+				);
+				const state = async (x) => (await c.getWorkflow(x.workflow.id)).workflow;
+				c.check((await state(A)).archivedAt, "old completed is archived");
+				c.checkEq((await state(A)).status, "completed", "archived keeps its completed outcome");
+				c.check((await state(B)).archivedAt, "old failed is archived");
+				c.checkEq((await state(B)).status, "failed", "archived keeps its failed outcome");
+				for (const [label, x] of [["running", C], ["armed", D], ["fresh completed", E], ["draft", G]]) {
+					c.checkEq((await state(x)).archivedAt, null, `${label} is not archived`);
+				}
+				c.checkEq((await state(C)).status, "running", "the running one is still running");
+				c.checkEq((await state(D)).schedule.state, "armed", "the armed one is still armed");
+
+				const def = (await c.hub.api("GET", "/api/workflows")).json.workflows.map((w) => w.id);
+				c.check(!def.includes(A.workflow.id) && !def.includes(B.workflow.id), "GET /api/workflows excludes archived by default");
+				for (const x of [C, D, E, G]) c.check(def.includes(x.workflow.id), `default list still has ${x.workflow.name}`);
+				const all = (await c.hub.api("GET", "/api/workflows?archived=include")).json.workflows.map((w) => w.id);
+				c.check(all.includes(A.workflow.id) && all.includes(C.workflow.id), "?archived=include lists both");
+				const only = (await c.hub.api("GET", "/api/workflows?archived=only")).json.workflows.map((w) => w.id);
+				c.check(!only.includes(C.workflow.id) && !only.includes(E.workflow.id), "?archived=only lists archived ones only");
+				c.checkEq((await c.hub.api("GET", "/api/workflows?archived=bogus")).status, 400, "bad archived filter");
+			} finally {
+				if (holdHook) {
+					c.broker.delayFor(holdHook, 0);
+					await c.broker.releaseHeld(holdHook);
+				}
+				await setDays(30); // the product default, so later scenarios are unaffected
+			}
 		},
 	},
 ];
