@@ -256,6 +256,7 @@ import {
 	unarchiveWorkflow,
 	updateWorkflowDockerMounts,
 	WorkflowArchivedError,
+	WorkflowScheduledArmedError,
 	WorkflowError,
 	WorkflowNotArchivableError,
 	type CloneOverrides,
@@ -737,13 +738,19 @@ function readStepConfig(body: Record<string, unknown>): {
 
 /**
  * The shared error answer of the run entry points (start/resume/restart and a
- * step's ▶ run): an archived workflow is a 409 `{"error":"archived"}` — a
- * conflict with the workflow's state, distinguished by type (see
- * `WorkflowArchivedError`) — any other engine refusal a 400, anything else 500.
+ * step's ▶ run): an archived workflow is a 409 `{"error":"archived"}` and a
+ * schedule's armed instance a 409 `{"error":"scheduled_armed"}` — conflicts
+ * with the workflow's state, distinguished by type (see `WorkflowArchivedError`
+ * / `WorkflowScheduledArmedError`) — any other engine refusal a 400, anything
+ * else 500.
  */
 function sendRunError(res: http.ServerResponse, err: unknown): void {
 	if (err instanceof WorkflowArchivedError) {
 		sendJson(res, 409, { error: "archived", message: err.message });
+		return;
+	}
+	if (err instanceof WorkflowScheduledArmedError) {
+		sendJson(res, 409, { error: "scheduled_armed", message: err.message });
 		return;
 	}
 	sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });

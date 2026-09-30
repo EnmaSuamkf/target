@@ -147,6 +147,39 @@ function refuseArchived(workflow: Workflow): void {
 }
 
 /**
+ * Thrown by the run entry points when the workflow is a schedule's ARMED
+ * instance (D2). A `WorkflowError` subclass for the same reason as
+ * `WorkflowArchivedError`: sync acks it `failed` with this message and MCP
+ * relays the hub's answer, while the HTTP layer maps it to 409
+ * `{"error":"scheduled_armed"}` by type. The message leads with that code so a
+ * sync ack (which only carries a message) is just as recognisable.
+ */
+export class WorkflowScheduledArmedError extends WorkflowError {
+	constructor(nextRunAt: string | null = null) {
+		super(
+			`scheduled_armed: this workflow is the next run of a schedule and starts on its own${
+				nextRunAt ? ` at ${nextRunAt}` : ""
+			} — cancel its schedule to run it by hand`,
+		);
+		this.name = "WorkflowScheduledArmedError";
+	}
+}
+
+/**
+ * The armed instance of a series is the NEXT execution, waiting for its time
+ * (D2): starting it by hand would run it early and then again when it fires —
+ * or, worse, have it already mid-run when the scheduler claims it. So every
+ * way of running work on it is refused (start, resume, restart, a ▶ step run),
+ * on every entry point, because they all come through here. Editing it stays
+ * allowed — the next instance is cloned from it, so edits carry forward — and
+ * once fired it is a normal workflow again. The scheduler itself only starts
+ * an instance AFTER claiming it (armed → fired), so it never trips this.
+ */
+function refuseScheduledArmed(workflow: Workflow): void {
+	if (workflow.scheduleState === "armed") throw new WorkflowScheduledArmedError(workflow.nextRunAt);
+}
+
+/**
  * Refreshes the progress clock of every in-flight step from the artifacts its
  * harness is writing (see progress.ts). Throttled per step, so running this on
  * every workflow read (~every 2s with the UI open) costs at most one `readdir`
@@ -2185,6 +2218,7 @@ export async function startWorkflow(
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	refuseArchived(workflow);
+	refuseScheduledArmed(workflow);
 	if (workflow.status === "completed" || workflow.status === "failed") {
 		throw new WorkflowError(`workflow is ${workflow.status} — use restart instead`);
 	}
@@ -2232,6 +2266,7 @@ export async function resumeWorkflow(
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	refuseArchived(workflow);
+	refuseScheduledArmed(workflow);
 	if (workflow.status !== "paused") throw new WorkflowError("only a paused workflow can be resumed");
 	setStepSelection(workflowId, stepIds);
 	// A resume mid-run finds the context step already `done` and leaves it alone —
@@ -2299,6 +2334,7 @@ export async function restartWorkflow(
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	refuseArchived(workflow);
+	refuseScheduledArmed(workflow);
 	if (workflow.status === "running") throw new WorkflowError("pause the workflow before restarting it");
 	// Selection first, so resetSteps only wipes the chosen steps.
 	setStepSelection(workflowId, stepIds);
@@ -3109,6 +3145,7 @@ export async function runStep(workflowId: string, stepId: string, cfg: HubConfig
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	refuseArchived(workflow);
+	refuseScheduledArmed(workflow);
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
 	// A ▶ on the context step would deliver the background as a one-off manual run

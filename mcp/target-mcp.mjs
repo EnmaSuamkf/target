@@ -391,7 +391,8 @@ const TOOLS = [
 	},
 	{
 		name: "start_workflow",
-		description: "Start sequential dispatch for selected steps",
+		description:
+			"Start sequential dispatch for selected steps (refused with 409 scheduled_armed on the armed next run of a schedule — it starts on its own)",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -419,7 +420,7 @@ const TOOLS = [
 	},
 	{
 		name: "resume_workflow",
-		description: "Resume a paused workflow",
+		description: "Resume a paused workflow (refused with 409 scheduled_armed on the armed next run of a schedule)",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -436,7 +437,7 @@ const TOOLS = [
 	},
 	{
 		name: "restart_workflow",
-		description: "Reset all steps and start over",
+		description: "Reset all steps and start over (refused with 409 scheduled_armed on the armed next run of a schedule)",
 		inputSchema: {
 			type: "object",
 			properties: {
