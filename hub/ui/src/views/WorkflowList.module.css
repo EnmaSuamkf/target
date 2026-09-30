@@ -258,6 +258,24 @@
 	justify-content: flex-end;
 }
 
+/* The schedule badge's line (see WorkflowCard). Collapses when the workflow
+   isn't part of a schedule, and truncates a long series name rather than
+   widening the card. */
+.cardSchedule {
+	display: flex;
+	min-width: 0;
+}
+
+.cardSchedule:empty {
+	display: none;
+}
+
+.cardSchedule > :global(.badge) {
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
 .cardBadges > :global(.badge) {
 	flex: none;
 }

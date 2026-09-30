@@ -321,6 +321,13 @@ kbd,
    the next run (accent: it will happen by itself), `run` a past execution
    (muted: history), `warning` a missed run or a broken series — the two
    states that wait on the operator, so they borrow the attention colours. */
+/* These carry sentences ("Scheduled · next in 3h", "Run of Nightly audit · …"),
+   not a status word, so the pill's capitalisation would misspell them. */
+.badge--schedule-scheduled,
+.badge--schedule-run,
+.badge--schedule-warning {
+	text-transform: none;
+}
 .badge--schedule-scheduled {
 	background: var(--accent-50);
 	border-color: var(--accent-200);

@@ -279,10 +279,16 @@ function WorkflowCard({
 				    not only after opening it. */}
 				<span className={styles.cardBadges}>
 					<OriginBadge origin={workflow.origin} />
-					<ScheduleBadge workflow={workflow} />
 					<ArchivedBadge archivedAt={workflow.archivedAt} />
 					<Badge status={workflow.status} manual={workflow.statusManual} manualAt={workflow.statusManualAt} />
 				</span>
+			</span>
+
+			{/* Its own line, not beside the status: "Scheduled · next in 14h" or
+			    "Run of <series> · <occurrence>" is long enough that sharing the
+			    title row squeezed the name down to a few letters. */}
+			<span className={styles.cardSchedule}>
+				<ScheduleBadge workflow={workflow} />
 			</span>
 
 			<ProgressBar progress={workflow.progress} running={workflow.status === "running"} />
