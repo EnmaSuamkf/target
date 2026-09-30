@@ -14,6 +14,7 @@
     "test": "npm --prefix hub test",
     "test:sync": "npm --prefix hub run test:sync",
     "typecheck": "npm --prefix hub run typecheck && npm --prefix hub/ui run typecheck",
+    "e2e:scheduled": "node e2e/scheduled-workflows/run.mjs",
     "ui:dev": "npm --prefix hub/ui run dev",
     "ui:build": "npm --prefix hub/ui run build",
     "desktop:install": "npm --prefix desktop/linux install && npm --prefix desktop/mac install && npm --prefix desktop/windows install",
