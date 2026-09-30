@@ -363,6 +363,58 @@ while the instance is armed. MCP: `get_schedule`, `set_schedule`,
 
 ![The notices banner for a missed once, with Run now, Reschedule, Dismiss and Acknowledge](web-docs/ui-schedule-notice.png)
 
+#### Remote series (scheduled from the server)
+
+A linked target-server can schedule a remote workflow. The series is then
+**managed by the server only** (`managedBy: "server"`): the hub shows it
+read-only and answers 409 `server_managed` to local schedule edits, while the
+scheduler fires it exactly like a local series.
+
+- **Commands address the series, not a workflow.**
+  - `workflow.set_schedule { series_id, spec, timezone, include_previous? }`:
+    - For a series the hub doesn't know yet, the command's `remote_id` names
+      the workflow that becomes its first armed instance, under the
+      server's `series_id`.
+    - Otherwise the command applies to the series' **current** armed instance,
+      or to its missed once or broken instance, and `remote_id` is ignored.
+      A command that races a fire still lands on the next run.
+    - An invalid spec or timezone acks `failed` with the field errors.
+  - `workflow.cancel_schedule { series_id }`: cancels the current armed
+    instance. It is a no-op when nothing is live.
+  - Both refuse a series the hub manages itself.
+  - `step.add|edit|remove|move|run` aimed at an instance that has already
+    fired ack `failed` with `instance_already_fired`. `step.abort` and
+    `step.continue` still work on a running past run.
+- **Later instances are remote too.**
+  - When a server series fires, the clone gets a **hub-generated** `remote_id`
+    (a UUID), the same `series_id` and `managed_by='server'`.
+  - Its sync step map reuses the previous instance's `step_key`s, matched by
+    position. A step added on the hub gets a fresh key.
+- **Announcement (`schedule.instance_created`).**
+  - Every sync tick announces each such instance whose `announced_at` is
+    NULL. The event id is always `instance-created:<remote_id>`.
+  - The payload is `series_id`, `previous_remote_id`, `name`,
+    `scheduled_for`, `schedule {spec, timezone, include_previous}`, `agent`,
+    `sandbox`, `conversation_context`, `steps [{step_key, description,
+    acceptance_criteria, manual_review, use_subagent, max_retries,
+    retry_interval_seconds}]`, `tcp_selections` and `resource_selections`.
+  - `announced_at` is set only when the server returns the id in `accepted`
+    or `duplicates`. A restart or a lost push simply re-announces, and the
+    server answers `duplicate`.
+  - An id in `rejected` breaks the series, with a critical `broken` notice
+    and a Slack message carrying the server's reason.
+  - The first instance, created by the server, is never announced back.
+- **Other events.**
+  - `workflow.schedule_changed { series_id, state, next_run_at }` is derived
+    each tick from the series' current instance. It covers set, updated,
+    cancelled, re-armed and broken. The first tick after a restart re-sends
+    the current state.
+  - `schedule.run_missed { series_id, occurrences }` and
+    `schedule.run_skipped { series_id, reason, occurrence }` follow the
+    scheduler's notices.
+- All four event types are sent only when the server advertises them (see
+  Remote sync below).
+
 `ui:dev` gives hot reload while proxying API calls to a hub started separately
 with `npm start`. Point it at a hub on another port with `TARGET_HUB_ORIGIN`.
 
@@ -860,8 +912,9 @@ interval (30s when the default is 10s).
 Register and heartbeat responses carry `server_capabilities.events`, the
 event types the server accepts. One unknown type makes the server reject the
 whole event batch with 400 (and the hub re-queues it, stalling all sync), so
-event types newer than the original contract (currently `workflow.archived` /
-`workflow.unarchived`) are queued only if listed there — see `queueGatedEvent`
+event types newer than the original contract (currently `workflow.archived`,
+`workflow.unarchived`, `schedule.instance_created`, `workflow.schedule_changed`,
+`schedule.run_missed` and `schedule.run_skipped`) are queued only if listed there — see `queueGatedEvent`
 in `hub/sync.ts`; the original types are always sent. The last value is kept in
 the `settings` table (`server_capabilities_v1`), replaced on every parsed
 register/heartbeat response (a response without the field, i.e. an older

@@ -11,6 +11,25 @@ The current version is reported by every instance to the central server (see
 
 ### Added
 
+- **Scheduled workflows (remote series sync).**
+  - **Commands.** `workflow.set_schedule { series_id, spec, timezone,
+    include_previous }` and `workflow.cancel_schedule { series_id }`. They
+    address the series and apply to its current armed instance; a first
+    `set_schedule` arms the command's `remote_id` as a server-managed series
+    under the server's id. Both are advertised in `capabilities.commands`. An
+    invalid spec acks `failed`. Step edits and runs aimed at an instance that
+    has already fired ack `failed` with `instance_already_fired`.
+  - **Remote instances.** When a server series fires, the next instance is
+    remote too, with a hub-generated `remote_id`, the same `series_id` and the
+    previous instance's `step_key`s.
+  - **Announcement.** `schedule.instance_created` is derived from state:
+    every instance with `announced_at` NULL is announced each tick under the
+    id `instance-created:<remote_id>`, and `announced_at` is set only from the
+    server's `accepted` / `duplicates`. A rejection breaks the series, with a
+    notice and a Slack message.
+  - **Events.** `workflow.schedule_changed`, `schedule.run_missed` and
+    `schedule.run_skipped`. Like the announcement, they are sent only when the
+    server advertises them.
 - **Scheduled workflows (UI and Slack notices).**
   - **Schedule dialog.** Offers once, daily and weekly, a searchable timezone
     list (the browser's by default) and the previous-run toggle. It previews
