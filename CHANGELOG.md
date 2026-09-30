@@ -11,6 +11,24 @@ The current version is reported by every instance to the central server (see
 
 ### Added
 
+- **Archive workflows, automatically and on demand.** Archiving is an
+  `archived_at` flag beside the status, allowed only on completed/failed
+  workflows. The daemon's 60s sweep archives them once their last activity
+  (later of `updated_at` and the steps' latest `finished_at`) is older than
+  `archive_after_days` (default 30, `0` disables; Settings → Auto-archive,
+  `GET`/`PUT /api/settings/archive`). Operators can archive/unarchive by hand
+  (`POST /api/workflows/:id/archive|unarchive`, detail view buttons, MCP
+  `archive_workflow` / `unarchive_workflow`); a non-completed/failed workflow
+  answers `409 not_archivable`. `GET /api/workflows` hides archived workflows
+  unless `?archived=include|only`, and the UI rail and All workflows page gain
+  an **Archived** filter and badge. An archived workflow refuses
+  start/resume/restart/step run with `409 { "error": "archived" }`.
+- **Server capabilities gate new sync event types.** The hub now reads and
+  persists `server_capabilities.events` from register/heartbeat responses and
+  only queues newer event types when the server lists them; remote workflows
+  emit `workflow.archived` / `workflow.unarchived` on that basis. Gated events
+  no longer advertised are dropped at flush; the list is cleared on unlink.
+
 - **Role-based catalog sync from the linked server.** Settings → Catalog
   navigation offers **Sync resources** when the owner's role includes any of
   `client.templates.sync`, `client.tcp-tools.sync`, or `client.rci.sync`. The
