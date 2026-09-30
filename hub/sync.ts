@@ -39,6 +39,7 @@ import {
 	saveSyncStepMap,
 	setSyncStepKey,
 	setWorkflowRemoteMeta,
+	updateWorkflowSchedule,
 	type OverridableStepStatus,
 	type OverridableWorkflowStatus,
 	normalizeTemplateStepNotes,
@@ -931,6 +932,9 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 			throw new WorkflowError(`workflow already belongs to series ${workflow.seriesId}`);
 		}
 		const updated = setSchedule(workflow.id, { ...input, seriesId }, { actor: "server" });
+		// The server created this instance, so it already knows it: only the
+		// instances the hub clones later are announced (D18).
+		updateWorkflowSchedule(updated.id, { announcedAt: new Date().toISOString() }, { touch: false });
 		return { localId: updated.id };
 	},
 	"workflow.cancel_schedule": (command) => {

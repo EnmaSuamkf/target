@@ -313,6 +313,7 @@ test("a first workflow.set_schedule arms the remote workflow as a server-managed
 	assert.equal(wf.scheduleTimezone, "Europe/Madrid");
 	assert.equal(wf.includePrevious, false);
 	assert.ok(wf.nextRunAt && Date.parse(wf.nextRunAt) > Date.now());
+	assert.ok(wf.announcedAt, "the server created this instance, so it is never announced back");
 	// The hub itself may not change it (D15).
 	assert.throws(() => setSchedule(id, { spec: { kind: "daily", time: "10:00" }, timezone: "UTC" }), {
 		name: "ScheduleServerManagedError",

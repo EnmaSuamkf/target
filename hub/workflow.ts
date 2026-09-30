@@ -54,6 +54,7 @@ import {
 	getArchiveSettings,
 	getContextStep,
 	getStep,
+	getSyncStepMap,
 	getWorkflow,
 	insertStep,
 	insertWorkflow,
@@ -73,10 +74,12 @@ import {
 	rejectWaitingStep,
 	releaseWaitingStep,
 	resetSteps,
+	saveSyncStepMap,
 	setContextInjected,
 	setWorkflowConversationContext,
 	setWorkflowDockerMounts,
 	setWorkflowName,
+	setWorkflowRemoteMeta,
 	setStatusBeforeReview,
 	setStepSelection,
 	type SetStepSelectionOptions,
@@ -777,6 +780,8 @@ export function cancelSchedule(workflowId: string, options: ScheduleActor = {}):
  * would chain a date onto every generation. The previous-run block is NOT
  * copied: it describes the run before the SOURCE, and the new instance gets its
  * own one when it fires (`attachPreviousRun`).
+ *
+ * The next instance of a SERVER series is itself remote (`remoteSeriesInstance`).
  */
 export function cloneScheduledInstance(armedId: string, nextRunAt: Date | string): Workflow {
 	const source = getWorkflow(armedId);
@@ -800,10 +805,45 @@ export function cloneScheduledInstance(armedId: string, nextRunAt: Date | string
 		scheduleState: "armed",
 		previousInstanceId: armedId,
 		previousRunBlock: null,
+		announcedAt: null,
 	});
 	if (!instance) throw new WorkflowError("workflow disappeared");
-	writeStatusMd(instance.id);
-	return instance;
+	const next = source.origin === "remote" && source.remoteId && source.managedBy === "server"
+		? remoteSeriesInstance(source, instance)
+		: instance;
+	writeStatusMd(next.id);
+	return next;
+}
+
+/**
+ * Makes the clone of a server series' instance remote too, so the server can
+ * address it like the first one (D16). The hub mints its `remote_id` — the
+ * server learns it from the `schedule.instance_created` announcement, which a
+ * NULL `announced_at` queues (D18) — and carries the step_keys over: `cloneWorkflow`
+ * copies the non-context steps in order, so the source's and the clone's line
+ * up by position, and each key keeps naming "the same" step in every instance.
+ * A step the operator added to the armed instance locally has no key yet; it
+ * gets a fresh one so every step of a remote instance is addressable.
+ */
+function remoteSeriesInstance(source: Workflow, instance: Workflow): Workflow {
+	const remoteId = crypto.randomUUID();
+	const updated = setWorkflowRemoteMeta(instance.id, {
+		origin: "remote",
+		remoteId,
+		remoteSyncedAt: new Date().toISOString(),
+	});
+	if (!updated) throw new WorkflowError("workflow disappeared");
+	const keyByStepId = new Map(Object.entries(getSyncStepMap(source.remoteId!)).map(([key, id]) => [id, key]));
+	const sourceSteps = listSteps(source.id).filter((s) => s.kind !== "context");
+	const cloneSteps = listSteps(instance.id).filter((s) => s.kind !== "context");
+	const map: Record<string, string> = {};
+	sourceSteps.forEach((step, index) => {
+		const copy = cloneSteps[index];
+		if (!copy) return;
+		map[keyByStepId.get(step.id) ?? crypto.randomUUID()] = copy.id;
+	});
+	saveSyncStepMap(remoteId, map);
+	return updated;
 }
 
 /**

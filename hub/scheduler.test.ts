@@ -457,6 +457,111 @@ test("clone failure: the series is broken with a critical notice, yet the curren
 	assert.deepEqual((await tick(at(DUE, DAY))).fired, []);
 });
 
+// --- remote series (D16) ------------------------------------------------------------------
+
+const { getSyncStepMap, saveSyncStepMap, setWorkflowRemoteMeta } = await import("./db.ts");
+const { addStep } = await import("./workflow.ts");
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const taskIds = (id: string) => listSteps(id).filter((s) => s.kind !== "context").map((s) => s.id);
+
+/** A server series' first instance: remote, keyed steps, scheduled by the server. */
+function armedRemote(name: string) {
+	seq += 1;
+	const id = `wf-sched-remote-${seq}`;
+	insertWorkflow({
+		id,
+		name,
+		agentName: `sched-remote-agent-${seq}`,
+		hookUrl: `${hookBase}/${id}`,
+		secret: "s",
+		mdPath: path.join(tmpHome, `${id}.md`),
+	});
+	const [a, b] = [insertStep(id, "gather"), insertStep(id, "report")];
+	const remoteId = `rwf_series_${seq}`;
+	setWorkflowRemoteMeta(id, { origin: "remote", remoteId, remoteSyncedAt: ARMED_AT.toISOString() });
+	saveSyncStepMap(remoteId, { k_gather: a.id, k_report: b.id });
+	const wf = setSchedule(
+		id,
+		{ spec: { kind: "daily", time: "09:00" }, timezone: "UTC", seriesId: `series_remote_${seq}` },
+		{ now: ARMED_AT, actor: "server" },
+	);
+	return { wf, remoteId };
+}
+
+test("remote fire: the next instance is remote, with a fresh hub remote_id and the same step_keys", async () => {
+	const { wf: first, remoteId } = armedRemote("Remote nightly");
+	const result = await tick(DUE);
+	assert.deepEqual(result.fired, [first.id]);
+	assertStarted(first.id);
+
+	const next = getWorkflow(result.created[0])!;
+	assert.equal(next.origin, "remote");
+	assert.match(next.remoteId ?? "", UUID_RE, "the hub mints a UUID");
+	assert.notEqual(next.remoteId, remoteId);
+	assert.equal(next.seriesId, first.seriesId);
+	assert.equal(next.managedBy, "server");
+	assert.equal(next.announcedAt, null, "waiting to be announced");
+	assert.equal(next.scheduleState, "armed");
+	assert.equal(next.previousInstanceId, first.id);
+
+	const [gather, report] = taskIds(next.id);
+	assert.deepEqual(getSyncStepMap(next.remoteId!), { k_gather: gather, k_report: report });
+	assert.equal(listSteps(next.id).find((s) => s.id === gather)!.description, "gather");
+	// The fired instance keeps its own ids and map.
+	assert.equal(getWorkflow(first.id)!.remoteId, remoteId);
+	assert.deepEqual(Object.keys(getSyncStepMap(remoteId)), ["k_gather", "k_report"]);
+	assert.ok(!Object.values(getSyncStepMap(remoteId)).includes(gather));
+});
+
+test("remote fire: keys carry through generations, and a locally added step gets a fresh key", async () => {
+	const { wf: first } = armedRemote("Remote chain");
+	const second = getWorkflow((await tick(DUE)).created[0])!;
+	addStep(second.id, "extra check");
+	setWorkflowStatus(first.id, "completed"); // else the next run is skipped as an overlap
+	const third = getWorkflow((await tick(at(DUE, DAY))).created[0])!;
+
+	assert.notEqual(third.remoteId, second.remoteId);
+	assert.equal(third.seriesId, first.seriesId);
+	const map = getSyncStepMap(third.remoteId!);
+	const [gather, report, extra] = taskIds(third.id);
+	assert.equal(map.k_gather, gather);
+	assert.equal(map.k_report, report);
+	const extraKeys = Object.keys(map).filter((k) => k !== "k_gather" && k !== "k_report");
+	assert.equal(extraKeys.length, 1);
+	assert.equal(map[extraKeys[0]], extra);
+	assert.equal(Object.keys(map).length, 3, "one key per task step, no stale ones");
+});
+
+test("local series: the next instance stays local — no remote_id, no step map", async () => {
+	const first = armed({ name: "Local nightly" });
+	const next = getWorkflow((await tick(DUE)).created[0])!;
+	assert.equal(next.origin, "local");
+	assert.equal(next.remoteId, null);
+	assert.equal(next.managedBy, "local");
+	assert.equal(next.seriesId, first.seriesId);
+	assert.equal(getWorkflow(first.id)!.origin, "local");
+});
+
+test("a hub-managed series on a remote-origin workflow does not mint remote instances", async () => {
+	seq += 1;
+	const id = `wf-sched-remote-local-${seq}`;
+	insertWorkflow({
+		id,
+		name: "Remote workflow, local schedule",
+		agentName: `sched-rl-agent-${seq}`,
+		hookUrl: `${hookBase}/${id}`,
+		secret: "s",
+		mdPath: path.join(tmpHome, `${id}.md`),
+	});
+	insertStep(id, "one");
+	setWorkflowRemoteMeta(id, { origin: "remote", remoteId: `rwf_rl_${seq}`, remoteSyncedAt: ARMED_AT.toISOString() });
+	setSchedule(id, { spec: { kind: "daily", time: "09:00" }, timezone: "UTC" }, { now: ARMED_AT });
+	const next = getWorkflow((await tick(DUE)).created[0])!;
+	assert.equal(next.origin, "local", "the server knows nothing of a hub series");
+	assert.equal(next.remoteId, null);
+});
+
 // --- step selection -----------------------------------------------------------------------
 
 test("an instance whose steps already ran fires with restart semantics and every task step", async () => {
