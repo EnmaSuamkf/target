@@ -27,15 +27,16 @@ are a per-scenario `PASS`/`FAIL` summary.
   unless you pass `--any-server-rev`, and never modifies that checkout (its
   DB, control DB and mail outbox live in the temp dir).
 - Hub dependencies: none (the hub has no runtime dependencies).
-- Ports `8993` (hub), `8994` (server) and `8990` (broker) free. A busy port
+- Ports `8993` (hub), `8994` (server, via the proxy), `8995` (server behind the proxy) and `8990` (broker) free. A busy port
   aborts the run before anything is started.
 
 ## What it starts
 
 | Piece | Where | Notes |
 | --- | --- | --- |
-| target-server | `node <server>/server.mjs`, `127.0.0.1:8994` | temp `TARGET_SERVER_DB`/`TARGET_CONTROL_DB`, `TARGET_DEVICE_LINKING_MODE=optional`, file mail transport, seeded `admin@admin.com` |
+| target-server | `node <server>/server.mjs`, `127.0.0.1:8995` (clients reach it through the proxy on 8994) | temp `TARGET_SERVER_DB`/`TARGET_CONTROL_DB`, `TARGET_DEVICE_LINKING_MODE=optional`, file mail transport, seeded `admin@admin.com` |
 | hub | `node hub/daemon.ts`, `127.0.0.1:8993` | `TARGET_HOME` / `AWB_HOME` under the temp dir, `{"port": 8993}` in `config.json`, sync tick 5s |
+| fault-injecting proxy | in the harness process, `127.0.0.1:8994` | forwards to the real server (below) byte for byte; `proxy.block(method, path)` makes a route answer 503; logs every `POST /api/sync/events` exchange |
 | stand-in awb broker | in the harness process, `127.0.0.1:8990` | awb's hook contract only; never spawns an agent |
 
 Then it links the hub to the server through the real device-link flow
@@ -49,7 +50,9 @@ permission mode is `enforced`, exactly like production.
   plus what the harness sets) — no inherited `TARGET_REPORT_*` / `TARGET_SYNC_*`
   — and `HOME` points into the temp dir.
 - `PATH` is prefixed with stub `claude`/`free-code` (answer `--version` only; the
-  hub checks the runner exists) and `xdg-open` (linking never opens a browser).
+  hub checks the runner exists), `xdg-open` (linking never opens a browser) and
+  `docker` (always succeeds: a server-created workflow is a docker-sandbox one, and
+  the hub would otherwise probe — and try to build an image on — the host's docker).
 - Every process is killed by its **own pid** (never a pattern kill, which would
   also take down the live hub). Cleanup runs on success, failure, and
   SIGINT/SIGTERM; it then verifies ports 8993/8994/8990 are free and removes the
@@ -87,6 +90,13 @@ timestamps through `hub.db()` (a `node:sqlite` handle on the throwaway
 
 S1 takes ~3.5 minutes (two real scheduler ticks); S5/S6 ~1 minute each (they wait for a
 30s scheduler tick / the 60s archive sweep). The whole suite is ~6 minutes.
+
+| S7 | The operator creates a remote workflow with a daily schedule through the server API → the hub applies it (`managed_by: server`, same series id), the server mirrors `armed`, and a local `PUT`/`DELETE` of the schedule on the hub → 409 `server_managed`. |
+| S8 | Two real fires → the server lists the series with 3 instances (`server,hub,hub`, hub-minted distinct ids, identical `step_key`s, `fired,fired,armed`). A server `step.edit` to a fired instance is acked `failed` with `instance_already_fired`; the same edit to the armed instance is applied. |
+| S9 | The proxy blocks `POST /api/sync/events`, the hub fires and clones, is SIGKILLed before the announcement is pushed, the route is unblocked and the hub restarted → `instance-created:<id>` is accepted exactly once (one stored event, one workflow row). |
+| S10 | Missed remote occurrences (hub stopped, `next_run_at` rewound two days) → the server shows the mirrored `run_missed` notice (2 occurrences) and the re-armed `next_run_at`. |
+| S11 | `DELETE …/schedule` on the server → series `cancelled`, the hub's armed instance becomes a normal, startable workflow (never re-armed); `archive`/`unarchive` of a remote workflow are mirrored as `archived_at`. |
+| S12 | A second registered client's `schedule.instance_created` into the first client's series is rejected (`foreign_series`; with the real instance id `foreign_remote_id`), as is a foreign `workflow.schedule_changed` cancel; nothing is created or changed. |
 
 See `REPORT.md` for the latest recorded results.
 

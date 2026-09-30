@@ -36,6 +36,7 @@ const SERVER_REPO = path.resolve(process.env.E2E_SERVER_DIR ?? path.join(HUB_REP
 const HUB_PORT = 8993;
 const SERVER_PORT = 8994;
 const BROKER_PORT = 8990;
+const SERVER_INTERNAL_PORT = 8995; // the real server; 8994 is the fault-injecting proxy in front of it
 const LIVE_HUB_PORT = 8893; // never touched; only named so the preflight can say so
 const HUB_URL = `http://127.0.0.1:${HUB_PORT}`;
 const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
@@ -217,11 +218,13 @@ function removeTree(dir) {
 
 let cleanedUp = false;
 let broker = null;
+let proxy = null;
 async function cleanup() {
 	if (cleanedUp) return;
 	cleanedUp = true;
 	for (const entry of [...children].reverse()) await stopProcess(entry).catch(() => {});
 	if (broker) await broker.close().catch(() => {});
+	if (proxy) await proxy.close().catch(() => {});
 	if (!KEEP) removeTree(TMP);
 	else log(`kept ${TMP}`);
 }
@@ -408,6 +411,98 @@ function createBroker() {
 }
 
 // ---------------------------------------------------------------------------
+// Fault-injecting proxy in front of the server
+// ---------------------------------------------------------------------------
+
+/**
+ * The hub and the harness reach the server on 8994; the server itself listens
+ * on 8995. The proxy forwards bytes untouched (device-request signatures cover
+ * method, path and body, so it must not rewrite anything), and can refuse
+ * chosen routes with 503 — "block the server's events route temporarily" —
+ * without modifying the server or stopping it. It also keeps a log of every
+ * POST /api/sync/events exchange so a scenario can count what was accepted.
+ */
+function createProxy() {
+	const rules = []; // { method, pathname, status }
+	const eventLog = []; // { at, blocked, events: [ids], accepted, duplicates, rejected }
+	const server = http.createServer((req, res) => {
+		const pathname = (req.url ?? "/").split("?")[0];
+		const rule = rules.find((r) => r.method === req.method && r.pathname === pathname);
+		const chunks = [];
+		req.on("data", (c) => chunks.push(c));
+		req.on("end", () => {
+			const body = Buffer.concat(chunks);
+			const isEvents = req.method === "POST" && pathname === "/api/sync/events";
+			let sent = [];
+			if (isEvents) {
+				try {
+					sent = (JSON.parse(body.toString("utf8")).events ?? []).map((e) => e.id);
+				} catch {
+					// not JSON — the server will say so
+				}
+			}
+			if (rule) {
+				if (isEvents) eventLog.push({ at: Date.now(), blocked: true, events: sent });
+				res.writeHead(rule.status, { "content-type": "application/json" });
+				res.end(JSON.stringify({ error: "e2e_route_blocked" }));
+				return;
+			}
+			const upstream = http.request(
+				{ host: "127.0.0.1", port: SERVER_INTERNAL_PORT, method: req.method, path: req.url, headers: req.headers },
+				(up) => {
+					const out = [];
+					up.on("data", (c) => out.push(c));
+					up.on("end", () => {
+						const buf = Buffer.concat(out);
+						if (isEvents) {
+							let parsed = {};
+							try {
+								parsed = JSON.parse(buf.toString("utf8"));
+							} catch {
+								// leave empty
+							}
+							eventLog.push({
+								at: Date.now(),
+								blocked: false,
+								events: sent,
+								status: up.statusCode,
+								accepted: parsed.accepted ?? [],
+								duplicates: parsed.duplicates ?? [],
+								rejected: parsed.rejected ?? [],
+							});
+						}
+						res.writeHead(up.statusCode ?? 502, up.headers);
+						res.end(buf);
+					});
+				},
+			);
+			upstream.on("error", () => {
+				res.writeHead(502, { "content-type": "application/json" });
+				res.end(JSON.stringify({ error: "e2e_upstream_unreachable" }));
+			});
+			upstream.end(body);
+		});
+	});
+	return {
+		eventLog,
+		block: (method, pathname, status = 503) => rules.push({ method, pathname, status }),
+		unblock: (method, pathname) => {
+			for (let i = rules.length - 1; i >= 0; i--) if (rules[i].method === method && rules[i].pathname === pathname) rules.splice(i, 1);
+		},
+		listen: () =>
+			new Promise((resolve, reject) => {
+				server.once("error", reject);
+				server.listen(SERVER_PORT, "127.0.0.1", resolve);
+			}),
+		close: () =>
+			new Promise((resolve) => {
+				server.closeAllConnections?.();
+				server.close(() => resolve());
+			}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // target-server
 // ---------------------------------------------------------------------------
 
@@ -419,7 +514,7 @@ const server = {
 			cwd: DIRS.serverData, // mail outbox + relative paths land here, not in the repo
 			env: childEnv({
 				HOST: "127.0.0.1",
-				PORT: String(SERVER_PORT),
+				PORT: String(SERVER_INTERNAL_PORT),
 				TARGET_SERVER_DB: dbPath,
 				TARGET_CONTROL_DB: path.join(DIRS.serverData, "control.db"),
 				TARGET_DEVICE_LINKING_MODE: "optional",
@@ -449,6 +544,10 @@ const server = {
 	/** Dashboard-session call (the operator). */
 	api(method, p, body) {
 		return httpJson(method, `${SERVER_URL}${p}`, { headers: { cookie: this.cookie, origin: SERVER_URL }, body });
+	},
+	/** Read-only handle on the throwaway server DB (for facts the API does not expose, e.g. command status). */
+	db() {
+		return new DatabaseSync(path.join(DIRS.serverData, "target-server.db"), { readOnly: true });
 	},
 };
 
@@ -483,6 +582,14 @@ const hub = {
 				TARGET_SYNC_INTERVAL_MS: "5000", // the floor; a linked hub otherwise ticks every 10s
 			}),
 		});
+	},
+	/** SIGKILL the hub (by its own pid): no shutdown handlers, the in-memory event queue is simply gone. */
+	async kill() {
+		const { child } = this.entry;
+		if (!this.entry.exited) {
+			child.kill("SIGKILL");
+			while (!this.entry.exited) await sleep(50);
+		}
 	},
 	/** Stop the hub (by its own pid) — used to simulate downtime. */
 	async stop() {
@@ -601,7 +708,7 @@ async function waitForStatus(id, statuses, timeoutMs = 60_000) {
 	);
 }
 
-const ctx = { hub, server, get broker() { return broker; }, DIRS, HUB_URL, SERVER_URL, linkHub, createWorkflow, getWorkflow, waitForStatus, waitFor, check, checkEq, sleep, log };
+const ctx = { hub, server, get broker() { return broker; }, get proxy() { return proxy; }, DIRS, HUB_URL, SERVER_URL, linkHub, hubWorkflowByRemoteId: hubWorkflowByRemote, createWorkflow, getWorkflow, waitForStatus, waitFor, check, checkEq, sleep, log };
 
 
 // --- time + schedule helpers (all schedules here use UTC, so "tomorrow" is exactly +24h) ---
@@ -656,6 +763,71 @@ async function runToCompletion(w, steps, want = "completed") {
 	check(started.ok, `start answered ${started.status} ${started.text}`);
 	return await waitForStatus(w.id, want, 60_000);
 }
+
+
+// --- remote (server-created) series helpers ---
+
+let linkedClientId = null;
+/** The linked hub's client id on the server (cached: S12 registers a second client). */
+async function hubClientId() {
+	if (linkedClientId) return linkedClientId;
+	const r = await server.api("GET", "/api/sync/clients");
+	check(r.ok, `GET sync/clients answered ${r.status} ${r.text}`);
+	const list = r.json?.clients ?? r.json ?? [];
+	check(Array.isArray(list) && list.length >= 1, `the server lists the linked hub as a sync client (got ${r.text.slice(0, 200)})`);
+	linkedClientId = list[0].id;
+	return linkedClientId;
+}
+
+/** The hub's workflow for a server remote id, or null. */
+async function hubWorkflowByRemote(remoteId) {
+	const r = await hub.api("GET", "/api/workflows?archived=include");
+	return r.json.workflows.find((w) => w.remoteId === remoteId) ?? null;
+}
+
+async function serverSeries(seriesId) {
+	const r = await server.api("GET", `/api/sync/schedule-series?client_id=${encodeURIComponent(await hubClientId())}`);
+	check(r.ok, `GET schedule-series answered ${r.status} ${r.text}`);
+	return r.json.series.find((x) => x.id === seriesId) ?? null;
+}
+
+async function serverDetail(remoteId) {
+	const r = await server.api("GET", `/api/sync/remote-workflows/${remoteId}`);
+	return r;
+}
+
+/**
+ * The operator creates a remote workflow with a daily UTC schedule through the
+ * server API (2 template steps), then waits until the hub has applied every
+ * command and armed it. Returns the ids both sides use.
+ */
+async function createRemoteSeries(name, { time, context = `${name} background.` } = {}) {
+	const tpl = await server.api("POST", "/api/templates", { name: `${name} template`, steps: [{ description: "Collect" }, { description: "Report" }] });
+	check(tpl.status === 201, `create template answered ${tpl.status} ${tpl.text}`);
+	const created = await server.api("POST", "/api/sync/remote-workflows", {
+		client_id: await hubClientId(),
+		name,
+		agent: "claude",
+		conversation_context: context,
+		template_id: tpl.json.template.id,
+		schedule: { spec: { kind: "daily", time }, timezone: "UTC" },
+	});
+	check(created.status === 201, `create remote workflow answered ${created.status} ${created.text}`);
+	const remoteId = created.json.remote_workflow.id;
+	const seriesId = created.json.series.id;
+	const hubWf = await waitFor(
+		`the hub to apply the remote series "${name}"`,
+		async () => {
+			const w = await hubWorkflowByRemote(remoteId);
+			return w?.schedule?.state === "armed" ? w : null;
+		},
+		{ timeoutMs: 45_000, intervalMs: 1_000 },
+	);
+	const detail = await serverDetail(remoteId);
+	return { remoteId, seriesId, hubId: hubWf.id, agentName: hubWf.agentName, hubWf, stepKeys: detail.json.steps.map((x) => x.step_key) };
+}
+
+const hubDbRead = () => new DatabaseSync(path.join(DIRS.hubHome, "target.db"), { readOnly: true });
 
 // ---------------------------------------------------------------------------
 // Scenarios
@@ -1010,6 +1182,338 @@ const SCENARIOS = [
 			}
 		},
 	},
+
+	{
+		id: "S7",
+		title: "operator creates a remote daily series on the server: hub applies it (managed_by server); local PUT → 409 server_managed",
+		async run(c) {
+			const s = await createRemoteSeries("S7 remote series", { time: hhmmUtc(new Date(Date.now() + 2 * 3_600_000)) });
+			const w = s.hubWf;
+			c.checkEq(w.origin, "remote", "hub workflow origin");
+			c.checkEq(w.schedule.seriesId, s.seriesId, "hub series id is the server's series id");
+			c.checkEq(w.schedule.managedBy, "server", "managed_by");
+			c.checkEq(w.schedule.spec.kind, "daily", "spec kind");
+			c.checkEq(w.schedule.timezone, "UTC", "timezone");
+			c.check(w.nextRunAt && Date.parse(w.nextRunAt) > Date.now(), "hub computed a future next_run_at");
+			const listed = (await c.hub.api("GET", `/api/workflows/${s.hubId}`)).json.steps.filter((x) => x.kind === "task");
+			c.checkEq(listed.length, 2, "both template steps reached the hub");
+			// The hub reports the armed state back: the server's mirror catches up.
+			const mirrored = await c.waitFor(
+				"the server to mirror the armed state",
+				async () => {
+					const d = await serverDetail(s.remoteId);
+					return d.json?.remote_workflow?.schedule_state === "armed" ? d : null;
+				},
+				{ timeoutMs: 30_000, intervalMs: 1_000 },
+			);
+			c.checkEq(mirrored.json.remote_workflow.next_run_at, w.nextRunAt, "server next_run_at equals the hub's");
+			// Local edits of a server-managed series are refused.
+			const put = await c.hub.api("PUT", `/api/workflows/${s.hubId}/schedule`, { spec: { kind: "daily", time: "03:00" }, timezone: "UTC" });
+			c.checkEq(put.status, 409, `local PUT status (${put.text})`);
+			c.checkEq(put.json?.error, "server_managed", "local PUT error code");
+			const del = await c.hub.api("DELETE", `/api/workflows/${s.hubId}/schedule`);
+			c.checkEq(del.status, 409, "local DELETE status");
+			c.checkEq(del.json?.error, "server_managed", "local DELETE error code");
+			c.checkEq((await c.hubWorkflowByRemoteId(s.remoteId)).schedule.state, "armed", "still armed after the refused edits");
+		},
+	},
+	{
+		id: "S8",
+		title: "two fires: server lists 3 instances (server, hub, hub) with matching step_keys; step.edit on a fired instance → instance_already_fired",
+		async run(c) {
+			const fireAt = minuteAhead(45_000, 1);
+			const s = await createRemoteSeries("S8 remote fires", { time: hhmmUtc(fireAt) });
+			c.log(`S8: first fire due at ${fireAt.toISOString()}`);
+			const two = await c.waitFor(
+				"the server to list 2 instances after the first fire",
+				async () => {
+					const ser = await serverSeries(s.seriesId);
+					return ser?.instances.length === 2 ? ser : null;
+				},
+				{ timeoutMs: 200_000, intervalMs: 2_000 },
+			);
+			const second = two.instances[1];
+			c.checkEq(second.created_by, "hub", "the announced instance is created_by hub");
+			const secondHub = await c.waitFor("the hub's 2nd instance", async () => c.hubWorkflowByRemoteId(second.id), { timeoutMs: 10_000 });
+			c.checkEq(secondHub.schedule.state, "armed", "2nd instance is armed on the hub");
+			await c.hub.whileStopped((db) => makeDue(db, secondHub.id));
+			const three = await c.waitFor(
+				"the server to list 3 instances after the second fire",
+				async () => {
+					const ser = await serverSeries(s.seriesId);
+					return ser?.instances.length === 3 ? ser : null;
+				},
+				{ timeoutMs: 120_000, intervalMs: 2_000 },
+			);
+			c.checkEq(three.instances.map((i) => i.created_by).join(","), "server,hub,hub", "created_by of the 3 instances");
+			c.checkEq(three.instances.length, 3, "exactly 3 instances");
+			c.checkEq(new Set(three.instances.map((i) => i.id)).size, 3, "distinct remote ids (hub-minted)");
+			for (const inst of three.instances) {
+				const d = await serverDetail(inst.id);
+				c.checkEq(d.json.steps.map((x) => x.step_key).join(","), s.stepKeys.join(","), `step_keys of instance ${inst.id}`);
+			}
+			// The third is the armed one; the first two have fired (server learned it from the announcements).
+			await c.waitFor(
+				"the server to mirror fired,fired,armed",
+				async () => {
+					const ser = await serverSeries(s.seriesId);
+					return ser.instances.map((i) => i.schedule_state).join(",") === "fired,fired,armed" ? ser : null;
+				},
+				{ timeoutMs: 30_000, intervalMs: 1_000 },
+			);
+
+			const cmdStatus = (id) => {
+				const db = server.db();
+				try {
+					return db.prepare("SELECT status FROM commands WHERE id = ?").get(id)?.status ?? null;
+				} finally {
+					db.close();
+				}
+			};
+			// step.edit to a FIRED instance → acked failed.
+			const edit = await server.api("POST", `/api/sync/remote-workflows/${three.instances[0].id}/commands`, {
+				type: "step.edit",
+				payload: { step_key: s.stepKeys[0], description: "edited after it fired" },
+			});
+			c.checkEq(edit.status, 201, `enqueue step.edit answered ${edit.text}`);
+			const failedStatus = await c.waitFor("the hub to ack the step.edit", async () => {
+				const st = cmdStatus(edit.json.command.id);
+				return st && st !== "pending" ? st : null;
+			}, { timeoutMs: 30_000, intervalMs: 1_000 });
+			c.checkEq(failedStatus, "failed", "step.edit on a fired instance is acked failed");
+			const sdb = server.db();
+			let ackText = "";
+			try {
+				ackText = sdb.prepare("SELECT payload_json FROM sync_events WHERE type = 'command.ack' AND payload_json LIKE ?").all(`%${edit.json.command.id}%`).map((r) => r.payload_json).join("\n");
+			} finally {
+				sdb.close();
+			}
+			c.check(ackText.includes("instance_already_fired"), `the failed ack carries instance_already_fired (got: ${ackText || "no command.ack event"})`);
+			const firedHub = await c.hubWorkflowByRemoteId(three.instances[0].id);
+			const firedSteps = (await c.getWorkflow(firedHub.id)).steps.filter((x) => x.kind === "task");
+			c.check(!firedSteps.some((x) => x.description.includes("edited after it fired")), "the fired instance's step was not edited");
+			// Control: the same edit on the ARMED instance is applied.
+			const armedRemote = three.instances[2].id;
+			const edit2 = await server.api("POST", `/api/sync/remote-workflows/${armedRemote}/commands`, {
+				type: "step.edit",
+				payload: { step_key: s.stepKeys[0], description: "edited while armed" },
+			});
+			c.checkEq(edit2.status, 201, "enqueue step.edit on the armed instance");
+			const okStatus = await c.waitFor("the hub to ack the armed edit", async () => {
+				const st = cmdStatus(edit2.json.command.id);
+				return st && st !== "pending" ? st : null;
+			}, { timeoutMs: 30_000, intervalMs: 1_000 });
+			// The server stores a command the hub applied as "acked" (and one it refused as "failed").
+			c.checkEq(okStatus, "acked", "step.edit on the armed instance is applied (acked)");
+		},
+	},
+	{
+		id: "S9",
+		title: "hub killed right after a fire, announcement blocked → after restart the instance is announced exactly once",
+		async run(c) {
+			// A slot that passed 2 minutes ago: its next occurrence is ~24h away, so makeDue puts the armed
+			// instance exactly 24h back = a few minutes late, inside the grace window (it FIRES, not "missed").
+			const s = await createRemoteSeries("S9 announce once", { time: hhmmUtc(new Date(Date.now() - 2 * 60_000)) });
+			// From now on the server refuses the events route: the hub fires, clones, and cannot announce.
+			c.proxy.block("POST", "/api/sync/events");
+			let armedRemote;
+			try {
+				await c.hub.whileStopped((db) => makeDue(db, s.hubId));
+				armedRemote = await c.waitFor(
+					"the hub to fire and clone the next instance",
+					async () => {
+						const db = hubDbRead();
+						try {
+							const row = db.prepare("SELECT remote_id, announced_at FROM workflows WHERE series_id = ? AND schedule_state = 'armed' AND remote_id != ?").get(s.seriesId, s.remoteId);
+							return row?.remote_id ? row : null; // the ORIGINAL instance is armed too until it fires — only the clone counts
+						} finally {
+							db.close();
+						}
+					},
+					{ timeoutMs: 120_000, intervalMs: 100 },
+				);
+				c.checkEq(armedRemote.announced_at, null, "the clone is not announced yet");
+				const seenAt = Date.now();
+				await c.hub.kill(); // right after the fire, before the announcement got through
+				c.log(`S9: hub SIGKILLed ${Date.now() - seenAt}ms after the clone was seen`);
+			} catch (err) {
+				c.proxy.unblock("POST", "/api/sync/events");
+				throw err;
+			}
+			c.checkEq((await serverSeries(s.seriesId)).instances.length, 1, "the server has not heard of the new instance");
+			const newId = armedRemote.remote_id;
+			c.proxy.unblock("POST", "/api/sync/events");
+			c.hub.spawn();
+			await c.waitFor("the restarted hub to answer", async () => (await httpJson("GET", `${HUB_URL}/health`)).ok, { timeoutMs: 30_000 });
+			const after = await c.waitFor(
+				"the restarted hub to announce the instance",
+				async () => {
+					const ser = await serverSeries(s.seriesId);
+					return ser?.instances.length === 2 ? ser : null;
+				},
+				{ timeoutMs: 60_000, intervalMs: 1_000 },
+			);
+			c.checkEq(after.instances[1].id, newId, "the announced instance is the one the hub cloned");
+			// Let several more sync ticks pass: a second announcement would show up here.
+			await c.sleep(15_000);
+			const eventId = `instance-created:${newId}`;
+			const accepted = c.proxy.eventLog.filter((e) => !e.blocked && e.accepted?.includes(eventId)).length;
+			const duplicates = c.proxy.eventLog.filter((e) => !e.blocked && e.duplicates?.includes(eventId)).length;
+			const sent = c.proxy.eventLog.filter((e) => !e.blocked && e.events.includes(eventId)).length;
+			c.log(`S9: ${eventId}: accepted ${accepted}, duplicates ${duplicates}, unblocked sends ${sent}`);
+			c.checkEq(accepted, 1, "announcement accepted exactly once");
+			c.checkEq(sent, 1, "announcement sent exactly once after the restart");
+			const sdb = c.server.db();
+			try {
+				c.checkEq(sdb.prepare("SELECT COUNT(*) n FROM sync_events WHERE id = ?").get(eventId).n, 1, "one stored announcement event");
+				c.checkEq(sdb.prepare("SELECT COUNT(*) n FROM remote_workflows WHERE id = ?").get(newId).n, 1, "one remote workflow row for the instance");
+			} finally {
+				sdb.close();
+			}
+			c.checkEq((await serverSeries(s.seriesId)).instances.length, 2, "still exactly 2 instances");
+			const db = hubDbRead();
+			try {
+				c.check(db.prepare("SELECT announced_at FROM workflows WHERE remote_id = ?").get(newId).announced_at, "announced_at is set on the hub");
+			} finally {
+				db.close();
+			}
+		},
+	},
+	{
+		id: "S10",
+		title: "missed remote occurrences are mirrored on the server as a run_missed notice",
+		async run(c) {
+			const s = await createRemoteSeries("S10 remote missed", { time: hhmmUtc(new Date(Date.now() + 2 * 3_600_000)) });
+			const future = s.hubWf.nextRunAt;
+			const rewound = new Date(Date.parse(future) - 2 * DAY_MS).toISOString();
+			await c.hub.whileStopped((db) =>
+				db.prepare("UPDATE workflows SET next_run_at = ?, scheduled_for = ? WHERE id = ?").run(rewound, rewound, s.hubId),
+			);
+			const ser = await c.waitFor(
+				"the server to show the missed notice",
+				async () => {
+					const x = await serverSeries(s.seriesId);
+					return x?.notices.some((n) => n.kind === "missed") ? x : null;
+				},
+				{ timeoutMs: 60_000, intervalMs: 1_000 },
+			);
+			const notice = ser.notices.find((n) => n.kind === "missed");
+			c.checkEq(notice.occurrences.length, 2, "mirrored occurrences");
+			c.checkEq(notice.remote_id, s.remoteId, "notice names the instance");
+			c.checkEq(ser.instances.length, 1, "no extra instance on the server");
+			const hubSide = await c.hubWorkflowByRemoteId(s.remoteId);
+			c.checkEq(hubSide.schedule.state, "armed", "hub re-armed");
+			const mirrored = await c.waitFor(
+				"the server to mirror the re-armed next_run_at",
+				async () => {
+					const d = await serverDetail(s.remoteId);
+					return d.json.remote_workflow.next_run_at === hubSide.nextRunAt ? d : null;
+				},
+				{ timeoutMs: 30_000, intervalMs: 1_000 },
+			);
+			c.checkEq(mirrored.json.remote_workflow.schedule_state, "armed", "server schedule_state");
+		},
+	},
+	{
+		id: "S11",
+		title: "server cancel → hub instance becomes a normal workflow + series cancelled; archive/unarchive mirrored on the server",
+		async run(c) {
+			const s = await createRemoteSeries("S11 cancel and archive", { time: hhmmUtc(new Date(Date.now() + 2 * 3_600_000)) });
+			const del = await server.api("DELETE", `/api/sync/remote-workflows/${s.remoteId}/schedule`);
+			c.checkEq(del.status, 200, `DELETE schedule answered ${del.text}`);
+			c.checkEq((await serverSeries(s.seriesId)).state, "cancelled", "server series state");
+			const hubSide = await c.waitFor(
+				"the hub to cancel the armed instance",
+				async () => {
+					const w = await c.hubWorkflowByRemoteId(s.remoteId);
+					return w?.schedule?.state === "cancelled" ? w : null;
+				},
+				{ timeoutMs: 45_000, intervalMs: 1_000 },
+			);
+			c.checkEq(hubSide.nextRunAt, null, "a cancelled instance has no next run");
+			await c.waitFor(
+				"the server to mirror the cancelled instance",
+				async () => ((await serverDetail(s.remoteId)).json.remote_workflow.schedule_state === "cancelled" ? true : null),
+				{ timeoutMs: 30_000, intervalMs: 1_000 },
+			);
+			c.checkEq((await serverSeries(s.seriesId)).state, "cancelled", "a server cancel is never revived by the hub's mirror");
+			// It is a normal workflow now: it can be started by hand.
+			const taskIds = (await c.getWorkflow(s.hubId)).steps.filter((x) => x.kind === "task").map((x) => x.id);
+			const start = await c.hub.api("POST", `/api/workflows/${s.hubId}/start`, { stepIds: taskIds });
+			c.check(start.ok, `manual start of the cancelled instance answered ${start.status} ${start.text}`);
+			const done = await c.waitForStatus(s.hubId, ["completed", "failed"], 60_000);
+			c.checkEq(done.workflow.status, "completed", "the cancelled instance ran as a normal workflow");
+			c.checkEq((await c.hubWorkflowByRemoteId(s.remoteId)).schedule.state, "cancelled", "still cancelled, not re-armed");
+			c.checkEq((await serverSeries(s.seriesId)).instances.length, 1, "no new instance after the cancel");
+			// Archiving a remote workflow is mirrored.
+			c.checkEq((await serverDetail(s.remoteId)).json.remote_workflow.archived_at, null, "not archived on the server yet");
+			const arch = await c.hub.api("POST", `/api/workflows/${s.hubId}/archive`, {});
+			c.check(arch.ok, `archive answered ${arch.status} ${arch.text}`);
+			await c.waitFor(
+				"the server to mirror the archive",
+				async () => ((await serverDetail(s.remoteId)).json.remote_workflow.archived_at ? true : null),
+				{ timeoutMs: 30_000, intervalMs: 1_000 },
+			);
+			const un = await c.hub.api("POST", `/api/workflows/${s.hubId}/unarchive`, {});
+			c.check(un.ok, `unarchive answered ${un.status} ${un.text}`);
+			await c.waitFor(
+				"the server to mirror the unarchive",
+				async () => ((await serverDetail(s.remoteId)).json.remote_workflow.archived_at === null ? true : null),
+				{ timeoutMs: 30_000, intervalMs: 1_000 },
+			);
+		},
+	},
+	{
+		id: "S12",
+		title: "a second registered client cannot announce an instance (or cancel) into the first client's series",
+		async run(c) {
+			const s = await createRemoteSeries("S12 foreign announce", { time: hhmmUtc(new Date(Date.now() + 2 * 3_600_000)) });
+			await hubClientId(); // cache the real hub's id before a second client exists
+			const reg = await httpJson("POST", `${SERVER_URL}/api/sync/register`, {
+				body: { name: "intruder", capabilities: { commands: ["workflow.create"], runners: [{ id: "claude", installed: true }] } },
+			});
+			c.check(reg.status === 201 || reg.status === 200, `register answered ${reg.status} ${reg.text}`);
+			const intruder = { authorization: `Bearer ${reg.json.client_token}` };
+			const post = (events) => httpJson("POST", `${SERVER_URL}/api/sync/events`, { headers: intruder, body: { events } });
+			const announce = (remoteId, previousRemoteId) => ({
+				id: `instance-created:${remoteId}`,
+				type: "schedule.instance_created",
+				remote_id: remoteId,
+				payload: {
+					series_id: s.seriesId,
+					previous_remote_id: previousRemoteId,
+					name: "S12 foreign announce · injected",
+					scheduled_for: new Date(Date.now() + DAY_MS).toISOString(),
+					schedule: { kind: "daily", time: "03:00", timezone: "UTC", include_previous: true },
+					agent: "claude",
+					sandbox: "docker",
+					conversation_context: null,
+					steps: s.stepKeys.map((step_key) => ({ step_key, description: "x", acceptance_criteria: null, manual_review: false, use_subagent: true, max_retries: 0, retry_interval_seconds: 0 })),
+					tcp_selections: [],
+					resource_selections: [],
+				},
+			});
+			const fresh = crypto.randomUUID();
+			const a = await post([announce(fresh, s.remoteId)]);
+			c.checkEq(a.status, 200, `events answered ${a.text}`);
+			c.checkEq(a.json.accepted.length, 0, "nothing accepted (new remote id into a foreign series)");
+			c.checkEq(a.json.rejected.length, 1, "one rejection");
+			c.checkEq(a.json.rejected[0].reason, "foreign_series", "rejection reason");
+			// Re-using the real client's own instance id is refused too.
+			const b = await post([announce(s.remoteId, s.remoteId)]);
+			c.checkEq(b.json.accepted.length, 0, "nothing accepted (foreign remote id)");
+			c.checkEq(b.json.rejected.length, 1, "one rejection for the foreign remote id");
+			// A foreign client cannot cancel the series by reporting a state change either.
+			const cancel = await post([{ id: `sc-${crypto.randomUUID()}`, type: "workflow.schedule_changed", remote_id: s.remoteId, payload: { series_id: s.seriesId, state: "cancelled", next_run_at: null } }]);
+			c.checkEq(cancel.json.accepted.length, 0, "foreign schedule_changed not accepted");
+			c.checkEq(cancel.json.rejected.length, 1, "foreign schedule_changed rejected");
+			const ser = await serverSeries(s.seriesId);
+			c.checkEq(ser.instances.length, 1, "the series still has exactly its own instance");
+			c.checkEq(ser.state, "active", "the series is untouched");
+			c.checkEq((await serverDetail(fresh)).status, 404, "no workflow was created for the injected id");
+			c.log(`S12: rejections: ${a.json.rejected[0].reason}, ${b.json.rejected[0].reason}, ${cancel.json.rejected[0].reason}`);
+		},
+	},
 ];
 
 // ---------------------------------------------------------------------------
@@ -1029,6 +1533,12 @@ function writeFakeBinaries() {
 	stub("claude", 'echo "0.0.0-e2e-stub"');
 	stub("free-code", 'echo "0.0.0-e2e-stub"');
 	stub("xdg-open", "exit 0");
+	// Remote workflows are created with sandbox "docker" (the server always asks for it).
+	// The hub probes `docker info` when creating one and `docker image inspect` before
+	// each dispatch (and would BUILD a missing image); the stand-in broker never starts
+	// a container, so a stub that says "daemon up, image present" keeps the harness
+	// independent of the host's real docker and makes sure nothing is ever built.
+	stub("docker", "exit 0");
 }
 
 function gitOut(cwd, ...gitArgs) {
@@ -1065,6 +1575,7 @@ async function main() {
 		[HUB_PORT, "throwaway hub"],
 		[SERVER_PORT, "throwaway server"],
 		[BROKER_PORT, "stand-in broker"],
+		[SERVER_INTERNAL_PORT, "the server behind the proxy"],
 	]) {
 		if (await portInUse(port)) {
 			throw new HarnessError(`port ${port} (${what}) is already in use — a previous run may have leaked a process. The live hub on ${LIVE_HUB_PORT} is never touched.`);
@@ -1076,6 +1587,8 @@ async function main() {
 
 	broker = createBroker();
 	await broker.listen();
+	proxy = createProxy();
+	await proxy.listen();
 	log(`stand-in broker on 127.0.0.1:${BROKER_PORT}`);
 	await server.boot();
 	log(`target-server up on ${SERVER_URL}`);
@@ -1120,7 +1633,7 @@ try {
 } finally {
 	await cleanup();
 	const leaked = [];
-	for (const [port] of [[HUB_PORT], [SERVER_PORT], [BROKER_PORT]]) if (await portInUse(port)) leaked.push(port);
+	for (const [port] of [[HUB_PORT], [SERVER_PORT], [BROKER_PORT], [SERVER_INTERNAL_PORT]]) if (await portInUse(port)) leaked.push(port);
 	if (leaked.length > 0) {
 		console.error(`[e2e] WARNING: ports still busy after cleanup: ${leaked.join(", ")}`);
 		exitCode = exitCode || 2;
