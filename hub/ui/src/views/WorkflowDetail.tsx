@@ -17,7 +17,7 @@ import type {
 	Workflow,
 } from "../api/types.ts";
 import { OVERRIDABLE_WORKFLOW_STATUSES, startActionFor } from "../api/types.ts";
-import { ArchivedBadge, Badge } from "../components/Badge.tsx";
+import { ArchivedBadge, Badge, ScheduleBadge } from "../components/Badge.tsx";
 import { CollapsibleSection } from "../components/CollapsibleSection.tsx";
 import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { useToast } from "../components/Toast.tsx";
@@ -31,6 +31,7 @@ import { isUsableCopy, templateOptionLabel } from "../lib/catalogCopy.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
 import { canMoveStep } from "../lib/stepMove.ts";
 import { hasLiveSchedule, scheduleAvailability } from "../lib/scheduleForm.ts";
+import { isArmedInstance, SCHEDULED_ARMED_TITLE } from "../lib/scheduleView.ts";
 import { isArchivable } from "../lib/workflowFilter.ts";
 import {
 	adoptNewlyVisibleSteps,
@@ -50,6 +51,7 @@ import { RciPanel } from "./RciPanel.tsx";
 import { TcpPanel } from "./TcpPanel.tsx";
 import { RenameWorkflowModal } from "./RenameWorkflowModal.tsx";
 import { ScheduleModal, type ScheduleSaveResult } from "./ScheduleModal.tsx";
+import { SeriesPanel } from "./SeriesPanel.tsx";
 import { SessionPanel } from "./SessionPanel.tsx";
 import { StepItem } from "./StepItem.tsx";
 import { WorkflowCanvas } from "./WorkflowCanvas.tsx";
@@ -363,7 +365,11 @@ export function WorkflowDetail({
 	// Archived work runs nothing until unarchived (the hub answers 409 `archived`).
 	const archived = Boolean(workflow.archivedAt);
 	const archivable = isArchivable(workflow);
-	const startAction = canExecute && !archived ? startActionFor(workflow.status) : null;
+	// A schedule's armed instance is the NEXT run: it starts by itself at its
+	// time, and the hub refuses Start/Resume/Restart/Run step on it (409
+	// `scheduled_armed`, D2) — so none of them is offered. It stays editable.
+	const scheduledArmed = isArmedInstance(workflow);
+	const startAction = scheduledArmed ? null : canExecute && !archived ? startActionFor(workflow.status) : null;
 	const running = workflow.status === "running";
 	// The server refuses a workflow override while a step still has a callback
 	// coming — that callback would write a status over it seconds later.
@@ -501,6 +507,7 @@ export function WorkflowDetail({
 						Change
 					</button>
 					<Badge status={workflow.status} manual={workflow.statusManual} manualAt={workflow.statusManualAt} />
+					<ScheduleBadge workflow={workflow} />
 					<ArchivedBadge archivedAt={workflow.archivedAt} />
 				</div>
 
@@ -611,7 +618,9 @@ export function WorkflowDetail({
 						title={
 							!canExecute
 								? "Requires client.workflows.execute"
-								: archived
+								: scheduledArmed
+									? SCHEDULED_ARMED_TITLE
+									: archived
 									? "This workflow is archived — unarchive it to run it again."
 									: !startAction
 									? workflow.status === "waiting"
@@ -871,6 +880,7 @@ export function WorkflowDetail({
 									onRemoveNote={onRemoveNote}
 									onSelectWorkflow={onSelectWorkflow}
 									archived={archived}
+									scheduledArmed={scheduledArmed}
 									busy={busy}
 								/>
 							</ul>
@@ -910,6 +920,7 @@ export function WorkflowDetail({
 										onRemoveNote={onRemoveNote}
 										onSelectWorkflow={onSelectWorkflow}
 										archived={archived}
+										scheduledArmed={scheduledArmed}
 										busy={busy}
 									/>
 								))}
@@ -925,6 +936,8 @@ export function WorkflowDetail({
 					    "n turns · in · out" line twice, one right above the other. The numbers
 					    belong to the session, so they are stated once, where the session is. */}
 				</div>
+
+				<SeriesPanel workflow={workflow} />
 
 				<SessionPanel
 					info={sessionInfo}

@@ -1,4 +1,5 @@
-import type { StepStatus, WorkflowOrigin, WorkflowStatus } from "../api/types.ts";
+import type { StepStatus, Workflow, WorkflowOrigin, WorkflowStatus } from "../api/types.ts";
+import { scheduleBadge } from "../lib/scheduleView.ts";
 
 /**
  * Status pill. A `running` badge carries a pulsing dot so in-flight work is
@@ -72,6 +73,23 @@ export function ArchivedBadge({ archivedAt }: { archivedAt: string | null | unde
 			data-archived-badge
 		>
 			Archived
+		</span>
+	);
+}
+
+/**
+ * Marks a workflow's place in a schedule series (see `scheduleBadge`): the
+ * armed instance ("Scheduled · next in 3h", absolute time in the tooltip), a
+ * past run ("Run of <series> · <occurrence>"), or — in the warning style — a
+ * missed run or a broken series, both waiting for the operator. Renders
+ * nothing outside a series.
+ */
+export function ScheduleBadge({ workflow }: { workflow: Pick<Workflow, "schedule" | "name"> }): React.JSX.Element | null {
+	const info = scheduleBadge(workflow);
+	if (!info) return null;
+	return (
+		<span className={`badge badge--schedule-${info.tone}`} title={info.title} data-schedule-badge={info.tone}>
+			{info.label}
 		</span>
 	);
 }

@@ -317,6 +317,26 @@ kbd,
 	color: var(--gray-500);
 }
 
+/* Schedule markers sit beside the status pill, like Archived. `scheduled` is
+   the next run (accent: it will happen by itself), `run` a past execution
+   (muted: history), `warning` a missed run or a broken series — the two
+   states that wait on the operator, so they borrow the attention colours. */
+.badge--schedule-scheduled {
+	background: var(--accent-50);
+	border-color: var(--accent-200);
+	color: var(--accent-700);
+}
+.badge--schedule-run {
+	background: var(--gray-50);
+	border-color: var(--gray-200);
+	color: var(--gray-600);
+}
+.badge--schedule-warning {
+	background: var(--attention-50);
+	border-color: var(--attention-200);
+	color: var(--attention-700);
+}
+
 /* A soft pulse marks work actually in flight (running step, judging). */
 .badge--running .badge__dot {
 	animation: pulse 1.6s ease-in-out infinite;

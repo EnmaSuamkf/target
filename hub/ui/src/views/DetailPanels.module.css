@@ -176,6 +176,41 @@
  *
  * Keep in sync with MOBILE_QUERY in hooks/useIsMobile.ts.
  */
+/* Schedule series: one row per instance, the occurrence as the link (it's what
+   tells runs of the same series apart), badges trailing. */
+.seriesList {
+	display: grid;
+	gap: var(--space-1);
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.seriesRow {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	padding: var(--space-1) 0;
+	border-bottom: 1px solid var(--border);
+}
+
+.seriesRow:last-child {
+	border-bottom: none;
+}
+
+.seriesLink {
+	flex: 1;
+	min-width: 0;
+	font-variant-numeric: tabular-nums;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.seriesLink[aria-current="true"] {
+	font-weight: 600;
+}
+
 @media (max-width: 768px) {
 	/* The block's title and its action stop competing for one line: a session id
 	   plus an "Open conversation" button doesn't fit across a phone. */
