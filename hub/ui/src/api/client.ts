@@ -47,6 +47,7 @@ import type {
 	OverridableWorkflowStatus,
 	Runner,
 	ScheduleInput,
+	ScheduleNotice,
 	SchedulePreview,
 	ScheduleSpec,
 	SessionInfo,
@@ -357,6 +358,43 @@ export async function cancelWorkflowSchedule(id: string): Promise<Workflow> {
 		admin: true,
 	});
 	return data.workflow;
+}
+
+/**
+ * A missed `once` (the hub was offline at its time) waits for one of three
+ * choices. Run now starts it — the one manual run an unfired scheduled instance
+ * allows; Reschedule re-arms it at a new time; Dismiss gives up on it and it
+ * becomes a normal workflow. Each answers 409 `not_missed` when it no longer is.
+ */
+export async function runMissedScheduleNow(id: string): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/schedule/run-now`, { method: "POST", admin: true });
+	return data.workflow;
+}
+
+export async function rescheduleMissedSchedule(id: string, input: ScheduleInput): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/schedule/reschedule`, {
+		method: "POST",
+		admin: true,
+		body: json(input),
+	});
+	return data.workflow;
+}
+
+export async function dismissMissedSchedule(id: string): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/schedule/dismiss`, { method: "POST", admin: true });
+	return data.workflow;
+}
+
+/** The schedule notices nobody has acknowledged yet, newest first. */
+export async function listScheduleNotices(): Promise<ScheduleNotice[]> {
+	const data = await request<{ notices: ScheduleNotice[] }>("/api/schedule-notices?unacknowledged=1");
+	return data.notices;
+}
+
+/** Acknowledges a notice: it leaves the banner. Changes nothing about any workflow. */
+export async function acknowledgeScheduleNotice(id: string): Promise<ScheduleNotice> {
+	const data = await request<{ notice: ScheduleNotice }>(`/api/schedule-notices/${id}/ack`, { method: "POST", admin: true });
+	return data.notice;
 }
 
 /** The next (up to) three runs a schedule would produce — nothing is saved. */

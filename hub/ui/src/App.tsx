@@ -38,6 +38,7 @@ import type {
 	ResourceSetUsage,
 	ScheduleFieldError,
 	ScheduleInput,
+	ScheduleNotice,
 	Tcp,
 	TcpInput,
 	TcpSelection,
@@ -51,10 +52,11 @@ import { useConfirm } from "./components/ConfirmDialog.tsx";
 import { EmptyState } from "./components/EmptyState.tsx";
 import { Header, type View } from "./components/Header.tsx";
 import { useToast } from "./components/Toast.tsx";
+import { NoticesBanner } from "./components/NoticesBanner.tsx";
 import { VoiceDock } from "./components/VoiceDock.tsx";
 import { useAdminToken } from "./hooks/useAdminToken.ts";
 import { setCatalogSyncStatusSnapshot } from "./hooks/useCatalogSyncStatus.ts";
-import { getPermissionsOrigin, setPermissionsSnapshot } from "./hooks/usePermissions.ts";
+import { getPermissionsOrigin, setPermissionsSnapshot, usePermissions } from "./hooks/usePermissions.ts";
 import { useDictation } from "./hooks/useDictation.ts";
 import { useIsMobile } from "./hooks/useIsMobile.ts";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts.ts";
@@ -71,7 +73,7 @@ import { CreateWorkflowModal } from "./views/CreateWorkflowModal.tsx";
 import { LandingView } from "./views/LandingView.tsx";
 import { LoginView } from "./views/LoginView.tsx";
 import { ResetPasswordView } from "./views/ResetPasswordView.tsx";
-import type { ScheduleSaveResult } from "./views/ScheduleModal.tsx";
+import { ScheduleModal, type ScheduleSaveResult } from "./views/ScheduleModal.tsx";
 import { SettingsView } from "./views/SettingsView.tsx";
 import { SetupView } from "./views/SetupView.tsx";
 import { ResourceSetsView } from "./views/ResourceSetsView.tsx";
@@ -103,6 +105,8 @@ import styles from "./App.module.css";
  */
 
 const POLL_INTERVAL_MS = 2000;
+/** Schedule notices only change on a scheduler tick (every 30s), so they're polled less often. */
+const NOTICES_POLL_INTERVAL_MS = 10_000;
 
 function readHashSelection(): string | null {
 	const match = /^#\/w\/(.+)$/.exec(window.location.hash);
@@ -253,6 +257,14 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	// rather than by object so the note in that dialog keeps up with the poll.
 	const [cloneSourceId, setCloneSourceId] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
+	// Unacknowledged schedule notices (the banner under the header), and the
+	// missed `once` whose Reschedule was pressed in that banner.
+	const [notices, setNotices] = useState<ScheduleNotice[]>([]);
+	const [rescheduleTarget, setRescheduleTarget] = useState<{ workflow: Workflow; steps: Step[] } | null>(null);
+	// Scheduling (and a missed once's choices) needs execute AND manage (D22);
+	// `can` answers "any of", hence two calls.
+	const { can } = usePermissions();
+	const canSchedule = can("client.workflows.execute") && can("client.workflows.manage");
 	const [loaded, setLoaded] = useState(false);
 	// Bumped every time a workflow is created (including via Clone, which is the
 	// same create dialog). The rail watches it and scrolls itself fully back to
@@ -272,6 +284,8 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	const selectedRef = useRef<string | null>(selectedId);
 	selectedRef.current = selectedId;
 
+	// The banner looks up a notice's workflow to know whether it's still a missed once.
+	const workflowsById = useMemo(() => new Map(workflows.map((w) => [w.id, w])), [workflows]);
 	const selectedWorkflow = useMemo(
 		() => workflows.find((w) => w.id === selectedId) ?? null,
 		[workflows, selectedId],
@@ -378,6 +392,10 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 
 	const refreshArchiveSettings = useCallback(async (): Promise<void> => {
 		setArchiveSettings(await api.getArchiveSettings());
+	}, []);
+
+	const refreshNotices = useCallback(async (): Promise<void> => {
+		setNotices(await api.listScheduleNotices());
 	}, []);
 
 	const refreshPermissions = useCallback(async (): Promise<void> => {
@@ -512,6 +530,14 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	useEffect(() => {
 		if (loaded && selectedId && !workflows.some((w) => w.id === selectedId)) setSelectedId(null);
 	}, [workflows, selectedId, loaded]);
+
+	// Schedule notices on their own, slower poll: they change at most once per
+	// scheduler tick (30s), unlike the workflow list the 2s poll is for. Loaded
+	// once right away, since `usePolling` waits one interval before its first tick.
+	useEffect(() => {
+		void refreshNotices().catch(() => {});
+	}, [refreshNotices]);
+	usePolling(refreshNotices, NOTICES_POLL_INTERVAL_MS);
 
 	usePolling(async () => {
 		await refreshWorkflows();
@@ -698,20 +724,22 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	 * Saves the schedule dialog. Not through `act`: a 400 `invalid_schedule`
 	 * carries per-field errors the dialog puts next to their fields, and the
 	 * hub's `message` (not its error code) is what the toast should say for
-	 * that and for a 409 such as `server_managed`.
+	 * that and for a 409 such as `server_managed`. A missed `once` is saved as
+	 * a RESCHEDULE (its own endpoint, D8), whichever surface opened the dialog.
 	 */
-	const handleSaveSchedule = async (input: ScheduleInput): Promise<ScheduleSaveResult> => {
-		const workflow = selectedWorkflow;
-		if (!workflow) return { ok: false };
+	const saveScheduleFor = async (workflow: Workflow, input: ScheduleInput): Promise<ScheduleSaveResult> => {
 		setBusy(true);
 		try {
-			const saved = await api.setWorkflowSchedule(workflow.id, input);
+			const missed = workflow.schedule?.state === "missed";
+			const saved = missed
+				? await api.rescheduleMissedSchedule(workflow.id, input)
+				: await api.setWorkflowSchedule(workflow.id, input);
 			toast.success(
 				saved.nextRunAt
-					? `Workflow "${workflow.name}" scheduled — next run ${new Date(saved.nextRunAt).toLocaleString()}.`
-					: `Workflow "${workflow.name}" scheduled.`,
+					? `Workflow "${workflow.name}" ${missed ? "rescheduled" : "scheduled"} — next run ${new Date(saved.nextRunAt).toLocaleString()}.`
+					: `Workflow "${workflow.name}" ${missed ? "rescheduled" : "scheduled"}.`,
 			);
-			await refreshCurrent();
+			await Promise.all([refreshCurrent(), refreshNotices()]);
 			return { ok: true };
 		} catch (err) {
 			const payload = err instanceof ApiError ? (err.payload as { message?: unknown; fields?: unknown } | null) : null;
@@ -724,6 +752,65 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		} finally {
 			setBusy(false);
 		}
+	};
+
+	const handleSaveSchedule = async (input: ScheduleInput): Promise<ScheduleSaveResult> =>
+		selectedWorkflow ? saveScheduleFor(selectedWorkflow, input) : { ok: false };
+
+	// --- schedule notices + a missed once's choices ---
+
+	/**
+	 * A missed `once`: Run now. The hub claims it (missed → fired) once, so a
+	 * second click — here or in another tab — answers 409 `not_missed` rather
+	 * than running it twice.
+	 */
+	const handleRunMissedNow = async (workflow: Workflow): Promise<void> => {
+		await act(
+			"Could not run the missed workflow",
+			async () => {
+				await api.runMissedScheduleNow(workflow.id);
+				toast.success(`Workflow "${workflow.name}" started.`);
+			},
+			async () => {
+				await Promise.all([refreshCurrent(), refreshNotices()]);
+			},
+		);
+	};
+
+	/** A missed `once`: Dismiss — it becomes a normal workflow; nothing runs. */
+	const handleDismissMissed = async (workflow: Workflow): Promise<void> => {
+		await act(
+			"Could not dismiss the missed run",
+			async () => {
+				await api.dismissMissedSchedule(workflow.id);
+				toast.success(`Missed run of "${workflow.name}" dismissed — it is a normal workflow again.`);
+			},
+			async () => {
+				await Promise.all([refreshCurrent(), refreshNotices()]);
+			},
+		);
+	};
+
+	const handleAcknowledgeNotice = async (id: string): Promise<void> => {
+		await act(
+			"Could not acknowledge the notice",
+			async () => {
+				await api.acknowledgeScheduleNotice(id);
+				// Drop it now rather than a poll later: the click should visibly do something.
+				setNotices((current) => current.filter((n) => n.id !== id));
+			},
+			refreshNotices,
+		);
+	};
+
+	/**
+	 * Reschedule from the banner: the missed workflow may not be the one open,
+	 * so the dialog is opened here, on that workflow, with its steps fetched
+	 * for the manual-review warning.
+	 */
+	const openRescheduleFromNotice = async (workflow: Workflow): Promise<void> => {
+		const detail = await api.getWorkflow(workflow.id).catch(() => null);
+		setRescheduleTarget({ workflow: detail?.workflow ?? workflow, steps: detail?.steps ?? [] });
 	};
 
 	const handleCancelSchedule = async (): Promise<boolean> => {
@@ -1498,6 +1585,18 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 				onLogout={onLogout}
 			/>
 
+			<NoticesBanner
+				notices={notices}
+				workflowsById={workflowsById}
+				canAct={canSchedule}
+				actHint="Requires client.workflows.execute and client.workflows.manage"
+				busy={busy}
+				onAcknowledge={(id) => void handleAcknowledgeNotice(id)}
+				onRunNow={(workflow) => void handleRunMissedNow(workflow)}
+				onReschedule={(workflow) => void openRescheduleFromNotice(workflow)}
+				onDismiss={(workflow) => void handleDismissMissed(workflow)}
+			/>
+
 			<main className={styles.main}>
 				{displayView === "workflows" && allWorkflowsOpen ? (
 					<AllWorkflowsPage
@@ -1546,6 +1645,8 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								onUnarchive={() => void handleUnarchive()}
 								onSaveSchedule={handleSaveSchedule}
 								onCancelSchedule={handleCancelSchedule}
+								onRunMissedNow={() => selectedWorkflow && void handleRunMissedNow(selectedWorkflow)}
+								onDismissMissed={() => selectedWorkflow && void handleDismissMissed(selectedWorkflow)}
 								onSetStatus={(status) => void handleSetWorkflowStatus(status)}
 								onSaveContext={handleSaveContext}
 								onSaveTcps={handleSaveTcps}
@@ -1684,6 +1785,29 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 				onCreate={handleCreate}
 				onClone={handleCloneSubmit}
 			/>
+
+			{rescheduleTarget && (
+				<ScheduleModal
+					open
+					workflow={rescheduleTarget.workflow}
+					steps={rescheduleTarget.steps}
+					canSchedule={canSchedule}
+					permissionHint="Requires client.workflows.execute and client.workflows.manage"
+					onClose={() => setRescheduleTarget(null)}
+					onSave={(input) => saveScheduleFor(rescheduleTarget.workflow, input)}
+					onCancelSchedule={async () => {
+						const target = rescheduleTarget.workflow;
+						const ok = await act(
+							"Could not cancel the schedule",
+							() => api.cancelWorkflowSchedule(target.id),
+							async () => {
+								await Promise.all([refreshCurrent(), refreshNotices()]);
+							},
+						);
+						return ok;
+					}}
+				/>
+			)}
 
 			<VoiceDock dictation={dictation} />
 			{dialog}

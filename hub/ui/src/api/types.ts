@@ -319,6 +319,26 @@ export interface SchedulePreview {
 	occurrences: { at: string; local: string }[];
 }
 
+/** What a schedule notice reports (the hub's `SCHEDULE_NOTICE_KINDS`). */
+export type ScheduleNoticeKind = "missed" | "skipped" | "broken" | "failed";
+
+/**
+ * GET /api/schedule-notices — something about a scheduled run the operator
+ * should know, kept until acknowledged: runs missed while the hub was offline,
+ * a run skipped (`reason` busy / forbidden / stale), a broken series, a failed
+ * scheduled run. `detail.message` is the hub's own sentence for it.
+ */
+export interface ScheduleNotice {
+	id: string;
+	workflowId: string | null;
+	seriesId: string | null;
+	kind: ScheduleNoticeKind;
+	reason: string | null;
+	detail: { message?: string; critical?: boolean; [key: string]: unknown };
+	createdAt: string;
+	acknowledgedAt: string | null;
+}
+
 /** GET /api/workflows/:id/schedule — the series plus every instance of it. */
 export interface WorkflowScheduleDetail {
 	schedule: WorkflowSchedule | null;

@@ -168,7 +168,16 @@ export function ScheduleModal({
 		}
 	};
 
-	const title = readOnly ? "Schedule (managed by the server)" : editing ? "Edit schedule" : "Schedule workflow";
+	// A missed `once` saved from here is RESCHEDULED (the caller sends it to the
+	// reschedule endpoint): same form, but the words say what it does.
+	const missed = workflow.schedule?.state === "missed";
+	const title = readOnly
+		? "Schedule (managed by the server)"
+		: missed
+			? "Reschedule missed run"
+			: editing
+				? "Edit schedule"
+				: "Schedule workflow";
 
 	if (availability.mode === "disabled") {
 		return (
@@ -228,7 +237,7 @@ export function ScheduleModal({
 							title={canSchedule ? undefined : permissionHint}
 							data-save-schedule
 						>
-							{saving ? "Saving…" : editing ? "Save schedule" : "Schedule"}
+							{saving ? "Saving…" : missed ? "Reschedule" : editing ? "Save schedule" : "Schedule"}
 						</button>
 					)}
 				</>

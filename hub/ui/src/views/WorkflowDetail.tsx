@@ -18,6 +18,7 @@ import type {
 } from "../api/types.ts";
 import { OVERRIDABLE_WORKFLOW_STATUSES, startActionFor } from "../api/types.ts";
 import { ArchivedBadge, Badge, ScheduleBadge } from "../components/Badge.tsx";
+import { MissedOnceActions } from "../components/MissedOnceActions.tsx";
 import { CollapsibleSection } from "../components/CollapsibleSection.tsx";
 import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { useToast } from "../components/Toast.tsx";
@@ -31,6 +32,7 @@ import { isUsableCopy, templateOptionLabel } from "../lib/catalogCopy.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
 import { canMoveStep } from "../lib/stepMove.ts";
 import { hasLiveSchedule, scheduleAvailability } from "../lib/scheduleForm.ts";
+import { isMissedOnce } from "../lib/scheduleNotices.ts";
 import { isArmedInstance, SCHEDULED_ARMED_TITLE } from "../lib/scheduleView.ts";
 import { isArchivable } from "../lib/workflowFilter.ts";
 import {
@@ -130,6 +132,8 @@ export function WorkflowDetail({
 	onUnarchive,
 	onSaveSchedule,
 	onCancelSchedule,
+	onRunMissedNow,
+	onDismissMissed,
 	onSetStatus,
 	onSaveContext,
 	onSaveTcps,
@@ -181,6 +185,10 @@ export function WorkflowDetail({
 	onSaveSchedule: (input: ScheduleInput) => Promise<ScheduleSaveResult>;
 	/** Cancels its schedule; resolves true when the hub did. */
 	onCancelSchedule: () => Promise<boolean>;
+	/** A missed `once`: run it now — the one manual run an unfired scheduled instance allows. */
+	onRunMissedNow: () => void;
+	/** A missed `once`: give up on it; it becomes a normal workflow. */
+	onDismissMissed: () => void;
 	/** Forces the workflow's status by hand; never runs anything. */
 	onSetStatus: (status: OverridableWorkflowStatus) => void;
 	/** Resolves true only when the server really stored the context. */
@@ -594,6 +602,30 @@ export function WorkflowDetail({
 							)}
 						</div>
 					</CollapsibleSection>
+				)}
+
+				{/* A missed `once` waits for the operator (D8) — say so where the run
+				    controls are, with the same three choices as the notices banner.
+				    Reschedule is the schedule dialog, saved as a reschedule. A
+				    server-managed series is decided on the server. */}
+				{isMissedOnce(workflow) && scheduleMode.mode !== "readonly" && (
+					<div className="msg msg--warn" role="status" data-missed-once>
+						<p>
+							This run was scheduled for{" "}
+							{workflow.schedule?.scheduledFor ? new Date(workflow.schedule.scheduledFor).toLocaleString() : "an earlier time"}{" "}
+							and was missed while the hub was offline. Run it now, pick a new time, or dismiss it.
+						</p>
+						<div className={styles.missedActions}>
+							<MissedOnceActions
+								canAct={canSchedule}
+								actHint={schedulePermissionHint}
+								busy={busy}
+								onRunNow={onRunMissedNow}
+								onReschedule={() => setScheduling(true)}
+								onDismiss={onDismissMissed}
+							/>
+						</div>
+					</div>
 				)}
 
 				<div className={styles.progressRow}>
