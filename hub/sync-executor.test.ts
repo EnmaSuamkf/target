@@ -429,3 +429,33 @@ test("schedule commands never touch a hub-managed series", async () => {
 	assert.equal(other.status, "failed");
 	assert.match(other.error ?? "", /already belongs to series/);
 });
+
+test("step commands on a fired instance ack failed with instance_already_fired; an unfired remote workflow still takes them", async () => {
+	const { id: firstId, remoteId } = await remoteDraft();
+	await send("workflow.set_schedule", remoteId, { series_id: "series_srv_fired", ...DAILY_PAYLOAD });
+	fire(firstId);
+	const before = taskSteps(firstId).map((s) => [s.id, s.description, s.orderIndex]);
+
+	for (const [type, payload] of [
+		["step.add", { step_key: "k2", description: "Late addition" }],
+		["step.edit", { step_key: "k1", description: "Rewritten" }],
+		["step.remove", { step_key: "k1" }],
+		["step.move", { step_key: "k1", to_index: 0 }],
+		["step.run", { step_key: "k1" }],
+	] as const) {
+		const ack = await send(type, remoteId, payload);
+		assert.equal(ack.status, "failed", type);
+		assert.equal(ack.error, "instance_already_fired", type);
+	}
+	assert.deepEqual(
+		taskSteps(firstId).map((s) => [s.id, s.description, s.orderIndex]),
+		before,
+		"the fired instance is untouched",
+	);
+	assert.deepEqual(Object.keys(getSyncStepMap(remoteId)), ["k1"]);
+
+	// A remote instance that is NOT fired — here a plain remote workflow — still takes step edits.
+	const { remoteId: plain } = await remoteDraft();
+	const edited = await send("step.edit", plain, { step_key: "k1", description: "Rewritten" });
+	assert.equal(edited.status, "applied", edited.error ?? "");
+});

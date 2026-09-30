@@ -22,7 +22,7 @@ import { recordOwnerSnapshot } from "./owner-permissions.ts";
 import { recordServerCapabilities, resetServerCapabilitiesCache, serverSupportsEvent } from "./server-capabilities.ts";
 import { loadEffectiveSyncConfig } from "./remote-config.ts";
 import { validateSchedule, type ScheduleSpec } from "./schedule.ts";
-import { recordScheduleNotice } from "./scheduler.ts";
+import { recordScheduleNotice, setScheduleNoticeListener } from "./scheduler.ts";
 import {
 	clearAppliedSyncCommands,
 	deleteSyncStepMap,
@@ -46,6 +46,7 @@ import {
 	type OverridableStepStatus,
 	type OverridableWorkflowStatus,
 	normalizeTemplateStepNotes,
+	type ScheduleNotice,
 	type Workflow,
 } from "./db.ts";
 import { normalizeResourceSelections } from "./rci-selection.ts";
@@ -114,6 +115,8 @@ const SYNC_TIMEOUT_MS = 15_000;
 const workflowStatusCache = new Map<string, string>();
 const stepStatusCache = new Map<string, string>();
 const pendingEvents: SyncOutboundEvent[] = [];
+/** series_id → the `workflow.schedule_changed` snapshot last queued for it. */
+const scheduleSnapshotCache = new Map<string, string>();
 
 /** Command types the executor understands (mirrors target-server blueprint). */
 export const SYNC_COMMAND_TYPES = [
@@ -268,6 +271,49 @@ function parseSandbox(sandbox: unknown): PublishableSandbox | undefined {
 	throw new WorkflowError(`unknown sandbox '${value}'`);
 }
 
+/** A server series' instance: the only kind whose schedule events reach the server. */
+function isServerSeriesInstance(workflow: Workflow | null | undefined): workflow is Workflow & { remoteId: string; seriesId: string } {
+	return (
+		!!workflow &&
+		workflow.origin === "remote" &&
+		!!workflow.remoteId &&
+		!!workflow.seriesId &&
+		workflow.managedBy === "server"
+	);
+}
+
+/**
+ * `schedule.run_missed` / `schedule.run_skipped` for a server series, as the
+ * scheduler records the notice (registered below as its notice listener).
+ * Gated (D13). Other notice kinds have no event of their own: a broken series
+ * reaches the server as its `workflow.schedule_changed` state, and a failed run
+ * as the instance's ordinary status events.
+ */
+export function emitScheduleNoticeEvent(notice: ScheduleNotice): boolean {
+	if (notice.kind !== "missed" && notice.kind !== "skipped") return false;
+	const workflow = notice.workflowId ? getWorkflow(notice.workflowId) : null;
+	if (!isServerSeriesInstance(workflow)) return false;
+	if (notice.kind === "missed") {
+		const occurrences = Array.isArray(notice.detail.occurrences) ? notice.detail.occurrences : [];
+		return queueGatedEvent({
+			type: "schedule.run_missed",
+			remote_id: workflow.remoteId,
+			payload: { series_id: workflow.seriesId, occurrences },
+		});
+	}
+	return queueGatedEvent({
+		type: "schedule.run_skipped",
+		remote_id: workflow.remoteId,
+		payload: {
+			series_id: workflow.seriesId,
+			reason: notice.reason,
+			...(typeof notice.detail.occurrence === "string" ? { occurrence: notice.detail.occurrence } : {}),
+		},
+	});
+}
+
+setScheduleNoticeListener(emitScheduleNoticeEvent);
+
 /** remote_id → local workflow id (null when not mapped yet). */
 export function resolveLocalWorkflowId(remoteId: string): string | null {
 	return getWorkflowByRemoteId(remoteId)?.id ?? null;
@@ -276,6 +322,18 @@ export function resolveLocalWorkflowId(remoteId: string): string | null {
 function resolveLocalWorkflow(remoteId: string): Workflow {
 	const workflow = getWorkflowByRemoteId(remoteId);
 	if (!workflow) throw new WorkflowError(`remote workflow '${remoteId}' is not mapped locally`);
+	return workflow;
+}
+
+/**
+ * The workflow a step command edits or runs. A scheduled instance that has
+ * already fired is a past run: the server's command was aimed at the series'
+ * next run and raced the fire (D17) — the edit belongs on the new armed
+ * instance, so it is refused rather than silently landing on history.
+ */
+function resolveStepCommandWorkflow(remoteId: string): Workflow {
+	const workflow = resolveLocalWorkflow(remoteId);
+	if (workflow.scheduleState === "fired") throw new WorkflowError("instance_already_fired");
 	return workflow;
 }
 
@@ -582,6 +640,7 @@ async function pushEvents(
 ): Promise<void> {
 	collectLocalStateEvents();
 	collectInstanceAnnouncements();
+	collectScheduleChanges();
 	for (let i = pendingEvents.length - 1; i >= 0; i--) {
 		const event = pendingEvents[i]!;
 		if (event.gated && !serverSupportsEvent(event.type)) pendingEvents.splice(i, 1);
@@ -698,6 +757,43 @@ function instanceCreatedPayload(workflow: Workflow): Record<string, unknown> {
 		tcp_selections: listWorkflowTcpSelections(workflow.id),
 		resource_selections: listWorkflowResourceSelections(workflow.id),
 	};
+}
+
+/**
+ * `workflow.schedule_changed` {series_id, state, next_run_at}, derived from
+ * state like the status events: each tick compares every server series'
+ * CURRENT instance — its live one (armed, missed or broken), else its latest —
+ * with the snapshot last sent, so set, rescheduled, cancelled, re-armed after a
+ * fire/miss/skip and broken all surface without hooking each code path. The
+ * cache is not seeded at boot: the first tick after a restart re-sends every
+ * series' snapshot, which the server just upserts, and changes made while the
+ * hub was down (or while the server didn't advertise the type) are not lost.
+ * An instance the server hasn't confirmed yet waits: its announcement carries
+ * the schedule, and an event about a remote_id the server doesn't know would
+ * only be refused.
+ */
+function collectScheduleChanges(): void {
+	if (!serverSupportsEvent("workflow.schedule_changed")) return;
+	const seriesIds = new Set(
+		listWorkflows()
+			.filter(isServerSeriesInstance)
+			.map((w) => w.seriesId),
+	);
+	for (const seriesId of seriesIds) {
+		const current = liveSeriesInstance(seriesId) ?? listSeriesInstances(seriesId).at(-1) ?? null;
+		if (!isServerSeriesInstance(current) || current.announcedAt === null) continue;
+		const snapshot = `${current.remoteId}|${current.scheduleState}|${current.nextRunAt}`;
+		if (scheduleSnapshotCache.get(seriesId) === snapshot) continue;
+		if (
+			queueGatedEvent({
+				type: "workflow.schedule_changed",
+				remote_id: current.remoteId,
+				payload: { series_id: seriesId, state: current.scheduleState, next_run_at: current.nextRunAt },
+			})
+		) {
+			scheduleSnapshotCache.set(seriesId, snapshot);
+		}
+	}
 }
 
 /** Ids in a `{accepted, rejected, duplicates}` list: plain ids or `{id, reason}` entries. */
@@ -980,7 +1076,7 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 	"step.add": (command) => {
 		const remoteId = command.remote_id;
 		const payload = command.payload;
-		const workflow = resolveLocalWorkflow(remoteId);
+		const workflow = resolveStepCommandWorkflow(remoteId);
 		const stepKey = typeof payload.step_key === "string" ? payload.step_key : "";
 		const description = typeof payload.description === "string" ? payload.description : "";
 		const added = addStep(workflow.id, description, {
@@ -1002,7 +1098,7 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 	"step.edit": (command) => {
 		const remoteId = command.remote_id;
 		const payload = command.payload;
-		const workflow = resolveLocalWorkflow(remoteId);
+		const workflow = resolveStepCommandWorkflow(remoteId);
 		const stepId = resolveStepId(remoteId, String(payload.step_key ?? ""));
 		const existing = getStep(stepId);
 		if (!existing) throw new WorkflowError("unknown step");
@@ -1022,7 +1118,7 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 	"step.remove": (command) => {
 		const remoteId = command.remote_id;
 		const payload = command.payload;
-		const workflow = resolveLocalWorkflow(remoteId);
+		const workflow = resolveStepCommandWorkflow(remoteId);
 		const stepId = resolveStepId(remoteId, String(payload.step_key ?? ""));
 		removeStep(workflow.id, stepId);
 		const map = getSyncStepMap(remoteId);
@@ -1033,7 +1129,7 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 	"step.move": (command) => {
 		const remoteId = command.remote_id;
 		const payload = command.payload;
-		const workflow = resolveLocalWorkflow(remoteId);
+		const workflow = resolveStepCommandWorkflow(remoteId);
 		const stepId = resolveStepId(remoteId, String(payload.step_key ?? ""));
 		if (typeof payload.to_index !== "number") throw new WorkflowError("to_index is required");
 		moveStepToIndex(workflow.id, stepId, payload.to_index);
@@ -1041,7 +1137,7 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 	},
 	"step.run": async (command, hubConfig, log) => {
 		const remoteId = command.remote_id;
-		const workflow = resolveLocalWorkflow(remoteId);
+		const workflow = resolveStepCommandWorkflow(remoteId);
 		const stepId = resolveStepId(remoteId, String(command.payload.step_key ?? ""));
 		await runStep(workflow.id, stepId, hubConfig, (m) => logMessage(log, m));
 		return { localId: workflow.id };
@@ -1255,6 +1351,7 @@ export function initSyncStateCache(): void {
 export function resetSyncExecutorState(): void {
 	workflowStatusCache.clear();
 	stepStatusCache.clear();
+	scheduleSnapshotCache.clear();
 	pendingEvents.length = 0;
 	clearAppliedSyncCommands();
 }

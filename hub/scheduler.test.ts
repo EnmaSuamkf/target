@@ -562,6 +562,73 @@ test("a hub-managed series on a remote-origin workflow does not mint remote inst
 	assert.equal(next.remoteId, null);
 });
 
+// --- schedule.run_missed / schedule.run_skipped (D20, gated by D13) ----------------------
+
+const { pendingSyncEvents, resetSyncExecutorState } = await import("./sync.ts");
+const { clearServerCapabilities, recordServerCapabilities } = await import("./server-capabilities.ts");
+
+const RUN_EVENTS = ["schedule.run_missed", "schedule.run_skipped"];
+const runEvents = () => pendingSyncEvents().filter((e) => RUN_EVENTS.includes(e.type));
+const forbidden = (): FirePermissionState => ({ kind: "enforced", permissions: ["client.workflows.manage"] });
+
+function withServerEvents(events: string[] | null) {
+	resetSyncExecutorState();
+	if (events) recordServerCapabilities({ server_capabilities: { events } });
+	else clearServerCapabilities();
+}
+
+test("run_missed: a remote series' missed run is sent when advertised, with its occurrences", async () => {
+	withServerEvents(RUN_EVENTS);
+	const { wf, remoteId } = armedRemote("Remote missed");
+	await tick(at(DUE, 11 * MIN));
+	assert.deepEqual(runEvents(), [
+		{
+			type: "schedule.run_missed",
+			remote_id: remoteId,
+			payload: { series_id: wf.seriesId, occurrences: [DUE.toISOString()] },
+		},
+	]);
+});
+
+test("run_missed: nothing is queued when the server doesn't advertise it", async () => {
+	withServerEvents(["schedule.run_skipped"]);
+	armedRemote("Remote missed, unadvertised");
+	const result = await tick(at(DUE, 11 * MIN));
+	assert.equal(result.missed.length, 1, "the miss itself still happens");
+	assert.deepEqual(runEvents(), []);
+});
+
+test("run_skipped: a remote series' skipped run is sent when advertised, with the reason", async () => {
+	withServerEvents(RUN_EVENTS);
+	const { wf, remoteId } = armedRemote("Remote skipped");
+	await tick(DUE, { permissionState: forbidden });
+	assert.deepEqual(runEvents(), [
+		{
+			type: "schedule.run_skipped",
+			remote_id: remoteId,
+			payload: { series_id: wf.seriesId, reason: "forbidden", occurrence: DUE.toISOString() },
+		},
+	]);
+});
+
+test("run_skipped: nothing is queued when the server doesn't advertise it", async () => {
+	withServerEvents(null);
+	armedRemote("Remote skipped, unadvertised");
+	const result = await tick(DUE, { permissionState: forbidden });
+	assert.equal(result.skipped.length, 1);
+	assert.deepEqual(runEvents(), []);
+});
+
+test("run events: a local series never reaches the server, even when advertised", async () => {
+	withServerEvents(RUN_EVENTS);
+	armed({ name: "Local missed" });
+	await tick(at(DUE, 11 * MIN));
+	armed({ name: "Local skipped" });
+	await tick(at(DUE, DAY), { permissionState: forbidden });
+	assert.deepEqual(runEvents(), []);
+	withServerEvents(null);
+});
+
 // --- step selection -----------------------------------------------------------------------
 
 test("an instance whose steps already ran fires with restart semantics and every task step", async () => {

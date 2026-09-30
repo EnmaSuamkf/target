@@ -629,3 +629,148 @@ test("announcement: nothing is sent when the server doesn't advertise schedule.i
 	// Tidy: later tests in this file must not pick it up.
 	patchSchedule(next, { scheduleState: "cancelled", nextRunAt: null });
 });
+
+// --- workflow.schedule_changed (D20, state-derived, gated by D13) -------------------
+
+function scheduleChangesIn(mock: ReturnType<typeof createMockSyncServer>, seriesId: string) {
+	return (mock.state.eventBatches as Array<{ events: Array<{ type: string; remote_id?: string; payload: Record<string, unknown> }> }>)
+		.flatMap((b) => b.events)
+		.filter((e) => e.type === "workflow.schedule_changed" && e.payload.series_id === seriesId)
+		.map((e): Record<string, unknown> => ({ remote_id: e.remote_id, ...e.payload }));
+}
+
+test("schedule_changed: set, re-armed, broken and cancelled each send one snapshot when advertised", async () => {
+	const mock = createMockSyncServer();
+	mock.state.heartbeatCapabilities = { events: ["workflow.schedule_changed", "schedule.instance_created"] };
+	const hubCfg = loadConfig();
+	await runSyncTick({ hubConfig: hubCfg, fetchImpl: mock.fetchImpl, config: syncCfg("") });
+	const { token } = getSyncCredentials();
+	const tick = () => runSyncTick({ hubConfig: hubCfg, fetchImpl: mock.fetchImpl, config: syncCfg(token!) });
+	const cmd = (id: string, type: string, payload: Record<string, unknown>): SyncCommand => ({
+		id,
+		type,
+		remote_id: "rwf_changed",
+		sequence: 1,
+		payload,
+		status: "delivered",
+	});
+
+	// Set: the server arms its workflow as a new series.
+	mock.enqueue(cmd("cmd_changed_1", "workflow.create", { name: "Changed" }));
+	mock.enqueue(
+		cmd("cmd_changed_2", "workflow.set_schedule", {
+			series_id: "series_changed",
+			spec: { kind: "daily", time: "09:00" },
+			timezone: "UTC",
+		}),
+	);
+	await tick();
+	const wf = getWorkflowByRemoteId("rwf_changed")!;
+	assert.deepEqual(scheduleChangesIn(mock, "series_changed"), [
+		{ remote_id: "rwf_changed", series_id: "series_changed", state: "armed", next_run_at: getWf(wf.id)!.nextRunAt },
+	]);
+	await tick();
+	assert.equal(scheduleChangesIn(mock, "series_changed").length, 1, "unchanged → nothing more");
+
+	// Updated: a new time is a new snapshot.
+	mock.enqueue(
+		cmd("cmd_changed_3", "workflow.set_schedule", {
+			series_id: "series_changed",
+			spec: { kind: "daily", time: "18:00" },
+			timezone: "UTC",
+		}),
+	);
+	await tick();
+	assert.equal(scheduleChangesIn(mock, "series_changed").at(-1)!.next_run_at, getWf(wf.id)!.nextRunAt);
+	assert.equal(scheduleChangesIn(mock, "series_changed").length, 2);
+
+	// Re-armed (as the scheduler does after a miss or a skip): the next run moves on.
+	const later = new Date(Date.parse(getWf(wf.id)!.nextRunAt!) + 86_400_000).toISOString();
+	patchSchedule(wf.id, { nextRunAt: later, scheduledFor: later });
+	await tick();
+	assert.deepEqual(scheduleChangesIn(mock, "series_changed").at(-1), {
+		remote_id: "rwf_changed",
+		series_id: "series_changed",
+		state: "armed",
+		next_run_at: later,
+	});
+
+	// Broken.
+	patchSchedule(wf.id, { scheduleState: "broken", nextRunAt: null });
+	await tick();
+	assert.deepEqual(scheduleChangesIn(mock, "series_changed").at(-1), {
+		remote_id: "rwf_changed",
+		series_id: "series_changed",
+		state: "broken",
+		next_run_at: null,
+	});
+
+	// Cancelled.
+	mock.enqueue(cmd("cmd_changed_4", "workflow.cancel_schedule", { series_id: "series_changed" }));
+	await tick();
+	assert.deepEqual(scheduleChangesIn(mock, "series_changed").at(-1), {
+		remote_id: "rwf_changed",
+		series_id: "series_changed",
+		state: "cancelled",
+		next_run_at: null,
+	});
+	assert.equal(scheduleChangesIn(mock, "series_changed").length, 5);
+});
+
+test("schedule_changed: a fire re-arms the series on its next instance, reported once the server knows it", async () => {
+	const { next, nextRemoteId, seriesId } = remoteSeriesWithClone();
+	const mock = createMockSyncServer();
+	mock.state.heartbeatCapabilities = { events: ["workflow.schedule_changed", "schedule.instance_created"] };
+	await runSyncTick({ hubConfig: loadConfig(), fetchImpl: mock.fetchImpl, config: syncCfg("") });
+	assert.deepEqual(scheduleChangesIn(mock, seriesId), [], "waits for the announcement to be confirmed");
+	assert.ok(getWf(next)!.announcedAt);
+	const { token } = getSyncCredentials();
+	await runSyncTick({ hubConfig: loadConfig(), fetchImpl: mock.fetchImpl, config: syncCfg(token!) });
+	assert.deepEqual(scheduleChangesIn(mock, seriesId), [
+		{ remote_id: nextRemoteId, series_id: seriesId, state: "armed", next_run_at: getWf(next)!.nextRunAt },
+	]);
+	patchSchedule(next, { scheduleState: "cancelled", nextRunAt: null });
+});
+
+test("schedule_changed: nothing is sent while unadvertised; once advertised the current snapshot goes out", async () => {
+	const { next, nextRemoteId, seriesId } = remoteSeriesWithClone();
+	patchSchedule(next, { announcedAt: new Date().toISOString() }, { touch: false });
+	const mock = createMockSyncServer();
+	mock.state.heartbeatCapabilities = { events: ["schedule.instance_created"] };
+	await runSyncTick({ hubConfig: loadConfig(), fetchImpl: mock.fetchImpl, config: syncCfg("") });
+	const { token } = getSyncCredentials();
+	await runSyncTick({ hubConfig: loadConfig(), fetchImpl: mock.fetchImpl, config: syncCfg(token!) });
+	const all = (mock.state.eventBatches as Array<{ events: Array<{ type: string }> }>).flatMap((b) => b.events);
+	assert.ok(!all.some((e) => e.type === "workflow.schedule_changed"));
+	assert.equal(pendingSyncEvents().filter((e) => e.type === "workflow.schedule_changed").length, 0);
+
+	mock.state.heartbeatCapabilities = { events: ["workflow.schedule_changed"] };
+	await runSyncTick({ hubConfig: loadConfig(), fetchImpl: mock.fetchImpl, config: syncCfg(token!) });
+	assert.deepEqual(scheduleChangesIn(mock, seriesId), [
+		{ remote_id: nextRemoteId, series_id: seriesId, state: "armed", next_run_at: getWf(next)!.nextRunAt },
+	]);
+	patchSchedule(next, { scheduleState: "cancelled", nextRunAt: null });
+});
+
+test("instance_already_fired: a step command aimed at a fired instance is acked failed over the wire", async () => {
+	const { first, firstRemoteId } = remoteSeriesWithClone();
+	const mock = createMockSyncServer();
+	await runSyncTick({ hubConfig: loadConfig(), fetchImpl: mock.fetchImpl, config: syncCfg("") });
+	mock.enqueue({
+		id: "cmd_fired_add",
+		type: "step.add",
+		remote_id: firstRemoteId,
+		sequence: 1,
+		payload: { step_key: "k_late", description: "Too late" },
+		status: "delivered",
+	});
+	const { token } = getSyncCredentials();
+	await runSyncTick({ hubConfig: loadConfig(), fetchImpl: mock.fetchImpl, config: syncCfg(token!) });
+	const ack = mock.state.acks.find((a) => a.commandId === "cmd_fired_add")!.body as {
+		status: string;
+		error?: { message?: string };
+	};
+	assert.equal(ack.status, "failed");
+	assert.equal(ack.error?.message, "instance_already_fired");
+	assert.equal(getWf(first)!.scheduleState, "fired");
+});

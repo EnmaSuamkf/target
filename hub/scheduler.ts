@@ -325,7 +325,26 @@ const NOTICE_DETAIL_CHARS = 300;
 export function recordScheduleNotice(log: Logger, input: Parameters<typeof recordNotice>[0]): ScheduleNotice {
 	const notice = recordNotice(input);
 	void announceNotice(notice, log);
+	try {
+		noticeListener?.(notice);
+	} catch (err) {
+		// Sync bookkeeping must never fail the tick that recorded the notice.
+		log(`scheduler: notice listener failed: ${String(err)}`, "warning");
+	}
 	return notice;
+}
+
+/**
+ * Told about every notice as it is recorded — sync.ts registers one to turn a
+ * remote series' missed/skipped runs into `schedule.run_missed` /
+ * `schedule.run_skipped` events. A listener rather than an import: sync.ts
+ * already imports this module.
+ */
+export type ScheduleNoticeListener = (notice: ScheduleNotice) => void;
+let noticeListener: ScheduleNoticeListener | null = null;
+
+export function setScheduleNoticeListener(listener: ScheduleNoticeListener | null): void {
+	noticeListener = listener;
 }
 
 /**
