@@ -660,6 +660,12 @@ export interface SetScheduleInput {
 	timezone: string;
 	/** Defaults to the series' current value, or on for a new series. */
 	includePrevious?: boolean;
+	/**
+	 * The id of a NEW series, when whoever creates it names it (D16: the server
+	 * sends its own `series_id` in `workflow.set_schedule`). Ignored when this
+	 * reschedules an existing series — its id never changes. Omitted → a UUID.
+	 */
+	seriesId?: string;
 }
 
 function refuseServerManaged(workflow: Workflow, options: ScheduleActor): void {
@@ -722,7 +728,7 @@ export function setSchedule(
 		...(keepsSeries
 			? {}
 			: {
-					seriesId: crypto.randomUUID(),
+					seriesId: input.seriesId ?? crypto.randomUUID(),
 					seriesName: workflow.name,
 					previousInstanceId: null,
 					previousRunBlock: null,

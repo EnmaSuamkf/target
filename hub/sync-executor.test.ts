@@ -254,3 +254,177 @@ test("duplicate command_id is a no-op", async () => {
 	assert.equal(addSecond.noop, true);
 	assert.equal(taskSteps(localId).length, stepsBefore);
 });
+
+// --- schedule commands addressed by series_id (D15–D17) ----------------------
+
+const { getWorkflow, listSeriesInstances, updateWorkflowSchedule } = await import("./db.ts");
+const { cloneScheduledInstance, setSchedule } = await import("./workflow.ts");
+
+let scheduleSeq = 0;
+const DAILY_PAYLOAD = { spec: { kind: "daily", time: "09:00" }, timezone: "Europe/Madrid" };
+
+/**
+ * Applies one command and answers what the sync tick would ack for it: the
+ * tick acks `failed` with the error message whenever the handler throws.
+ */
+async function send(type: string, remoteId: string, payload: Record<string, unknown>) {
+	scheduleSeq += 1;
+	try {
+		const result = await executeSyncCommand(command(remoteId, `cmd_schedule_${scheduleSeq}`, type, payload), cfg);
+		return { status: "applied", local_id: result.localId, error: undefined as string | undefined };
+	} catch (err) {
+		return { status: "failed", local_id: undefined, error: (err as Error).message };
+	}
+}
+
+/** A remote workflow created through the sync command path, with one step. */
+async function remoteDraft(): Promise<{ id: string; remoteId: string }> {
+	const remoteId = `rwf_schedule_${scheduleSeq + 1}`;
+	const ack = await send("workflow.create_with_steps", remoteId, {
+		name: "Nightly report",
+		steps: [{ step_key: "k1", description: "Write the report" }],
+	});
+	assert.equal(ack.status, "applied", ack.error ?? "");
+	return { id: getWorkflowByRemoteId(remoteId)!.id, remoteId };
+}
+
+/** What the scheduler does to a series when its armed instance fires (D3). */
+function fire(armedId: string): string {
+	const armed = getWorkflow(armedId)!;
+	const next = cloneScheduledInstance(armedId, new Date(Date.parse(armed.nextRunAt!) + 86_400_000));
+	updateWorkflowSchedule(armedId, { scheduleState: "fired", nextRunAt: null });
+	return next.id;
+}
+
+test("a first workflow.set_schedule arms the remote workflow as a server-managed series with the server's series_id", async () => {
+	const { id, remoteId } = await remoteDraft();
+	const ack = await send("workflow.set_schedule", remoteId, {
+		series_id: "series_srv_1",
+		...DAILY_PAYLOAD,
+		include_previous: false,
+	});
+	assert.equal(ack.status, "applied", ack.error ?? "");
+	assert.equal(ack.local_id, id);
+	const wf = getWorkflow(id)!;
+	assert.equal(wf.seriesId, "series_srv_1");
+	assert.equal(wf.managedBy, "server");
+	assert.equal(wf.scheduleState, "armed");
+	assert.deepEqual(wf.schedule, DAILY_PAYLOAD.spec);
+	assert.equal(wf.scheduleTimezone, "Europe/Madrid");
+	assert.equal(wf.includePrevious, false);
+	assert.ok(wf.nextRunAt && Date.parse(wf.nextRunAt) > Date.now());
+	// The hub itself may not change it (D15).
+	assert.throws(() => setSchedule(id, { spec: { kind: "daily", time: "10:00" }, timezone: "UTC" }), {
+		name: "ScheduleServerManagedError",
+	});
+});
+
+test("a later workflow.set_schedule applies to the CURRENT armed instance even when remote_id names a fired one", async () => {
+	const { id: firstId, remoteId } = await remoteDraft();
+	assert.equal((await send("workflow.set_schedule", remoteId, { series_id: "series_srv_2", ...DAILY_PAYLOAD })).status, "applied");
+	const armedId = fire(firstId);
+	assert.equal(getWorkflow(firstId)!.scheduleState, "fired");
+
+	// The server still addresses the instance it knows about: the fired one.
+	const ack = await send("workflow.set_schedule", remoteId, {
+		series_id: "series_srv_2",
+		spec: { kind: "weekly", days: [1, 3], time: "07:30" },
+		timezone: "UTC",
+	});
+	assert.equal(ack.status, "applied", ack.error ?? "");
+	assert.equal(ack.local_id, armedId);
+	const armed = getWorkflow(armedId)!;
+	assert.equal(armed.scheduleState, "armed");
+	assert.deepEqual(armed.schedule, { kind: "weekly", days: [1, 3], time: "07:30" });
+	assert.equal(armed.scheduleTimezone, "UTC");
+	assert.equal(armed.seriesId, "series_srv_2", "the series keeps its id");
+	assert.equal(armed.managedBy, "server");
+	const fired = getWorkflow(firstId)!;
+	assert.equal(fired.scheduleState, "fired", "the fired instance is untouched");
+	assert.deepEqual(fired.schedule, DAILY_PAYLOAD.spec);
+	assert.equal(listSeriesInstances("series_srv_2").length, 2, "no new instance or series");
+});
+
+test("workflow.cancel_schedule cancels the series' current armed instance; repeating it is a no-op", async () => {
+	const { id: firstId, remoteId } = await remoteDraft();
+	await send("workflow.set_schedule", remoteId, { series_id: "series_srv_3", ...DAILY_PAYLOAD });
+	const armedId = fire(firstId);
+
+	const ack = await send("workflow.cancel_schedule", remoteId, { series_id: "series_srv_3" });
+	assert.equal(ack.status, "applied", ack.error ?? "");
+	assert.equal(ack.local_id, armedId);
+	const armed = getWorkflow(armedId)!;
+	assert.equal(armed.scheduleState, "cancelled");
+	assert.equal(armed.nextRunAt, null);
+	assert.equal(getWorkflow(firstId)!.scheduleState, "fired");
+
+	assert.equal((await send("workflow.cancel_schedule", remoteId, { series_id: "series_srv_3" })).status, "applied");
+	assert.equal(getWorkflow(armedId)!.scheduleState, "cancelled");
+	// A cancelled series can't be re-armed by a set_schedule: nothing is live to apply it to.
+	const re = await send("workflow.set_schedule", remoteId, { series_id: "series_srv_3", ...DAILY_PAYLOAD });
+	assert.equal(re.status, "failed");
+	assert.match(re.error ?? "", /no upcoming run/);
+});
+
+test("invalid schedule commands ack failed with the reason and change nothing", async () => {
+	const { id, remoteId } = await remoteDraft();
+
+	const badSpec = await send("workflow.set_schedule", remoteId, {
+		series_id: "series_srv_4",
+		spec: { kind: "hourly" },
+		timezone: "UTC",
+	});
+	assert.equal(badSpec.status, "failed");
+	assert.match(badSpec.error ?? "", /invalid schedule: kind/);
+
+	const badZone = await send("workflow.set_schedule", remoteId, {
+		series_id: "series_srv_4",
+		spec: { kind: "daily", time: "25:00" },
+		timezone: "Mars/Olympus",
+	});
+	assert.equal(badZone.status, "failed");
+	assert.match(badZone.error ?? "", /timezone/);
+	assert.match(badZone.error ?? "", /time/);
+
+	const badToggle = await send("workflow.set_schedule", remoteId, {
+		series_id: "series_srv_4",
+		...DAILY_PAYLOAD,
+		include_previous: "yes",
+	});
+	assert.equal(badToggle.status, "failed");
+	assert.match(badToggle.error ?? "", /include_previous/);
+
+	const past = await send("workflow.set_schedule", remoteId, {
+		series_id: "series_srv_4",
+		spec: { kind: "once", at: "2001-01-01T09:00" },
+		timezone: "UTC",
+	});
+	assert.equal(past.status, "failed");
+	assert.match(past.error ?? "", /future/);
+
+	const noSeries = await send("workflow.set_schedule", remoteId, DAILY_PAYLOAD);
+	assert.equal(noSeries.status, "failed");
+	assert.match(noSeries.error ?? "", /series_id is required/);
+	assert.equal((await send("workflow.cancel_schedule", remoteId, {})).status, "failed");
+
+	const wf = getWorkflow(id)!;
+	assert.equal(wf.seriesId, null);
+	assert.equal(wf.scheduleState, null);
+});
+
+test("schedule commands never touch a hub-managed series", async () => {
+	const { id, remoteId } = await remoteDraft();
+	const local = setSchedule(id, { spec: { kind: "daily", time: "09:00" }, timezone: "UTC" });
+	assert.equal(local.managedBy, "local");
+	const set = await send("workflow.set_schedule", remoteId, { series_id: local.seriesId, ...DAILY_PAYLOAD });
+	assert.equal(set.status, "failed");
+	assert.match(set.error ?? "", /managed by this hub/);
+	const cancel = await send("workflow.cancel_schedule", remoteId, { series_id: local.seriesId });
+	assert.equal(cancel.status, "failed");
+	assert.equal(getWorkflow(id)!.scheduleState, "armed");
+
+	// And a remote_id already armed in one series can't start another.
+	const other = await send("workflow.set_schedule", remoteId, { series_id: "series_srv_5", ...DAILY_PAYLOAD });
+	assert.equal(other.status, "failed");
+	assert.match(other.error ?? "", /already belongs to series/);
+});

@@ -20,15 +20,18 @@ import { getDeviceLinkStatus, markDeviceRemoteRecovered, setDeviceLinkRemoteStat
 import { recordOwnerSnapshot } from "./owner-permissions.ts";
 import { recordServerCapabilities, resetServerCapabilitiesCache, serverSupportsEvent } from "./server-capabilities.ts";
 import { loadEffectiveSyncConfig } from "./remote-config.ts";
+import { validateSchedule, type ScheduleSpec } from "./schedule.ts";
 import {
 	clearAppliedSyncCommands,
 	deleteSyncStepMap,
 	getAppliedSyncCommand,
+	getArmedInstance,
 	getOrCreateInstanceId,
 	getStep,
 	getSyncStepMap,
 	getTemplate,
 	getWorkflowByRemoteId,
+	listSeriesInstances,
 	listSteps,
 	listWorkflows,
 	markSyncCommandApplied,
@@ -59,6 +62,7 @@ import { TARGET_VERSION } from "./version.ts";
 import {
 	addStep,
 	abortStep,
+	cancelSchedule,
 	continueStep,
 	createWorkflow,
 	editStep,
@@ -74,6 +78,7 @@ import {
 	resumeWorkflow,
 	runStep,
 	setConversationContext,
+	setSchedule,
 	setWorkflowArchiveListener,
 	startWorkflow,
 	type StepMoveDirection,
@@ -126,6 +131,8 @@ export const SYNC_COMMAND_TYPES = [
 	"step.abort",
 	"step.continue",
 	"step.set_status",
+	"workflow.set_schedule",
+	"workflow.cancel_schedule",
 	"tcp-tool.upsert",
 	"tcp-tool.delete",
 	"resource-set.upsert",
@@ -302,6 +309,47 @@ function resolveRunStepIds(remoteId: string, payload: Record<string, unknown>): 
 	const keys = payload.step_keys.filter((k): k is string => typeof k === "string" && k.trim().length > 0);
 	if (!keys.length) throw new WorkflowError("step_keys must include at least one step");
 	return keys.map((k) => resolveStepId(remoteId, k));
+}
+
+function parseSeriesId(payload: Record<string, unknown>): string {
+	const seriesId = typeof payload.series_id === "string" ? payload.series_id.trim() : "";
+	if (!seriesId) throw new WorkflowError("series_id is required");
+	return seriesId;
+}
+
+/**
+ * The instance of a series that carries its live schedule: the armed one (the
+ * next execution) or — when the series is waiting on a decision — its `missed`
+ * once or `broken` instance. Null when the series is unknown here, or has no
+ * live schedule any more (cancelled).
+ */
+function liveSeriesInstance(seriesId: string): Workflow | null {
+	const armed = getArmedInstance(seriesId);
+	if (armed) return armed;
+	const waiting = listSeriesInstances(seriesId).filter(
+		(w) => w.scheduleState === "missed" || w.scheduleState === "broken",
+	);
+	return waiting.at(-1) ?? null;
+}
+
+/** A server-sent schedule as `setSchedule` input, refused (acked failed) when invalid. */
+function parseRemoteSchedule(payload: Record<string, unknown>): {
+	spec: ScheduleSpec;
+	timezone: string;
+	includePrevious?: boolean;
+} {
+	const errors = validateSchedule(payload.spec, payload.timezone);
+	if (payload.include_previous !== undefined && typeof payload.include_previous !== "boolean") {
+		errors.push({ field: "includePrevious", message: "include_previous must be a boolean" });
+	}
+	if (errors.length > 0) {
+		throw new WorkflowError(`invalid schedule: ${errors.map((e) => `${e.field}: ${e.message}`).join("; ")}`);
+	}
+	return {
+		spec: payload.spec as ScheduleSpec,
+		timezone: payload.timezone as string,
+		...(payload.include_previous === undefined ? {} : { includePrevious: payload.include_previous as boolean }),
+	};
 }
 
 function moveStepToIndex(workflowId: string, stepId: string, targetIndex: number): void {
@@ -856,6 +904,45 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 		const status = typeof command.payload.status === "string" ? command.payload.status : "";
 		forceStepStatus(workflow.id, stepId, status as OverridableStepStatus, (m) => logMessage(log, m));
 		return { localId: workflow.id };
+	},
+	// Schedule commands address the SERIES, not a workflow (D17): by the time the
+	// command arrives the instance the server last saw may already have fired and
+	// been replaced by a newer armed one. Applying to the series' CURRENT live
+	// instance means a command that races a fire still lands on the next run.
+	"workflow.set_schedule": (command) => {
+		const seriesId = parseSeriesId(command.payload);
+		const input = parseRemoteSchedule(command.payload);
+		const live = liveSeriesInstance(seriesId);
+		if (live) {
+			// Only a series the server created is the server's to change (D15); a
+			// local series never has a server id, so this is a mismatch, not a race.
+			if (live.managedBy !== "server") throw new WorkflowError(`series ${seriesId} is managed by this hub`);
+			return { localId: setSchedule(live.id, input, { actor: "server" }).id };
+		}
+		if (listSeriesInstances(seriesId).length > 0) {
+			throw new WorkflowError(`series ${seriesId} has no upcoming run (it was cancelled)`);
+		}
+		// A new series: command.remote_id names the workflow that becomes its
+		// first armed instance, under the id the server chose (D16).
+		const workflow = resolveLocalWorkflow(command.remote_id);
+		// A cancelled instance went back to being a normal workflow and may start a
+		// new series; any other instance already has one.
+		if (workflow.seriesId && workflow.scheduleState !== "cancelled") {
+			throw new WorkflowError(`workflow already belongs to series ${workflow.seriesId}`);
+		}
+		const updated = setSchedule(workflow.id, { ...input, seriesId }, { actor: "server" });
+		return { localId: updated.id };
+	},
+	"workflow.cancel_schedule": (command) => {
+		const seriesId = parseSeriesId(command.payload);
+		const live = liveSeriesInstance(seriesId);
+		if (!live) {
+			// Already cancelled here, or never scheduled on this client: either way
+			// there is nothing left to run, which is what the server asked for.
+			return { localId: listSeriesInstances(seriesId).at(-1)?.id };
+		}
+		if (live.managedBy !== "server") throw new WorkflowError(`series ${seriesId} is managed by this hub`);
+		return { localId: cancelSchedule(live.id, { actor: "server" }).id };
 	},
 	"tcp-tool.upsert": (command) => {
 		const resource = parseResourceEnvelope(command.payload);

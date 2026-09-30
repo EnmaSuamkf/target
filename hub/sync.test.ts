@@ -388,3 +388,56 @@ test("unlinking the hub clears the advertised server capabilities", () => {
 	assert.equal(getServerCapabilitiesJson(), null);
 	assert.equal(serverSupportsEvent("workflow.archived"), false);
 });
+
+// --- schedule commands over the wire (D17) -------------------------------------
+
+test("the schedule commands are advertised in capabilities.commands and ack over the wire", async () => {
+	const { syncClientCapabilities } = await import("./sync.ts");
+	const { getWorkflow } = await import("./db.ts");
+	assert.ok(syncClientCapabilities().commands.includes("workflow.set_schedule"));
+	assert.ok(syncClientCapabilities().commands.includes("workflow.cancel_schedule"));
+
+	const mock = createMockSyncServer();
+	const hubCfg = loadConfig();
+	await runSyncTick({ hubConfig: hubCfg, fetchImpl: mock.fetchImpl, config: syncCfg("") });
+	const hb = mock.state.heartbeats.at(-1) as { capabilities?: { commands?: string[] } };
+	assert.ok(hb.capabilities?.commands?.includes("workflow.set_schedule"));
+	assert.ok(hb.capabilities?.commands?.includes("workflow.cancel_schedule"));
+
+	const remoteId = "rwf_schedule_wire";
+	const envelope = (id: string, type: string, payload: Record<string, unknown>, sequence: number): SyncCommand => ({
+		id,
+		type,
+		remote_id: remoteId,
+		sequence,
+		payload,
+		status: "delivered",
+	});
+	mock.enqueue(envelope("cmd_wire_1", "workflow.create", { name: "Wire series" }, 1));
+	mock.enqueue(
+		envelope("cmd_wire_2", "workflow.set_schedule", { series_id: "series_wire", spec: { kind: "hourly" }, timezone: "UTC" }, 2),
+	);
+	mock.enqueue(
+		envelope(
+			"cmd_wire_3",
+			"workflow.set_schedule",
+			{ series_id: "series_wire", spec: { kind: "daily", time: "09:00" }, timezone: "UTC" },
+			3,
+		),
+	);
+	mock.enqueue(envelope("cmd_wire_4", "workflow.cancel_schedule", { series_id: "series_wire" }, 4));
+	const { token } = getSyncCredentials();
+	await runSyncTick({ hubConfig: hubCfg, fetchImpl: mock.fetchImpl, config: syncCfg(token!) });
+
+	const acks = new Map(mock.state.acks.map((a) => [a.commandId, a.body as { status: string; local_id?: string; error?: { message?: string } }]));
+	const local = getWorkflowByRemoteId(remoteId)!;
+	assert.equal(acks.get("cmd_wire_2")?.status, "failed", "an invalid spec acks failed");
+	assert.match(acks.get("cmd_wire_2")?.error?.message ?? "", /invalid schedule: kind/);
+	assert.equal(acks.get("cmd_wire_3")?.status, "applied");
+	assert.equal(acks.get("cmd_wire_3")?.local_id, local.id);
+	assert.equal(acks.get("cmd_wire_4")?.status, "applied");
+	const wf = getWorkflow(local.id)!;
+	assert.equal(wf.seriesId, "series_wire");
+	assert.equal(wf.managedBy, "server");
+	assert.equal(wf.scheduleState, "cancelled");
+});
