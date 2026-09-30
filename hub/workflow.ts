@@ -88,6 +88,7 @@ import {
 	takeStatusBeforeReview,
 	updateStepConfig,
 	updateStepDescription,
+	updateWorkflowSchedule,
 	type Attachment,
 	type OverridableStepStatus,
 	type OverridableWorkflowStatus,
@@ -98,6 +99,7 @@ import {
 	type Workflow,
 	type WorkflowStatus,
 } from "./db.ts";
+import { nextOccurrence, validateSchedule, type ScheduleFieldError, type ScheduleSpec } from "./schedule.ts";
 import { sendManualReviewNotification, sendWorkflowCompletedNotification } from "./notifier.ts";
 import { forgetProbe, humanizeSeconds, probeStepProgress, pruneProbes, stepActivity } from "./progress.ts";
 import { dispatchStep, type Logger } from "./runner.ts";
@@ -574,6 +576,150 @@ export function forceWorkflowStatus(workflowId: string, status: OverridableWorkf
 	return updated;
 }
 
+// --- Scheduling: series ---------------------------------------------------
+//
+// A schedule is a SERIES of workflows (D1): every execution is its own
+// workflow, an instance, and the series always has exactly one `armed`
+// instance — the next execution. The series' definition (spec, zone, the
+// previous-run toggle, its name) is carried on its instances rather than in a
+// table of its own, because the next instance is cloned from the armed one
+// when it fires: whatever the operator edited on the armed instance —
+// steps, context, and the schedule itself — carries into every later run.
+
+/** Thrown by `setSchedule` when the spec or zone is invalid; `fields` says which. */
+export class ScheduleValidationError extends WorkflowError {
+	readonly fields: ScheduleFieldError[];
+	constructor(fields: ScheduleFieldError[]) {
+		super(fields.map((f) => f.message).join("; "));
+		this.name = "ScheduleValidationError";
+		this.fields = fields;
+	}
+}
+
+/**
+ * Thrown when the hub is asked to change a schedule the server owns (D15) —
+ * mapped to 409 `server_managed` by the HTTP layer.
+ */
+export class ScheduleServerManagedError extends WorkflowError {
+	constructor(message = "this schedule is managed by the server — change it there") {
+		super(message);
+		this.name = "ScheduleServerManagedError";
+	}
+}
+
+/** Who is changing a schedule: the hub's own operator, or the server via sync. */
+export interface ScheduleActor {
+	actor?: "local" | "server";
+}
+
+/** The statuses a workflow may be scheduled from: anything not in progress. */
+const SCHEDULABLE_STATUSES: readonly WorkflowStatus[] = ["draft", "completed", "failed"];
+
+export interface SetScheduleInput {
+	spec: ScheduleSpec;
+	timezone: string;
+	/** Defaults to the series' current value, or on for a new series. */
+	includePrevious?: boolean;
+}
+
+function refuseServerManaged(workflow: Workflow, options: ScheduleActor): void {
+	if (workflow.managedBy === "server" && options.actor !== "server") throw new ScheduleServerManagedError();
+}
+
+/**
+ * Schedules a workflow: turns it into the armed instance of a NEW series, or —
+ * when it already is the armed instance (or a `missed` once / `broken` series
+ * waiting to be rescheduled) — updates that series' schedule in place.
+ * Computes `next_run_at` from the spec. Refused for:
+ *  - a workflow in progress (running/waiting/paused): scheduling it would arm
+ *    something that is already executing;
+ *  - an archived one (unarchive first — archived workflows don't run);
+ *  - a workflow continuing an adopted operator conversation (D23): every
+ *    instance is a clone, and a clone can't continue someone else's thread;
+ *  - a past (`fired`) instance of a series: its series has moved on to a newer
+ *    armed instance, which is the one to reschedule; making the past run a new
+ *    series would pull it out of its series' history;
+ *  - a server-managed series, unless the server itself is asking (D15);
+ *  - an invalid spec/zone, or a `once` that is not in the future.
+ */
+export function setSchedule(
+	workflowId: string,
+	input: SetScheduleInput,
+	options: ScheduleActor & { now?: Date } = {},
+): Workflow {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	refuseServerManaged(workflow, options);
+	refuseArchived(workflow);
+	if (workflow.adoptedSessionId) {
+		throw new WorkflowError(
+			"a workflow that continues an adopted conversation can't be scheduled — every run is a clone, and a clone can't continue that conversation",
+		);
+	}
+	if (workflow.scheduleState === "fired") {
+		throw new WorkflowError(
+			"this is a past run of a schedule — change the schedule on its upcoming (armed) run, or clone this one",
+		);
+	}
+	if (!SCHEDULABLE_STATUSES.includes(workflow.status)) {
+		throw new WorkflowError(`only a draft, completed or failed workflow can be scheduled (this one is ${workflow.status})`);
+	}
+	const errors = validateSchedule(input.spec, input.timezone);
+	if (input.includePrevious !== undefined && typeof input.includePrevious !== "boolean") {
+		errors.push({ field: "includePrevious", message: "includePrevious must be a boolean" });
+	}
+	if (errors.length > 0) throw new ScheduleValidationError(errors);
+	const next = nextOccurrence(input.spec, input.timezone, options.now ?? new Date());
+	if (!next) throw new ScheduleValidationError([{ field: "at", message: "the scheduled time must be in the future" }]);
+	const nextRunAt = next.toISOString();
+	// Rescheduling keeps the series (its id, its name, its history); anything
+	// else — never scheduled, or a `cancelled` instance that went back to being
+	// a normal workflow — starts a new one, named after the workflow as it is now.
+	const keepsSeries =
+		workflow.seriesId !== null &&
+		(workflow.scheduleState === "armed" || workflow.scheduleState === "missed" || workflow.scheduleState === "broken");
+	const updated = updateWorkflowSchedule(workflowId, {
+		...(keepsSeries
+			? {}
+			: {
+					seriesId: crypto.randomUUID(),
+					seriesName: workflow.name,
+					previousInstanceId: null,
+					previousRunBlock: null,
+					managedBy: options.actor === "server" ? ("server" as const) : ("local" as const),
+				}),
+		schedule: input.spec,
+		scheduleTimezone: input.timezone,
+		includePrevious: input.includePrevious ?? (keepsSeries ? workflow.includePrevious : true),
+		scheduleState: "armed",
+		scheduledFor: nextRunAt,
+		nextRunAt,
+	});
+	if (!updated) throw new WorkflowError("workflow disappeared");
+	writeStatusMd(workflowId);
+	return updated;
+}
+
+/**
+ * Cancels a workflow's schedule. Only the armed instance (or a `missed` once
+ * waiting for a decision, or a `broken` series) carries a live schedule; it
+ * becomes a normal workflow again — `cancelled`, no `next_run_at` — while
+ * keeping its `series_id` so it still reads as part of that series' history.
+ * Past instances are untouched. A no-op on a workflow with no live schedule.
+ */
+export function cancelSchedule(workflowId: string, options: ScheduleActor = {}): Workflow {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	const live =
+		workflow.scheduleState === "armed" || workflow.scheduleState === "missed" || workflow.scheduleState === "broken";
+	if (!live) return workflow;
+	refuseServerManaged(workflow, options);
+	const updated = updateWorkflowSchedule(workflowId, { scheduleState: "cancelled", nextRunAt: null });
+	if (!updated) throw new WorkflowError("workflow disappeared");
+	writeStatusMd(workflowId);
+	return updated;
+}
+
 // --- Archiving ------------------------------------------------------------
 //
 // Archiving is the `archived_at` FLAG, never a status: `reconcileStatus`
@@ -589,6 +735,11 @@ export function forceWorkflowStatus(workflowId: string, status: OverridableWorkf
  * than at the call sites.
  */
 export function isArchivable(workflow: Workflow): boolean {
+	// An armed scheduled instance is the series' next execution — possibly an
+	// old completed workflow that was turned into a series — and archiving it
+	// would hide (and, since archived workflows refuse to run, silently stop)
+	// the schedule.
+	if (workflow.scheduleState === "armed") return false;
 	return workflow.status === "completed" || workflow.status === "failed";
 }
 
@@ -628,7 +779,9 @@ export function archiveWorkflow(workflowId: string, now: Date = new Date()): Wor
 	if (workflow.archivedAt !== null) return workflow;
 	if (!isArchivable(workflow)) {
 		throw new WorkflowNotArchivableError(
-			`only a completed or failed workflow can be archived (this one is ${workflow.status})`,
+			workflow.scheduleState === "armed"
+				? "an armed scheduled workflow can't be archived — cancel its schedule first"
+				: `only a completed or failed workflow can be archived (this one is ${workflow.status})`,
 		);
 	}
 	const changed = markWorkflowArchived(workflowId, now.toISOString());
@@ -1438,6 +1591,10 @@ export function setConversationContext(workflowId: string, context: string | nul
 export function removeWorkflow(workflowId: string): void {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
+	// Deleting the armed instance ends its series: it was the only thing that
+	// would ever run next. Cancelled through the same path as an explicit
+	// cancel so the transition is observed the same way; past instances stay.
+	if (workflow.scheduleState === "armed") cancelSchedule(workflowId, { actor: workflow.managedBy });
 	deleteAwbHook(workflow.agentName);
 	fs.rmSync(workflow.mdPath, { force: true });
 	// The agent-facing copies of its results live under ~/.target/steps/<agent

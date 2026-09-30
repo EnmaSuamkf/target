@@ -34,7 +34,7 @@ export type ScheduleSpec =
   | { kind: "weekly"; days: number[]; time: string }; // days 0=Sunday..6
 
 export interface ScheduleFieldError {
-  field: "spec" | "kind" | "at" | "time" | "days" | "timezone";
+  field: "spec" | "kind" | "at" | "time" | "days" | "timezone" | "includePrevious";
   message: string;
 }
 
