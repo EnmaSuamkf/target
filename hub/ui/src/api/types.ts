@@ -242,6 +242,13 @@ export interface Workflow {
 	origin: WorkflowOrigin;
 	remoteId: string | null;
 	remoteSyncedAt: string | null;
+	/**
+	 * When it was archived, or null. A flag beside `status`: an archived workflow
+	 * keeps its completed/failed outcome, is hidden from the default list
+	 * (GET /api/workflows?archived=exclude) and refuses start/resume/restart/step
+	 * run with 409 `archived` until unarchived.
+	 */
+	archivedAt: string | null;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -709,6 +716,20 @@ export interface UiSettingsInput {
 	showTcpCatalog: boolean;
 	showRciCatalog: boolean;
 }
+
+/** GET /api/settings/archive — completed/failed workflows idle this many days are auto-archived; 0 = off. */
+export interface ArchiveSettings {
+	archive_after_days: number;
+	updatedAt: string | null;
+}
+
+/** Payload accepted by PUT /api/settings/archive (a non-negative integer, else 400). */
+export interface ArchiveSettingsInput {
+	archive_after_days: number;
+}
+
+/** `GET /api/workflows?archived=` — which workflows the list returns (server default: `exclude`). */
+export type ArchivedFilter = "exclude" | "include" | "only";
 
 /** Payload accepted by PUT /api/settings/report (a full replace). */
 export interface ReportSettingsInput {

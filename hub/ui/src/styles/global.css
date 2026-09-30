@@ -308,6 +308,15 @@ kbd,
 	color: var(--gray-500);
 }
 
+/* Archived: filed away, not a status — muted and dashed so it reads as a
+   secondary marker beside the (still meaningful) completed/failed pill. */
+.badge--archived {
+	background: var(--gray-50);
+	border-color: var(--gray-300);
+	border-style: dashed;
+	color: var(--gray-500);
+}
+
 /* A soft pulse marks work actually in flight (running step, judging). */
 .badge--running .badge__dot {
 	animation: pulse 1.6s ease-in-out infinite;

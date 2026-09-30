@@ -58,6 +58,24 @@ export function OriginBadge({ origin }: { origin: WorkflowOrigin }): React.JSX.E
 	);
 }
 
+/**
+ * Marks an archived workflow. Archiving is a flag beside the status, not a
+ * status of its own, so this sits next to the completed/failed pill rather
+ * than replacing it. Renders nothing for a workflow that isn't archived.
+ */
+export function ArchivedBadge({ archivedAt }: { archivedAt: string | null | undefined }): React.JSX.Element | null {
+	if (!archivedAt) return null;
+	return (
+		<span
+			className="badge badge--archived"
+			title={`Archived on ${new Date(archivedAt).toLocaleString()} — hidden from the default list; unarchive to run it again.`}
+			data-archived-badge
+		>
+			Archived
+		</span>
+	);
+}
+
 /** Marks TCP packs and Resource Sets that the server pushed and owns. */
 export function ServerManagedBadge(): React.JSX.Element {
 	return (

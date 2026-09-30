@@ -15,6 +15,9 @@
 import type {
 	Account,
 	Adoptability,
+	ArchivedFilter,
+	ArchiveSettings,
+	ArchiveSettingsInput,
 	Attachment,
 	AttachmentField,
 	AuthStatus,
@@ -182,8 +185,15 @@ const json = (value: unknown): string => JSON.stringify(value);
 
 // --- workflows ---
 
-export async function listWorkflows(): Promise<Workflow[]> {
-	const data = await request<{ workflows: Workflow[] }>("/api/workflows");
+/**
+ * The workflow list. The hub hides archived workflows unless asked
+ * (`archived` defaults to `exclude` server-side); the app shell passes
+ * `include` so a selected archived workflow stays resolvable and the rail /
+ * All workflows page can switch to their "Archived" filter without a refetch.
+ */
+export async function listWorkflows(options: { archived?: ArchivedFilter } = {}): Promise<Workflow[]> {
+	const query = options.archived ? `?archived=${encodeURIComponent(options.archived)}` : "";
+	const data = await request<{ workflows: Workflow[] }>(`/api/workflows${query}`);
 	return data.workflows;
 }
 
@@ -288,6 +298,28 @@ export async function renameWorkflow(id: string, name: string): Promise<Workflow
 		method: "PATCH",
 		admin: true,
 		body: json({ name }),
+	});
+	return data.workflow;
+}
+
+/**
+ * Files a finished (completed or failed) workflow away: hidden from the default
+ * list and refused by start/resume/restart/step run until unarchived. 409
+ * `not_archivable` for any other status.
+ */
+export async function archiveWorkflow(id: string): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/archive`, {
+		method: "POST",
+		admin: true,
+	});
+	return data.workflow;
+}
+
+/** Brings an archived workflow back into the list so it can run again. */
+export async function unarchiveWorkflow(id: string): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/unarchive`, {
+		method: "POST",
+		admin: true,
 	});
 	return data.workflow;
 }
@@ -997,6 +1029,33 @@ export async function getUiSettings(): Promise<UiSettings> {
 
 export async function saveUiSettings(input: UiSettingsInput): Promise<UiSettings> {
 	const data = await request<{ settings: UiSettings }>("/api/settings/ui", {
+		method: "PUT",
+		admin: true,
+		body: json(input),
+	});
+	return data.settings;
+}
+
+const DEFAULT_ARCHIVE_SETTINGS: ArchiveSettings = {
+	archive_after_days: 30,
+	updatedAt: null,
+};
+
+/** Auto-archive: completed/failed workflows idle this many days are archived; 0 = off. */
+export async function getArchiveSettings(): Promise<ArchiveSettings> {
+	try {
+		const data = await request<{ settings: ArchiveSettings }>("/api/settings/archive");
+		return data.settings;
+	} catch (err) {
+		// Hubs started before this route existed answer 404 — fall back to the
+		// server default so the rest of Settings still loads.
+		if (err instanceof ApiError && err.status === 404) return DEFAULT_ARCHIVE_SETTINGS;
+		throw err;
+	}
+}
+
+export async function saveArchiveSettings(input: ArchiveSettingsInput): Promise<ArchiveSettings> {
+	const data = await request<{ settings: ArchiveSettings }>("/api/settings/archive", {
 		method: "PUT",
 		admin: true,
 		body: json(input),

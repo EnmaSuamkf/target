@@ -16,7 +16,7 @@ import type {
 	Workflow,
 } from "../api/types.ts";
 import { OVERRIDABLE_WORKFLOW_STATUSES, startActionFor } from "../api/types.ts";
-import { Badge } from "../components/Badge.tsx";
+import { ArchivedBadge, Badge } from "../components/Badge.tsx";
 import { CollapsibleSection } from "../components/CollapsibleSection.tsx";
 import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { useToast } from "../components/Toast.tsx";
@@ -29,6 +29,7 @@ import { useStagedImages } from "../hooks/useStagedImages.ts";
 import { isUsableCopy, templateOptionLabel } from "../lib/catalogCopy.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
 import { canMoveStep } from "../lib/stepMove.ts";
+import { isArchivable } from "../lib/workflowFilter.ts";
 import {
 	adoptNewlyVisibleSteps,
 	reconcileSelectionWithServer,
@@ -79,6 +80,10 @@ import styles from "./WorkflowDetail.module.css";
  *   ran out of tokens, a callback that never landed). The hub then leaves that
  *   status alone until the workflow is run again, and the badge is marked as
  *   set by hand.
+ * - **An archived workflow runs nothing.** The hub answers 409 `archived` to
+ *   start/resume/restart and a step's Retry, so those buttons are disabled
+ *   and say to unarchive first. Only completed/failed workflows can be
+ *   archived; Archive is disabled (with the reason) on any other status.
  *
  * `onBack` is passed only when this pane is the whole screen (a phone, where
  * the workflow list is not next to it) — it's what turns "the detail half of a
@@ -116,6 +121,8 @@ export function WorkflowDetail({
 	onClone,
 	onRename,
 	onDelete,
+	onArchive,
+	onUnarchive,
 	onSetStatus,
 	onSaveContext,
 	onSaveTcps,
@@ -159,6 +166,10 @@ export function WorkflowDetail({
 	/** Saves a new name; resolves true only when the server stored it. */
 	onRename: (name: string) => Promise<boolean>;
 	onDelete: () => void;
+	/** Archives this (completed/failed) workflow: hidden from the default list, not runnable until unarchived. */
+	onArchive: () => void;
+	/** Brings an archived workflow back so it can run again. */
+	onUnarchive: () => void;
 	/** Forces the workflow's status by hand; never runs anything. */
 	onSetStatus: (status: OverridableWorkflowStatus) => void;
 	/** Resolves true only when the server really stored the context. */
@@ -334,7 +345,10 @@ export function WorkflowDetail({
 	const canManage = can("client.workflows.manage");
 	const canCreate = can("client.workflows.create");
 
-	const startAction = canExecute ? startActionFor(workflow.status) : null;
+	// Archived work runs nothing until unarchived (the hub answers 409 `archived`).
+	const archived = Boolean(workflow.archivedAt);
+	const archivable = isArchivable(workflow);
+	const startAction = canExecute && !archived ? startActionFor(workflow.status) : null;
 	const running = workflow.status === "running";
 	// The server refuses a workflow override while a step still has a callback
 	// coming — that callback would write a status over it seconds later.
@@ -472,6 +486,7 @@ export function WorkflowDetail({
 						Change
 					</button>
 					<Badge status={workflow.status} manual={workflow.statusManual} manualAt={workflow.statusManualAt} />
+					<ArchivedBadge archivedAt={workflow.archivedAt} />
 				</div>
 
 				<dl className={styles.facts}>
@@ -581,7 +596,9 @@ export function WorkflowDetail({
 						title={
 							!canExecute
 								? "Requires client.workflows.execute"
-								: !startAction
+								: archived
+									? "This workflow is archived — unarchive it to run it again."
+									: !startAction
 									? workflow.status === "waiting"
 										? "A step is waiting for your review — Continue it to carry on, or Abort it to stop here."
 										: "Already running."
@@ -660,6 +677,44 @@ export function WorkflowDetail({
 					</select>
 
 					<div className={styles.controlsSpacer} />
+
+					{/* Filing finished work away, not a run control — so it sits with
+					    Delete, on the far side of the spacer. Archive only takes
+					    completed/failed workflows (the hub's `not_archivable` rule), so
+					    it's disabled with the reason on anything else. */}
+					{archived ? (
+						<button
+							type="button"
+							className="btn"
+							onClick={onUnarchive}
+							disabled={busy || !canManage}
+							title={
+								canManage
+									? "Bring this workflow back into the list so it can run again."
+									: requires("client.workflows.manage")
+							}
+							data-unarchive-workflow
+						>
+							Unarchive
+						</button>
+					) : (
+						<button
+							type="button"
+							className="btn"
+							onClick={onArchive}
+							disabled={busy || !canManage || !archivable}
+							title={
+								!canManage
+									? requires("client.workflows.manage")
+									: !archivable
+										? "Only completed or failed workflows can be archived."
+										: "Hide this workflow from the list. It can't run until it's unarchived; the Archived filter shows it."
+							}
+							data-archive-workflow
+						>
+							Archive
+						</button>
+					)}
 
 					<button
 						type="button"
@@ -771,6 +826,7 @@ export function WorkflowDetail({
 									onEditNote={onEditNote}
 									onRemoveNote={onRemoveNote}
 									onSelectWorkflow={onSelectWorkflow}
+									archived={archived}
 									busy={busy}
 								/>
 							</ul>
@@ -809,6 +865,7 @@ export function WorkflowDetail({
 										onEditNote={onEditNote}
 										onRemoveNote={onRemoveNote}
 										onSelectWorkflow={onSelectWorkflow}
+										archived={archived}
 										busy={busy}
 									/>
 								))}
