@@ -26,21 +26,28 @@
  *     named explicitly (an empty selection runs nothing). A clone failure
  *     marks the series `broken` with a critical notice, but the current run
  *     still starts (D12).
+ *
+ * Every notice recorded here is also sent to Slack (D11), and each tick
+ * announces the scheduled runs that have ended `failed` since the last one.
  */
 import type { HubConfig } from "./config.ts";
 import {
+	claimFailedRunNotice,
 	claimMissedRun,
 	claimScheduledFire,
 	getWorkflow,
 	listArmedInstances,
 	listSeriesInstances,
 	listSteps,
+	listUnannouncedFailedRuns,
 	recordNotice,
 	setWorkflowName,
 	updateWorkflowSchedule,
+	type ScheduleNotice,
 	type Workflow,
 	type WorkflowStatus,
 } from "./db.ts";
+import { sendScheduleNoticeNotification } from "./notifier.ts";
 import { ownerSnapshotState, resolvePermissionMode } from "./owner-permissions.ts";
 import type { Logger } from "./runner.ts";
 import { formatInZone, nextOccurrence, occurrencesBetween } from "./schedule.ts";
@@ -172,6 +179,11 @@ export async function runSchedulerTick(options: SchedulerTickOptions): Promise<S
 	const now = options.now ?? new Date();
 	const nowMs = now.getTime();
 	const result: SchedulerTickResult = { fired: [], created: [], missed: [], skipped: [], deferred: [] };
+	try {
+		announceFailedRuns(now, options.log);
+	} catch (err) {
+		options.log(`scheduler: announcing failed runs failed: ${String(err)}`, "warning");
+	}
 	// Decided lazily, once per tick: most ticks have nothing due, and resolving
 	// permissions reads the device link from disk.
 	let gate: FireGate | null = null;
@@ -232,7 +244,7 @@ async function processDue(
 
 	if (missed.length > 0) {
 		const next = recurring ? nextOccurrence(spec, tz, now) : null;
-		recordNotice({
+		recordScheduleNotice(log, {
 			workflowId: armed.id,
 			seriesId: armed.seriesId,
 			kind: "missed",
@@ -279,7 +291,7 @@ async function processDue(
 				result.created.push(created.id);
 			} catch (err) {
 				updateWorkflowSchedule(armed.id, { scheduleState: "broken" });
-				recordNotice({
+				recordScheduleNotice(log, {
 					workflowId: armed.id,
 					seriesId: armed.seriesId,
 					kind: "broken",
@@ -297,6 +309,99 @@ async function processDue(
 	}
 	result.fired.push(armed.id);
 	await launchInstance(armed.id, options.cfg, log, now);
+}
+
+// --- notices (D11) -----------------------------------------------------------
+
+/** How much of an error the Slack message quotes; the full text stays on the notice. */
+const NOTICE_DETAIL_CHARS = 300;
+
+/**
+ * Records a notice and sends it to Slack. The notice is the durable half (the
+ * hub's banner shows it until acknowledged); the message is fire-and-forget,
+ * so a slow or dead Slack never holds up a tick.
+ */
+function recordScheduleNotice(log: Logger, input: Parameters<typeof recordNotice>[0]): ScheduleNotice {
+	const notice = recordNotice(input);
+	void announceNotice(notice, log);
+	return notice;
+}
+
+/**
+ * Turns a recorded notice into the Slack message's inputs: the series and the
+ * occurrence(s) it is about, rendered in the schedule's timezone, and the
+ * series' next run when the notice doesn't carry one (a failed run's series
+ * has long since re-armed its next instance). Never rejects.
+ */
+async function announceNotice(notice: ScheduleNotice, log: Logger): Promise<void> {
+	try {
+		const wf = notice.workflowId ? getWorkflow(notice.workflowId) : null;
+		const tz = wf?.scheduleTimezone ?? "UTC";
+		const render = (iso: unknown): string | null =>
+			typeof iso === "string" && Number.isFinite(Date.parse(iso)) ? formatInZone(new Date(iso), tz) : null;
+		const d = notice.detail;
+		const occurrences = (
+			Array.isArray(d.occurrences) ? d.occurrences : [d.occurrence ?? wf?.scheduledFor ?? null]
+		)
+			.map(render)
+			.filter((s): s is string => s !== null);
+		let nextRunAt = d.nextRunAt;
+		if (nextRunAt === undefined && notice.seriesId) {
+			nextRunAt = listSeriesInstances(notice.seriesId).find((w) => w.scheduleState === "armed")?.nextRunAt ?? null;
+		}
+		const error = typeof d.error === "string" ? d.error : "";
+		const detail =
+			typeof d.stepDescription === "string"
+				? `step ${String(d.stepNumber)} (${d.stepDescription})${error ? `: ${error}` : ""}`
+				: error;
+		const outcome = await sendScheduleNoticeNotification({
+			kind: notice.kind,
+			seriesName: wf?.seriesName ?? wf?.name ?? "(deleted schedule)",
+			workflowName: wf?.name ?? "",
+			reason: notice.reason,
+			occurrences,
+			nextRun: render(nextRunAt),
+			recurring: wf?.schedule ? wf.schedule.kind !== "once" : false,
+			detail: detail.length > NOTICE_DETAIL_CHARS ? `${detail.slice(0, NOTICE_DETAIL_CHARS)}…` : detail,
+		});
+		log(
+			outcome.sent
+				? `scheduler: ${notice.kind} notice sent to Slack`
+				: `scheduler: ${notice.kind} notice not sent to Slack (${outcome.reason}${outcome.detail ? `: ${outcome.detail}` : ""})`,
+		);
+	} catch (err) {
+		log(`scheduler: ${notice.kind} notice not sent to Slack: ${String(err)}`, "warning");
+	}
+}
+
+/**
+ * Records (and announces) a `failed` notice for every scheduled run that has
+ * ended `failed` since the last tick. Polled rather than hooked into the
+ * engine because a workflow becomes `failed` in a dozen places (a timed-out
+ * step, a rejected review, an abort, the read-path reconcile…) and a missed
+ * site would be a silent gap; the claim makes each failure announce once, and
+ * the tick means within 30 seconds. A workflow outside any series never
+ * matches, so an interactive failure still sends nothing.
+ */
+function announceFailedRuns(now: Date, log: Logger): void {
+	for (const wf of listUnannouncedFailedRuns()) {
+		if (!claimFailedRunNotice(wf.id)) continue;
+		const tasks = listSteps(wf.id).filter((s) => s.kind === "task");
+		const index = tasks.findIndex((s) => s.status === "failed");
+		const step = index >= 0 ? tasks[index] : null;
+		recordScheduleNotice(log, {
+			workflowId: wf.id,
+			seriesId: wf.seriesId,
+			kind: "failed",
+			reason: "run_failed",
+			detail: {
+				...(step ? { stepNumber: index + 1, stepDescription: step.description, error: step.error ?? "" } : {}),
+				message: `The scheduled run "${wf.name}" failed${step ? ` at step ${index + 1} (${step.description})` : ""}.`,
+			},
+			now,
+		});
+		log(`scheduler: ${wf.name}: scheduled run failed`, "warning");
+	}
 }
 
 /** Re-arms an instance at a later occurrence, renaming it to match. */
@@ -333,7 +438,7 @@ function skip(
 			: reason === "forbidden"
 				? `the device owner lacks ${FIRE_PERMISSION}`
 				: "the hub could not confirm the owner's permissions (no recent contact with the server)";
-	recordNotice({
+	recordScheduleNotice(log, {
 		workflowId: armed.id,
 		seriesId: armed.seriesId,
 		kind: "skipped",
@@ -397,7 +502,7 @@ async function launchInstance(instanceId: string, cfg: HubConfig, log: Logger, n
 	const steps = listSteps(instanceId);
 	const taskIds = steps.filter((s) => s.kind === "task").map((s) => s.id);
 	if (taskIds.length === 0) {
-		recordNotice({
+		recordScheduleNotice(log, {
 			workflowId: instanceId,
 			seriesId: instance.seriesId,
 			kind: "failed",
@@ -415,7 +520,7 @@ async function launchInstance(instanceId: string, cfg: HubConfig, log: Logger, n
 		else await startWorkflow(instanceId, cfg, log, taskIds);
 		log(`scheduler: started ${instance.name}`);
 	} catch (err) {
-		recordNotice({
+		recordScheduleNotice(log, {
 			workflowId: instanceId,
 			seriesId: instance.seriesId,
 			kind: "failed",

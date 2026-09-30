@@ -1,11 +1,16 @@
 /**
- * Best-effort notifications. Two so far, both about a moment the user would
+ * Best-effort notifications. Three kinds, all about a moment the user would
  * otherwise only discover by having the UI open:
  *
  *  - "a step is waiting for your manual review" — sent the moment a gated step
  *    enters the `waiting` hold;
  *  - "your workflow finished" — sent the moment a workflow becomes `completed`,
- *    carrying the result it ended on.
+ *    carrying the result it ended on;
+ *  - "your schedule needs attention" — sent when a schedule notice is recorded
+ *    (runs missed, a run skipped, a broken series) and when a SCHEDULED run
+ *    ends `failed`. Nobody watches a run that starts at 03:00, so a scheduled
+ *    failure is worth a message where an interactive one is not: the operator
+ *    who started a run by hand is already looking at it.
  *
  * The engine calls them and then carries on regardless of what they answer.
  * Delivery is strictly advisory: the hold (and the completion) is the feature,
@@ -503,6 +508,90 @@ export function workflowCompletedMessage(notice: WorkflowCompletedNotice): strin
 }
 
 /**
+ * What a schedule notice is reporting. Same "nothing from the DB layer" rule as
+ * the other notices: the scheduler reads the instance and hands over strings
+ * already rendered in the schedule's own timezone — the operator set the
+ * schedule in that zone, so that is the clock the message has to speak.
+ */
+export interface ScheduleNoticeNotification {
+	kind: "missed" | "skipped" | "broken" | "failed";
+	/** The series' stored name — what the operator called the schedule. */
+	seriesName: string;
+	/** The instance's own name ("<series> · <occurrence>"), for the failed-run message. */
+	workflowName: string;
+	/** The notice's reason code (`offline`, `busy`, `forbidden`, `stale`, `clone_failed`, `run_failed`…). */
+	reason: string | null;
+	/** The occurrence(s) the notice is about, rendered. Several only for `missed`. */
+	occurrences: string[];
+	/** The series' next run, rendered, or null when there is none to name. */
+	nextRun: string | null;
+	/** Whether the series recurs. A `once` that was missed or skipped waits for the operator instead of a next run. */
+	recurring: boolean;
+	/** The cause in the words of whatever failed (an error, the failed step), already truncated. Empty when there is none. */
+	detail: string;
+}
+
+/** The reason codes the scheduler records, as the sentence a human reads after "because". */
+const SCHEDULE_REASONS: Record<string, string> = {
+	offline: "the hub was offline",
+	busy: "the previous run was still in progress",
+	forbidden: "the device owner lacks the permission to run workflows (client.workflows.execute)",
+	stale: "the hub could not confirm the owner's permissions (no recent contact with the server)",
+	clone_failed: "its next run could not be created",
+	no_steps: "the run has no steps",
+	start_failed: "the run could not start",
+	run_failed: "a step failed",
+};
+
+/**
+ * The message a schedule notice sends. Like the other two, it has to stand on
+ * its own: WHICH schedule, WHICH run(s) and WHY — plus what happens next,
+ * because that differs by kind and is the thing the operator has to act on. A
+ * recurring series carries on by itself after a miss, a skip or a failed run
+ * (D3/D8/D9), so the message names the next run; a missed `once` waits for a
+ * choice; a broken series stops altogether, and saying so is the point of the
+ * message.
+ */
+export function scheduleNoticeMessage(notice: ScheduleNoticeNotification): string {
+	const why = notice.reason ? (SCHEDULE_REASONS[notice.reason] ?? notice.reason) : "";
+	const runs = notice.occurrences.join(", ");
+	const lines: string[] = [];
+	switch (notice.kind) {
+		case "missed": {
+			const count = notice.occurrences.length === 1 ? "1 run" : `${notice.occurrences.length} runs`;
+			lines.push(`:warning: *Scheduled run missed* — schedule *${notice.seriesName}*`, "");
+			if (runs !== "") lines.push(`*Missed (${count}):* ${runs}`);
+			break;
+		}
+		case "skipped":
+			lines.push(`:fast_forward: *Scheduled run skipped* — schedule *${notice.seriesName}*`, "");
+			if (runs !== "") lines.push(`*Run:* ${runs}`);
+			break;
+		case "broken":
+			lines.push(`:rotating_light: *Schedule broken* — *${notice.seriesName}*`, "");
+			if (runs !== "") lines.push(`*Run:* ${runs} (this run still started)`);
+			break;
+		case "failed":
+			lines.push(`:x: *Scheduled run failed* — *${notice.workflowName}* (schedule *${notice.seriesName}*)`, "");
+			if (runs !== "") lines.push(`*Run:* ${runs}`);
+			break;
+	}
+	if (why !== "") lines.push(`*Why:* ${why}`);
+	if (notice.detail !== "") lines.push(`*Detail:* ${notice.detail}`);
+	lines.push("");
+	if (notice.kind === "broken") {
+		lines.push("No further runs will happen until the schedule is rescheduled in The Target Project.");
+	} else if (notice.nextRun) {
+		lines.push(`*Next run:* ${notice.nextRun}`);
+	} else if (!notice.recurring && notice.kind !== "failed") {
+		lines.push("Nothing runs until you choose *Run now*, *Reschedule* or *Dismiss* on it in The Target Project.");
+	} else {
+		lines.push("Open it in The Target Project for the details.");
+	}
+	return lines.join("\n");
+}
+
+/**
  * Walks `_impl.detect()` transports and tries `_impl.send` in order. Shared by
  * `deliver` and the Settings "Test connection" path so both stay on the same
  * client-tokens-then-MCP preference. Caller has already resolved the username
@@ -580,6 +669,16 @@ export function sendManualReviewNotification(notice: ManualReviewNotice): Promis
  */
 export function sendWorkflowCompletedNotification(notice: WorkflowCompletedNotice): Promise<NotificationResult> {
 	return deliver(() => workflowCompletedMessage(notice));
+}
+
+/**
+ * Attempts to tell the user about a schedule notice or a failed scheduled run.
+ * Same `deliver`, so the same master switch and Slack destination as the other
+ * two: a schedule is not a reason for a second opt-in. The notice itself is
+ * already recorded (and shown in the hub's banner) whatever this answers.
+ */
+export function sendScheduleNoticeNotification(notice: ScheduleNoticeNotification): Promise<NotificationResult> {
+	return deliver(() => scheduleNoticeMessage(notice));
 }
 
 /** Fixed copy for Settings → Notifications → Test connection — no workflow payload. */

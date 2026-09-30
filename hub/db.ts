@@ -699,6 +699,14 @@ export function open(): DatabaseSync {
 	addWorkflowColumn("previous_run_block", "previous_run_block TEXT");
 	addWorkflowColumn("managed_by", "managed_by TEXT NOT NULL DEFAULT 'local'");
 	addWorkflowColumn("announced_at", "announced_at TEXT");
+	// "This scheduled run's failure was announced" — the failed-run twin of
+	// `completion_notified`, reset whenever the workflow leaves `failed`. A DB
+	// that gains the column marks the runs that ALREADY failed as announced: the
+	// upgrade must not greet the operator with a Slack message per old failure.
+	if (!existingWorkflowColumns.has("failure_notified")) {
+		addWorkflowColumn("failure_notified", "failure_notified INTEGER NOT NULL DEFAULT 0");
+		database.exec("UPDATE workflows SET failure_notified = 1 WHERE status = 'failed';");
+	}
 	// The scheduler tick looks up armed instances by state on every tick, and
 	// series views list instances by series.
 	database.exec("CREATE INDEX IF NOT EXISTS idx_workflows_schedule_state ON workflows(schedule_state);");
@@ -1022,16 +1030,18 @@ export function setWorkflowStatus(id: string, status: WorkflowStatus, options: {
 	// the NEXT completion: leaving `completed` means the completion that was
 	// already announced is over, and whatever finishes later is a new one.
 	// Writing `completed` itself deliberately leaves the marker alone, so a
-	// status re-write on an already-completed workflow can't re-arm it.
+	// status re-write on an already-completed workflow can't re-arm it. The
+	// failed-run marker (`claimFailedRunNotice`) follows the same rule for `failed`.
 	const now = new Date().toISOString();
 	open()
 		.prepare(
 			`UPDATE workflows SET status = ?, updated_at = ?,
 			 completion_notified = CASE WHEN ? = 'completed' THEN completion_notified ELSE 0 END,
+			 failure_notified = CASE WHEN ? = 'failed' THEN failure_notified ELSE 0 END,
 			 status_manual = ?, status_manual_at = ?
 			 WHERE id = ?`,
 		)
-		.run(status, now, status, manual ? 1 : 0, manual ? now : null, id);
+		.run(status, now, status, status, manual ? 1 : 0, manual ? now : null, id);
 }
 
 /**
@@ -1334,6 +1344,38 @@ export function claimWorkflowCompletionNotice(id: string): boolean {
 	return (
 		open()
 			.prepare("UPDATE workflows SET completion_notified = 1 WHERE id = ? AND completion_notified = 0")
+			.run(id).changes > 0
+	);
+}
+
+/**
+ * Scheduled instances that have failed and whose failure hasn't been announced
+ * yet (D11). Only FIRED instances of a series: an armed one hasn't run, and a
+ * workflow outside any series keeps today's rule of never announcing a failure.
+ */
+export function listUnannouncedFailedRuns(): Workflow[] {
+	const rows = open()
+		.prepare(
+			`SELECT * FROM workflows
+			 WHERE status = 'failed' AND failure_notified = 0 AND series_id IS NOT NULL
+			   AND schedule_state IN ('fired', 'broken')
+			 ORDER BY updated_at ASC, rowid ASC`,
+		)
+		.all() as Record<string, unknown>[];
+	return rows.map(rowToWorkflow);
+}
+
+/**
+ * Claims the right to announce a scheduled run's failure — the same once-only
+ * conditional UPDATE as `claimWorkflowCompletionNotice`, re-checking `failed`
+ * so a run restarted between the read and the claim isn't announced. Reset by
+ * `setWorkflowStatus` when the workflow leaves `failed`, so a later failure of
+ * the same instance (after a restart) is a new one.
+ */
+export function claimFailedRunNotice(id: string): boolean {
+	return (
+		open()
+			.prepare("UPDATE workflows SET failure_notified = 1 WHERE id = ? AND failure_notified = 0 AND status = 'failed'")
 			.run(id).changes > 0
 	);
 }
