@@ -287,8 +287,12 @@ occurrence.
   still starts, the series is marked `broken`, and a critical notice is
   recorded.
 - **Notices** (missed, skipped, broken, failed) are stored in the database and
-  stay until acknowledged. The banner and Slack delivery arrive with the
-  scheduling UI.
+  stay until acknowledged. Each one is also sent as a Slack DM through the
+  existing notification settings (the same opt-in and destination as the
+  "workflow finished" message). A scheduled run that ends `failed` is recorded
+  as a `failed` notice and sent within one scheduler tick, once per failure. A
+  failed workflow that isn't a scheduled run still sends nothing; only
+  completions notify.
 - **Restrictions.** Only a draft, completed or failed workflow can be
   scheduled. A workflow that continues an adopted conversation can't be
   scheduled, since every run is a clone and a clone can't continue someone
@@ -316,6 +320,48 @@ workflow DTO carries `schedule` (series id and name, spec, timezone,
 while the instance is armed. MCP: `get_schedule`, `set_schedule`,
 `cancel_schedule`, `preview_schedule`, `list_schedule_notices`,
 `acknowledge_schedule_notice`.
+
+#### Scheduling from the UI
+
+- **Schedule / Edit schedule** in a workflow's header opens the schedule dialog.
+  It covers once (date + time), daily (time) or weekly (weekday chips + time),
+  and a searchable timezone list that defaults to the browser's zone. It also
+  has the **Include a reference to the previous run** toggle (on by default)
+  and a live preview of the next 3 runs, computed by the hub
+  (`/api/schedule/preview`), so DST rules are the scheduler's own.
+  - It warns when a step has manual review, since a scheduled run stops there
+    until someone presses Continue.
+  - The same dialog changes the schedule or cancels it (**Cancel schedule**).
+  - A server-managed series opens read-only.
+  - A workflow on an adopted conversation can't be scheduled, and the button
+    says why.
+- **Badges.** Cards and the detail header show `Scheduled · next in 14h` on the
+  armed instance (absolute time and zone in the tooltip), and
+  `Run of <series> · <occurrence>` on a past run. A missed run or a broken
+  series gets an orange warning badge.
+- **Run gate.** On the armed instance Start and a step's Retry are disabled with
+  "Scheduled — runs automatically". Editing stays possible.
+- **Filters.** The rail and the All workflows page have
+  **All / Scheduled / Scheduled runs**. **Scheduled** shows each series once,
+  by its armed instance; **Scheduled runs** shows past runs. The filter
+  combines with Archived, status and search.
+- **Series panel.** The detail pane lists every instance of the series, newest
+  first, marking the next run and the one that's open. Each row shows its
+  status and links to that instance, archived runs included.
+- **Notices banner.** A banner under the header lists every unacknowledged
+  notice with **Acknowledge**. For a **missed once** the banner and the
+  workflow's detail pane both offer **Run now**, **Reschedule** (the schedule
+  dialog, saved through `/schedule/reschedule`) and **Dismiss**. Scheduling and
+  these three actions need `client.workflows.execute` **and**
+  `client.workflows.manage`.
+
+![The schedule dialog: daily at 09:00 in Europe/Madrid, with the next three runs previewed](web-docs/ui-schedule-modal.png)
+
+![A scheduled workflow: the "Scheduled · next in 14h" badge on its card and header, with Start disabled](web-docs/ui-scheduled-card.png)
+
+![The Scheduled filter, leaving one card per series](web-docs/ui-scheduled-filter.png)
+
+![The notices banner for a missed once, with Run now, Reschedule, Dismiss and Acknowledge](web-docs/ui-schedule-notice.png)
 
 `ui:dev` gives hot reload while proxying API calls to a hub started separately
 with `npm start`. Point it at a hub on another port with `TARGET_HUB_ORIGIN`.
