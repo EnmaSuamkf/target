@@ -1,0 +1,146 @@
+.form {
+	display: grid;
+	gap: var(--space-4);
+}
+
+/* Once / Daily / Weekly: one choice, so one segmented control — the same shape
+   as the steps' List / Canvas toggle. */
+.kinds {
+	display: inline-flex;
+	justify-self: start;
+	padding: 2px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-full);
+	background: var(--surface-sunken);
+}
+
+.kindBtn {
+	padding: var(--space-1) var(--space-4);
+	border: none;
+	border-radius: var(--radius-full);
+	background: transparent;
+	color: var(--text-muted);
+	font-family: inherit;
+	font-size: var(--text-sm);
+	font-weight: 600;
+	cursor: pointer;
+	transition:
+		background var(--transition),
+		color var(--transition);
+}
+
+.kindBtn:hover:not(:disabled) {
+	color: var(--text);
+}
+
+.kindBtn:disabled {
+	cursor: default;
+}
+
+.kindBtnOn {
+	background: var(--surface);
+	color: var(--accent-700);
+	box-shadow: var(--shadow-xs);
+}
+
+/* Date and time are one moment in two inputs, so they share a line. */
+.grid {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: var(--space-3);
+}
+
+.days {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--space-1);
+}
+
+.day {
+	min-width: 3rem;
+	padding: var(--space-1) var(--space-2);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-full);
+	background: var(--surface);
+	color: var(--text-muted);
+	font-family: inherit;
+	font-size: var(--text-xs);
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.day:disabled {
+	cursor: default;
+}
+
+.dayOn {
+	border-color: var(--accent-500);
+	background: var(--accent-50);
+	color: var(--accent-700);
+}
+
+/* The timezone picker: a search box filtering a short list, because the full
+   IANA list is ~400 entries and a plain select of that length is unusable. */
+.zone {
+	display: grid;
+	gap: var(--space-2);
+}
+
+.zoneList {
+	min-height: 7.5rem;
+}
+
+/* Same shape as the manual-review toggle in AddStepModal: explanation on the
+   left, switch on the right. */
+.toggleRow {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-4);
+}
+
+.toggleText {
+	display: grid;
+	gap: var(--space-1);
+	min-width: 0;
+}
+
+.preview {
+	display: grid;
+	gap: var(--space-1);
+	padding: var(--space-3);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--surface-sunken);
+}
+
+.previewList {
+	margin: 0;
+	padding-left: var(--space-5);
+	font-variant-numeric: tabular-nums;
+}
+
+.summary {
+	margin: 0;
+	font-weight: 600;
+}
+
+/* Cancel schedule is destructive and sits apart from Close / Save. */
+.footerSpacer {
+	flex: 1;
+}
+
+@media (max-width: 768px) {
+	.form {
+		gap: var(--space-8);
+	}
+
+	.grid {
+		grid-template-columns: 1fr;
+	}
+
+	.toggleRow {
+		align-items: flex-start;
+		gap: var(--space-3);
+	}
+}

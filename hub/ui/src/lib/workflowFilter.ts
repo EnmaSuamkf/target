@@ -1,4 +1,5 @@
 import type { Workflow, WorkflowOrigin, WorkflowStatus } from "../api/types.ts";
+import { filterBySchedule, type ScheduleFilter } from "./scheduleView.ts";
 
 /**
  * Narrowing and ordering for the workflow surfaces (the rail and the "All
@@ -44,7 +45,9 @@ export function scopeByArchive<W extends Pick<Workflow, "archivedAt">>(workflows
 /**
  * Narrows and orders the workflows the same way in every surface, so a search
  * typed in any one ranks identically. The archive scope applies first: with
- * the default `active`, archived workflows never appear.
+ * the default `active`, archived workflows never appear. The schedule filter
+ * (Scheduled / Scheduled runs) then narrows within that scope, so "Archived" +
+ * "Scheduled runs" is the archived runs of every series.
  */
 export function filterAndSort(
 	workflows: Workflow[],
@@ -52,9 +55,10 @@ export function filterAndSort(
 	filter: StatusFilter,
 	originFilter: OriginFilter,
 	archive: ArchiveFilter = "active",
+	scheduleFilter: ScheduleFilter = "all",
 ): Workflow[] {
 	const q = query.trim().toLowerCase();
-	return scopeByArchive(workflows, archive)
+	return filterBySchedule(scopeByArchive(workflows, archive), scheduleFilter)
 		.filter((w) => (filter === "all" ? true : w.status === filter))
 		.filter((w) => (originFilter === "all" ? true : w.origin === originFilter))
 		.filter((w) => (q === "" ? true : w.name.toLowerCase().includes(q) || w.agentName.toLowerCase().includes(q)))

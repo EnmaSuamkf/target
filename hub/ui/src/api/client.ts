@@ -46,6 +46,10 @@ import type {
 	OverridableStepStatus,
 	OverridableWorkflowStatus,
 	Runner,
+	ScheduleInput,
+	ScheduleNotice,
+	SchedulePreview,
+	ScheduleSpec,
 	SessionInfo,
 	ShortcutSettings,
 	ShortcutSettingsInput,
@@ -70,6 +74,7 @@ import type {
 	TemplateBundle,
 	TemplateInput,
 	Workflow,
+	WorkflowScheduleDetail,
 } from "./types.ts";
 
 const TOKEN_KEY = "targetAdminToken";
@@ -322,6 +327,83 @@ export async function unarchiveWorkflow(id: string): Promise<Workflow> {
 		admin: true,
 	});
 	return data.workflow;
+}
+
+// --- schedules ---
+
+/** The workflow's schedule series (null when never scheduled) and the series' instances. */
+export async function getWorkflowSchedule(id: string): Promise<WorkflowScheduleDetail> {
+	return request<WorkflowScheduleDetail>(`/api/workflows/${id}/schedule`);
+}
+
+/**
+ * Schedules a workflow, or changes the schedule of its armed instance. Needs
+ * client.workflows.execute AND client.workflows.manage. 400 `invalid_schedule`
+ * carries `fields` in the error payload; 409 `server_managed` for a series the
+ * server owns.
+ */
+export async function setWorkflowSchedule(id: string, input: ScheduleInput): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/schedule`, {
+		method: "PUT",
+		admin: true,
+		body: json(input),
+	});
+	return data.workflow;
+}
+
+/** Cancels the schedule: the armed instance becomes a normal workflow again. */
+export async function cancelWorkflowSchedule(id: string): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/schedule`, {
+		method: "DELETE",
+		admin: true,
+	});
+	return data.workflow;
+}
+
+/**
+ * A missed `once` (the hub was offline at its time) waits for one of three
+ * choices. Run now starts it — the one manual run an unfired scheduled instance
+ * allows; Reschedule re-arms it at a new time; Dismiss gives up on it and it
+ * becomes a normal workflow. Each answers 409 `not_missed` when it no longer is.
+ */
+export async function runMissedScheduleNow(id: string): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/schedule/run-now`, { method: "POST", admin: true });
+	return data.workflow;
+}
+
+export async function rescheduleMissedSchedule(id: string, input: ScheduleInput): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/schedule/reschedule`, {
+		method: "POST",
+		admin: true,
+		body: json(input),
+	});
+	return data.workflow;
+}
+
+export async function dismissMissedSchedule(id: string): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/schedule/dismiss`, { method: "POST", admin: true });
+	return data.workflow;
+}
+
+/** The schedule notices nobody has acknowledged yet, newest first. */
+export async function listScheduleNotices(): Promise<ScheduleNotice[]> {
+	const data = await request<{ notices: ScheduleNotice[] }>("/api/schedule-notices?unacknowledged=1");
+	return data.notices;
+}
+
+/** Acknowledges a notice: it leaves the banner. Changes nothing about any workflow. */
+export async function acknowledgeScheduleNotice(id: string): Promise<ScheduleNotice> {
+	const data = await request<{ notice: ScheduleNotice }>(`/api/schedule-notices/${id}/ack`, { method: "POST", admin: true });
+	return data.notice;
+}
+
+/** The next (up to) three runs a schedule would produce — nothing is saved. */
+export async function previewSchedule(spec: ScheduleSpec, timezone: string): Promise<SchedulePreview> {
+	return request<SchedulePreview>("/api/schedule/preview", {
+		method: "POST",
+		admin: true,
+		body: json({ spec, timezone }),
+	});
 }
 
 /**

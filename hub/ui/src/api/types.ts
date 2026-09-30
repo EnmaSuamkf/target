@@ -249,8 +249,107 @@ export interface Workflow {
 	 * run with 409 `archived` until unarchived.
 	 */
 	archivedAt: string | null;
+	/**
+	 * The schedule series this workflow belongs to, or null when it was never
+	 * scheduled. Absent on a hub that predates scheduling, hence optional.
+	 */
+	schedule?: WorkflowSchedule | null;
+	/** When it runs next — set only on a series' ARMED instance. */
+	nextRunAt?: string | null;
 	createdAt: string;
 	updatedAt: string;
+}
+
+/**
+ * When a schedule runs, in its own timezone's wall clock (the hub's
+ * hub/schedule.ts `ScheduleSpec`). `at` is local "YYYY-MM-DDTHH:mm", `time`
+ * local "HH:mm", `days` 0 = Sunday … 6 = Saturday.
+ */
+export type ScheduleSpec =
+	| { kind: "once"; at: string }
+	| { kind: "daily"; time: string }
+	| { kind: "weekly"; days: number[]; time: string };
+
+export type ScheduleKind = ScheduleSpec["kind"];
+
+/**
+ * Where an instance stands in its series: `armed` is the next execution (it
+ * can't be run by hand), `fired` a past run, `missed` a `once` the hub was
+ * offline for (Run now / Reschedule / Dismiss), `broken` a series whose next
+ * run couldn't be created, `cancelled` a former schedule that is a normal
+ * workflow again.
+ */
+export type ScheduleState = "armed" | "fired" | "missed" | "broken" | "cancelled";
+
+/** The `schedule` object on a workflow (GET /api/workflows/:id and the list). */
+export interface WorkflowSchedule {
+	seriesId: string;
+	seriesName: string | null;
+	spec: ScheduleSpec | null;
+	timezone: string | null;
+	/** Whether each run gets a reference to the previous run's results. */
+	includePrevious: boolean;
+	state: ScheduleState | null;
+	/** The occurrence this instance runs (or ran) for. */
+	scheduledFor: string | null;
+	nextRunAt: string | null;
+	previousInstanceId: string | null;
+	previousRunBlock: string | null;
+	/** `server`: created from the server and managed there only — read-only here (409 server_managed). */
+	managedBy: "local" | "server";
+	announcedAt: string | null;
+}
+
+/** Body of PUT /api/workflows/:id/schedule (and of a missed once's reschedule). */
+export interface ScheduleInput {
+	spec: ScheduleSpec;
+	timezone: string;
+	includePrevious: boolean;
+}
+
+/** One field error of a 400 `invalid_schedule`. */
+export interface ScheduleFieldError {
+	field: "spec" | "kind" | "at" | "time" | "days" | "timezone" | "includePrevious";
+	message: string;
+}
+
+/** POST /api/schedule/preview — up to three next runs, as ISO and as the zone's wall clock. */
+export interface SchedulePreview {
+	timezone: string;
+	occurrences: { at: string; local: string }[];
+}
+
+/** What a schedule notice reports (the hub's `SCHEDULE_NOTICE_KINDS`). */
+export type ScheduleNoticeKind = "missed" | "skipped" | "broken" | "failed";
+
+/**
+ * GET /api/schedule-notices — something about a scheduled run the operator
+ * should know, kept until acknowledged: runs missed while the hub was offline,
+ * a run skipped (`reason` busy / forbidden / stale), a broken series, a failed
+ * scheduled run. `detail.message` is the hub's own sentence for it.
+ */
+export interface ScheduleNotice {
+	id: string;
+	workflowId: string | null;
+	seriesId: string | null;
+	kind: ScheduleNoticeKind;
+	reason: string | null;
+	detail: { message?: string; critical?: boolean; [key: string]: unknown };
+	createdAt: string;
+	acknowledgedAt: string | null;
+}
+
+/** GET /api/workflows/:id/schedule — the series plus every instance of it. */
+export interface WorkflowScheduleDetail {
+	schedule: WorkflowSchedule | null;
+	nextRunAt: string | null;
+	instances: {
+		id: string;
+		name: string;
+		status: WorkflowStatus;
+		scheduleState: ScheduleState | null;
+		scheduledFor: string | null;
+	}[];
 }
 
 /**

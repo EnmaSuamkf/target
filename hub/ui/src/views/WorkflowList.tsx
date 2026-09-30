@@ -1,10 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Workflow, WorkflowOrigin, WorkflowStatus } from "../api/types.ts";
-import { ArchivedBadge, Badge, OriginBadge } from "../components/Badge.tsx";
+import { ArchivedBadge, Badge, OriginBadge, ScheduleBadge } from "../components/Badge.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { ProgressBar } from "../components/Progress.tsx";
 import { usePermissions } from "../hooks/usePermissions.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
+import {
+	filterBySchedule,
+	presentScheduleFilters,
+	SCHEDULE_FILTER_LABELS,
+	type ScheduleFilter,
+} from "../lib/scheduleView.ts";
 import {
 	type ArchiveFilter,
 	emptyListMessage,
@@ -59,15 +65,17 @@ function useWorkflowFilters(workflows: Workflow[]) {
 	const [filter, setFilter] = useState<Filter>("all");
 	const [originFilter, setOriginFilter] = useState<OriginFilter>("all");
 	const [archive, setArchiveState] = useState<ArchiveFilter>("active");
+	const [scheduleFilter, setScheduleFilter] = useState<ScheduleFilter>("all");
 
 	const scoped = useMemo(() => scopeByArchive(workflows, archive), [workflows, archive]);
 	const archivedCount = useMemo(() => workflows.filter(isArchived).length, [workflows]);
 	const visible = useMemo(
-		() => filterAndSort(workflows, query, filter, originFilter, archive),
-		[workflows, query, filter, originFilter, archive],
+		() => filterBySchedule(filterAndSort(workflows, query, filter, originFilter, archive), scheduleFilter),
+		[workflows, query, filter, originFilter, archive, scheduleFilter],
 	);
 	const statuses = useMemo(() => presentStatuses(scoped), [scoped]);
 	const origins = useMemo(() => presentOrigins(scoped), [scoped]);
+	const scheduleFilters = useMemo(() => presentScheduleFilters(scoped), [scoped]);
 
 	// Switching sides of the archive changes which statuses exist (archived work
 	// is only ever completed/failed), so a status chip picked on the other side
@@ -84,6 +92,9 @@ function useWorkflowFilters(workflows: Workflow[]) {
 		setFilter,
 		originFilter,
 		setOriginFilter,
+		scheduleFilter,
+		setScheduleFilter,
+		scheduleFilters,
 		archive,
 		setArchive,
 		scoped,
@@ -273,6 +284,13 @@ function WorkflowCard({
 				</span>
 			</span>
 
+			{/* Its own line, not beside the status: "Scheduled · next in 14h" or
+			    "Run of <series> · <occurrence>" is long enough that sharing the
+			    title row squeezed the name down to a few letters. */}
+			<span className={styles.cardSchedule}>
+				<ScheduleBadge workflow={workflow} />
+			</span>
+
 			<ProgressBar progress={workflow.progress} running={workflow.status === "running"} />
 
 			<span className={styles.cardMeta}>
@@ -310,7 +328,7 @@ function WorkflowCard({
 	);
 }
 
-/** The shared search + archive/origin/status-filter toolbar, used by the rail and the page. */
+/** The shared search + archive/origin/schedule/status-filter toolbar, used by the rail and the page. */
 function FilterToolbar({
 	query,
 	setQuery,
@@ -318,6 +336,9 @@ function FilterToolbar({
 	setFilter,
 	originFilter,
 	setOriginFilter,
+	scheduleFilter,
+	setScheduleFilter,
+	scheduleFilters,
 	archive,
 	setArchive,
 	archivedCount,
@@ -331,6 +352,10 @@ function FilterToolbar({
 	setFilter: (f: Filter) => void;
 	originFilter: OriginFilter;
 	setOriginFilter: (f: OriginFilter) => void;
+	scheduleFilter: ScheduleFilter;
+	setScheduleFilter: (f: ScheduleFilter) => void;
+	/** Which schedule filters would match something on this side of the archive. */
+	scheduleFilters: Exclude<ScheduleFilter, "all">[];
 	archive: ArchiveFilter;
 	setArchive: (a: ArchiveFilter) => void;
 	/** How many archived workflows exist — the Archived toggle only appears when there are some (or it's on). */
@@ -407,6 +432,40 @@ function FilterToolbar({
 				</div>
 			)}
 
+			{/* Same pattern as origin. Offered once any schedule exists on this side
+			    of the archive — or while one is picked, so the way back to "All"
+			    never disappears (e.g. after cancelling the last schedule). */}
+			{(scheduleFilters.length > 0 || scheduleFilter !== "all") && (
+				<div className={styles.filters} role="group" aria-label="Filter by schedule" data-schedule-filter>
+					<button
+						type="button"
+						className={`${styles.filter} ${scheduleFilter === "all" ? styles.filterActive : ""}`}
+						onClick={() => setScheduleFilter("all")}
+						aria-pressed={scheduleFilter === "all"}
+					>
+						All
+					</button>
+					{(["scheduled", "runs"] as const)
+						.filter((f) => scheduleFilters.includes(f) || scheduleFilter === f)
+						.map((f) => (
+							<button
+								key={f}
+								type="button"
+								className={`${styles.filter} ${scheduleFilter === f ? styles.filterActive : ""}`}
+								onClick={() => setScheduleFilter(f)}
+								aria-pressed={scheduleFilter === f}
+								title={
+									f === "scheduled"
+										? "Each schedule once, by its next run"
+										: "Runs that schedules have already executed"
+								}
+							>
+								{SCHEDULE_FILTER_LABELS[f]}
+							</button>
+						))}
+				</div>
+			)}
+
 			{statuses.length > 1 && (
 				<div className={styles.filters} role="group" aria-label="Filter by status">
 					<button
@@ -474,7 +533,7 @@ export function AllWorkflowsPage({
 	onBack: () => void;
 }): React.JSX.Element {
 	const filters = useWorkflowFilters(workflows);
-	const { query, filter, originFilter, archive, scoped, visible } = filters;
+	const { query, filter, originFilter, archive, scheduleFilter, scoped, visible } = filters;
 	const [page, setPage] = useState(1);
 	const empty = emptyListMessage(workflows.length, scoped.length, archive);
 
@@ -492,7 +551,7 @@ export function AllWorkflowsPage({
 	// search you've just retyped is never the page you want.
 	useEffect(() => {
 		setPage(1);
-	}, [query, filter, originFilter, archive]);
+	}, [query, filter, originFilter, archive, scheduleFilter]);
 
 	return (
 		<section className={styles.page} aria-label="All workflows">
