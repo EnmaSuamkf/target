@@ -21,6 +21,7 @@ import {
 	createAwbHook,
 	deleteAwbHook,
 	abortAwbRun,
+	ensureHookMounts,
 	hookRuntime,
 	PUBLISHABLE_RUNNERS,
 	type HookOptions,
@@ -99,7 +100,13 @@ import {
 	type Workflow,
 	type WorkflowStatus,
 } from "./db.ts";
-import { nextOccurrence, validateSchedule, type ScheduleFieldError, type ScheduleSpec } from "./schedule.ts";
+import {
+	formatInZone,
+	nextOccurrence,
+	validateSchedule,
+	type ScheduleFieldError,
+	type ScheduleSpec,
+} from "./schedule.ts";
 import { sendManualReviewNotification, sendWorkflowCompletedNotification } from "./notifier.ts";
 import { forgetProbe, humanizeSeconds, probeStepProgress, pruneProbes, stepActivity } from "./progress.ts";
 import { dispatchStep, type Logger } from "./runner.ts";
@@ -717,6 +724,95 @@ export function cancelSchedule(workflowId: string, options: ScheduleActor = {}):
 	const updated = updateWorkflowSchedule(workflowId, { scheduleState: "cancelled", nextRunAt: null });
 	if (!updated) throw new WorkflowError("workflow disappeared");
 	writeStatusMd(workflowId);
+	return updated;
+}
+
+/**
+ * Creates the series' next instance from the one that is firing (D3/D4): a
+ * `cloneWorkflow` of it — so every edit the operator made to the armed
+ * instance (steps, context, TCP/RCI, mounts) carries into future runs — armed
+ * for `nextRunAt`.
+ *
+ * The name is always rendered from the stored `series_name`, never from the
+ * source's own name, which is itself "<series> · <date>": deriving from it
+ * would chain a date onto every generation. The previous-run block is NOT
+ * copied: it describes the run before the SOURCE, and the new instance gets its
+ * own one when it fires (`attachPreviousRun`).
+ */
+export function cloneScheduledInstance(armedId: string, nextRunAt: Date | string): Workflow {
+	const source = getWorkflow(armedId);
+	if (!source) throw new WorkflowError("unknown workflow");
+	if (!source.seriesId || !source.schedule || !source.scheduleTimezone) {
+		throw new WorkflowError("workflow is not an instance of a schedule");
+	}
+	const when = typeof nextRunAt === "string" ? new Date(nextRunAt) : nextRunAt;
+	if (Number.isNaN(when.getTime())) throw new WorkflowError("invalid next run time");
+	const seriesName = source.seriesName ?? source.name;
+	const clone = cloneWorkflow(armedId, { name: `${seriesName} · ${formatInZone(when, source.scheduleTimezone)}` });
+	const instance = updateWorkflowSchedule(clone.id, {
+		seriesId: source.seriesId,
+		seriesName,
+		schedule: source.schedule,
+		scheduleTimezone: source.scheduleTimezone,
+		includePrevious: source.includePrevious,
+		managedBy: source.managedBy,
+		scheduledFor: when.toISOString(),
+		nextRunAt: when.toISOString(),
+		scheduleState: "armed",
+		previousInstanceId: armedId,
+		previousRunBlock: null,
+	});
+	if (!instance) throw new WorkflowError("workflow disappeared");
+	writeStatusMd(instance.id);
+	return instance;
+}
+
+/**
+ * The previous-run reference a scheduled run is given (D5): which instance ran
+ * before it, how that run ended, and where its step results are on disk — the
+ * same `<NN>-<slug>.md` files that instance's own agent was pointed at, so a
+ * run can compare against, or continue from, what the last one produced.
+ */
+export function buildPreviousRunBlock(previous: Workflow): string {
+	return [
+		"Previous run of this schedule:",
+		`- Workflow: ${previous.name} (id ${previous.id})`,
+		`- Final status: ${previous.status}`,
+		`- Step results: ${stepResultsDir(previous.agentName)}`,
+		"You may read the files in that directory (one <NN>-<slug>.md per step, in order) to see what the previous run produced. Treat them as read-only reference: do not modify them.",
+	].join("\n");
+}
+
+/**
+ * Written when an instance FIRES, not when it is cloned (D5): the previous
+ * instance's outcome is only known once it has finished, and at clone time the
+ * source is the run that is just starting. Stores the block apart from the
+ * conversation context and refreshes the context step so it's delivered with
+ * the background. For a docker sandbox the previous results directory is
+ * added to this instance's hook — only when it exists, because docker would
+ * otherwise create the bind-mount source as a root-owned directory the hub
+ * could no longer write into.
+ *
+ * Clears a stale block when there is nothing to reference (no previous
+ * instance, or the series has the toggle off). Returns the instance as it now
+ * reads.
+ */
+export function attachPreviousRun(instanceId: string): Workflow {
+	const instance = getWorkflow(instanceId);
+	if (!instance) throw new WorkflowError("unknown workflow");
+	const previous =
+		instance.includePrevious && instance.previousInstanceId ? getWorkflow(instance.previousInstanceId) : null;
+	const block = previous ? buildPreviousRunBlock(previous) : null;
+	if (block !== instance.previousRunBlock) {
+		updateWorkflowSchedule(instanceId, { previousRunBlock: block }, { touch: false });
+	}
+	if (previous) {
+		const dir = stepResultsDir(previous.agentName);
+		if (fs.existsSync(dir)) ensureHookMounts(instance.hookUrl, [dir]);
+	}
+	reconcileContextStep(instanceId);
+	const updated = getWorkflow(instanceId);
+	if (!updated) throw new WorkflowError("workflow disappeared");
 	return updated;
 }
 
@@ -1466,13 +1562,21 @@ function chainSession(workflowId: string, sessionId: string | undefined | null):
 const CONTEXT_STEP_IMAGES_ONLY_DESCRIPTION = "Conversation context (attached image(s))";
 
 function contextStepDescription(workflow: Workflow): string {
-	return workflow.conversationContext?.trim() || CONTEXT_STEP_IMAGES_ONLY_DESCRIPTION;
+	const text = workflow.conversationContext?.trim() || "";
+	const previous = workflow.previousRunBlock?.trim() || "";
+	// A scheduled run's previous-run block rides the context step (see
+	// `attachPreviousRun`); the label shows it so the operator can see what the
+	// agent was told about the previous run.
+	if (previous) return text ? `${text}\n\n${previous}` : previous;
+	return text || CONTEXT_STEP_IMAGES_ONLY_DESCRIPTION;
 }
 
-/** Whether the workflow has any background at all to deliver — text or images. */
+/** Whether the workflow has any background at all to deliver — text, images or
+ * a scheduled run's previous-run block. */
 function workflowHasContext(workflow: Workflow): boolean {
 	return (
 		!!workflow.conversationContext?.trim() ||
+		!!workflow.previousRunBlock?.trim() ||
 		listFieldAttachments(workflow.id, null, "context").length > 0
 	);
 }

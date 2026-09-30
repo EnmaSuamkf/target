@@ -156,11 +156,25 @@ function criteriaNote(criteria: string | null | undefined, images: Attachment[] 
  * attaching a spec screenshot and writing nothing is a legitimate way to use
  * this, and returning "" there would throw the attachment away.
  */
-function contextPreamble(context: string | null | undefined, images: Attachment[] = [], afterCompaction = false): string {
+function contextPreamble(
+	context: string | null | undefined,
+	images: Attachment[] = [],
+	afterCompaction = false,
+	previousRunBlock: string | null = null,
+): string {
 	const trimmed = (context ?? "").trim();
 	const section = attachmentSection("attached to this workflow's conversation context", images);
-	if (!trimmed && !section) return "";
-	const body = trimmed || "(No background text — the background for this workflow is in the attached image(s) below.)";
+	// A scheduled run's reference to the previous run of its series (see
+	// `buildPreviousRunBlock` in workflow.ts). Delivered WITH the background but
+	// never stored IN it: the next instance is cloned from this one's
+	// conversation context, and a block written into that text would be copied
+	// forward and pile up one more stale "previous run" per generation.
+	const previous = previousRunBlock?.trim() ?? "";
+	if (!trimmed && !section && !previous) return "";
+	const text =
+		trimmed ||
+		(section ? "(No background text — the background for this workflow is in the attached image(s) below.)" : "");
+	const body = [text, previous].filter(Boolean).join("\n\n");
 	// A re-injection has to say it IS one. The agent may still be able to see a
 	// summary of the original preamble in its compacted history, and an
 	// unexplained second copy of the same background reads as either a mistake or
@@ -292,6 +306,7 @@ export function composeStepInput(
 			workflow.conversationContext,
 			listFieldAttachments(workflow.id, null, "context"),
 			options.afterCompaction ?? false,
+			workflow.previousRunBlock,
 		);
 		return `${preamble}${CONTEXT_STEP_SUFFIX}`;
 	}
@@ -305,6 +320,7 @@ export function composeStepInput(
 				workflow.conversationContext,
 				listFieldAttachments(workflow.id, null, "context"),
 				options.afterCompaction ?? false,
+				workflow.previousRunBlock,
 			)
 		: "";
 	const tcpBlock = options.injectTcp ? tcpCatalogPreamble(workflow.id, options.tcpExecuteUrl) : "";
