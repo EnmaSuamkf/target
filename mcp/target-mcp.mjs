@@ -14,6 +14,7 @@ const RUNNERS = ["claude", "free-code", "cursor"];
 const SANDBOXES = ["host", "docker"];
 const PERMISSION_MODES = ["acceptEdits", "auto", "manual", "dontAsk", "plan", "bypassPermissions"];
 const WORKFLOW_STATUSES = ["draft", "paused", "completed", "failed"];
+const ARCHIVED_FILTERS = ["exclude", "include", "only"];
 const STEP_STATUSES = ["pending", "done", "failed"];
 
 function send(msg) {
@@ -190,9 +191,23 @@ const TOOLS = [
 	},
 	{
 		name: "list_workflows",
-		description: "List all workflows with progress",
-		inputSchema: { type: "object", properties: {}, additionalProperties: false },
-		run: async () => hubJson("GET", "/api/workflows"),
+		description: "List workflows with progress (archived ones are hidden unless archived=include|only)",
+		inputSchema: {
+			type: "object",
+			properties: {
+				archived: {
+					type: "string",
+					enum: ARCHIVED_FILTERS,
+					description: "exclude (default) hides archived workflows, include adds them, only returns just them",
+				},
+			},
+			additionalProperties: false,
+		},
+		run: async (a) => {
+			const archived = pickString(a, "archived");
+			const q = archived ? `?archived=${enc(archived)}` : "";
+			return hubJson("GET", `/api/workflows${q}`);
+		},
 	},
 	{
 		name: "get_workflow",
@@ -268,6 +283,29 @@ const TOOLS = [
 			additionalProperties: false,
 		},
 		run: async (a) => hubJson("DELETE", `/api/workflows/${enc(a.workflowId)}`),
+	},
+	{
+		name: "archive_workflow",
+		description:
+			"Archive a completed or failed workflow (hidden from the default list; start/resume/restart/step run are refused until unarchived)",
+		inputSchema: {
+			type: "object",
+			properties: { workflowId: { type: "string" } },
+			required: ["workflowId"],
+			additionalProperties: false,
+		},
+		run: async (a) => hubJson("POST", `/api/workflows/${enc(a.workflowId)}/archive`),
+	},
+	{
+		name: "unarchive_workflow",
+		description: "Unarchive a workflow so it shows in the default list and can run again",
+		inputSchema: {
+			type: "object",
+			properties: { workflowId: { type: "string" } },
+			required: ["workflowId"],
+			additionalProperties: false,
+		},
+		run: async (a) => hubJson("POST", `/api/workflows/${enc(a.workflowId)}/unarchive`),
 	},
 	{
 		name: "rename_workflow",
