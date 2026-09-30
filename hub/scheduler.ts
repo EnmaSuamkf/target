@@ -429,10 +429,22 @@ async function launchInstance(instanceId: string, cfg: HubConfig, log: Logger, n
 
 // --- a missed `once`: the operator's three choices (D8) ----------------------
 
+/**
+ * Thrown by Run now / Reschedule / Dismiss on anything but a missed `once` —
+ * and by a second Run now that lost the claim. A `WorkflowError` subclass so
+ * the HTTP layer can map it to 409 `not_missed` by type.
+ */
+export class ScheduleNotMissedError extends WorkflowError {
+	constructor(message = "this scheduled run was not missed") {
+		super(message);
+		this.name = "ScheduleNotMissedError";
+	}
+}
+
 function requireMissed(workflowId: string): Workflow {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
-	if (workflow.scheduleState !== "missed") throw new WorkflowError("this scheduled run was not missed");
+	if (workflow.scheduleState !== "missed") throw new ScheduleNotMissedError();
 	return workflow;
 }
 
@@ -450,7 +462,7 @@ export async function runMissedNow(
 	const workflow = requireMissed(workflowId);
 	// Same refusal as every other local edit of a server-managed series (D15).
 	if (workflow.managedBy === "server" && options.actor !== "server") throw new ScheduleServerManagedError();
-	if (!claimMissedRun(workflowId)) throw new WorkflowError("this scheduled run was already started");
+	if (!claimMissedRun(workflowId)) throw new ScheduleNotMissedError("this scheduled run was already started");
 	await launchInstance(workflowId, cfg, log, options.now ?? new Date());
 	const updated = getWorkflow(workflowId);
 	if (!updated) throw new WorkflowError("workflow disappeared");

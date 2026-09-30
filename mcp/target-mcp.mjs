@@ -453,6 +453,105 @@ const TOOLS = [
 			}),
 	},
 	{
+		name: "get_schedule",
+		description: "Get a workflow's schedule series (spec, timezone, state, nextRunAt) and its instances; schedule is null when not scheduled",
+		inputSchema: {
+			type: "object",
+			properties: { workflowId: { type: "string" } },
+			required: ["workflowId"],
+			additionalProperties: false,
+		},
+		run: async (a) => hubJson("GET", `/api/workflows/${enc(a.workflowId)}/schedule`),
+	},
+	{
+		name: "set_schedule",
+		description:
+			"Schedule a draft/completed/failed workflow, or change its schedule. It becomes the armed next run: it starts on its own at nextRunAt and can't be started by hand meanwhile. spec is {kind:'once', at:'YYYY-MM-DDTHH:mm'} | {kind:'daily', time:'HH:mm'} | {kind:'weekly', days:[0-6, 0=Sunday], time:'HH:mm'}, in the IANA timezone given. 400 invalid_schedule lists field errors; 409 server_managed for a series managed by the server.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				workflowId: { type: "string" },
+				spec: {
+					type: "object",
+					properties: {
+						kind: { type: "string", enum: ["once", "daily", "weekly"] },
+						at: { type: "string", description: "once: local YYYY-MM-DDTHH:mm" },
+						time: { type: "string", description: "daily/weekly: local HH:mm" },
+						days: { type: "array", items: { type: "integer", minimum: 0, maximum: 6 }, description: "weekly: 0=Sunday..6" },
+					},
+					required: ["kind"],
+				},
+				timezone: { type: "string", description: "IANA zone, e.g. Europe/Madrid" },
+				includePrevious: {
+					type: "boolean",
+					description: "Tell each run where the previous run's results are (default true)",
+				},
+			},
+			required: ["workflowId", "spec", "timezone"],
+			additionalProperties: false,
+		},
+		run: async (a) =>
+			hubJson("PUT", `/api/workflows/${enc(a.workflowId)}/schedule`, {
+				spec: a.spec,
+				timezone: a.timezone,
+				...(a.includePrevious === undefined ? {} : { includePrevious: Boolean(a.includePrevious) }),
+			}),
+	},
+	{
+		name: "cancel_schedule",
+		description:
+			"Cancel a workflow's schedule: its armed next run becomes a normal workflow again; past runs are kept. 409 server_managed for a series managed by the server.",
+		inputSchema: {
+			type: "object",
+			properties: { workflowId: { type: "string" } },
+			required: ["workflowId"],
+			additionalProperties: false,
+		},
+		run: async (a) => hubJson("DELETE", `/api/workflows/${enc(a.workflowId)}/schedule`),
+	},
+	{
+		name: "preview_schedule",
+		description: "The next 3 runs a schedule spec would produce (ISO + local time), without saving anything",
+		inputSchema: {
+			type: "object",
+			properties: { spec: { type: "object" }, timezone: { type: "string" } },
+			required: ["spec", "timezone"],
+			additionalProperties: false,
+		},
+		run: async (a) => hubJson("POST", "/api/schedule/preview", { spec: a.spec, timezone: a.timezone }),
+	},
+	{
+		name: "list_schedule_notices",
+		description:
+			"List notices about scheduled runs (missed while offline, skipped as busy/forbidden/stale, broken series, failed runs), newest first",
+		inputSchema: {
+			type: "object",
+			properties: {
+				unacknowledged: { type: "boolean", description: "Only notices not yet acknowledged" },
+				seriesId: { type: "string" },
+			},
+			additionalProperties: false,
+		},
+		run: async (a) => {
+			const params = new URLSearchParams();
+			if (a.unacknowledged === true) params.set("unacknowledged", "1");
+			if (a.seriesId) params.set("seriesId", String(a.seriesId));
+			const q = params.toString();
+			return hubJson("GET", `/api/schedule-notices${q ? `?${q}` : ""}`);
+		},
+	},
+	{
+		name: "acknowledge_schedule_notice",
+		description: "Acknowledge (dismiss) a schedule notice",
+		inputSchema: {
+			type: "object",
+			properties: { noticeId: { type: "string" } },
+			required: ["noticeId"],
+			additionalProperties: false,
+		},
+		run: async (a) => hubJson("POST", `/api/schedule-notices/${enc(a.noticeId)}/ack`),
+	},
+	{
 		name: "set_workflow_tcp_selections",
 		description: "Attach TCP packs/tools to a workflow",
 		inputSchema: {
