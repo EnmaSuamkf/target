@@ -1182,6 +1182,32 @@ export function listArmedInstances(): Workflow[] {
 }
 
 /**
+ * Claims an armed instance's due run for THIS process (D7), and answers whether
+ * the claim was won. A single conditional UPDATE, so two hubs on one DB (or two
+ * overlapping ticks) can never both fire it: the first flips armed → fired,
+ * every later caller matches no row. `nextRunAt` is part of the condition so a
+ * claim computed from a stale read (the schedule was edited or re-armed since)
+ * loses too.
+ */
+export function claimScheduledFire(id: string, nextRunAt: string): boolean {
+	return (
+		open()
+			.prepare(
+				"UPDATE workflows SET schedule_state = 'fired' WHERE id = ? AND schedule_state = 'armed' AND next_run_at = ?",
+			)
+			.run(id, nextRunAt).changes > 0
+	);
+}
+
+/** Same once-only claim for "Run now" on a missed `once` (D8): missed → fired. */
+export function claimMissedRun(id: string): boolean {
+	return (
+		open().prepare("UPDATE workflows SET schedule_state = 'fired' WHERE id = ? AND schedule_state = 'missed'").run(id)
+			.changes > 0
+	);
+}
+
+/**
  * What a schedule notice reports (D11): runs that were `missed` because the hub
  * was offline, a due run `skipped` (reason `busy` — the previous run was still
  * going — or `forbidden`/`stale` — the owner permission gate), a `broken`
