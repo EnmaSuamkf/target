@@ -9,6 +9,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { Workflow, WorkflowSchedule } from "./ui/src/api/types.ts";
+import type { WorkflowFilterState } from "./ui/src/lib/workflowFilterView.ts";
 
 const { filterAndSort } = await import("./ui/src/lib/workflowFilter.ts");
 const {
@@ -134,7 +135,7 @@ test("withoutFilter resets exactly one dimension", () => {
 	assert.deepEqual(withoutFilter(state, "origin"), { ...state, origin: "all" });
 	assert.deepEqual(withoutFilter(state, "archive"), { ...state, archive: "active" });
 	assert.deepEqual(withoutFilter(state, "query"), { ...state, query: "" });
-	let cleared = state;
+	let cleared: WorkflowFilterState = state;
 	for (const a of appliedFilters(state)) cleared = withoutFilter(cleared, a.key);
 	assert.deepEqual(cleared, DEFAULT_FILTER_STATE);
 });
