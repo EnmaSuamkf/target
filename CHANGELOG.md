@@ -117,6 +117,26 @@ The current version is reported by every instance to the central server (see
   unchanged: pause still accepts execute or manage; disconnect and Remote
   Sync still need manage. The old `remote.*` prefix is only mentioned here
   as the previous name.
+- **Workflow list filters redesigned.** The filter toolbar of the workflow
+  rail and the All workflows page no longer shows four unlabeled chip groups.
+  - **Status tabs.** The All workflows page shows `All N` plus one tab per
+    status with its count; a status with no matches is dimmed and disabled
+    instead of disappearing. The compact rail has search and a Filters button
+    only, with the status choices inside the popover.
+  - **Filters popover.** One `Filters` button (a bottom sheet on phones) with
+    three labeled sections that are always present: **Show** (Open / Archived),
+    **Created** (Anywhere / Local / Remote) and **Scheduling** (Any / Upcoming
+    runs / Past runs). The button shows `Filters · N` only when non-default
+    filters are applied, so nothing is highlighted at rest. Escape and an
+    outside click close it, and focus returns to the button.
+  - **Counts.** Every option shows how many workflows it would match, computed
+    with all the other active filters applied; options with no matches stay,
+    greyed with `(0)`.
+  - **Applied filters.** A `Showing:` row of removable chips with a `Clear all`
+    link appears whenever a filter, a status or a search is applied.
+  - **Renamed labels.** `Active` is now `Open`, `Scheduled` is now `Upcoming
+    runs` and `Scheduled Runs` is now `Past runs`. Filtering behavior is
+    unchanged. See `docs/workflow-filters-redesign.md`.
 
 ### Added
 
