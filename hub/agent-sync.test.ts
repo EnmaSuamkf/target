@@ -6,7 +6,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { repoRoot } from "./repo-paths.ts";
+import { repoRoot, writeJsonFile } from "./repo-paths.ts";
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-agent-sync-"));
 process.env.TARGET_HOME = path.join(tmpHome, ".target");
@@ -130,4 +130,30 @@ test("syncMcp remove drops only target server entry", () => {
 	const parsed = JSON.parse(fs.readFileSync(cursorFile, "utf8")) as { mcpServers: Record<string, unknown> };
 	assert.equal(parsed.mcpServers.target, undefined);
 	assert.ok(parsed.mcpServers.keep);
+});
+
+test("writeJsonFile writes atomically and preserves file mode", () => {
+	const file = path.join(tmpHome, "mode-check", "state.json");
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, "{}\n");
+	fs.chmodSync(file, 0o600);
+	writeJsonFile(file, { a: 1 });
+	assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+	assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { a: 1 });
+	assert.deepEqual(fs.readdirSync(path.dirname(file)), ["state.json"]);
+});
+
+test("syncMcp skips an unparseable destination without touching it", () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "target-agent-sync-bad-"));
+	const bad = "{ not json";
+	const cursorFile = path.join(home, ".cursor/mcp.json");
+	fs.mkdirSync(path.dirname(cursorFile), { recursive: true });
+	fs.writeFileSync(cursorFile, bad);
+	for (const remove of [false, true]) {
+		const actions = syncMcp({ homeDir: home, repoDir: repoRoot(), force: true, remove });
+		const a = actions.find((x) => x.harness === "cursor");
+		assert.equal(a?.action, "skipped");
+		assert.equal(a?.detail, "unreadable_config");
+		assert.equal(fs.readFileSync(cursorFile, "utf8"), bad);
+	}
 });

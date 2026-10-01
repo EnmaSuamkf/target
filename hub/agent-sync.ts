@@ -20,7 +20,7 @@ export const TARGET_MCP_MANAGED_VALUE = "target";
 
 export interface SyncAction {
 	harness: string;
-	action: "synced" | "skipped" | "removed" | "unchanged";
+	action: "synced" | "skipped" | "removed" | "unchanged" | "failed";
 	path: string;
 	detail?: string;
 }
@@ -196,15 +196,16 @@ function resolveServerBlock(manifest: McpManifest, cfg: HubConfig, repoDir: stri
 	};
 }
 
-function readDestJson(file: string): Record<string, unknown> {
+/** Missing file starts empty; an existing file that is not a JSON object yields null so callers never overwrite it. */
+function readDestJson(file: string): Record<string, unknown> | null {
 	if (!fs.existsSync(file)) return { mcpServers: {} };
 	try {
-		const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
-		if (parsed && typeof parsed === "object") return parsed;
+		const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
 	} catch {
 		// fall through
 	}
-	return { mcpServers: {} };
+	return null;
 }
 
 function enableFreeCodeMcpStatus(home: string, serverKey: string, dryRun: boolean): void {
@@ -270,6 +271,10 @@ export function syncMcp(options: SyncOptions = {}): SyncAction[] {
 				continue;
 			}
 			const doc = readDestJson(destFile);
+			if (!doc) {
+				actions.push({ harness: key, action: "skipped", path: destFile, detail: "unreadable_config" });
+				continue;
+			}
 			const servers = (doc[harness.dest.pointer] ?? {}) as Record<string, unknown>;
 			if (!(serverKey in servers)) {
 				actions.push({ harness: key, action: "unchanged", path: destFile });
@@ -283,6 +288,10 @@ export function syncMcp(options: SyncOptions = {}): SyncAction[] {
 		}
 
 		const doc = readDestJson(destFile);
+		if (!doc) {
+			actions.push({ harness: key, action: "skipped", path: destFile, detail: "unreadable_config" });
+			continue;
+		}
 		const pointer = harness.dest.pointer;
 		if (!doc[pointer] || typeof doc[pointer] !== "object") doc[pointer] = {};
 		const servers = doc[pointer] as Record<string, unknown>;
@@ -313,6 +322,7 @@ export function syncMcp(options: SyncOptions = {}): SyncAction[] {
 export function printSyncActions(label: string, actions: SyncAction[]): void {
 	for (const a of actions) {
 		const where = a.path || "(n/a)";
-		console.log(`${label} ${a.harness}: ${a.action} → ${where}${a.detail ? ` (${a.detail})` : ""}`);
+		const log = a.action === "failed" ? console.error : console.log;
+		log(`${label} ${a.harness}: ${a.action} → ${where}${a.detail ? ` (${a.detail})` : ""}`);
 	}
 }
