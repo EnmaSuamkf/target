@@ -100,8 +100,11 @@ test("a free-code aborted turn does not become the session's occupancy", () => {
 		FREE_CODE_ABORTED_LINE,
 	]);
 	const usage = readTokenUsage("/nowhere", file);
-	assert.equal(usage.contextTokens, 86_386, "43% full, not 0% — the aborted turn measured nothing");
-	assert.ok(contextPercent(usage) > 40, "and the meter must not collapse to zero because of it");
+	assert.equal(usage.contextTokens, 86_386, "the last real turn's reading, not 0 — the aborted turn measured nothing");
+	// 8.2% of kimi-k3's 1,048,576 window (models.ts). This read "43%" while kimi-k3
+	// was measured against the 200k fallback; what matters here is that it is the
+	// real turn's share and not the 0% the aborted line would have made it.
+	assert.equal(contextPercent(usage).toFixed(1), "8.2", "and the meter must not collapse to zero because of it");
 });
 
 // --- readings the window cannot hold ---

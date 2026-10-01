@@ -37,11 +37,15 @@
  *   CUMULATIVE over every API round of the run, so occupancy can only be
  *   estimated — from the run's round count in the agent-transcript (see
  *   `estimateCursorOccupancy`) — and is flagged as such (`contextEstimated`).
- *   The window comes from `models.ts` (Composer models are 200k, not 1M).
+ *   Neither the result nor the transcript names the model on this machine, so
+ *   it comes from the run's `--model` flag when there is one, else from
+ *   Cursor's own tracking database (`cursorModelFromTracking`); the window is
+ *   the size the run or the CLI config states for it, else `models.ts`.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { awbDir } from "./awb.ts";
 import { contextWindowForModel } from "./models.ts";
 
@@ -185,6 +189,8 @@ interface RawUsage {
 	recentContexts: number[];
 	/** Cursor-only: every headless `agent -p` result for the session, oldest first (for the occupancy estimate). */
 	cursorRuns: CursorRunUsage[];
+	/** Cursor-only: a window the run itself declared (`--model 'x[context=1m]'`), or null. See `contextWindowForModel`'s `stated`. */
+	statedContextWindow: number | null;
 	/** Model id of the last turn / `model_change` record seen, for the window lookup. */
 	lastModel: string | null;
 	/** Latest compaction boundary in this file, and how many there were. */
@@ -202,6 +208,7 @@ function emptyRawUsage(): RawUsage {
 		lastContext: 0,
 		recentContexts: [],
 		cursorRuns: [],
+		statedContextWindow: null,
 		lastModel: null,
 		lastCompaction: null,
 		compactions: 0,
@@ -590,6 +597,178 @@ export function estimateCursorOccupancy(
 	return Math.round(reading ?? 0);
 }
 
+/**
+ * `"1m"` / `"272k"` / `"200000"` → tokens, as Cursor writes a context size in
+ * its CLI config and in `--model 'x[context=1m]'`; null for anything else.
+ */
+export function parseCursorContextSize(value: string): number | null {
+	const match = /^\s*(\d+(?:\.\d+)?)\s*([km]?)\s*$/i.exec(value);
+	if (!match) return null;
+	const n = Number(match[1]) * ({ k: 1_000, m: 1_000_000 }[match[2]!.toLowerCase() as "k" | "m"] ?? 1);
+	return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+}
+
+/**
+ * The model a logged `agent -p` command line asked for, and the window it
+ * declared with it, if any.
+ *
+ * awb writes the spawned command as the log's `$ …` line, the prompt as a JSON
+ * string. The prompt is skipped before looking for `--model`, because prompts
+ * routinely QUOTE command lines (this machine's logs have hundreds of
+ * `--model claude-3-5-haiku…` inside prompts that were never a flag). Cursor's
+ * parameterised form `--model 'claude-opus-4-8[context=1m,effort=high]'`
+ * yields the bare id plus the stated window.
+ *
+ * awb's Cursor adapter doesn't pass `--model` today, so for awb's own runs
+ * this finds nothing and the model comes from Cursor's tracking database
+ * instead (`cursorModelFromTracking`); it is read first because a flag on the
+ * run's own command line is the most direct record there can be.
+ */
+export function cursorModelFromCommandLine(commandLine: string): { model: string; statedWindow: number | null } | null {
+	let rest = commandLine;
+	const promptAt = commandLine.indexOf(' -p "');
+	if (promptAt >= 0) {
+		let i = promptAt + 5;
+		for (; i < commandLine.length; i++) {
+			if (commandLine[i] === "\\") i++;
+			else if (commandLine[i] === '"') break;
+		}
+		rest = commandLine.slice(i + 1);
+	}
+	const flag = /(?:^|\s)--model(?:=|\s+)(?:'([^']*)'|"([^"]*)"|(\S+))/.exec(rest);
+	const raw = flag ? (flag[1] ?? flag[2] ?? flag[3] ?? "").trim() : "";
+	if (!raw) return null;
+	const bracket = raw.indexOf("[");
+	const model = normalizeCursorModelId(bracket >= 0 ? raw.slice(0, bracket) : raw);
+	let statedWindow: number | null = null;
+	if (bracket >= 0) {
+		const close = raw.lastIndexOf("]");
+		for (const param of raw.slice(bracket + 1, close > bracket ? close : undefined).split(",")) {
+			const [key, value] = param.split("=").map((part) => part.trim());
+			if (key?.toLowerCase() === "context" && value) statedWindow = parseCursorContextSize(value);
+		}
+	}
+	return model ? { model, statedWindow } : null;
+}
+
+/**
+ * The `$ …` command line at the top of an awb run log (after any MCP warm-up
+ * block), or null when it isn't within the first `maxBytes` — a prompt can be
+ * long, and a line cut short could hide the flags that follow it.
+ */
+function loggedCommandLine(file: string, maxBytes = 1024 * 1024): string | null {
+	let head: string;
+	try {
+		const fd = fs.openSync(file, "r");
+		try {
+			const buf = Buffer.alloc(Math.min(maxBytes, fs.fstatSync(fd).size));
+			fs.readSync(fd, buf, 0, buf.length, 0);
+			head = buf.toString("utf8");
+		} finally {
+			fs.closeSync(fd);
+		}
+	} catch {
+		return null;
+	}
+	for (const line of head.split("\n")) {
+		if (line.startsWith("$ ") && line.includes(" -p ")) return line;
+	}
+	return null;
+}
+
+/** Cached by stat so the hub's polling doesn't re-query on every call — the database only changes when Cursor writes code. */
+let trackingCache: { key: string; sessions: Map<string, string | null> } | null = null;
+
+/**
+ * The model Cursor itself recorded for a conversation, from its own AI code
+ * tracking database (`~/.cursor/ai-tracking/ai-code-tracking.db`, table
+ * `ai_code_hashes`: `conversationId`, `model`, `timestamp` per change the
+ * agent made). It is the only per-session record of the model Cursor keeps on
+ * this machine: the headless result JSON and the agent-transcripts never name
+ * it, and awb doesn't pass `--model`, so a run uses whatever the CLI had
+ * selected at the time — which `cli-config.json` only knows for NOW. Verified
+ * 2026-10-01: session a8abe85e → composer-2.5, dd9f5248 → grok-4.6, both
+ * matching what those workflows ran on.
+ *
+ * Only runs that changed files leave a row, so a session that never wrote
+ * anything has no record here (null); the latest row wins when the model was
+ * switched mid-conversation.
+ */
+export function cursorModelFromTracking(sessionId: string): string | null {
+	const db = path.join(os.homedir(), ".cursor", "ai-tracking", "ai-code-tracking.db");
+	let key: string;
+	try {
+		// The WAL is where fresh rows land first, so it is part of the key.
+		const main = fs.statSync(db);
+		let wal = "";
+		try {
+			wal = String(fs.statSync(`${db}-wal`).mtimeMs);
+		} catch {
+			// No WAL file: everything is in the main database.
+		}
+		key = `${main.mtimeMs}:${main.size}:${wal}`;
+	} catch {
+		return null;
+	}
+	if (!trackingCache || trackingCache.key !== key) trackingCache = { key, sessions: new Map() };
+	const cached = trackingCache.sessions.get(sessionId);
+	if (cached !== undefined) return cached;
+	let model: string | null = null;
+	try {
+		const conn = new DatabaseSync(db, { readOnly: true });
+		try {
+			const row = conn
+				.prepare(
+					"SELECT model FROM ai_code_hashes WHERE conversationId = ? AND model IS NOT NULL AND model != '' ORDER BY timestamp DESC LIMIT 1",
+				)
+				.get(sessionId) as { model?: unknown } | undefined;
+			if (typeof row?.model === "string") model = normalizeCursorModelId(row.model);
+		} finally {
+			conn.close();
+		}
+	} catch {
+		// Missing table, locked or foreign database — no record, not an error.
+	}
+	trackingCache.sessions.set(sessionId, model);
+	return model;
+}
+
+/**
+ * The context size the Cursor CLI is configured to run `model` at, from
+ * `~/.cursor/cli-config.json` → `modelParameters[model]` → `{id:"context"}`
+ * (e.g. `gpt-5.6-terra: context=272k` here). Several Cursor models are
+ * offered at more than one size, so this is what tells a 272k run from a 1M
+ * one; null when the CLI sets no size for that model.
+ */
+let cliConfigCache: { key: string; parsed: Record<string, unknown> | null } | null = null;
+
+export function cursorConfiguredContext(model: string): number | null {
+	const file = path.join(os.homedir(), ".cursor", "cli-config.json");
+	let key: string;
+	try {
+		const st = fs.statSync(file);
+		key = `${st.mtimeMs}:${st.size}:${st.ino}`;
+	} catch {
+		return null;
+	}
+	if (!cliConfigCache || cliConfigCache.key !== key) {
+		let parsed: Record<string, unknown> | null = null;
+		try {
+			parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+		} catch {
+			// Half-written or not JSON — no configured size this time.
+		}
+		cliConfigCache = { key, parsed };
+	}
+	const params = (cliConfigCache.parsed?.modelParameters as Record<string, unknown> | undefined)?.[model];
+	if (!Array.isArray(params)) return null;
+	for (const param of params) {
+		const p = param as Record<string, unknown>;
+		if (p.id === "context" && typeof p.value === "string") return parseCursorContextSize(p.value);
+	}
+	return null;
+}
+
 /** Normalises Cursor Agent's JSON `usage` block from a headless run result. */
 function cursorUsageOfResult(obj: Record<string, unknown>): {
 	input: number;
@@ -661,6 +840,10 @@ function accumulateCursorUsageFromLogs(sessionId: string): RawUsage {
 			continue;
 		}
 		if (!raw.includes(sessionId) || !raw.includes('"type":"result"')) continue;
+		// The flags this run was spawned with — read once per log that holds a
+		// result for this session, and only consulted when the result itself
+		// doesn't name a model.
+		let commandModel: ReturnType<typeof cursorModelFromCommandLine> | undefined;
 		for (const line of raw.split("\n")) {
 			if (!line.includes('"type":"result"') || !line.includes(sessionId)) continue;
 			try {
@@ -680,7 +863,19 @@ function accumulateCursorUsageFromLogs(sessionId: string): RawUsage {
 					output: rec.output,
 					resultText: typeof obj.result === "string" ? obj.result : "",
 				});
-				if (rec.model) acc.lastModel = normalizeCursorModelId(rec.model);
+				if (rec.model) {
+					acc.lastModel = normalizeCursorModelId(rec.model);
+					acc.statedContextWindow = null;
+				} else {
+					if (commandModel === undefined) {
+						const commandLine = loggedCommandLine(file);
+						commandModel = commandLine ? cursorModelFromCommandLine(commandLine) : null;
+					}
+					if (commandModel) {
+						acc.lastModel = commandModel.model;
+						acc.statedContextWindow = commandModel.statedWindow;
+					}
+				}
 			} catch {
 				// Malformed/partial line in a growing log — skip.
 			}
@@ -732,7 +927,7 @@ function tokenUsageFromRaw(
 		output += sub.output;
 		turns += sub.turns;
 	}
-	const contextWindow = contextWindowForModel(main.lastModel);
+	const contextWindow = contextWindowForModel(main.lastModel, main.statedContextWindow);
 	const contextTokens = cursor
 		? estimateCursorOccupancy(main.cursorRuns, cursor.transcript, contextWindow)
 		: plausibleOccupancy(main.recentContexts, main.lastContext, contextWindow);
@@ -814,10 +1009,12 @@ export function readTokenUsage(workdir: string, sessionId: string): TokenUsage {
 				: cursorTranscript
 					? accumulateUsage(cursorTranscript)
 					: (cursorLogs ?? emptyRawUsage());
-		if (!main.lastModel) {
-			const fromTranscript = cursorModelFromTranscript(sessionId);
-			if (fromTranscript) main.lastModel = fromTranscript;
-		}
+		// Neither the result nor the command line named the model (awb's own
+		// runs, today): Cursor's tracking database, then the transcript.
+		if (!main.lastModel) main.lastModel = cursorModelFromTracking(sessionId) ?? cursorModelFromTranscript(sessionId);
+		// No size on the command line: the size the CLI is configured to run that
+		// model at, when it sets one.
+		if (main.lastModel && main.statedContextWindow === null) main.statedContextWindow = cursorConfiguredContext(main.lastModel);
 		return tokenUsageFromRaw(main, [], { transcript: cursorTranscript ? cursorTranscriptRuns(cursorTranscript) : null });
 	}
 
