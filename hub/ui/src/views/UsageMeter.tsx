@@ -41,17 +41,27 @@ export function UsageMeter({ usage }: { usage: TokenUsage }): React.JSX.Element 
 	// Warn as the context window fills — past ~90% a resumed session is close
 	// to compaction, which is worth seeing before starting more steps.
 	const meterClass = pct >= 90 ? styles.meterDanger : pct >= 70 ? styles.meterWarn : "";
+	// An estimate is said to be one, rather than printed with the same authority
+	// as a reading the harness wrote down — otherwise the difference from the
+	// agent's own /context bar looks like the hub being wrong.
+	const approx = usage.contextEstimated ? "≈" : "";
+	const windowNote = usage.model ? `window for ${usage.model}` : "no model reported yet — assuming the fallback window";
+	const title = usage.contextEstimated
+		? `Estimated: this harness only reports token usage summed over every API call of a run, not how full the window is, so the hub estimates it from the number of calls each run made. It can differ from the agent's own /context reading. (${windowNote})`
+		: windowNote;
 
 	return (
-		<div className={styles.usage} data-usage-meter>
+		<div className={styles.usage} data-usage-meter data-context-estimated={usage.contextEstimated ? "true" : undefined}>
 			<div className={styles.usageHead}>
 				{/* The window is per-model, so name the model it belongs to — otherwise
 				    the same session showing "of 1M" one day and "of 200k" the next
 				    (because the operator switched models) looks like a bug. */}
-				<span title={usage.model ? `window for ${usage.model}` : "no model reported yet — assuming the fallback window"}>
-					Context {compactNumber(usage.contextTokens)} / {compactNumber(usage.contextWindow)}
+				<span title={title}>
+					Context {approx}{compactNumber(usage.contextTokens)} / {compactNumber(usage.contextWindow)}
 				</span>
-				<span className={styles.usagePct}>{pct.toFixed(1)}%</span>
+				<span className={styles.usagePct} title={title}>
+					{approx}{pct.toFixed(1)}%
+				</span>
 			</div>
 			<div className={`${styles.meter} ${meterClass}`}>
 				<div className={styles.meterFill} style={{ width: `${Math.min(100, pct)}%` }} />
