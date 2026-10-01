@@ -5,6 +5,7 @@ import * as cp from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
 	PUBLISHABLE_RUNNERS,
 	RUNNER_BINARIES,
@@ -184,10 +185,11 @@ function resolveServerBlock(manifest: McpManifest, cfg: HubConfig, repoDir: stri
 		s
 			.replace(/\{\{HUB_ORIGIN\}\}/g, hub)
 			.replace(/\{\{ADMIN_TOKEN\}\}/g, cfg.adminToken)
-			.replace(/\{\{TARGET_MCP_ENTRY\}\}/g, mcpEntry);
+			.replace(/\{\{TARGET_MCP_ENTRY\}\}/g, mcpEntry)
+			.replace(/\{\{NODE\}\}/g, process.execPath);
 	return {
 		description: manifest.server.description,
-		command: manifest.server.command,
+		command: replace(manifest.server.command),
 		args: manifest.server.args.map(replace),
 		env: Object.fromEntries(Object.entries(manifest.server.env).map(([k, v]) => [k, replace(v)])),
 		[TARGET_MCP_MANAGED_STAMP]: TARGET_MCP_MANAGED_VALUE,
@@ -206,6 +208,35 @@ function readDestJson(file: string): Record<string, unknown> | null {
 		// fall through
 	}
 	return null;
+}
+
+/** Re-read a written destination and return a failure detail when the target entry is not what we meant to write. */
+function verifyDest(file: string, pointer: string, serverKey: string, expected: unknown): string | null {
+	const doc = readDestJson(file);
+	if (!doc) return "verify_unreadable";
+	const servers = doc[pointer];
+	const actual = servers && typeof servers === "object" ? (servers as Record<string, unknown>)[serverKey] : undefined;
+	if (expected === undefined ? actual !== undefined : !isDeepStrictEqual(actual, expected)) return "verify_mismatch";
+	return null;
+}
+
+/** Legacy Target stamped entries in ~/.claude/settings.json (never read by Claude Code); drop only that key. */
+function removeLegacyClaudeSettings(home: string, pointer: string, serverKey: string, dryRun: boolean): SyncAction | null {
+	const file = path.join(home, ".claude", "settings.json");
+	if (!fs.existsSync(file)) return null;
+	const doc = readDestJson(file);
+	if (!doc) return null;
+	const servers = doc[pointer];
+	if (!servers || typeof servers !== "object") return null;
+	const entry = (servers as Record<string, unknown>)[serverKey] as Record<string, unknown> | undefined;
+	if (!entry || typeof entry !== "object" || entry[TARGET_MCP_MANAGED_STAMP] !== TARGET_MCP_MANAGED_VALUE) return null;
+	delete (servers as Record<string, unknown>)[serverKey];
+	if (!dryRun) {
+		writeJsonFile(file, doc);
+		const bad = verifyDest(file, pointer, serverKey, undefined);
+		if (bad) return { harness: "claude-code", action: "failed", path: file, detail: bad };
+	}
+	return { harness: "claude-code", action: "removed", path: file, detail: "legacy_settings_entry" };
 }
 
 function enableFreeCodeMcpStatus(home: string, serverKey: string, dryRun: boolean): void {
@@ -266,6 +297,8 @@ export function syncMcp(options: SyncOptions = {}): SyncAction[] {
 		}
 
 		if (options.remove) {
+			const legacy = key === "claude-code" ? removeLegacyClaudeSettings(home, harness.dest.pointer, serverKey, !!options.dryRun) : null;
+			if (legacy) actions.push(legacy);
 			if (!fs.existsSync(destFile)) {
 				actions.push({ harness: key, action: "unchanged", path: destFile });
 				continue;
@@ -287,6 +320,10 @@ export function syncMcp(options: SyncOptions = {}): SyncAction[] {
 			continue;
 		}
 
+		if (key === "claude-code") {
+			const legacy = removeLegacyClaudeSettings(home, harness.dest.pointer, serverKey, !!options.dryRun);
+			if (legacy) actions.push(legacy);
+		}
 		const doc = readDestJson(destFile);
 		if (!doc) {
 			actions.push({ harness: key, action: "skipped", path: destFile, detail: "unreadable_config" });
@@ -310,11 +347,21 @@ export function syncMcp(options: SyncOptions = {}): SyncAction[] {
 		doc[pointer] = servers;
 		if (!options.dryRun) {
 			writeJsonFile(destFile, doc);
+			const bad = verifyDest(destFile, pointer, serverKey, serverBlock);
+			if (bad) {
+				actions.push({ harness: key, action: "failed", path: destFile, detail: bad });
+				continue;
+			}
 			if (harness.postSync?.includes("enableInFreeCodeMcpStatus")) {
 				enableFreeCodeMcpStatus(home, serverKey, false);
 			}
 		}
-		actions.push({ harness: key, action: "synced", path: destFile });
+		actions.push({
+			harness: key,
+			action: "synced",
+			path: destFile,
+			...(key === "claude-desktop" ? { detail: "restart Claude Desktop to load it" } : {}),
+		});
 	}
 	return actions;
 }

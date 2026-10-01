@@ -157,3 +157,87 @@ test("syncMcp skips an unparseable destination without touching it", () => {
 		assert.equal(fs.readFileSync(cursorFile, "utf8"), bad);
 	}
 });
+
+function writeJson(file: string, value: unknown): void {
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function readJson(file: string): any {
+	return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+
+test("syncMcp registers claude-code in ~/.claude.json and migrates the legacy settings entry", () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "target-agent-sync-claude-"));
+	const claudeJson = path.join(home, ".claude.json");
+	const settings = path.join(home, ".claude", "settings.json");
+	const before = {
+		numStartups: 7,
+		projects: { "/x": { allowedTools: ["a"], history: [1, 2] } },
+		history: ["one"],
+		mcpServers: { other: { command: "echo", args: ["hi"] } },
+	};
+	writeJson(claudeJson, before);
+	fs.chmodSync(claudeJson, 0o600);
+	writeJson(settings, {
+		theme: "dark",
+		mcpServers: { target: { managedBy: "target", command: "node" }, "mcp-github": { command: "gh" } },
+	});
+
+	const actions = syncMcp({ homeDir: home, repoDir: repoRoot() });
+	assert.ok(actions.some((a) => a.harness === "claude-code" && a.action === "synced" && a.path === claudeJson));
+	const after = readJson(claudeJson);
+	assert.ok(path.isAbsolute(after.mcpServers.target.command));
+	assert.equal(after.mcpServers.target.command, process.execPath);
+	const { target, ...otherServers } = after.mcpServers;
+	assert.ok(target);
+	assert.deepEqual({ ...after, mcpServers: otherServers }, before);
+	assert.equal(fs.statSync(claudeJson).mode & 0o777, 0o600);
+
+	const migrated = readJson(settings);
+	assert.equal(migrated.mcpServers.target, undefined);
+	assert.deepEqual(migrated.mcpServers["mcp-github"], { command: "gh" });
+	assert.equal(migrated.theme, "dark");
+
+	const second = syncMcp({ homeDir: home, repoDir: repoRoot() });
+	assert.ok(second.some((a) => a.harness === "claude-code" && a.action === "unchanged" && a.path === claudeJson));
+
+	const removed = syncMcp({ homeDir: home, repoDir: repoRoot(), remove: true });
+	assert.ok(removed.some((a) => a.harness === "claude-code" && a.action === "removed" && a.path === claudeJson));
+	assert.equal(readJson(claudeJson).mcpServers.target, undefined);
+	assert.ok(readJson(claudeJson).mcpServers.other);
+});
+
+test("syncMcp leaves an unmanaged legacy target entry alone and --remove cleans both files", () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "target-agent-sync-claude2-"));
+	const settings = path.join(home, ".claude", "settings.json");
+	const mine = { command: "mine" };
+	writeJson(settings, { mcpServers: { target: mine } });
+	syncMcp({ homeDir: home, repoDir: repoRoot() });
+	assert.deepEqual(readJson(settings).mcpServers.target, mine);
+
+	writeJson(settings, { mcpServers: { target: { managedBy: "target" }, keep: { command: "k" } } });
+	syncMcp({ homeDir: home, repoDir: repoRoot() });
+	assert.equal(readJson(settings).mcpServers.target, undefined);
+
+	writeJson(settings, { mcpServers: { target: { managedBy: "target" }, keep: { command: "k" } } });
+	syncMcp({ homeDir: home, repoDir: repoRoot(), remove: true });
+	assert.equal(readJson(settings).mcpServers.target, undefined);
+	assert.ok(readJson(settings).mcpServers.keep);
+	assert.equal(readJson(path.join(home, ".claude.json")).mcpServers.target, undefined);
+});
+
+test("syncMcp tells claude-desktop users to restart it", () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "target-agent-sync-desktop-"));
+	const desktop: Record<string, string> = {
+		linux: path.join(home, ".config/Claude/claude_desktop_config.json"),
+		darwin: path.join(home, "Library/Application Support/Claude/claude_desktop_config.json"),
+		win32: path.join(process.env.APPDATA ?? path.join(home, "AppData", "Roaming"), "Claude/claude_desktop_config.json"),
+	};
+	const file = desktop[process.platform];
+	if (!file) return;
+	writeJson(file, { mcpServers: {} });
+	const a = syncMcp({ homeDir: home, repoDir: repoRoot() }).find((x) => x.harness === "claude-desktop");
+	assert.equal(a?.action, "synced");
+	assert.equal(a?.detail, "restart Claude Desktop to load it");
+});

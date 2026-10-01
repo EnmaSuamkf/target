@@ -3,7 +3,7 @@
   "serverKey": "target",
   "server": {
     "description": "The Target Project hub — workflows, steps, run control",
-    "command": "node",
+    "command": "{{NODE}}",
     "args": ["{{TARGET_MCP_ENTRY}}"],
     "env": {
       "TARGET_HUB_URL": "{{HUB_ORIGIN}}",
@@ -19,7 +19,7 @@
     "claude-code": {
       "runnerId": "claude",
       "detect": { "binary": "claude", "probe": ["--version"] },
-      "dest": { "file": "~/.claude/settings.json", "pointer": "mcpServers" }
+      "dest": { "file": "~/.claude.json", "pointer": "mcpServers" }
     },
     "claude-desktop": {
       "optional": true,
