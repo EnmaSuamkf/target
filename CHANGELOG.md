@@ -187,6 +187,32 @@ The current version is reported by every instance to the central server (see
 
 ### Fixed
 
+- **Claude Code now actually loads the `target` MCP server.** `sync-mcp` wrote
+  it to `~/.claude/settings.json`, which Claude Code ignores for `mcpServers`,
+  so it reported "synced" while `claude mcp list` showed nothing. The
+  claude-code destination is now `~/.claude.json` (the user-scope file
+  `claude mcp add --scope user` writes); verified on a throwaway HOME with
+  `claude mcp list` / `claude mcp get target` showing `Connected`.
+  - **Migration.** A `target` entry stamped `managedBy: "target"` in
+    `~/.claude/settings.json` is removed on the next sync (only that key; other
+    entries such as user-added servers are untouched, and an unstamped `target`
+    stays). `sync-mcp --remove` cleans both files.
+  - **Absolute node path.** The generated `command` is `process.execPath`
+    instead of a bare `node`, so Claude Desktop launched from a GUI and
+    IDE-launched CLIs, which do not inherit the shell PATH (nvm installs),
+    can start the server.
+  - **Unreadable configs are never overwritten.** A destination that exists but
+    is not a JSON object is skipped with `unreadable_config` instead of being
+    replaced by `{"mcpServers":{}}`. Writes are atomic (temp file + rename) and
+    keep the file mode, which matters for `~/.claude.json` (0600, rewritten
+    often by Claude Code).
+  - **Verified writes.** Each destination is re-read after writing; if
+    `mcpServers.target` is not what was written the action is `failed`
+    (printed on stderr) rather than `synced`.
+  - **Claude Desktop must be restarted** to pick up the entry; the sync report
+    says so (`restart Claude Desktop to load it`). Desktop itself was not run
+    for this change.
+
 - **The token numbers the server reports now match the ones the operator's own
   client shows.** The hub reported a session's `input_tokens` as the bare
   `usage.input_tokens` field of each assistant turn. With prompt caching on
