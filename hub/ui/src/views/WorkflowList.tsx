@@ -1,27 +1,28 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { Workflow, WorkflowOrigin, WorkflowStatus } from "../api/types.ts";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import type { Workflow } from "../api/types.ts";
 import { ArchivedBadge, Badge, OriginBadge, ScheduleBadge } from "../components/Badge.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { ProgressBar } from "../components/Progress.tsx";
 import { usePermissions } from "../hooks/usePermissions.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
-import {
-	filterBySchedule,
-	presentScheduleFilters,
-	SCHEDULE_FILTER_LABELS,
-	type ScheduleFilter,
-} from "../lib/scheduleView.ts";
+import { filterBySchedule, type ScheduleFilter } from "../lib/scheduleView.ts";
 import {
 	type ArchiveFilter,
 	emptyListMessage,
 	filterAndSort,
-	isArchived,
 	type OriginFilter,
-	presentOrigins,
-	presentStatuses,
 	scopeByArchive,
 	type StatusFilter as Filter,
 } from "../lib/workflowFilter.ts";
+import {
+	type AppliedFilterKey,
+	appliedFilters,
+	countFilterOptions,
+	DEFAULT_FILTER_STATE,
+	filtersButtonCount,
+	type WorkflowFilterState,
+} from "../lib/workflowFilterView.ts";
+import { AppliedFilterChips, FiltersButton, FiltersPopover, StatusSection, StatusTabs } from "./WorkflowFilters.tsx";
 import styles from "./WorkflowList.module.css";
 
 /**
@@ -46,7 +47,7 @@ import styles from "./WorkflowList.module.css";
  * recency — so the workflow you're most likely to want is the leftmost card.
  *
  * Archived workflows are hidden from both surfaces by default; each surface's
- * "Archived" filter flips it to show ONLY them. The shell fetches the list with
+ * "Show: Archived" filter flips it to show ONLY them. The shell fetches the list with
  * `archived=include` and the narrowing happens here (see lib/workflowFilter.ts).
  */
 
@@ -54,11 +55,12 @@ import styles from "./WorkflowList.module.css";
 const PAGE_SIZE = 12;
 
 /**
- * The narrowing state one surface owns (search, status, origin, archive side),
- * plus what it derives from it. The rail and the page each call this, so
- * narrowing one never silently narrows the other. Archived workflows are
- * hidden unless the surface's "Archived" filter is on, which shows ONLY them;
- * counts and the offered status/origin chips follow that scope.
+ * The narrowing state one surface owns (search, status, origin, archive side,
+ * schedule), plus what it derives from it. The rail and the page each call
+ * this, so narrowing one never silently narrows the other. Archived workflows
+ * are hidden unless the surface's "Archived" filter is on, which shows ONLY
+ * them; the option counts the toolbar shows are faceted (each count applies
+ * every other active filter — see `countFilterOptions`).
  */
 function useWorkflowFilters(workflows: Workflow[]) {
 	const [query, setQuery] = useState("");
@@ -68,21 +70,39 @@ function useWorkflowFilters(workflows: Workflow[]) {
 	const [scheduleFilter, setScheduleFilter] = useState<ScheduleFilter>("all");
 
 	const scoped = useMemo(() => scopeByArchive(workflows, archive), [workflows, archive]);
-	const archivedCount = useMemo(() => workflows.filter(isArchived).length, [workflows]);
 	const visible = useMemo(
 		() => filterBySchedule(filterAndSort(workflows, query, filter, originFilter, archive), scheduleFilter),
 		[workflows, query, filter, originFilter, archive, scheduleFilter],
 	);
-	const statuses = useMemo(() => presentStatuses(scoped), [scoped]);
-	const origins = useMemo(() => presentOrigins(scoped), [scoped]);
-	const scheduleFilters = useMemo(() => presentScheduleFilters(scoped), [scoped]);
+	const state = useMemo<WorkflowFilterState>(
+		() => ({ query, status: filter, origin: originFilter, archive, schedule: scheduleFilter }),
+		[query, filter, originFilter, archive, scheduleFilter],
+	);
+	const counts = useMemo(() => countFilterOptions(workflows, state), [workflows, state]);
+	const applied = useMemo(() => appliedFilters(state), [state]);
 
 	// Switching sides of the archive changes which statuses exist (archived work
-	// is only ever completed/failed), so a status chip picked on the other side
-	// could strand the list on "No matches" with no chip left to clear it.
+	// is only ever completed/failed), so a status picked on the other side
+	// could strand the list on "No matches" with nothing left to clear it.
 	const setArchive = (next: ArchiveFilter): void => {
 		setArchiveState(next);
 		setFilter("all");
+	};
+
+	const clearAll = (): void => {
+		setQuery(DEFAULT_FILTER_STATE.query);
+		setFilter(DEFAULT_FILTER_STATE.status);
+		setOriginFilter(DEFAULT_FILTER_STATE.origin);
+		setArchiveState(DEFAULT_FILTER_STATE.archive);
+		setScheduleFilter(DEFAULT_FILTER_STATE.schedule);
+	};
+
+	const removeApplied = (key: AppliedFilterKey): void => {
+		if (key === "query") setQuery("");
+		else if (key === "status") setFilter("all");
+		else if (key === "origin") setOriginFilter("all");
+		else if (key === "archive") setArchive("active");
+		else setScheduleFilter("all");
 	};
 
 	return {
@@ -94,16 +114,19 @@ function useWorkflowFilters(workflows: Workflow[]) {
 		setOriginFilter,
 		scheduleFilter,
 		setScheduleFilter,
-		scheduleFilters,
 		archive,
 		setArchive,
 		scoped,
-		archivedCount,
 		visible,
-		statuses,
-		origins,
+		state,
+		counts,
+		applied,
+		clearAll,
+		removeApplied,
 	};
 }
+
+type WorkflowFilters = ReturnType<typeof useWorkflowFilters>;
 
 export function WorkflowList({
 	workflows,
@@ -127,7 +150,7 @@ export function WorkflowList({
 	 * had scrolled sideways. */
 	railResetKey?: number;
 }): React.JSX.Element {
-	// The rail's own search + status/origin/archive filters. Independent of the
+	// The rail's own search + filters. Independent of the
 	// "All workflows" page's state, so narrowing one doesn't silently narrow the other.
 	const filters = useWorkflowFilters(workflows);
 	const { visible, scoped, archive } = filters;
@@ -157,7 +180,7 @@ export function WorkflowList({
 				</h2>
 
 				<div className={styles.toolbarTools}>
-					{workflows.length > 0 && <FilterToolbar {...filters} />}
+					{workflows.length > 0 && <FilterToolbar {...filters} variant="rail" />}
 
 					{/* Classed so the phone can give it a row of its own: sharing the
 					    line with the horizontally-scrolling status chips left the last
@@ -196,6 +219,8 @@ export function WorkflowList({
 						</button>
 					)}
 				</div>
+
+				{workflows.length > 0 && <AppliedRow filters={filters} className={styles.railApplied} />}
 			</div>
 
 			{/* `data-workflow-list` is the keyboard-shortcut hook's anchor (Alt+W
@@ -328,8 +353,24 @@ function WorkflowCard({
 	);
 }
 
-/** The shared search + archive/origin/schedule/status-filter toolbar, used by the rail and the page. */
+/** The "Showing:" row under a surface's controls; nothing when no filter is applied. */
+function AppliedRow({ filters, className }: { filters: WorkflowFilters; className?: string | undefined }): React.JSX.Element | null {
+	if (filters.applied.length === 0) return null;
+	return (
+		<div className={className ?? styles.pageApplied}>
+			<AppliedFilterChips applied={filters.applied} onRemove={filters.removeApplied} onClearAll={filters.clearAll} />
+		</div>
+	);
+}
+
+/**
+ * The shared controls, used by the rail and the page: search, then — on the
+ * page only — the status tabs, then one "Filters" button whose popover holds
+ * the rest. The rail has no room for the tabs, so its popover gets a Status
+ * section instead. Nothing is highlighted at rest.
+ */
 function FilterToolbar({
+	variant,
 	query,
 	setQuery,
 	filter,
@@ -338,32 +379,17 @@ function FilterToolbar({
 	setOriginFilter,
 	scheduleFilter,
 	setScheduleFilter,
-	scheduleFilters,
 	archive,
 	setArchive,
-	archivedCount,
-	statuses,
-	origins,
+	state,
+	counts,
+	clearAll,
 	autoFocus,
-}: {
-	query: string;
-	setQuery: (q: string) => void;
-	filter: Filter;
-	setFilter: (f: Filter) => void;
-	originFilter: OriginFilter;
-	setOriginFilter: (f: OriginFilter) => void;
-	scheduleFilter: ScheduleFilter;
-	setScheduleFilter: (f: ScheduleFilter) => void;
-	/** Which schedule filters would match something on this side of the archive. */
-	scheduleFilters: Exclude<ScheduleFilter, "all">[];
-	archive: ArchiveFilter;
-	setArchive: (a: ArchiveFilter) => void;
-	/** How many archived workflows exist — the Archived toggle only appears when there are some (or it's on). */
-	archivedCount: number;
-	statuses: WorkflowStatus[];
-	origins: WorkflowOrigin[];
-	autoFocus?: boolean;
-}): React.JSX.Element {
+}: WorkflowFilters & { variant: "rail" | "page"; autoFocus?: boolean }): React.JSX.Element {
+	const [open, setOpen] = useState(false);
+	const buttonRef = useRef<HTMLButtonElement | null>(null);
+	const popoverId = useId();
+	const isRail = variant === "rail";
 	return (
 		<>
 			<div className={styles.search}>
@@ -383,112 +409,32 @@ function FilterToolbar({
 				/>
 			</div>
 
-			{/* Archived workflows are hidden by default; this flips the surface to
-			    show ONLY them. Offered once something is archived — or while it's on,
-			    so the way back never disappears (e.g. after unarchiving the last one). */}
-			{(archivedCount > 0 || archive === "archived") && (
-				<div className={styles.filters} role="group" aria-label="Filter by archive state" data-archive-filter>
-					<button
-						type="button"
-						className={`${styles.filter} ${archive === "active" ? styles.filterActive : ""}`}
-						onClick={() => setArchive("active")}
-						aria-pressed={archive === "active"}
-					>
-						Active
-					</button>
-					<button
-						type="button"
-						className={`${styles.filter} ${archive === "archived" ? styles.filterActive : ""}`}
-						onClick={() => setArchive("archived")}
-						aria-pressed={archive === "archived"}
-						title="Show only archived workflows"
-					>
-						Archived
-					</button>
-				</div>
-			)}
+			{!isRail && <StatusTabs value={filter} counts={counts.status} onChange={setFilter} />}
 
-			{origins.length > 1 && (
-				<div className={styles.filters} role="group" aria-label="Filter by origin">
-					<button
-						type="button"
-						className={`${styles.filter} ${originFilter === "all" ? styles.filterActive : ""}`}
-						onClick={() => setOriginFilter("all")}
-						aria-pressed={originFilter === "all"}
-					>
-						All origins
-					</button>
-					{origins.map((origin) => (
-						<button
-							key={origin}
-							type="button"
-							className={`${styles.filter} ${originFilter === origin ? styles.filterActive : ""}`}
-							onClick={() => setOriginFilter(origin)}
-							aria-pressed={originFilter === origin}
-						>
-							{origin === "remote" ? "Remote" : "Local"}
-						</button>
-					))}
-				</div>
-			)}
-
-			{/* Same pattern as origin. Offered once any schedule exists on this side
-			    of the archive — or while one is picked, so the way back to "All"
-			    never disappears (e.g. after cancelling the last schedule). */}
-			{(scheduleFilters.length > 0 || scheduleFilter !== "all") && (
-				<div className={styles.filters} role="group" aria-label="Filter by schedule" data-schedule-filter>
-					<button
-						type="button"
-						className={`${styles.filter} ${scheduleFilter === "all" ? styles.filterActive : ""}`}
-						onClick={() => setScheduleFilter("all")}
-						aria-pressed={scheduleFilter === "all"}
-					>
-						All
-					</button>
-					{(["scheduled", "runs"] as const)
-						.filter((f) => scheduleFilters.includes(f) || scheduleFilter === f)
-						.map((f) => (
-							<button
-								key={f}
-								type="button"
-								className={`${styles.filter} ${scheduleFilter === f ? styles.filterActive : ""}`}
-								onClick={() => setScheduleFilter(f)}
-								aria-pressed={scheduleFilter === f}
-								title={
-									f === "scheduled"
-										? "Each schedule once, by its next run"
-										: "Runs that schedules have already executed"
-								}
-							>
-								{SCHEDULE_FILTER_LABELS[f]}
-							</button>
-						))}
-				</div>
-			)}
-
-			{statuses.length > 1 && (
-				<div className={styles.filters} role="group" aria-label="Filter by status">
-					<button
-						type="button"
-						className={`${styles.filter} ${filter === "all" ? styles.filterActive : ""}`}
-						onClick={() => setFilter("all")}
-						aria-pressed={filter === "all"}
-					>
-						All statuses
-					</button>
-					{statuses.map((status) => (
-						<button
-							key={status}
-							type="button"
-							className={`${styles.filter} ${filter === status ? styles.filterActive : ""}`}
-							onClick={() => setFilter(status)}
-							aria-pressed={filter === status}
-						>
-							{status}
-						</button>
-					))}
-				</div>
-			)}
+			<div className={styles.filtersWrap}>
+				<FiltersButton
+					count={filtersButtonCount(state, { includeStatus: isRail })}
+					open={open}
+					onClick={() => setOpen((o) => !o)}
+					buttonRef={buttonRef}
+					controlsId={popoverId}
+				/>
+				<FiltersPopover
+					open={open}
+					onClose={() => setOpen(false)}
+					anchorRef={buttonRef}
+					id={popoverId}
+					counts={counts}
+					archive={archive}
+					onArchiveChange={setArchive}
+					origin={originFilter}
+					onOriginChange={setOriginFilter}
+					schedule={scheduleFilter}
+					onScheduleChange={setScheduleFilter}
+					onClearAll={clearAll}
+					leadingSection={isRail ? <StatusSection value={filter} counts={counts.status} onChange={setFilter} /> : undefined}
+				/>
+			</div>
 		</>
 	);
 }
@@ -571,7 +517,8 @@ export function AllWorkflowsPage({
 
 			{workflows.length > 0 && (
 				<div className={styles.pageToolbar}>
-					<FilterToolbar {...filters} autoFocus />
+					<FilterToolbar {...filters} variant="page" autoFocus />
+					<AppliedRow filters={filters} />
 				</div>
 			)}
 

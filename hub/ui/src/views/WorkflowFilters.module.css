@@ -297,7 +297,36 @@
 		border-bottom: none;
 	}
 
+	/* Thumb-sized targets: the tabs, the trigger, the options and the chips'
+	   remove buttons (a bare icon would be far under the minimum). */
+	.tab,
+	.filtersBtn,
+	.option {
+		min-height: var(--tap-target);
+		font-size: var(--text-sm);
+	}
+
+	.tab,
+	.filtersBtn {
+		flex: none;
+		padding-inline: var(--space-4);
+	}
+
 	.option {
 		padding-block: var(--space-2);
+	}
+
+	.chip {
+		font-size: var(--text-sm);
+	}
+
+	.chipRemove {
+		width: var(--tap-target);
+		height: var(--tap-target);
+		margin-block: calc((var(--tap-target) - 1.5rem) / -2);
+	}
+
+	.clearLink {
+		min-height: var(--tap-target);
 	}
 }

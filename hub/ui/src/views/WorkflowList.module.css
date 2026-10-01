@@ -98,36 +98,19 @@
 	appearance: none;
 }
 
-.filters {
-	display: flex;
-	flex-wrap: wrap;
-	gap: var(--space-1);
+/* Positioning context for the Filters popover (see WorkflowFilters.module.css). */
+.filtersWrap {
+	position: relative;
+	flex: none;
 }
 
-.filter {
-	padding: 0.125rem var(--space-2);
-	border: 1px solid transparent;
-	border-radius: var(--radius-full);
-	background: var(--surface-sunken);
-	color: var(--text-muted);
-	font-family: inherit;
-	font-size: var(--text-xs);
-	font-weight: 500;
-	text-transform: capitalize;
-	cursor: pointer;
-	transition: background var(--transition), color var(--transition);
+/* The "Showing:" row sits on its own line under the controls. */
+.railApplied {
+	flex: 1 0 100%;
 }
 
-.filter:hover {
-	background: var(--gray-200);
-	color: var(--gray-700);
-}
-
-.filterActive,
-.filterActive:hover {
-	background: var(--accent-50);
-	border-color: var(--accent-200);
-	color: var(--accent-700);
+.pageApplied {
+	flex: 1 0 100%;
 }
 
 /* "All workflows" reads as a view-switch, so it sits beside the run of
@@ -548,38 +531,11 @@
 		left: var(--space-4);
 	}
 
-	/* One scrollable row rather than three wrapped ones — the filters must not
-	   push the workflows themselves below the fold. `flex: 1 0 100%` gives that
-	   row the whole line: when it shared the line with "New" the last chip ran
-	   under the button and read as two controls overlapping, and a chip strip
-	   that scrolls sideways can't sit beside anything without doing that. */
-	.filters {
-		flex: 1 0 100%;
-		min-width: 0;
-		flex-wrap: nowrap;
-		overflow-x: auto;
-		gap: var(--space-2);
-		padding-bottom: var(--space-1);
-		scrollbar-width: none;
-		-webkit-overflow-scrolling: touch;
-	}
-
-	/* Its own full-width row under the chips: it's the primary action on this
+	/* Its own full-width row under the filters: it's the primary action on this
 	   screen, nothing can slide beneath it there, and the full width is the
 	   easiest possible thumb target. */
 	.newBtn {
 		width: 100%;
-	}
-
-	.filters::-webkit-scrollbar {
-		display: none;
-	}
-
-	.filter {
-		flex: none;
-		min-height: var(--tap-target);
-		padding: 0 var(--space-4);
-		font-size: var(--text-sm);
 	}
 
 	/* The card is the primary target on this screen and it's what a thumb aims
@@ -613,11 +569,6 @@
 		border-color: var(--border);
 		box-shadow: none;
 		transform: none;
-	}
-
-	.filter:hover {
-		background: var(--surface-sunken);
-		color: var(--text-muted);
 	}
 
 	.cardName {

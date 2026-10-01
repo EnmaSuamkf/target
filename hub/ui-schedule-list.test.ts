@@ -197,16 +197,18 @@ test("the schedule filter composes with the Archived filter, status and search",
 	assert.deepEqual(filterBySchedule([wf("x")], "scheduled"), []);
 });
 
-test("the filter group is in the shared toolbar, so the rail AND the All workflows page get it", () => {
+test("the Scheduling section is in the shared toolbar, so the rail AND the All workflows page get it", () => {
 	const list = read("src/views/WorkflowList.tsx");
-	assert.match(list, /aria-label="Filter by schedule" data-schedule-filter/);
-	assert.match(list, /SCHEDULE_FILTER_LABELS\[f\]/);
+	const popover = read("src/views/WorkflowFilters.tsx");
+	assert.match(popover, /<FilterSection<ScheduleFilter>[\s\S]*title=\{scheduling\.title\}/);
+	assert.match(read("src/lib/workflowFilterView.ts"), /scheduling: \{ title: "Scheduling", all: "Any", scheduled: "Upcoming runs", runs: "Past runs" \}/);
+	// The logic module keeps its own labels; the toolbar uses the plain-language ones.
 	assert.match(read("src/lib/scheduleView.ts"), /scheduled: "Scheduled",\s*runs: "Scheduled runs"/);
 	assert.match(list, /filterBySchedule\(filterAndSort\(workflows, query, filter, originFilter, archive\), scheduleFilter\)/);
 	// Both surfaces own their filter state and render the same toolbar from it.
 	assert.equal((list.match(/const filters = useWorkflowFilters\(workflows\)/g) ?? []).length, 2);
-	assert.match(list, /export function WorkflowList[\s\S]*<FilterToolbar \{\.\.\.filters\} \/>/);
-	assert.match(list, /export function AllWorkflowsPage[\s\S]*<FilterToolbar \{\.\.\.filters\} autoFocus \/>/);
+	assert.match(list, /export function WorkflowList[\s\S]*<FilterToolbar \{\.\.\.filters\} variant="rail" \/>/);
+	assert.match(list, /export function AllWorkflowsPage[\s\S]*<FilterToolbar \{\.\.\.filters\} variant="page" autoFocus \/>/);
 	// The page returns to page 1 when the schedule filter changes, like every other filter.
 	assert.match(list, /\[query, filter, originFilter, archive, scheduleFilter\]/);
 });

@@ -110,13 +110,15 @@ test("the rail and the All workflows page both go through the archive-aware filt
 	const hookCalls = list.match(/useWorkflowFilters\(workflows\)/g) ?? [];
 	assert.equal(hookCalls.length, 2, "rail and page should each own their filter state");
 	assert.match(list, /filterAndSort\(workflows, query, filter, originFilter, archive\)/);
-	// Archived toggle uses the same button-group pattern as the origin filter.
-	assert.match(list, /role="group" aria-label="Filter by archive state"/);
-	assert.match(list, /onClick=\{\(\) => setArchive\("archived"\)\}/);
-	assert.match(list, /aria-pressed=\{archive === "archived"\}/);
-	// The rail uses the shared toolbar instead of its own copy.
-	assert.match(list, /<FilterToolbar \{\.\.\.filters\} \/>/);
-	assert.match(list, /<FilterToolbar \{\.\.\.filters\} autoFocus \/>/);
+	// The Archived choice is the "Show" radio section of the Filters popover.
+	const popover = read("src/views/WorkflowFilters.tsx");
+	assert.match(popover, /<FilterSection<ArchiveFilter>[\s\S]*value: "archived", label: show\.archived/);
+	assert.match(popover, /onChange=\{onArchiveChange\}/);
+	assert.match(list, /onArchiveChange=\{setArchive\}/, "the popover goes through setArchive, which resets the status filter");
+	assert.match(list, /else if \(key === "archive"\) setArchive\("active"\)/, "removing the chip does too");
+	// The rail and the page render the same toolbar, in their own variant.
+	assert.match(list, /<FilterToolbar \{\.\.\.filters\} variant="rail" \/>/);
+	assert.match(list, /<FilterToolbar \{\.\.\.filters\} variant="page" autoFocus \/>/);
 });
 
 test("the app shell fetches archived workflows too so the filter and selection work", () => {

@@ -184,3 +184,23 @@ test("status tabs, the trigger badge and the applied row are wired as specified"
 	const css = read("src/views/WorkflowFilters.module.css");
 	assert.match(css, /@media \(max-width: 768px\)[\s\S]*\.popover \{[^}]*position: fixed/, "bottom sheet on phones");
 });
+
+test("the rail shows search + Filters (status inside the popover); the page adds the status tabs; both show the applied row", () => {
+	const list = read("src/views/WorkflowList.tsx");
+	assert.match(list, /\{!isRail && <StatusTabs value=\{filter\} counts=\{counts\.status\} onChange=\{setFilter\} \/>\}/);
+	assert.match(list, /leadingSection=\{isRail \? <StatusSection/);
+	assert.match(list, /filtersButtonCount\(state, \{ includeStatus: isRail \}\)/);
+	assert.match(list, /<AppliedRow filters=\{filters\} className=\{styles\.railApplied\} \/>/);
+	assert.match(list, /<FilterToolbar \{\.\.\.filters\} variant="page" autoFocus \/>\s*<AppliedRow filters=\{filters\} \/>/);
+	assert.equal((list.match(/<AppliedFilterChips/g) ?? []).length, 1, "one shared chips row");
+});
+
+test("the old chip groups and their copy are gone from the workflow list", () => {
+	const list = read("src/views/WorkflowList.tsx");
+	for (const gone of ["All origins", "All statuses", "Scheduled runs", "data-archive-filter", "data-schedule-filter", "Filter by origin", "Filter by schedule", "Filter by archive state"]) {
+		assert.ok(!list.includes(gone), gone);
+	}
+	const css = read("src/views/WorkflowList.module.css");
+	assert.ok(!/\.filters?\b|\.filterActive/.test(css), "dead chip-group CSS is removed");
+	assert.match(read("src/lib/workflowFilter.ts"), /Open Filters and choose Show: Archived/);
+});
