@@ -10,13 +10,15 @@ import type {
 	StepNoteTheme,
 	ResourceSelection,
 	ResourceSet,
+	ScheduleInput,
 	Tcp,
 	TcpSelection,
 	Template,
 	Workflow,
 } from "../api/types.ts";
 import { OVERRIDABLE_WORKFLOW_STATUSES, startActionFor } from "../api/types.ts";
-import { Badge } from "../components/Badge.tsx";
+import { ArchivedBadge, Badge, ScheduleBadge } from "../components/Badge.tsx";
+import { MissedOnceActions } from "../components/MissedOnceActions.tsx";
 import { CollapsibleSection } from "../components/CollapsibleSection.tsx";
 import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { useToast } from "../components/Toast.tsx";
@@ -29,6 +31,10 @@ import { useStagedImages } from "../hooks/useStagedImages.ts";
 import { isUsableCopy, templateOptionLabel } from "../lib/catalogCopy.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
 import { canMoveStep } from "../lib/stepMove.ts";
+import { hasLiveSchedule, scheduleAvailability } from "../lib/scheduleForm.ts";
+import { isMissedOnce } from "../lib/scheduleNotices.ts";
+import { isArmedInstance, SCHEDULED_ARMED_TITLE } from "../lib/scheduleView.ts";
+import { isArchivable } from "../lib/workflowFilter.ts";
 import {
 	adoptNewlyVisibleSteps,
 	reconcileSelectionWithServer,
@@ -46,6 +52,8 @@ import { ContextPanel } from "./ContextPanel.tsx";
 import { RciPanel } from "./RciPanel.tsx";
 import { TcpPanel } from "./TcpPanel.tsx";
 import { RenameWorkflowModal } from "./RenameWorkflowModal.tsx";
+import { ScheduleModal, type ScheduleSaveResult } from "./ScheduleModal.tsx";
+import { SeriesPanel } from "./SeriesPanel.tsx";
 import { SessionPanel } from "./SessionPanel.tsx";
 import { StepItem } from "./StepItem.tsx";
 import { WorkflowCanvas } from "./WorkflowCanvas.tsx";
@@ -79,6 +87,10 @@ import styles from "./WorkflowDetail.module.css";
  *   ran out of tokens, a callback that never landed). The hub then leaves that
  *   status alone until the workflow is run again, and the badge is marked as
  *   set by hand.
+ * - **An archived workflow runs nothing.** The hub answers 409 `archived` to
+ *   start/resume/restart and a step's Retry, so those buttons are disabled
+ *   and say to unarchive first. Only completed/failed workflows can be
+ *   archived; Archive is disabled (with the reason) on any other status.
  *
  * `onBack` is passed only when this pane is the whole screen (a phone, where
  * the workflow list is not next to it) — it's what turns "the detail half of a
@@ -116,6 +128,12 @@ export function WorkflowDetail({
 	onClone,
 	onRename,
 	onDelete,
+	onArchive,
+	onUnarchive,
+	onSaveSchedule,
+	onCancelSchedule,
+	onRunMissedNow,
+	onDismissMissed,
 	onSetStatus,
 	onSaveContext,
 	onSaveTcps,
@@ -159,6 +177,18 @@ export function WorkflowDetail({
 	/** Saves a new name; resolves true only when the server stored it. */
 	onRename: (name: string) => Promise<boolean>;
 	onDelete: () => void;
+	/** Archives this (completed/failed) workflow: hidden from the default list, not runnable until unarchived. */
+	onArchive: () => void;
+	/** Brings an archived workflow back so it can run again. */
+	onUnarchive: () => void;
+	/** Schedules this workflow, or changes the schedule of its armed instance. */
+	onSaveSchedule: (input: ScheduleInput) => Promise<ScheduleSaveResult>;
+	/** Cancels its schedule; resolves true when the hub did. */
+	onCancelSchedule: () => Promise<boolean>;
+	/** A missed `once`: run it now — the one manual run an unfired scheduled instance allows. */
+	onRunMissedNow: () => void;
+	/** A missed `once`: give up on it; it becomes a normal workflow. */
+	onDismissMissed: () => void;
 	/** Forces the workflow's status by hand; never runs anything. */
 	onSetStatus: (status: OverridableWorkflowStatus) => void;
 	/** Resolves true only when the server really stored the context. */
@@ -208,6 +238,7 @@ export function WorkflowDetail({
 	const [opening, setOpening] = useState(false);
 	// The rename dialog opened by "Change", next to the title.
 	const [renaming, setRenaming] = useState(false);
+	const [scheduling, setScheduling] = useState(false);
 	const [dockerMounts, setDockerMounts] = useState<string[]>(workflow.dockerMounts);
 	const [savingDockerMounts, setSavingDockerMounts] = useState(false);
 	// How the steps are drawn: the list, or the canvas. A way of LOOKING at the
@@ -333,8 +364,20 @@ export function WorkflowDetail({
 	const canPause = can("client.workflows.execute", "client.workflows.manage");
 	const canManage = can("client.workflows.manage");
 	const canCreate = can("client.workflows.create");
+	// Scheduling is running work unattended AND managing the workflow (D22), so
+	// both are required — `can` answers "any of", hence two calls.
+	const canSchedule = canExecute && canManage;
+	const schedulePermissionHint = "Requires client.workflows.execute and client.workflows.manage";
+	const scheduleMode = scheduleAvailability(workflow);
 
-	const startAction = canExecute ? startActionFor(workflow.status) : null;
+	// Archived work runs nothing until unarchived (the hub answers 409 `archived`).
+	const archived = Boolean(workflow.archivedAt);
+	const archivable = isArchivable(workflow);
+	// A schedule's armed instance is the NEXT run: it starts by itself at its
+	// time, and the hub refuses Start/Resume/Restart/Run step on it (409
+	// `scheduled_armed`, D2) — so none of them is offered. It stays editable.
+	const scheduledArmed = isArmedInstance(workflow);
+	const startAction = scheduledArmed ? null : canExecute && !archived ? startActionFor(workflow.status) : null;
 	const running = workflow.status === "running";
 	// The server refuses a workflow override while a step still has a callback
 	// coming — that callback would write a status over it seconds later.
@@ -472,6 +515,8 @@ export function WorkflowDetail({
 						Change
 					</button>
 					<Badge status={workflow.status} manual={workflow.statusManual} manualAt={workflow.statusManualAt} />
+					<ScheduleBadge workflow={workflow} />
+					<ArchivedBadge archivedAt={workflow.archivedAt} />
 				</div>
 
 				<dl className={styles.facts}>
@@ -559,6 +604,30 @@ export function WorkflowDetail({
 					</CollapsibleSection>
 				)}
 
+				{/* A missed `once` waits for the operator (D8) — say so where the run
+				    controls are, with the same three choices as the notices banner.
+				    Reschedule is the schedule dialog, saved as a reschedule. A
+				    server-managed series is decided on the server. */}
+				{isMissedOnce(workflow) && scheduleMode.mode !== "readonly" && (
+					<div className="msg msg--warn" role="status" data-missed-once>
+						<p>
+							This run was scheduled for{" "}
+							{workflow.schedule?.scheduledFor ? new Date(workflow.schedule.scheduledFor).toLocaleString() : "an earlier time"}{" "}
+							and was missed while the hub was offline. Run it now, pick a new time, or dismiss it.
+						</p>
+						<div className={styles.missedActions}>
+							<MissedOnceActions
+								canAct={canSchedule}
+								actHint={schedulePermissionHint}
+								busy={busy}
+								onRunNow={onRunMissedNow}
+								onReschedule={() => setScheduling(true)}
+								onDismiss={onDismissMissed}
+							/>
+						</div>
+					</div>
+				)}
+
 				<div className={styles.progressRow}>
 					<ProgressBar progress={workflow.progress} running={running} />
 					<span className={styles.progressText}>
@@ -581,7 +650,11 @@ export function WorkflowDetail({
 						title={
 							!canExecute
 								? "Requires client.workflows.execute"
-								: !startAction
+								: scheduledArmed
+									? SCHEDULED_ARMED_TITLE
+									: archived
+									? "This workflow is archived — unarchive it to run it again."
+									: !startAction
 									? workflow.status === "waiting"
 										? "A step is waiting for your review — Continue it to carry on, or Abort it to stop here."
 										: "Already running."
@@ -629,6 +702,35 @@ export function WorkflowDetail({
 						Clone
 					</button>
 
+					{/* Opens the schedule dialog: create, edit or cancel a schedule — or,
+					    for a series the server manages, see it read-only. Disabled only
+					    where the dialog would have nothing to offer: an adopted
+					    conversation can never be scheduled (D23). */}
+					<button
+						type="button"
+						className="btn"
+						onClick={() => setScheduling(true)}
+						disabled={
+							busy ||
+							Boolean(workflow.adoptedSessionId) ||
+							(!canSchedule && scheduleMode.mode !== "readonly")
+						}
+						title={
+							workflow.adoptedSessionId
+								? "This workflow continues an adopted conversation, so it can't be scheduled — every scheduled run is a clone, and a clone can't continue that conversation."
+								: scheduleMode.mode === "readonly"
+									? "See this workflow's schedule. It is managed by the server."
+									: !canSchedule
+										? schedulePermissionHint
+										: hasLiveSchedule(workflow)
+											? "Change or cancel this workflow's schedule."
+											: "Run this workflow on a schedule: once, daily or weekly."
+						}
+						data-schedule-workflow
+					>
+						{hasLiveSchedule(workflow) ? "Edit schedule" : "Schedule"}
+					</button>
+
 					{/* Says what really happened when the engine's verdict is wrong.
 					    Deliberately NOT a run control: it dispatches nothing, and it's a
 					    picker rather than four buttons so the run controls stay the
@@ -660,6 +762,44 @@ export function WorkflowDetail({
 					</select>
 
 					<div className={styles.controlsSpacer} />
+
+					{/* Filing finished work away, not a run control — so it sits with
+					    Delete, on the far side of the spacer. Archive only takes
+					    completed/failed workflows (the hub's `not_archivable` rule), so
+					    it's disabled with the reason on anything else. */}
+					{archived ? (
+						<button
+							type="button"
+							className="btn"
+							onClick={onUnarchive}
+							disabled={busy || !canManage}
+							title={
+								canManage
+									? "Bring this workflow back into the list so it can run again."
+									: requires("client.workflows.manage")
+							}
+							data-unarchive-workflow
+						>
+							Unarchive
+						</button>
+					) : (
+						<button
+							type="button"
+							className="btn"
+							onClick={onArchive}
+							disabled={busy || !canManage || !archivable}
+							title={
+								!canManage
+									? requires("client.workflows.manage")
+									: !archivable
+										? "Only completed or failed workflows can be archived."
+										: "Hide this workflow from the list. It can't run until it's unarchived; the Archived filter shows it."
+							}
+							data-archive-workflow
+						>
+							Archive
+						</button>
+					)}
 
 					<button
 						type="button"
@@ -771,6 +911,8 @@ export function WorkflowDetail({
 									onEditNote={onEditNote}
 									onRemoveNote={onRemoveNote}
 									onSelectWorkflow={onSelectWorkflow}
+									archived={archived}
+									scheduledArmed={scheduledArmed}
 									busy={busy}
 								/>
 							</ul>
@@ -809,6 +951,8 @@ export function WorkflowDetail({
 										onEditNote={onEditNote}
 										onRemoveNote={onRemoveNote}
 										onSelectWorkflow={onSelectWorkflow}
+										archived={archived}
+										scheduledArmed={scheduledArmed}
 										busy={busy}
 									/>
 								))}
@@ -825,6 +969,8 @@ export function WorkflowDetail({
 					    belong to the session, so they are stated once, where the session is. */}
 				</div>
 
+				<SeriesPanel workflow={workflow} />
+
 				<SessionPanel
 					info={sessionInfo}
 					adoptedSessionId={workflow.adoptedSessionId}
@@ -833,6 +979,17 @@ export function WorkflowDetail({
 					opening={opening}
 				/>
 			</div>
+
+			<ScheduleModal
+				open={scheduling}
+				workflow={workflow}
+				steps={steps}
+				canSchedule={canSchedule}
+				permissionHint={schedulePermissionHint}
+				onClose={() => setScheduling(false)}
+				onSave={onSaveSchedule}
+				onCancelSchedule={onCancelSchedule}
+			/>
 
 			<RenameWorkflowModal
 				open={renaming}

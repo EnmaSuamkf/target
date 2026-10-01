@@ -1,10 +1,27 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Workflow, WorkflowOrigin, WorkflowStatus } from "../api/types.ts";
-import { Badge, OriginBadge } from "../components/Badge.tsx";
+import { ArchivedBadge, Badge, OriginBadge, ScheduleBadge } from "../components/Badge.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { ProgressBar } from "../components/Progress.tsx";
 import { usePermissions } from "../hooks/usePermissions.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
+import {
+	filterBySchedule,
+	presentScheduleFilters,
+	SCHEDULE_FILTER_LABELS,
+	type ScheduleFilter,
+} from "../lib/scheduleView.ts";
+import {
+	type ArchiveFilter,
+	emptyListMessage,
+	filterAndSort,
+	isArchived,
+	type OriginFilter,
+	presentOrigins,
+	presentStatuses,
+	scopeByArchive,
+	type StatusFilter as Filter,
+} from "../lib/workflowFilter.ts";
 import styles from "./WorkflowList.module.css";
 
 /**
@@ -27,55 +44,65 @@ import styles from "./WorkflowList.module.css";
  * Sorting is unchanged: the work that needs you first (waiting on a manual
  * review), then active work (running, then paused), then everything else by
  * recency — so the workflow you're most likely to want is the leftmost card.
+ *
+ * Archived workflows are hidden from both surfaces by default; each surface's
+ * "Archived" filter flips it to show ONLY them. The shell fetches the list with
+ * `archived=include` and the narrowing happens here (see lib/workflowFilter.ts).
  */
-
-// `waiting` sorts above even `running`: it's the only status that can't move
-// until the operator does something, so it's what they need to find first.
-const STATUS_ORDER: Record<WorkflowStatus, number> = {
-	waiting: 0,
-	running: 1,
-	paused: 2,
-	draft: 3,
-	failed: 4,
-	completed: 5,
-};
-
-type Filter = "all" | WorkflowStatus;
-type OriginFilter = "all" | WorkflowOrigin;
 
 /** How many cards the "All workflows" page shows per page. */
 const PAGE_SIZE = 12;
 
 /**
- * Narrows and orders the workflows the same way in every surface — the rail,
- * the mobile dialog and the desktop page — so a search typed in any one ranks
- * identically. Kept as a plain function (not a hook) so each surface can call
- * it in its own `useMemo` without sharing state.
+ * The narrowing state one surface owns (search, status, origin, archive side),
+ * plus what it derives from it. The rail and the page each call this, so
+ * narrowing one never silently narrows the other. Archived workflows are
+ * hidden unless the surface's "Archived" filter is on, which shows ONLY them;
+ * counts and the offered status/origin chips follow that scope.
  */
-function filterAndSort(workflows: Workflow[], query: string, filter: Filter, originFilter: OriginFilter): Workflow[] {
-	const q = query.trim().toLowerCase();
-	return workflows
-		.filter((w) => (filter === "all" ? true : w.status === filter))
-		.filter((w) => (originFilter === "all" ? true : w.origin === originFilter))
-		.filter((w) => (q === "" ? true : w.name.toLowerCase().includes(q) || w.agentName.toLowerCase().includes(q)))
-		.sort((a, b) => {
-			const byStatus = STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
-			if (byStatus !== 0) return byStatus;
-			return b.updatedAt.localeCompare(a.updatedAt);
-		});
-}
+function useWorkflowFilters(workflows: Workflow[]) {
+	const [query, setQuery] = useState("");
+	const [filter, setFilter] = useState<Filter>("all");
+	const [originFilter, setOriginFilter] = useState<OriginFilter>("all");
+	const [archive, setArchiveState] = useState<ArchiveFilter>("active");
+	const [scheduleFilter, setScheduleFilter] = useState<ScheduleFilter>("all");
 
-/** Only offer filters that would actually match something. */
-function presentStatuses(workflows: Workflow[]): WorkflowStatus[] {
-	const present = new Set(workflows.map((w) => w.status));
-	return (Object.keys(STATUS_ORDER) as WorkflowStatus[])
-		.filter((s) => present.has(s))
-		.sort((a, b) => STATUS_ORDER[a] - STATUS_ORDER[b]);
-}
+	const scoped = useMemo(() => scopeByArchive(workflows, archive), [workflows, archive]);
+	const archivedCount = useMemo(() => workflows.filter(isArchived).length, [workflows]);
+	const visible = useMemo(
+		() => filterBySchedule(filterAndSort(workflows, query, filter, originFilter, archive), scheduleFilter),
+		[workflows, query, filter, originFilter, archive, scheduleFilter],
+	);
+	const statuses = useMemo(() => presentStatuses(scoped), [scoped]);
+	const origins = useMemo(() => presentOrigins(scoped), [scoped]);
+	const scheduleFilters = useMemo(() => presentScheduleFilters(scoped), [scoped]);
 
-function presentOrigins(workflows: Workflow[]): WorkflowOrigin[] {
-	const present = new Set(workflows.map((w) => w.origin));
-	return (["local", "remote"] as WorkflowOrigin[]).filter((o) => present.has(o));
+	// Switching sides of the archive changes which statuses exist (archived work
+	// is only ever completed/failed), so a status chip picked on the other side
+	// could strand the list on "No matches" with no chip left to clear it.
+	const setArchive = (next: ArchiveFilter): void => {
+		setArchiveState(next);
+		setFilter("all");
+	};
+
+	return {
+		query,
+		setQuery,
+		filter,
+		setFilter,
+		originFilter,
+		setOriginFilter,
+		scheduleFilter,
+		setScheduleFilter,
+		scheduleFilters,
+		archive,
+		setArchive,
+		scoped,
+		archivedCount,
+		visible,
+		statuses,
+		origins,
+	};
 }
 
 export function WorkflowList({
@@ -100,19 +127,16 @@ export function WorkflowList({
 	 * had scrolled sideways. */
 	railResetKey?: number;
 }): React.JSX.Element {
-	// The rail's own search + status filter. Independent of the "All workflows"
-	// surfaces' state, so narrowing one doesn't silently narrow the other.
-	const [query, setQuery] = useState("");
-	const [filter, setFilter] = useState<Filter>("all");
-	const [originFilter, setOriginFilter] = useState<OriginFilter>("all");
+	// The rail's own search + status/origin/archive filters. Independent of the
+	// "All workflows" page's state, so narrowing one doesn't silently narrow the other.
+	const filters = useWorkflowFilters(workflows);
+	const { visible, scoped, archive } = filters;
 	const railRef = useRef<HTMLDivElement | null>(null);
 	const { can } = usePermissions();
 	const canCreate = can("client.workflows.create");
 	const createTitle = canCreate ? undefined : "Requires client.workflows.create";
 
-	const visible = useMemo(() => filterAndSort(workflows, query, filter, originFilter), [workflows, query, filter, originFilter]);
-	const statuses = useMemo(() => presentStatuses(workflows), [workflows]);
-	const origins = useMemo(() => presentOrigins(workflows), [workflows]);
+	const empty = emptyListMessage(workflows.length, scoped.length, archive);
 
 	// A new workflow: put the rail back at its left edge. `scrollLeft` (not
 	// `scrollIntoView`) on purpose — this must never move the *page*, which
@@ -128,78 +152,12 @@ export function WorkflowList({
 		<section className={styles.strip} aria-label="Workflows">
 			<div className={styles.toolbar}>
 				<h2 className={styles.heading}>
-					Workflows
-					{workflows.length > 0 && <span className={styles.count}>{workflows.length}</span>}
+					{archive === "archived" ? "Archived" : "Workflows"}
+					{scoped.length > 0 && <span className={styles.count}>{scoped.length}</span>}
 				</h2>
 
 				<div className={styles.toolbarTools}>
-					{workflows.length > 0 && (
-						<>
-							<div className={styles.search}>
-								<svg className={styles.searchIcon} width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-									<circle cx="11" cy="11" r="7" />
-									<path d="m20 20-3.5-3.5" />
-								</svg>
-								<input
-									type="search"
-									className={styles.searchInput}
-									placeholder="Search workflows…"
-									value={query}
-									onChange={(ev) => setQuery(ev.target.value)}
-									aria-label="Search workflows by name or agent"
-									data-workflow-search
-								/>
-							</div>
-
-							{origins.length > 1 && (
-								<div className={styles.filters} role="group" aria-label="Filter by origin">
-									<button
-										type="button"
-										className={`${styles.filter} ${originFilter === "all" ? styles.filterActive : ""}`}
-										onClick={() => setOriginFilter("all")}
-										aria-pressed={originFilter === "all"}
-									>
-										All origins
-									</button>
-									{origins.map((origin) => (
-										<button
-											key={origin}
-											type="button"
-											className={`${styles.filter} ${originFilter === origin ? styles.filterActive : ""}`}
-											onClick={() => setOriginFilter(origin)}
-											aria-pressed={originFilter === origin}
-										>
-											{origin === "remote" ? "Remote" : "Local"}
-										</button>
-									))}
-								</div>
-							)}
-
-							{statuses.length > 1 && (
-								<div className={styles.filters} role="group" aria-label="Filter by status">
-									<button
-										type="button"
-										className={`${styles.filter} ${filter === "all" ? styles.filterActive : ""}`}
-										onClick={() => setFilter("all")}
-										aria-pressed={filter === "all"}
-									>
-										All statuses
-									</button>
-									{statuses.map((status) => (
-										<button
-											key={status}
-											type="button"
-											className={`${styles.filter} ${filter === status ? styles.filterActive : ""}`}
-											onClick={() => setFilter(status)}
-											aria-pressed={filter === status}
-										>
-											{status}
-										</button>
-									))}
-								</div>
-							)}
-						</>
-					)}
+					{workflows.length > 0 && <FilterToolbar {...filters} />}
 
 					{/* Classed so the phone can give it a row of its own: sharing the
 					    line with the horizontally-scrolling status chips left the last
@@ -263,7 +221,7 @@ export function WorkflowList({
 								}
 							/>
 						) : (
-							<EmptyState title="No matches" description="Try a different search or clear the status filter." />
+							empty && <EmptyState title={empty.title} description={empty.description} />
 						)}
 					</div>
 				) : (
@@ -321,8 +279,16 @@ function WorkflowCard({
 				    not only after opening it. */}
 				<span className={styles.cardBadges}>
 					<OriginBadge origin={workflow.origin} />
+					<ArchivedBadge archivedAt={workflow.archivedAt} />
 					<Badge status={workflow.status} manual={workflow.statusManual} manualAt={workflow.statusManualAt} />
 				</span>
+			</span>
+
+			{/* Its own line, not beside the status: "Scheduled · next in 14h" or
+			    "Run of <series> · <occurrence>" is long enough that sharing the
+			    title row squeezed the name down to a few letters. */}
+			<span className={styles.cardSchedule}>
+				<ScheduleBadge workflow={workflow} />
 			</span>
 
 			<ProgressBar progress={workflow.progress} running={workflow.status === "running"} />
@@ -362,7 +328,7 @@ function WorkflowCard({
 	);
 }
 
-/** A shared search + status-filter toolbar, used by the dialog and the page. */
+/** The shared search + archive/origin/schedule/status-filter toolbar, used by the rail and the page. */
 function FilterToolbar({
 	query,
 	setQuery,
@@ -370,6 +336,12 @@ function FilterToolbar({
 	setFilter,
 	originFilter,
 	setOriginFilter,
+	scheduleFilter,
+	setScheduleFilter,
+	scheduleFilters,
+	archive,
+	setArchive,
+	archivedCount,
 	statuses,
 	origins,
 	autoFocus,
@@ -380,6 +352,14 @@ function FilterToolbar({
 	setFilter: (f: Filter) => void;
 	originFilter: OriginFilter;
 	setOriginFilter: (f: OriginFilter) => void;
+	scheduleFilter: ScheduleFilter;
+	setScheduleFilter: (f: ScheduleFilter) => void;
+	/** Which schedule filters would match something on this side of the archive. */
+	scheduleFilters: Exclude<ScheduleFilter, "all">[];
+	archive: ArchiveFilter;
+	setArchive: (a: ArchiveFilter) => void;
+	/** How many archived workflows exist — the Archived toggle only appears when there are some (or it's on). */
+	archivedCount: number;
 	statuses: WorkflowStatus[];
 	origins: WorkflowOrigin[];
 	autoFocus?: boolean;
@@ -403,6 +383,31 @@ function FilterToolbar({
 				/>
 			</div>
 
+			{/* Archived workflows are hidden by default; this flips the surface to
+			    show ONLY them. Offered once something is archived — or while it's on,
+			    so the way back never disappears (e.g. after unarchiving the last one). */}
+			{(archivedCount > 0 || archive === "archived") && (
+				<div className={styles.filters} role="group" aria-label="Filter by archive state" data-archive-filter>
+					<button
+						type="button"
+						className={`${styles.filter} ${archive === "active" ? styles.filterActive : ""}`}
+						onClick={() => setArchive("active")}
+						aria-pressed={archive === "active"}
+					>
+						Active
+					</button>
+					<button
+						type="button"
+						className={`${styles.filter} ${archive === "archived" ? styles.filterActive : ""}`}
+						onClick={() => setArchive("archived")}
+						aria-pressed={archive === "archived"}
+						title="Show only archived workflows"
+					>
+						Archived
+					</button>
+				</div>
+			)}
+
 			{origins.length > 1 && (
 				<div className={styles.filters} role="group" aria-label="Filter by origin">
 					<button
@@ -424,6 +429,40 @@ function FilterToolbar({
 							{origin === "remote" ? "Remote" : "Local"}
 						</button>
 					))}
+				</div>
+			)}
+
+			{/* Same pattern as origin. Offered once any schedule exists on this side
+			    of the archive — or while one is picked, so the way back to "All"
+			    never disappears (e.g. after cancelling the last schedule). */}
+			{(scheduleFilters.length > 0 || scheduleFilter !== "all") && (
+				<div className={styles.filters} role="group" aria-label="Filter by schedule" data-schedule-filter>
+					<button
+						type="button"
+						className={`${styles.filter} ${scheduleFilter === "all" ? styles.filterActive : ""}`}
+						onClick={() => setScheduleFilter("all")}
+						aria-pressed={scheduleFilter === "all"}
+					>
+						All
+					</button>
+					{(["scheduled", "runs"] as const)
+						.filter((f) => scheduleFilters.includes(f) || scheduleFilter === f)
+						.map((f) => (
+							<button
+								key={f}
+								type="button"
+								className={`${styles.filter} ${scheduleFilter === f ? styles.filterActive : ""}`}
+								onClick={() => setScheduleFilter(f)}
+								aria-pressed={scheduleFilter === f}
+								title={
+									f === "scheduled"
+										? "Each schedule once, by its next run"
+										: "Runs that schedules have already executed"
+								}
+							>
+								{SCHEDULE_FILTER_LABELS[f]}
+							</button>
+						))}
 				</div>
 			)}
 
@@ -493,14 +532,10 @@ export function AllWorkflowsPage({
 	onSelect: (id: string) => void;
 	onBack: () => void;
 }): React.JSX.Element {
-	const [query, setQuery] = useState("");
-	const [filter, setFilter] = useState<Filter>("all");
-	const [originFilter, setOriginFilter] = useState<OriginFilter>("all");
+	const filters = useWorkflowFilters(workflows);
+	const { query, filter, originFilter, archive, scheduleFilter, scoped, visible } = filters;
 	const [page, setPage] = useState(1);
-
-	const visible = useMemo(() => filterAndSort(workflows, query, filter, originFilter), [workflows, query, filter, originFilter]);
-	const statuses = useMemo(() => presentStatuses(workflows), [workflows]);
-	const origins = useMemo(() => presentOrigins(workflows), [workflows]);
+	const empty = emptyListMessage(workflows.length, scoped.length, archive);
 
 	const total = visible.length;
 	const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -516,7 +551,7 @@ export function AllWorkflowsPage({
 	// search you've just retyped is never the page you want.
 	useEffect(() => {
 		setPage(1);
-	}, [query, filter, originFilter]);
+	}, [query, filter, originFilter, archive, scheduleFilter]);
 
 	return (
 		<section className={styles.page} aria-label="All workflows">
@@ -528,32 +563,25 @@ export function AllWorkflowsPage({
 					Back
 				</button>
 				<h2 className={styles.pageTitle}>
-					All workflows
-					{workflows.length > 0 && <span className={styles.count}>{workflows.length}</span>}
+					{archive === "archived" ? "Archived workflows" : "All workflows"}
+					{scoped.length > 0 && <span className={styles.count}>{scoped.length}</span>}
 				</h2>
 				<span className={styles.pageSpacer} />
 			</div>
 
 			{workflows.length > 0 && (
 				<div className={styles.pageToolbar}>
-					<FilterToolbar
-						query={query}
-						setQuery={setQuery}
-						filter={filter}
-						setFilter={setFilter}
-						originFilter={originFilter}
-						setOriginFilter={setOriginFilter}
-						statuses={statuses}
-						origins={origins}
-						autoFocus
-					/>
+					<FilterToolbar {...filters} autoFocus />
 				</div>
 			)}
 
 			<div className={styles.pageBody}>
 				{pageItems.length === 0 ? (
 					<div className={styles.pageEmpty}>
-						<EmptyState title="No matches" description="Try a different search or clear the status filter." />
+						<EmptyState
+							title={empty?.title ?? "No workflows yet"}
+							description={empty?.description ?? "Create a workflow from the Workflows view to see it here."}
+						/>
 					</div>
 				) : (
 					<div className={styles.pageGrid} data-workflow-list>

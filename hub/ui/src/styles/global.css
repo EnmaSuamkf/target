@@ -308,6 +308,42 @@ kbd,
 	color: var(--gray-500);
 }
 
+/* Archived: filed away, not a status — muted and dashed so it reads as a
+   secondary marker beside the (still meaningful) completed/failed pill. */
+.badge--archived {
+	background: var(--gray-50);
+	border-color: var(--gray-300);
+	border-style: dashed;
+	color: var(--gray-500);
+}
+
+/* Schedule markers sit beside the status pill, like Archived. `scheduled` is
+   the next run (accent: it will happen by itself), `run` a past execution
+   (muted: history), `warning` a missed run or a broken series — the two
+   states that wait on the operator, so they borrow the attention colours. */
+/* These carry sentences ("Scheduled · next in 3h", "Run of Nightly audit · …"),
+   not a status word, so the pill's capitalisation would misspell them. */
+.badge--schedule-scheduled,
+.badge--schedule-run,
+.badge--schedule-warning {
+	text-transform: none;
+}
+.badge--schedule-scheduled {
+	background: var(--accent-50);
+	border-color: var(--accent-200);
+	color: var(--accent-700);
+}
+.badge--schedule-run {
+	background: var(--gray-50);
+	border-color: var(--gray-200);
+	color: var(--gray-600);
+}
+.badge--schedule-warning {
+	background: var(--attention-50);
+	border-color: var(--attention-200);
+	color: var(--attention-700);
+}
+
 /* A soft pulse marks work actually in flight (running step, judging). */
 .badge--running .badge__dot {
 	animation: pulse 1.6s ease-in-out infinite;

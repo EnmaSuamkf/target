@@ -14,6 +14,7 @@ const RUNNERS = ["claude", "free-code", "cursor"];
 const SANDBOXES = ["host", "docker"];
 const PERMISSION_MODES = ["acceptEdits", "auto", "manual", "dontAsk", "plan", "bypassPermissions"];
 const WORKFLOW_STATUSES = ["draft", "paused", "completed", "failed"];
+const ARCHIVED_FILTERS = ["exclude", "include", "only"];
 const STEP_STATUSES = ["pending", "done", "failed"];
 
 function send(msg) {
@@ -190,9 +191,23 @@ const TOOLS = [
 	},
 	{
 		name: "list_workflows",
-		description: "List all workflows with progress",
-		inputSchema: { type: "object", properties: {}, additionalProperties: false },
-		run: async () => hubJson("GET", "/api/workflows"),
+		description: "List workflows with progress (archived ones are hidden unless archived=include|only)",
+		inputSchema: {
+			type: "object",
+			properties: {
+				archived: {
+					type: "string",
+					enum: ARCHIVED_FILTERS,
+					description: "exclude (default) hides archived workflows, include adds them, only returns just them",
+				},
+			},
+			additionalProperties: false,
+		},
+		run: async (a) => {
+			const archived = pickString(a, "archived");
+			const q = archived ? `?archived=${enc(archived)}` : "";
+			return hubJson("GET", `/api/workflows${q}`);
+		},
 	},
 	{
 		name: "get_workflow",
@@ -268,6 +283,29 @@ const TOOLS = [
 			additionalProperties: false,
 		},
 		run: async (a) => hubJson("DELETE", `/api/workflows/${enc(a.workflowId)}`),
+	},
+	{
+		name: "archive_workflow",
+		description:
+			"Archive a completed or failed workflow (hidden from the default list; start/resume/restart/step run are refused until unarchived)",
+		inputSchema: {
+			type: "object",
+			properties: { workflowId: { type: "string" } },
+			required: ["workflowId"],
+			additionalProperties: false,
+		},
+		run: async (a) => hubJson("POST", `/api/workflows/${enc(a.workflowId)}/archive`),
+	},
+	{
+		name: "unarchive_workflow",
+		description: "Unarchive a workflow so it shows in the default list and can run again",
+		inputSchema: {
+			type: "object",
+			properties: { workflowId: { type: "string" } },
+			required: ["workflowId"],
+			additionalProperties: false,
+		},
+		run: async (a) => hubJson("POST", `/api/workflows/${enc(a.workflowId)}/unarchive`),
 	},
 	{
 		name: "rename_workflow",
@@ -353,7 +391,8 @@ const TOOLS = [
 	},
 	{
 		name: "start_workflow",
-		description: "Start sequential dispatch for selected steps",
+		description:
+			"Start sequential dispatch for selected steps (refused with 409 scheduled_armed on the armed next run of a schedule — it starts on its own)",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -381,7 +420,7 @@ const TOOLS = [
 	},
 	{
 		name: "resume_workflow",
-		description: "Resume a paused workflow",
+		description: "Resume a paused workflow (refused with 409 scheduled_armed on the armed next run of a schedule)",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -398,7 +437,7 @@ const TOOLS = [
 	},
 	{
 		name: "restart_workflow",
-		description: "Reset all steps and start over",
+		description: "Reset all steps and start over (refused with 409 scheduled_armed on the armed next run of a schedule)",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -412,6 +451,105 @@ const TOOLS = [
 			hubJson("POST", `/api/workflows/${enc(a.workflowId)}/restart`, {
 				stepIds: Array.isArray(a.stepIds) ? a.stepIds.map(String) : [],
 			}),
+	},
+	{
+		name: "get_schedule",
+		description: "Get a workflow's schedule series (spec, timezone, state, nextRunAt) and its instances; schedule is null when not scheduled",
+		inputSchema: {
+			type: "object",
+			properties: { workflowId: { type: "string" } },
+			required: ["workflowId"],
+			additionalProperties: false,
+		},
+		run: async (a) => hubJson("GET", `/api/workflows/${enc(a.workflowId)}/schedule`),
+	},
+	{
+		name: "set_schedule",
+		description:
+			"Schedule a draft/completed/failed workflow, or change its schedule. It becomes the armed next run: it starts on its own at nextRunAt and can't be started by hand meanwhile. spec is {kind:'once', at:'YYYY-MM-DDTHH:mm'} | {kind:'daily', time:'HH:mm'} | {kind:'weekly', days:[0-6, 0=Sunday], time:'HH:mm'}, in the IANA timezone given. 400 invalid_schedule lists field errors; 409 server_managed for a series managed by the server.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				workflowId: { type: "string" },
+				spec: {
+					type: "object",
+					properties: {
+						kind: { type: "string", enum: ["once", "daily", "weekly"] },
+						at: { type: "string", description: "once: local YYYY-MM-DDTHH:mm" },
+						time: { type: "string", description: "daily/weekly: local HH:mm" },
+						days: { type: "array", items: { type: "integer", minimum: 0, maximum: 6 }, description: "weekly: 0=Sunday..6" },
+					},
+					required: ["kind"],
+				},
+				timezone: { type: "string", description: "IANA zone, e.g. Europe/Madrid" },
+				includePrevious: {
+					type: "boolean",
+					description: "Tell each run where the previous run's results are (default true)",
+				},
+			},
+			required: ["workflowId", "spec", "timezone"],
+			additionalProperties: false,
+		},
+		run: async (a) =>
+			hubJson("PUT", `/api/workflows/${enc(a.workflowId)}/schedule`, {
+				spec: a.spec,
+				timezone: a.timezone,
+				...(a.includePrevious === undefined ? {} : { includePrevious: Boolean(a.includePrevious) }),
+			}),
+	},
+	{
+		name: "cancel_schedule",
+		description:
+			"Cancel a workflow's schedule: its armed next run becomes a normal workflow again; past runs are kept. 409 server_managed for a series managed by the server.",
+		inputSchema: {
+			type: "object",
+			properties: { workflowId: { type: "string" } },
+			required: ["workflowId"],
+			additionalProperties: false,
+		},
+		run: async (a) => hubJson("DELETE", `/api/workflows/${enc(a.workflowId)}/schedule`),
+	},
+	{
+		name: "preview_schedule",
+		description: "The next 3 runs a schedule spec would produce (ISO + local time), without saving anything",
+		inputSchema: {
+			type: "object",
+			properties: { spec: { type: "object" }, timezone: { type: "string" } },
+			required: ["spec", "timezone"],
+			additionalProperties: false,
+		},
+		run: async (a) => hubJson("POST", "/api/schedule/preview", { spec: a.spec, timezone: a.timezone }),
+	},
+	{
+		name: "list_schedule_notices",
+		description:
+			"List notices about scheduled runs (missed while offline, skipped as busy/forbidden/stale, broken series, failed runs), newest first",
+		inputSchema: {
+			type: "object",
+			properties: {
+				unacknowledged: { type: "boolean", description: "Only notices not yet acknowledged" },
+				seriesId: { type: "string" },
+			},
+			additionalProperties: false,
+		},
+		run: async (a) => {
+			const params = new URLSearchParams();
+			if (a.unacknowledged === true) params.set("unacknowledged", "1");
+			if (a.seriesId) params.set("seriesId", String(a.seriesId));
+			const q = params.toString();
+			return hubJson("GET", `/api/schedule-notices${q ? `?${q}` : ""}`);
+		},
+	},
+	{
+		name: "acknowledge_schedule_notice",
+		description: "Acknowledge (dismiss) a schedule notice",
+		inputSchema: {
+			type: "object",
+			properties: { noticeId: { type: "string" } },
+			required: ["noticeId"],
+			additionalProperties: false,
+		},
+		run: async (a) => hubJson("POST", `/api/schedule-notices/${enc(a.noticeId)}/ack`),
 	},
 	{
 		name: "set_workflow_tcp_selections",

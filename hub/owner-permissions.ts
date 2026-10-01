@@ -238,6 +238,18 @@ export function canUseServerResources(): boolean {
 	return SERVER_RESOURCE_USE_PERMISSIONS.some((id) => mode.permissions.has(id));
 }
 
+/**
+ * The raw cache, for the scheduler's fire-time gate (D10): whether a live
+ * register/heartbeat has arrived in THIS process, and the last snapshot known
+ * (live or loaded from disk), however old. `resolvePermissionMode` collapses
+ * both into "read_only" once stale; the scheduler needs to tell "not heard
+ * from the server yet since boot" apart from "heard, but a while ago".
+ */
+export function ownerSnapshotState(): { live: boolean; snapshot: OwnerSnapshot | null } {
+	ensureLoaded();
+	return { live, snapshot: memory };
+}
+
 export function clearOwnerSnapshot(): void {
 	try {
 		loaded = true;

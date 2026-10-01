@@ -23,6 +23,7 @@ import { type ResourceSelection, normalizeResourceSelections } from "./rci-selec
 import * as path from "node:path";
 import { dbFile, ensureTargetDirSecure, type ConversationReportMode } from "./config.ts";
 import type { ProgressKind } from "./progress.ts";
+import type { ScheduleSpec } from "./schedule.ts";
 
 /**
  * `waiting` is the manual-review hold: a step of the workflow finished its work
@@ -101,6 +102,28 @@ export type OverridableWorkflowStatus = (typeof OVERRIDABLE_WORKFLOW_STATUSES)[n
 export const WORKFLOW_ORIGINS = ["local", "remote"] as const;
 export type WorkflowOrigin = (typeof WORKFLOW_ORIGINS)[number];
 
+/**
+ * Where a workflow stands as an instance of a schedule SERIES (null when it
+ * isn't one). A series always has exactly one `armed` instance — the next
+ * execution, waiting for `next_run_at`. Once it fires it becomes `fired` (a
+ * normal workflow from then on) and a clone of it is armed for the following
+ * run. `missed` is a `once` schedule the hub was offline past the grace window
+ * for; `broken` a series whose next instance couldn't be created;
+ * `cancelled` an armed instance whose schedule was cancelled — a normal
+ * workflow again, kept in the series only as history.
+ */
+export const SCHEDULE_STATES = ["armed", "fired", "missed", "cancelled", "broken"] as const;
+export type ScheduleState = (typeof SCHEDULE_STATES)[number];
+
+/**
+ * Who owns a series' schedule. `server` series were created from the server and
+ * are managed only by it — the hub shows them read-only and refuses local
+ * schedule edits (409 `server_managed`). `local` series are managed only by the
+ * hub.
+ */
+export const SCHEDULE_MANAGERS = ["local", "server"] as const;
+export type ScheduleManager = (typeof SCHEDULE_MANAGERS)[number];
+
 export interface Workflow {
 	id: string;
 	name: string;
@@ -175,6 +198,46 @@ export interface Workflow {
 	remoteSyncedAt: string | null;
 	/** Extra host paths bind-mounted in a docker sandbox, on top of Settings defaults. */
 	dockerMounts: string[];
+	/**
+	 * When the workflow was archived, or null when it isn't. A FLAG, not a
+	 * status: `reconcileStatus` re-derives `status` from the steps on every read
+	 * and would overwrite an `archived` status, and the completed/failed outcome
+	 * has to survive archiving anyway. See `archiveWorkflow`/`autoArchive`
+	 * (workflow.ts).
+	 */
+	archivedAt: string | null;
+	/**
+	 * Scheduling (see `ScheduleState`). Every execution of a schedule is its own
+	 * workflow — an instance — and instances of one schedule share `seriesId`.
+	 * All null on a workflow that was never scheduled.
+	 */
+	seriesId: string | null;
+	/** The series' name as set when it was created — instance names are always
+	 * rendered from THIS, so "<name> · <date>" never chains into
+	 * "<name> · <date> · <date>". */
+	seriesName: string | null;
+	schedule: ScheduleSpec | null;
+	/** IANA zone the schedule's wall-clock times are in. */
+	scheduleTimezone: string | null;
+	/** Whether a fired run is told about the previous instance (D5). Defaults on. */
+	includePrevious: boolean;
+	/** The occurrence this instance is (or was) scheduled for. */
+	scheduledFor: string | null;
+	scheduleState: ScheduleState | null;
+	/** When the armed instance fires; null once it has fired or been cancelled. */
+	nextRunAt: string | null;
+	/** The instance of the same series this one was cloned from. */
+	previousInstanceId: string | null;
+	/**
+	 * The "previous run" reference written at FIRE time (D5), stored apart from
+	 * `conversationContext` so it's injected with the context step without ever
+	 * becoming part of the context a clone copies — otherwise every instance
+	 * would carry all its predecessors' blocks.
+	 */
+	previousRunBlock: string | null;
+	managedBy: ScheduleManager;
+	/** When the server acknowledged this instance's creation (remote series). */
+	announcedAt: string | null;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -613,6 +676,56 @@ export function open(): DatabaseSync {
 	addWorkflowColumn("remote_id", "remote_id TEXT");
 	addWorkflowColumn("remote_synced_at", "remote_synced_at TEXT");
 	addWorkflowColumn("docker_mounts", "docker_mounts TEXT NOT NULL DEFAULT '[]'");
+	// Archive flag (ISO timestamp). Nullable with no default, so an existing DB
+	// upgrades to "nothing archived". Indexed because list views filter on it
+	// (archived vs not) and the auto-archive sweep selects `archived_at IS NULL`.
+	// Created here, after the column is guaranteed to exist, not in the CREATE
+	// TABLE block above (which an older DB skips).
+	addWorkflowColumn("archived_at", "archived_at TEXT");
+	database.exec("CREATE INDEX IF NOT EXISTS idx_workflows_archived ON workflows(archived_at);");
+	// Scheduled workflows (series + instances). All nullable or defaulted so an
+	// existing DB upgrades to "nothing scheduled". include_previous DEFAULT 1:
+	// the previous-run reference is on unless the operator turns it off.
+	// managed_by DEFAULT 'local': every pre-existing row is the hub's own.
+	addWorkflowColumn("series_id", "series_id TEXT");
+	addWorkflowColumn("series_name", "series_name TEXT");
+	addWorkflowColumn("schedule_json", "schedule_json TEXT");
+	addWorkflowColumn("schedule_timezone", "schedule_timezone TEXT");
+	addWorkflowColumn("include_previous", "include_previous INTEGER NOT NULL DEFAULT 1");
+	addWorkflowColumn("scheduled_for", "scheduled_for TEXT");
+	addWorkflowColumn("schedule_state", "schedule_state TEXT");
+	addWorkflowColumn("next_run_at", "next_run_at TEXT");
+	addWorkflowColumn("previous_instance_id", "previous_instance_id TEXT");
+	addWorkflowColumn("previous_run_block", "previous_run_block TEXT");
+	addWorkflowColumn("managed_by", "managed_by TEXT NOT NULL DEFAULT 'local'");
+	addWorkflowColumn("announced_at", "announced_at TEXT");
+	// "This scheduled run's failure was announced" — the failed-run twin of
+	// `completion_notified`, reset whenever the workflow leaves `failed`. A DB
+	// that gains the column marks the runs that ALREADY failed as announced: the
+	// upgrade must not greet the operator with a Slack message per old failure.
+	if (!existingWorkflowColumns.has("failure_notified")) {
+		addWorkflowColumn("failure_notified", "failure_notified INTEGER NOT NULL DEFAULT 0");
+		database.exec("UPDATE workflows SET failure_notified = 1 WHERE status = 'failed';");
+	}
+	// The scheduler tick looks up armed instances by state on every tick, and
+	// series views list instances by series.
+	database.exec("CREATE INDEX IF NOT EXISTS idx_workflows_schedule_state ON workflows(schedule_state);");
+	database.exec("CREATE INDEX IF NOT EXISTS idx_workflows_series ON workflows(series_id);");
+	// Persistent schedule notices (missed/skipped/broken/failed runs): they must
+	// outlive a restart so the operator sees them until acknowledging them.
+	database.exec(`
+		CREATE TABLE IF NOT EXISTS schedule_notices (
+			id              TEXT PRIMARY KEY,
+			workflow_id     TEXT,
+			series_id       TEXT,
+			kind            TEXT NOT NULL,
+			reason          TEXT,
+			detail_json     TEXT NOT NULL DEFAULT '{}',
+			created_at      TEXT NOT NULL,
+			acknowledged_at TEXT
+		);
+		CREATE INDEX IF NOT EXISTS idx_schedule_notices_open ON schedule_notices(acknowledged_at, created_at);
+	`);
 	const existingTemplateColumns = new Set(
 		(database.prepare("PRAGMA table_info(templates)").all() as Record<string, unknown>[]).map((c) => String(c.name)),
 	);
@@ -681,9 +794,41 @@ function rowToWorkflow(row: Record<string, unknown>): Workflow {
 		remoteId: row.remote_id == null ? null : String(row.remote_id),
 		remoteSyncedAt: row.remote_synced_at == null ? null : String(row.remote_synced_at),
 		dockerMounts: parseStoredDockerMounts(row.docker_mounts),
+		archivedAt: row.archived_at == null ? null : String(row.archived_at),
+		seriesId: nullableString(row.series_id),
+		seriesName: nullableString(row.series_name),
+		schedule: parseStoredSchedule(row.schedule_json),
+		scheduleTimezone: nullableString(row.schedule_timezone),
+		includePrevious: Number(row.include_previous ?? 1) !== 0,
+		scheduledFor: nullableString(row.scheduled_for),
+		scheduleState: SCHEDULE_STATES.includes(row.schedule_state as ScheduleState)
+			? (row.schedule_state as ScheduleState)
+			: null,
+		nextRunAt: nullableString(row.next_run_at),
+		previousInstanceId: nullableString(row.previous_instance_id),
+		previousRunBlock: nullableString(row.previous_run_block),
+		managedBy: row.managed_by === "server" ? "server" : "local",
+		announcedAt: nullableString(row.announced_at),
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
 	};
+}
+
+function nullableString(value: unknown): string | null {
+	return value == null ? null : String(value);
+}
+
+/** A stored schedule_json, or null when absent or unreadable (never throws on a
+ * read path — a corrupt row reads as "not scheduled" rather than breaking every
+ * listing). */
+function parseStoredSchedule(raw: unknown): ScheduleSpec | null {
+	if (typeof raw !== "string" || raw.trim() === "") return null;
+	try {
+		const parsed = JSON.parse(raw) as unknown;
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as ScheduleSpec) : null;
+	} catch {
+		return null;
+	}
 }
 
 function parseStoredDockerMounts(raw: unknown): string[] {
@@ -743,6 +888,19 @@ export function insertWorkflow(input: {
 		remoteId,
 		remoteSyncedAt,
 		dockerMounts,
+		archivedAt: null,
+		seriesId: null,
+		seriesName: null,
+		schedule: null,
+		scheduleTimezone: null,
+		includePrevious: true,
+		scheduledFor: null,
+		scheduleState: null,
+		nextRunAt: null,
+		previousInstanceId: null,
+		previousRunBlock: null,
+		managedBy: "local",
+		announcedAt: null,
 		createdAt: now,
 		updatedAt: now,
 	};
@@ -826,11 +984,29 @@ export function getWorkflowByRemoteId(remoteId: string): Workflow | null {
 	return row ? rowToWorkflow(row as Record<string, unknown>) : null;
 }
 
-export function listWorkflows(): Workflow[] {
+/**
+ * Which workflows a listing returns with respect to the archive flag:
+ * `exclude` hides archived ones, `include` returns everything, `only` returns
+ * just the archived ones.
+ */
+export type ArchivedFilter = "exclude" | "include" | "only";
+
+export const ARCHIVED_FILTERS: readonly ArchivedFilter[] = ["exclude", "include", "only"];
+
+/**
+ * Every workflow, newest first. Defaults to `include` (archived ones too):
+ * internal callers — sync state, busy checks, sweeps, heartbeats — must keep
+ * seeing archived workflows. Only the user-facing list (GET /api/workflows)
+ * narrows it, and it opts in explicitly.
+ */
+export function listWorkflows(options: { archived?: ArchivedFilter } = {}): Workflow[] {
+	const archived = options.archived ?? "include";
+	const where =
+		archived === "exclude" ? "WHERE archived_at IS NULL " : archived === "only" ? "WHERE archived_at IS NOT NULL " : "";
 	// `rowid DESC` is the tiebreaker: `created_at` is an ISO string with only
 	// millisecond precision, so two rows created in the same millisecond compare
 	// equal and would otherwise come back in an arbitrary (insertion) order.
-	const rows = open().prepare("SELECT * FROM workflows ORDER BY created_at DESC, rowid DESC").all();
+	const rows = open().prepare(`SELECT * FROM workflows ${where}ORDER BY created_at DESC, rowid DESC`).all();
 	return (rows as Record<string, unknown>[]).map(rowToWorkflow);
 }
 
@@ -854,16 +1030,299 @@ export function setWorkflowStatus(id: string, status: WorkflowStatus, options: {
 	// the NEXT completion: leaving `completed` means the completion that was
 	// already announced is over, and whatever finishes later is a new one.
 	// Writing `completed` itself deliberately leaves the marker alone, so a
-	// status re-write on an already-completed workflow can't re-arm it.
+	// status re-write on an already-completed workflow can't re-arm it. The
+	// failed-run marker (`claimFailedRunNotice`) follows the same rule for `failed`.
 	const now = new Date().toISOString();
 	open()
 		.prepare(
 			`UPDATE workflows SET status = ?, updated_at = ?,
 			 completion_notified = CASE WHEN ? = 'completed' THEN completion_notified ELSE 0 END,
+			 failure_notified = CASE WHEN ? = 'failed' THEN failure_notified ELSE 0 END,
 			 status_manual = ?, status_manual_at = ?
 			 WHERE id = ?`,
 		)
-		.run(status, now, status, manual ? 1 : 0, manual ? now : null, id);
+		.run(status, now, status, status, manual ? 1 : 0, manual ? now : null, id);
+}
+
+/**
+ * Sets a workflow's archive flag, only if it isn't archived already — so the
+ * ORIGINAL archive timestamp is kept and a repeat call is a no-op. Returns
+ * whether a row changed.
+ *
+ * Deliberately does NOT touch `updated_at`: archiving is filing, not activity,
+ * and `updated_at` is half of the "last activity" clock the auto-archive sweep
+ * reads. Eligibility (completed/failed only) is decided by the caller —
+ * `archiveWorkflow`/`autoArchive` in workflow.ts — not here.
+ */
+export function markWorkflowArchived(id: string, archivedAt: string): boolean {
+	return (
+		open().prepare("UPDATE workflows SET archived_at = ? WHERE id = ? AND archived_at IS NULL").run(archivedAt, id)
+			.changes > 0
+	);
+}
+
+/**
+ * Clears a workflow's archive flag. Unlike archiving this DOES bump
+ * `updated_at`: un-archiving is a deliberate operator action, and without
+ * resetting the activity clock an old workflow would be re-archived by the very
+ * next auto-archive sweep (≤ 60s later), undoing the operator's choice.
+ * Returns whether a row changed (false when it wasn't archived).
+ */
+export function clearWorkflowArchived(id: string): boolean {
+	return (
+		open()
+			.prepare("UPDATE workflows SET archived_at = NULL, updated_at = ? WHERE id = ? AND archived_at IS NOT NULL")
+			.run(new Date().toISOString(), id).changes > 0
+	);
+}
+
+/**
+ * Not-yet-archived workflows in a terminal status, each with its latest step
+ * `finished_at` (null when no step ever finished) — the input to the
+ * auto-archive sweep's "last activity" computation. Pre-filtered in SQL only
+ * as a cheap narrowing; `isArchivable` (workflow.ts) remains the authority.
+ */
+export function listArchiveCandidates(): { workflow: Workflow; lastStepFinishedAt: string | null }[] {
+	const rows = open()
+		.prepare(
+			`SELECT w.*, (SELECT MAX(s.finished_at) FROM steps s WHERE s.workflow_id = w.id) AS last_step_finished_at
+			 FROM workflows w
+			 WHERE w.archived_at IS NULL AND w.status IN ('completed', 'failed')`,
+		)
+		.all() as Record<string, unknown>[];
+	return rows.map((row) => ({
+		workflow: rowToWorkflow(row),
+		lastStepFinishedAt: row.last_step_finished_at == null ? null : String(row.last_step_finished_at),
+	}));
+}
+
+// --- Scheduling: series columns and notices --------------------------------
+
+/**
+ * The schedule columns a caller may write, keyed by their `Workflow` field.
+ * Anything left out of a patch is untouched; an explicit null clears it.
+ */
+export interface WorkflowSchedulePatch {
+	seriesId?: string | null;
+	seriesName?: string | null;
+	schedule?: ScheduleSpec | null;
+	scheduleTimezone?: string | null;
+	includePrevious?: boolean;
+	scheduledFor?: string | null;
+	scheduleState?: ScheduleState | null;
+	nextRunAt?: string | null;
+	previousInstanceId?: string | null;
+	previousRunBlock?: string | null;
+	managedBy?: ScheduleManager;
+	announcedAt?: string | null;
+}
+
+const SCHEDULE_PATCH_COLUMNS: Record<keyof WorkflowSchedulePatch, string> = {
+	seriesId: "series_id",
+	seriesName: "series_name",
+	schedule: "schedule_json",
+	scheduleTimezone: "schedule_timezone",
+	includePrevious: "include_previous",
+	scheduledFor: "scheduled_for",
+	scheduleState: "schedule_state",
+	nextRunAt: "next_run_at",
+	previousInstanceId: "previous_instance_id",
+	previousRunBlock: "previous_run_block",
+	managedBy: "managed_by",
+	announcedAt: "announced_at",
+};
+
+/**
+ * Writes a workflow's schedule columns. Storage only — which transitions are
+ * legal is decided in workflow.ts. `touch` (default true) bumps `updated_at`;
+ * pure bookkeeping (an announcement ack, a block written at fire time) passes
+ * false so it doesn't read as operator activity.
+ */
+export function updateWorkflowSchedule(
+	id: string,
+	patch: WorkflowSchedulePatch,
+	options: { touch?: boolean } = {},
+): Workflow | null {
+	const fields: string[] = [];
+	const params: (string | number | null)[] = [];
+	for (const [key, column] of Object.entries(SCHEDULE_PATCH_COLUMNS) as [keyof WorkflowSchedulePatch, string][]) {
+		if (!(key in patch)) continue;
+		const value = patch[key];
+		fields.push(`${column} = ?`);
+		if (key === "schedule") params.push(value == null ? null : JSON.stringify(value));
+		else if (key === "includePrevious") params.push(value ? 1 : 0);
+		else params.push(value == null ? null : String(value));
+	}
+	if (options.touch !== false) {
+		fields.push("updated_at = ?");
+		params.push(new Date().toISOString());
+	}
+	if (fields.length > 0) {
+		params.push(id);
+		open()
+			.prepare(`UPDATE workflows SET ${fields.join(", ")} WHERE id = ?`)
+			.run(...params);
+	}
+	return getWorkflow(id);
+}
+
+/** Every instance of a series, oldest first. Creation order IS run order: each
+ * instance is cloned from the previous one when that one fires. */
+export function listSeriesInstances(seriesId: string): Workflow[] {
+	const rows = open()
+		.prepare("SELECT * FROM workflows WHERE series_id = ? ORDER BY created_at ASC, rowid ASC")
+		.all(seriesId) as Record<string, unknown>[];
+	return rows.map(rowToWorkflow);
+}
+
+/** The series' armed instance, if it has one (a series has at most one). */
+export function getArmedInstance(seriesId: string): Workflow | null {
+	const row = open()
+		.prepare("SELECT * FROM workflows WHERE series_id = ? AND schedule_state = 'armed' ORDER BY rowid DESC LIMIT 1")
+		.get(seriesId);
+	return row ? rowToWorkflow(row as Record<string, unknown>) : null;
+}
+
+/** Every armed instance, soonest first — the scheduler tick's input. */
+export function listArmedInstances(): Workflow[] {
+	const rows = open()
+		.prepare("SELECT * FROM workflows WHERE schedule_state = 'armed' ORDER BY next_run_at ASC, rowid ASC")
+		.all() as Record<string, unknown>[];
+	return rows.map(rowToWorkflow);
+}
+
+/**
+ * Claims an armed instance's due run for THIS process (D7), and answers whether
+ * the claim was won. A single conditional UPDATE, so two hubs on one DB (or two
+ * overlapping ticks) can never both fire it: the first flips armed → fired,
+ * every later caller matches no row. `nextRunAt` is part of the condition so a
+ * claim computed from a stale read (the schedule was edited or re-armed since)
+ * loses too.
+ */
+export function claimScheduledFire(id: string, nextRunAt: string): boolean {
+	return (
+		open()
+			.prepare(
+				"UPDATE workflows SET schedule_state = 'fired' WHERE id = ? AND schedule_state = 'armed' AND next_run_at = ?",
+			)
+			.run(id, nextRunAt).changes > 0
+	);
+}
+
+/** Same once-only claim for "Run now" on a missed `once` (D8): missed → fired. */
+export function claimMissedRun(id: string): boolean {
+	return (
+		open().prepare("UPDATE workflows SET schedule_state = 'fired' WHERE id = ? AND schedule_state = 'missed'").run(id)
+			.changes > 0
+	);
+}
+
+/**
+ * What a schedule notice reports (D11): runs that were `missed` because the hub
+ * was offline, a due run `skipped` (reason `busy` — the previous run was still
+ * going — or `forbidden`/`stale` — the owner permission gate), a `broken`
+ * series (its next instance couldn't be created) and a `failed` scheduled run.
+ */
+export const SCHEDULE_NOTICE_KINDS = ["missed", "skipped", "broken", "failed"] as const;
+export type ScheduleNoticeKind = (typeof SCHEDULE_NOTICE_KINDS)[number];
+
+export interface ScheduleNotice {
+	id: string;
+	workflowId: string | null;
+	seriesId: string | null;
+	kind: ScheduleNoticeKind;
+	reason: string | null;
+	detail: Record<string, unknown>;
+	createdAt: string;
+	acknowledgedAt: string | null;
+}
+
+function rowToNotice(row: Record<string, unknown>): ScheduleNotice {
+	let detail: Record<string, unknown> = {};
+	try {
+		const parsed = JSON.parse(String(row.detail_json ?? "{}")) as unknown;
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) detail = parsed as Record<string, unknown>;
+	} catch {
+		// A corrupt detail still leaves a readable notice.
+	}
+	return {
+		id: String(row.id),
+		workflowId: nullableString(row.workflow_id),
+		seriesId: nullableString(row.series_id),
+		kind: row.kind as ScheduleNoticeKind,
+		reason: nullableString(row.reason),
+		detail,
+		createdAt: String(row.created_at),
+		acknowledgedAt: nullableString(row.acknowledged_at),
+	};
+}
+
+export function recordNotice(input: {
+	workflowId?: string | null;
+	seriesId?: string | null;
+	kind: ScheduleNoticeKind;
+	reason?: string | null;
+	detail?: Record<string, unknown>;
+	now?: Date;
+}): ScheduleNotice {
+	const notice: ScheduleNotice = {
+		id: crypto.randomUUID(),
+		workflowId: input.workflowId ?? null,
+		seriesId: input.seriesId ?? null,
+		kind: input.kind,
+		reason: input.reason ?? null,
+		detail: input.detail ?? {},
+		createdAt: (input.now ?? new Date()).toISOString(),
+		acknowledgedAt: null,
+	};
+	open()
+		.prepare(
+			`INSERT INTO schedule_notices (id, workflow_id, series_id, kind, reason, detail_json, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		)
+		.run(
+			notice.id,
+			notice.workflowId,
+			notice.seriesId,
+			notice.kind,
+			notice.reason,
+			JSON.stringify(notice.detail),
+			notice.createdAt,
+		);
+	return notice;
+}
+
+/** Notices, newest first. Unacknowledged ones only unless `includeAcknowledged`. */
+export function listNotices(options: { includeAcknowledged?: boolean; seriesId?: string } = {}): ScheduleNotice[] {
+	const where: string[] = [];
+	const params: string[] = [];
+	if (!options.includeAcknowledged) where.push("acknowledged_at IS NULL");
+	if (options.seriesId !== undefined) {
+		where.push("series_id = ?");
+		params.push(options.seriesId);
+	}
+	const rows = open()
+		.prepare(
+			`SELECT * FROM schedule_notices ${where.length ? `WHERE ${where.join(" AND ")} ` : ""}ORDER BY created_at DESC, rowid DESC`,
+		)
+		.all(...params) as Record<string, unknown>[];
+	return rows.map(rowToNotice);
+}
+
+export function getNotice(id: string): ScheduleNotice | null {
+	const row = open().prepare("SELECT * FROM schedule_notices WHERE id = ?").get(id);
+	return row ? rowToNotice(row as Record<string, unknown>) : null;
+}
+
+/**
+ * Marks a notice acknowledged, keeping the ORIGINAL timestamp on a repeat call.
+ * Returns the notice as it now reads, or null when it doesn't exist.
+ */
+export function acknowledgeNotice(id: string, now: Date = new Date()): ScheduleNotice | null {
+	open()
+		.prepare("UPDATE schedule_notices SET acknowledged_at = ? WHERE id = ? AND acknowledged_at IS NULL")
+		.run(now.toISOString(), id);
+	return getNotice(id);
 }
 
 /**
@@ -885,6 +1344,38 @@ export function claimWorkflowCompletionNotice(id: string): boolean {
 	return (
 		open()
 			.prepare("UPDATE workflows SET completion_notified = 1 WHERE id = ? AND completion_notified = 0")
+			.run(id).changes > 0
+	);
+}
+
+/**
+ * Scheduled instances that have failed and whose failure hasn't been announced
+ * yet (D11). Only FIRED instances of a series: an armed one hasn't run, and a
+ * workflow outside any series keeps today's rule of never announcing a failure.
+ */
+export function listUnannouncedFailedRuns(): Workflow[] {
+	const rows = open()
+		.prepare(
+			`SELECT * FROM workflows
+			 WHERE status = 'failed' AND failure_notified = 0 AND series_id IS NOT NULL
+			   AND schedule_state IN ('fired', 'broken')
+			 ORDER BY updated_at ASC, rowid ASC`,
+		)
+		.all() as Record<string, unknown>[];
+	return rows.map(rowToWorkflow);
+}
+
+/**
+ * Claims the right to announce a scheduled run's failure — the same once-only
+ * conditional UPDATE as `claimWorkflowCompletionNotice`, re-checking `failed`
+ * so a run restarted between the read and the claim isn't announced. Reset by
+ * `setWorkflowStatus` when the workflow leaves `failed`, so a later failure of
+ * the same instance (after a restart) is a new one.
+ */
+export function claimFailedRunNotice(id: string): boolean {
+	return (
+		open()
+			.prepare("UPDATE workflows SET failure_notified = 1 WHERE id = ? AND failure_notified = 0 AND status = 'failed'")
 			.run(id).changes > 0
 	);
 }
@@ -3028,6 +3519,72 @@ export function saveDockerMountSettings(mounts: string[]): DockerMountSettings {
 	return settings;
 }
 
+// --- Workflow auto-archive (Settings) -------------------------------------
+//
+// `archive_after_days`: completed/failed workflows idle for longer than this
+// many days are archived by the daemon sweep (see `autoArchive`, workflow.ts).
+// 0 disables auto-archiving. Stored like every other setting — one JSON blob
+// under its own `settings` key.
+
+const ARCHIVE_SETTINGS_KEY = "archive";
+
+/** Default `archive_after_days` when the operator never saved one. */
+export const DEFAULT_ARCHIVE_AFTER_DAYS = 30;
+
+export interface ArchiveSettings {
+	/** Days of inactivity before a completed/failed workflow is auto-archived; 0 = disabled. */
+	archiveAfterDays: number;
+	updatedAt: string | null;
+}
+
+export function defaultArchiveSettings(): ArchiveSettings {
+	return { archiveAfterDays: DEFAULT_ARCHIVE_AFTER_DAYS, updatedAt: null };
+}
+
+/**
+ * Validates an `archive_after_days` value: a non-negative integer (numeric
+ * strings accepted, as a form field would send). Returns null when invalid.
+ */
+export function normalizeArchiveAfterDays(raw: unknown): number | null {
+	const n = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : raw;
+	if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0) return null;
+	return n;
+}
+
+/**
+ * The stored setting, or the default (30) when none was ever saved. A stored
+ * value that is malformed/negative reads as 0 (disabled): an unreadable
+ * setting must never cause workflows to be archived that the operator didn't
+ * ask to archive.
+ */
+export function getArchiveSettings(): ArchiveSettings {
+	const row = open().prepare("SELECT * FROM settings WHERE key = ?").get(ARCHIVE_SETTINGS_KEY) as
+		| Record<string, unknown>
+		| undefined;
+	if (!row) return defaultArchiveSettings();
+	const updatedAt = row.updated_at == null ? null : String(row.updated_at);
+	try {
+		const parsed = JSON.parse(String(row.value)) as Record<string, unknown>;
+		return { archiveAfterDays: normalizeArchiveAfterDays(parsed.archiveAfterDays) ?? 0, updatedAt };
+	} catch {
+		return { archiveAfterDays: 0, updatedAt };
+	}
+}
+
+/** Persists `archive_after_days`. Throws a RangeError for anything but a non-negative integer. */
+export function saveArchiveSettings(input: { archiveAfterDays: unknown }): ArchiveSettings {
+	const archiveAfterDays = normalizeArchiveAfterDays(input.archiveAfterDays);
+	if (archiveAfterDays === null) throw new RangeError("archive_after_days must be a non-negative integer");
+	const settings: ArchiveSettings = { archiveAfterDays, updatedAt: new Date().toISOString() };
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(ARCHIVE_SETTINGS_KEY, JSON.stringify({ archiveAfterDays }), settings.updatedAt);
+	return settings;
+}
+
 // --- UI catalog visibility (Settings) -----------------------------------
 
 const UI_SETTINGS_KEY = "ui";
@@ -3358,6 +3915,29 @@ export function saveOwnerPermissionsJson(value: string): void {
 
 export function clearOwnerPermissionsJson(): void {
 	open().prepare("DELETE FROM settings WHERE key = ?").run(OWNER_PERMISSIONS_KEY);
+}
+
+const SERVER_CAPABILITIES_KEY = "server_capabilities_v1";
+
+/** Last `server_capabilities` seen on a sync register/heartbeat response (JSON), or null. */
+export function getServerCapabilitiesJson(): string | null {
+	const row = open().prepare("SELECT value FROM settings WHERE key = ?").get(SERVER_CAPABILITIES_KEY) as
+		| { value: string }
+		| undefined;
+	return row?.value ?? null;
+}
+
+export function saveServerCapabilitiesJson(value: string): void {
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(SERVER_CAPABILITIES_KEY, value, new Date().toISOString());
+}
+
+export function clearServerCapabilitiesJson(): void {
+	open().prepare("DELETE FROM settings WHERE key = ?").run(SERVER_CAPABILITIES_KEY);
 }
 
 /** Stable remote step_key → local step id map for one remote workflow. */

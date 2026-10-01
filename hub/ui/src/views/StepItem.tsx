@@ -15,6 +15,7 @@ import { Markdown } from "../components/Markdown.tsx";
 import { StepNotes } from "../components/StepNotes.tsx";
 import { Switch } from "../components/Switch.tsx";
 import { activityLabel, duration, queuedReasonLabel, queuedStepLabel, queuedStepTooltip } from "../lib/format.ts";
+import { SCHEDULED_ARMED_TITLE } from "../lib/scheduleView.ts";
 import { AddStepModal } from "./AddStepModal.tsx";
 import styles from "./StepItem.module.css";
 
@@ -104,6 +105,8 @@ export function StepItem({
 	onEditNote,
 	onRemoveNote,
 	onSelectWorkflow,
+	archived = false,
+	scheduledArmed = false,
 	busy,
 }: {
 	step: Step;
@@ -135,6 +138,10 @@ export function StepItem({
 	onRemoveNote?: (stepId: string, noteId: string) => Promise<void>;
 	/** Opens another workflow — used when a queued step is blocked on a shared workdir. */
 	onSelectWorkflow?: ((workflowId: string) => void) | undefined;
+	/** The workflow is archived: the hub refuses to run its steps (409 `archived`) until it's unarchived. */
+	archived?: boolean;
+	/** The workflow is a schedule's armed instance: it runs automatically, and the hub refuses a manual run (409 `scheduled_armed`). */
+	scheduledArmed?: boolean;
 	busy: boolean;
 }): React.JSX.Element {
 	const [editing, setEditing] = useState(false);
@@ -570,16 +577,26 @@ export function StepItem({
 						{queuedStepLabel(step.queuedAt, step.manualRun)}
 					</span>
 				)}
-				{failed && !isContext && (
+				{/* On a schedule's armed instance Retry is shown but never live: the
+				    hub refuses a manual run there (409 `scheduled_armed`) — the
+				    instance runs by itself at its time. */}
+				{failed && !isContext && scheduledArmed && (
+					<button type="button" className="btn btn--sm btn--primary" disabled title={SCHEDULED_ARMED_TITLE} data-scheduled-armed-retry>
+						Retry
+					</button>
+				)}
+				{failed && !isContext && !scheduledArmed && (
 					<button
 						type="button"
 						className="btn btn--sm btn--primary"
 						onClick={() => onRunStep(step.id)}
-						disabled={busy || !canExecute}
+						disabled={busy || !canExecute || archived}
 						title={
-							canExecute
-								? "Re-run this step now. Use after Abort cleared a stuck queue, or any time a failed step should be tried again."
-								: requires("client.workflows.execute")
+							!canExecute
+								? requires("client.workflows.execute")
+								: archived
+									? "This workflow is archived — unarchive it to run this step again."
+									: "Re-run this step now. Use after Abort cleared a stuck queue, or any time a failed step should be tried again."
 						}
 					>
 						Retry

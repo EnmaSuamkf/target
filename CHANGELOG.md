@@ -11,6 +11,92 @@ The current version is reported by every instance to the central server (see
 
 ### Added
 
+- **Scheduled workflows (remote series sync).**
+  - **Commands.** `workflow.set_schedule { series_id, spec, timezone,
+    include_previous }` and `workflow.cancel_schedule { series_id }`. They
+    address the series and apply to its current armed instance; a first
+    `set_schedule` arms the command's `remote_id` as a server-managed series
+    under the server's id. Both are advertised in `capabilities.commands`. An
+    invalid spec acks `failed`. Step edits and runs aimed at an instance that
+    has already fired ack `failed` with `instance_already_fired`.
+  - **Remote instances.** When a server series fires, the next instance is
+    remote too, with a hub-generated `remote_id`, the same `series_id` and the
+    previous instance's `step_key`s.
+  - **Announcement.** `schedule.instance_created` is derived from state:
+    every instance with `announced_at` NULL is announced each tick under the
+    id `instance-created:<remote_id>`, and `announced_at` is set only from the
+    server's `accepted` / `duplicates`. A rejection breaks the series, with a
+    notice and a Slack message.
+  - **Events.** `workflow.schedule_changed`, `schedule.run_missed` and
+    `schedule.run_skipped`. Like the announcement, they are sent only when the
+    server advertises them.
+- **Scheduled workflows (UI and Slack notices).**
+  - **Schedule dialog.** Offers once, daily and weekly, a searchable timezone
+    list (the browser's by default) and the previous-run toggle. It previews
+    the next 3 runs from the hub, warns about manual-review steps, and can
+    edit or cancel a schedule. A server-managed series is read-only; an
+    adopted conversation is refused with the reason.
+  - **Badges and run gate.** `Scheduled · next in …` on the armed instance,
+    `Run of <series> · <occurrence>` on past runs, and a warning style for
+    missed and broken. Start and a step's Retry are disabled on the armed
+    instance ("Scheduled — runs automatically").
+  - **Filters.** A **Scheduled / Scheduled runs** filter in the rail and the
+    All workflows page, combined with Archived. The detail pane gets a
+    series panel listing every instance, newest first, with status and links.
+  - **Notices.** A banner lists unacknowledged schedule notices, with
+    Acknowledge. A missed once offers Run now / Reschedule / Dismiss in the
+    banner and in the detail pane.
+  - **Slack.** Missed, skipped, broken and failed-start notices, plus
+    scheduled runs that end `failed`, are sent through the existing Slack
+    notification settings. A non-scheduled failure still sends nothing.
+- **Scheduled workflows (engine and API).**
+  - **Model.** A workflow can be scheduled once, daily or weekly in an
+    explicit IANA timezone. Recurrence uses `Intl` only; a time skipped by a
+    daylight-saving change runs at the change, and a repeated time runs once.
+    A schedule is a series of instances with exactly one armed instance, the
+    next run.
+  - **Scheduler.** It ticks every 30s and at boot, claims each run atomically
+    and clones the next instance before starting the current run. A run more
+    than 10 minutes late is missed: recurring series move on without creating
+    workflows, and a once waits for Run now / Reschedule / Dismiss. A run is
+    skipped if the previous one is still in progress, or if the linked
+    owner's `client.workflows.execute` can't be confirmed (5-minute boot
+    wait, 7-day snapshot limit). A failed clone marks the series broken but
+    still runs the current instance.
+  - **Previous run.** Each run is told about the previous one through the
+    context step; in docker that run's results folder is mounted, made
+    non-writable because awb has no read-only mount option.
+  - **Guards.** The armed instance refuses manual runs with
+    `409 { "error": "scheduled_armed" }`, stays editable, and is never
+    archived.
+  - **Notices.** Missed, skipped, broken and failed runs are stored in
+    `schedule_notices`.
+  - **API.** `GET`/`PUT`/`DELETE /api/workflows/:id/schedule`,
+    `POST …/schedule/run-now|reschedule|dismiss`, `GET /api/schedule-notices`,
+    `POST /api/schedule-notices/:id/ack` and `POST /api/schedule/preview`.
+    Mutations need `client.workflows.execute` and `client.workflows.manage`.
+    Server-managed series answer `409 server_managed`.
+  - **MCP.** `set_schedule`, `cancel_schedule`, `list_schedule_notices`, and
+    also `get_schedule`, `preview_schedule`, `acknowledge_schedule_notice`.
+  - **Not yet.** Remote sync of schedules follows in a later release.
+- **Archive workflows, automatically and on demand.** Archiving is an
+  `archived_at` flag beside the status, allowed only on completed/failed
+  workflows. The daemon's 60s sweep archives them once their last activity
+  (later of `updated_at` and the steps' latest `finished_at`) is older than
+  `archive_after_days` (default 30, `0` disables; Settings → Auto-archive,
+  `GET`/`PUT /api/settings/archive`). Operators can archive/unarchive by hand
+  (`POST /api/workflows/:id/archive|unarchive`, detail view buttons, MCP
+  `archive_workflow` / `unarchive_workflow`); a non-completed/failed workflow
+  answers `409 not_archivable`. `GET /api/workflows` hides archived workflows
+  unless `?archived=include|only`, and the UI rail and All workflows page gain
+  an **Archived** filter and badge. An archived workflow refuses
+  start/resume/restart/step run with `409 { "error": "archived" }`.
+- **Server capabilities gate new sync event types.** The hub now reads and
+  persists `server_capabilities.events` from register/heartbeat responses and
+  only queues newer event types when the server lists them; remote workflows
+  emit `workflow.archived` / `workflow.unarchived` on that basis. Gated events
+  no longer advertised are dropped at flush; the list is cleared on unlink.
+
 - **Role-based catalog sync from the linked server.** Settings → Catalog
   navigation offers **Sync resources** when the owner's role includes any of
   `client.templates.sync`, `client.tcp-tools.sync`, or `client.rci.sync`. The

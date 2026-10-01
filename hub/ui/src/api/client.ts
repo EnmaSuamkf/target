@@ -15,6 +15,9 @@
 import type {
 	Account,
 	Adoptability,
+	ArchivedFilter,
+	ArchiveSettings,
+	ArchiveSettingsInput,
 	Attachment,
 	AttachmentField,
 	AuthStatus,
@@ -43,6 +46,10 @@ import type {
 	OverridableStepStatus,
 	OverridableWorkflowStatus,
 	Runner,
+	ScheduleInput,
+	ScheduleNotice,
+	SchedulePreview,
+	ScheduleSpec,
 	SessionInfo,
 	ShortcutSettings,
 	ShortcutSettingsInput,
@@ -67,6 +74,7 @@ import type {
 	TemplateBundle,
 	TemplateInput,
 	Workflow,
+	WorkflowScheduleDetail,
 } from "./types.ts";
 
 const TOKEN_KEY = "targetAdminToken";
@@ -182,8 +190,15 @@ const json = (value: unknown): string => JSON.stringify(value);
 
 // --- workflows ---
 
-export async function listWorkflows(): Promise<Workflow[]> {
-	const data = await request<{ workflows: Workflow[] }>("/api/workflows");
+/**
+ * The workflow list. The hub hides archived workflows unless asked
+ * (`archived` defaults to `exclude` server-side); the app shell passes
+ * `include` so a selected archived workflow stays resolvable and the rail /
+ * All workflows page can switch to their "Archived" filter without a refetch.
+ */
+export async function listWorkflows(options: { archived?: ArchivedFilter } = {}): Promise<Workflow[]> {
+	const query = options.archived ? `?archived=${encodeURIComponent(options.archived)}` : "";
+	const data = await request<{ workflows: Workflow[] }>(`/api/workflows${query}`);
 	return data.workflows;
 }
 
@@ -290,6 +305,105 @@ export async function renameWorkflow(id: string, name: string): Promise<Workflow
 		body: json({ name }),
 	});
 	return data.workflow;
+}
+
+/**
+ * Files a finished (completed or failed) workflow away: hidden from the default
+ * list and refused by start/resume/restart/step run until unarchived. 409
+ * `not_archivable` for any other status.
+ */
+export async function archiveWorkflow(id: string): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/archive`, {
+		method: "POST",
+		admin: true,
+	});
+	return data.workflow;
+}
+
+/** Brings an archived workflow back into the list so it can run again. */
+export async function unarchiveWorkflow(id: string): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/unarchive`, {
+		method: "POST",
+		admin: true,
+	});
+	return data.workflow;
+}
+
+// --- schedules ---
+
+/** The workflow's schedule series (null when never scheduled) and the series' instances. */
+export async function getWorkflowSchedule(id: string): Promise<WorkflowScheduleDetail> {
+	return request<WorkflowScheduleDetail>(`/api/workflows/${id}/schedule`);
+}
+
+/**
+ * Schedules a workflow, or changes the schedule of its armed instance. Needs
+ * client.workflows.execute AND client.workflows.manage. 400 `invalid_schedule`
+ * carries `fields` in the error payload; 409 `server_managed` for a series the
+ * server owns.
+ */
+export async function setWorkflowSchedule(id: string, input: ScheduleInput): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/schedule`, {
+		method: "PUT",
+		admin: true,
+		body: json(input),
+	});
+	return data.workflow;
+}
+
+/** Cancels the schedule: the armed instance becomes a normal workflow again. */
+export async function cancelWorkflowSchedule(id: string): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/schedule`, {
+		method: "DELETE",
+		admin: true,
+	});
+	return data.workflow;
+}
+
+/**
+ * A missed `once` (the hub was offline at its time) waits for one of three
+ * choices. Run now starts it — the one manual run an unfired scheduled instance
+ * allows; Reschedule re-arms it at a new time; Dismiss gives up on it and it
+ * becomes a normal workflow. Each answers 409 `not_missed` when it no longer is.
+ */
+export async function runMissedScheduleNow(id: string): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/schedule/run-now`, { method: "POST", admin: true });
+	return data.workflow;
+}
+
+export async function rescheduleMissedSchedule(id: string, input: ScheduleInput): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/schedule/reschedule`, {
+		method: "POST",
+		admin: true,
+		body: json(input),
+	});
+	return data.workflow;
+}
+
+export async function dismissMissedSchedule(id: string): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${id}/schedule/dismiss`, { method: "POST", admin: true });
+	return data.workflow;
+}
+
+/** The schedule notices nobody has acknowledged yet, newest first. */
+export async function listScheduleNotices(): Promise<ScheduleNotice[]> {
+	const data = await request<{ notices: ScheduleNotice[] }>("/api/schedule-notices?unacknowledged=1");
+	return data.notices;
+}
+
+/** Acknowledges a notice: it leaves the banner. Changes nothing about any workflow. */
+export async function acknowledgeScheduleNotice(id: string): Promise<ScheduleNotice> {
+	const data = await request<{ notice: ScheduleNotice }>(`/api/schedule-notices/${id}/ack`, { method: "POST", admin: true });
+	return data.notice;
+}
+
+/** The next (up to) three runs a schedule would produce — nothing is saved. */
+export async function previewSchedule(spec: ScheduleSpec, timezone: string): Promise<SchedulePreview> {
+	return request<SchedulePreview>("/api/schedule/preview", {
+		method: "POST",
+		admin: true,
+		body: json({ spec, timezone }),
+	});
 }
 
 /**
@@ -997,6 +1111,33 @@ export async function getUiSettings(): Promise<UiSettings> {
 
 export async function saveUiSettings(input: UiSettingsInput): Promise<UiSettings> {
 	const data = await request<{ settings: UiSettings }>("/api/settings/ui", {
+		method: "PUT",
+		admin: true,
+		body: json(input),
+	});
+	return data.settings;
+}
+
+const DEFAULT_ARCHIVE_SETTINGS: ArchiveSettings = {
+	archive_after_days: 30,
+	updatedAt: null,
+};
+
+/** Auto-archive: completed/failed workflows idle this many days are archived; 0 = off. */
+export async function getArchiveSettings(): Promise<ArchiveSettings> {
+	try {
+		const data = await request<{ settings: ArchiveSettings }>("/api/settings/archive");
+		return data.settings;
+	} catch (err) {
+		// Hubs started before this route existed answer 404 — fall back to the
+		// server default so the rest of Settings still loads.
+		if (err instanceof ApiError && err.status === 404) return DEFAULT_ARCHIVE_SETTINGS;
+		throw err;
+	}
+}
+
+export async function saveArchiveSettings(input: ArchiveSettingsInput): Promise<ArchiveSettings> {
+	const data = await request<{ settings: ArchiveSettings }>("/api/settings/archive", {
 		method: "PUT",
 		admin: true,
 		body: json(input),

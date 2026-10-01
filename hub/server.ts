@@ -10,7 +10,7 @@
  *   GET    /api/auth/me                               → the account, session-gated
  *   POST   /api/auth/password/reset                   → recovery-token password reset (open, per-IP throttled)
  *   GET    /api/permissions                           → owner-role mode for the UI (admin token; no permission required)
- *   GET    /api/workflows                             → list (with progress %)
+ *   GET    /api/workflows                             → list (with progress %); ?archived=exclude|include|only (default exclude; else 400)
  *   GET    /api/runners                               → which agent CLIs (claude/free-code) are installed on this host, for the create form
  *   POST   /api/workflows                             → create (admin token) — makes the awb hook too; optional templateId seeds its steps
  *   GET    /api/workflows/:id                          → detail + steps
@@ -40,6 +40,19 @@
  *   POST   /api/workflows/:id/pause                    → stop dispatching further steps (admin token)
  *   POST   /api/workflows/:id/resume                   → undo pause (admin token)
  *   POST   /api/workflows/:id/restart                  → reset all steps, start over (admin token)
+ *                                                        (start/resume/restart and steps/:stepId/run answer 409 {error:"archived"} on an archived workflow)
+ *   POST   /api/workflows/:id/archive                  → archive a completed/failed workflow (admin token; 409 not_archivable otherwise)
+ *   POST   /api/workflows/:id/unarchive                → clear the archive flag (admin token)
+ *   GET    /api/workflows/:id/schedule                 → the workflow's schedule/series (+ its instances), or schedule: null
+ *   PUT    /api/workflows/:id/schedule                 → schedule it / change its schedule: {spec, timezone, includePrevious} (execute+manage; 400 invalid_schedule with field errors; 409 server_managed)
+ *   DELETE /api/workflows/:id/schedule                 → cancel its schedule; it becomes a normal workflow (execute+manage; 409 server_managed)
+ *   POST   /api/workflows/:id/schedule/run-now         → run a MISSED once now (execute+manage; 409 not_missed otherwise)
+ *   POST   /api/workflows/:id/schedule/reschedule      → re-arm a MISSED once: {spec, timezone, includePrevious} (execute+manage; 409 not_missed / server_managed)
+ *   POST   /api/workflows/:id/schedule/dismiss         → give up on a MISSED once; it becomes a normal workflow (execute+manage; 409 not_missed)
+ *                                                        (start/resume/restart and steps/:stepId/run answer 409 {error:"scheduled_armed"} on a schedule's armed instance)
+ *   GET    /api/schedule-notices                       → schedule notices, newest first; ?unacknowledged=1 only the open ones; ?seriesId= one series
+ *   POST   /api/schedule-notices/:id/ack               → acknowledge a notice (admin token)
+ *   POST   /api/schedule/preview                       → the next 3 runs of {spec, timezone}: ISO + local "YYYY-MM-DD HH:mm" (admin token; 400 invalid_schedule)
  *   POST   /api/steps/:id/result                       → awb's result callback (?token=<per-step token>)
  *   GET    /api/templates                              → list templates (optional ?q= filters by name/tag)
  *   POST   /api/catalog/sync                            → pull the linked server's catalog (operator + a client.*.sync permission; 409 if not linked; 502 if the server is too old)
@@ -64,6 +77,8 @@
  *   PUT    /api/settings/docker-friendly                  → replace docker-friendly hub networking toggle (admin token; restart required)
  *   GET    /api/settings/ui                               → UI catalog visibility (TCP / RCI top-level nav)
  *   PUT    /api/settings/ui                               → replace UI catalog visibility (admin token)
+ *   GET    /api/settings/archive                          → auto-archive preference ({archive_after_days}; default 30, 0 = off)
+ *   PUT    /api/settings/archive                          → replace auto-archive preference (admin token; 400 unless a non-negative integer)
  *   GET    /                                           → ui/index.html
  *
  * Every route except /health, the /api/auth stack and the awb per-step-token
@@ -129,6 +144,8 @@ import {
 import {
 	promoteQueuedToRunning,
 	deleteTemplate,
+	ARCHIVED_FILTERS,
+	getArchiveSettings,
 	getDockerMountSettings,
 	getDockerFriendlySettings,
 	getNotificationSettings,
@@ -149,6 +166,7 @@ import {
 	OVERRIDABLE_STEP_STATUSES,
 	OVERRIDABLE_WORKFLOW_STATUSES,
 	parseTemplateBundle,
+	saveArchiveSettings,
 	saveDockerMountSettings,
 	saveDockerFriendlySettings,
 	saveNotificationSettings,
@@ -222,6 +240,7 @@ import { canReadTokenUsage, readTokenUsage } from "./transcript.ts";
 import {
 	abortStep,
 	addStep,
+	archiveWorkflow,
 	cloneWorkflow,
 	continueStep,
 	createWorkflow,
@@ -244,11 +263,28 @@ import {
 	setConversationContext,
 	setWorkflowStepSelection,
 	startWorkflow,
+	unarchiveWorkflow,
 	updateWorkflowDockerMounts,
+	WorkflowArchivedError,
+	WorkflowScheduledArmedError,
+	cancelSchedule,
+	ScheduleServerManagedError,
+	ScheduleValidationError,
+	setSchedule,
+	type SetScheduleInput,
 	WorkflowError,
+	WorkflowNotArchivableError,
 	type CloneOverrides,
 } from "./workflow.ts";
-import { getStep, listStepNotes, normalizeStepNoteTheme, type StepNoteTheme } from "./db.ts";
+import { getStep, listStepNotes, normalizeStepNoteTheme, type ArchivedFilter, type StepNoteTheme } from "./db.ts";
+import {
+	acknowledgeNotice,
+	listNotices,
+	listSeriesInstances,
+	type ScheduleNotice,
+} from "./db.ts";
+import { formatInZone, nextOccurrence, validateSchedule, type ScheduleSpec } from "./schedule.ts";
+import { dismissMissed, rescheduleMissed, runMissedNow, ScheduleNotMissedError } from "./scheduler.ts";
 import { addStepNote, editStepNote, removeStepNote, StepNoteError } from "./step-notes.ts";
 
 /**
@@ -457,6 +493,64 @@ function requirePermission(
 }
 
 /**
+ * Like `requirePermission`, but EVERY id must be granted rather than any one.
+ * Scheduling is both running work and managing the workflow (D22): a role
+ * that may only execute would otherwise be able to make the hub run things
+ * unattended forever, and one that may only manage could schedule runs it
+ * isn't allowed to start. The 403 names the first permission missing.
+ */
+function requireAllPermissions(
+	cfg: HubConfig,
+	req: http.IncomingMessage,
+	res: http.ServerResponse,
+	...ids: string[]
+): boolean {
+	if (!isAdmin(cfg, req.headers)) {
+		sendJson(res, 401, { error: "unauthorized" });
+		return false;
+	}
+	const mode = resolvePermissionMode();
+	if (mode.mode === "unrestricted") return true;
+	const missing = mode.mode === "enforced" ? ids.find((id) => !mode.permissions.has(id)) : ids[0];
+	if (missing === undefined) return true;
+	sendJson(res, 403, { error: "forbidden", permission: missing, mode: mode.mode });
+	return false;
+}
+
+/** The permissions every schedule mutation needs (D22). */
+const SCHEDULE_PERMISSIONS = ["client.workflows.execute", "client.workflows.manage"] as const;
+
+/**
+ * The shared error answer of the schedule mutations: field errors are a 400
+ * `invalid_schedule` carrying `fields`; a server-managed series (D15), a
+ * missed-only action on something that wasn't missed, and an archived workflow
+ * are 409 conflicts, each by type; any other engine refusal (in progress,
+ * adopted conversation, a past run) a 400.
+ */
+function sendScheduleError(res: http.ServerResponse, err: unknown): void {
+	if (err instanceof ScheduleValidationError) {
+		sendJson(res, 400, { error: "invalid_schedule", message: err.message, fields: err.fields });
+	} else if (err instanceof ScheduleServerManagedError) {
+		sendJson(res, 409, { error: "server_managed", message: err.message });
+	} else if (err instanceof ScheduleNotMissedError) {
+		sendJson(res, 409, { error: "not_missed", message: err.message });
+	} else if (err instanceof WorkflowArchivedError) {
+		sendJson(res, 409, { error: "archived", message: err.message });
+	} else {
+		sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+	}
+}
+
+/** A PUT/reschedule body as `setSchedule` input; shape checks are left to it. */
+function readScheduleInput(body: Record<string, unknown>): SetScheduleInput {
+	return {
+		spec: body.spec as SetScheduleInput["spec"],
+		timezone: body.timezone as string,
+		...(body.includePrevious === undefined ? {} : { includePrevious: body.includePrevious as boolean }),
+	};
+}
+
+/**
  * How an attachment reaches the browser. `path` is the absolute file on this
  * machine — the same string composed into the agent's prompt, shown in the UI so
  * an operator can see exactly what the agent was given — and `url` is where the
@@ -531,9 +625,42 @@ function publicWorkflow(workflow: Workflow): Record<string, unknown> {
 		tcpIds: listWorkflowTcpIds(workflow.id),
 		tcpSelections: listWorkflowTcpSelections(workflow.id),
 		resourceSelections: listWorkflowResourceSelections(workflow.id),
+		// When it was archived, or null. A flag beside `status`, never a status of
+		// its own: the completed/failed outcome still reads back while archived.
+		archivedAt: workflow.archivedAt,
+		// The schedule series this workflow belongs to (null when it never was
+		// scheduled), and — computed — when it runs next: only an ARMED instance
+		// has a next run; a fired, missed or cancelled one keeps its stored
+		// schedule fields as history but runs next never.
+		schedule: publicSchedule(workflow),
+		nextRunAt: workflow.scheduleState === "armed" ? workflow.nextRunAt : null,
 		createdAt: workflow.createdAt,
 		updatedAt: workflow.updatedAt,
 	};
+}
+
+function publicSchedule(workflow: Workflow): Record<string, unknown> | null {
+	if (!workflow.seriesId) return null;
+	return {
+		seriesId: workflow.seriesId,
+		seriesName: workflow.seriesName,
+		spec: workflow.schedule,
+		timezone: workflow.scheduleTimezone,
+		includePrevious: workflow.includePrevious,
+		state: workflow.scheduleState,
+		scheduledFor: workflow.scheduledFor,
+		nextRunAt: workflow.nextRunAt,
+		previousInstanceId: workflow.previousInstanceId,
+		previousRunBlock: workflow.previousRunBlock,
+		// `server`: created from the server and managed only there (D15) — the UI
+		// shows it read-only, and local schedule edits answer 409 server_managed.
+		managedBy: workflow.managedBy,
+		announcedAt: workflow.announcedAt,
+	};
+}
+
+function publicNotice(notice: ScheduleNotice): Record<string, unknown> {
+	return { ...notice };
 }
 
 function publicStep(step: Step, cfg: HubConfig): Record<string, unknown> {
@@ -718,6 +845,31 @@ function readStepConfig(body: Record<string, unknown>): {
 		config.retryIntervalSeconds = Math.max(0, Math.floor(Number(body.retryIntervalSeconds)));
 	}
 	return config;
+}
+
+/**
+ * The shared error answer of the run entry points (start/resume/restart and a
+ * step's ▶ run): an archived workflow is a 409 `{"error":"archived"}` and a
+ * schedule's armed instance a 409 `{"error":"scheduled_armed"}` — conflicts
+ * with the workflow's state, distinguished by type (see `WorkflowArchivedError`
+ * / `WorkflowScheduledArmedError`) — any other engine refusal a 400, anything
+ * else 500.
+ */
+function sendRunError(res: http.ServerResponse, err: unknown): void {
+	if (err instanceof WorkflowArchivedError) {
+		sendJson(res, 409, { error: "archived", message: err.message });
+		return;
+	}
+	if (err instanceof WorkflowScheduledArmedError) {
+		sendJson(res, 409, { error: "scheduled_armed", message: err.message });
+		return;
+	}
+	sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+}
+
+/** Wire shape of the auto-archive setting (snake_case key, as the API documents it). */
+function publicArchiveSettings(settings: { archiveAfterDays: number; updatedAt: string | null }): Record<string, unknown> {
+	return { archive_after_days: settings.archiveAfterDays, updatedAt: settings.updatedAt };
 }
 
 function sendJson(res: http.ServerResponse, status: number, payload: unknown): void {
@@ -2318,6 +2470,44 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		return;
 	}
 
+	// --- /api/settings/archive ---
+	//
+	// `archive_after_days`: completed/failed workflows idle longer than this are
+	// archived by the daemon sweep (`autoArchive`). 0 disables it; default 30.
+
+	if (parts[1] === "settings" && parts[2] === "archive" && !parts[3]) {
+		if (req.method === "GET") {
+			sendJson(res, 200, { settings: publicArchiveSettings(getArchiveSettings()) });
+			return;
+		}
+		if (req.method === "PUT" || req.method === "PATCH") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				try {
+					const settings = saveArchiveSettings({ archiveAfterDays: body.archive_after_days });
+					log(
+						settings.archiveAfterDays === 0
+							? "auto-archive disabled"
+							: `auto-archive after ${settings.archiveAfterDays} day(s) of inactivity`,
+					);
+					sendJson(res, 200, { settings: publicArchiveSettings(settings) });
+				} catch (err) {
+					if (err instanceof RangeError) {
+						sendJson(res, 400, { error: err.message });
+						return;
+					}
+					sendJson(res, 500, { error: String((err as Error).message ?? err) });
+				}
+			});
+			return;
+		}
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
 	// --- /api/settings/ui ---
 	//
 	// Whether TCP / RCI catalog UI is shown (header, workflow, template attach).
@@ -2561,6 +2751,69 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		return;
 	}
 
+	// --- /api/schedule-notices ---
+	//
+	// Persistent notices about scheduled runs (missed, skipped, broken, failed).
+	// Listing is open like every other read. Acknowledging needs the admin token
+	// but no owner permission: it changes nothing about any workflow, and the
+	// "skipped: stale/forbidden" notices appear precisely when the hub reads as
+	// read-only — they must still be dismissable then.
+
+	if (parts[1] === "schedule-notices" && !parts[2] && req.method === "GET") {
+		const notices = listNotices({
+			includeAcknowledged: url.searchParams.get("unacknowledged") !== "1",
+			...(url.searchParams.get("seriesId") ? { seriesId: String(url.searchParams.get("seriesId")) } : {}),
+		});
+		sendJson(res, 200, { notices: notices.map(publicNotice) });
+		return;
+	}
+
+	if (parts[1] === "schedule-notices" && parts[2] && parts[3] === "ack" && !parts[4] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		const notice = acknowledgeNotice(parts[2]);
+		if (!notice) {
+			sendJson(res, 404, { error: "unknown_notice" });
+			return;
+		}
+		sendJson(res, 200, { notice: publicNotice(notice) });
+		return;
+	}
+
+	// --- /api/schedule/preview ---
+	//
+	// The next three runs a schedule would produce, so the form can show "runs
+	// next: …" before anything is saved. Pure computation — admin token, no owner
+	// permission. A `once` yields at most one; a `once` in the past, none.
+
+	if (parts[1] === "schedule" && parts[2] === "preview" && !parts[3] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const fields = validateSchedule(body.spec, body.timezone);
+			if (fields.length > 0) {
+				sendJson(res, 400, { error: "invalid_schedule", message: fields.map((f) => f.message).join("; "), fields });
+				return;
+			}
+			const spec = body.spec as ScheduleSpec;
+			const timezone = String(body.timezone);
+			const occurrences: { at: string; local: string }[] = [];
+			let after = new Date();
+			while (occurrences.length < 3) {
+				const next = nextOccurrence(spec, timezone, after);
+				if (!next) break;
+				occurrences.push({ at: next.toISOString(), local: formatInZone(next, timezone) });
+				after = next;
+			}
+			sendJson(res, 200, { timezone, occurrences });
+		});
+		return;
+	}
+
 	if (parts[1] !== "workflows") {
 		sendJson(res, 404, { error: "not_found" });
 		return;
@@ -2570,8 +2823,17 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 
 	if (!parts[2]) {
 		if (req.method === "GET") {
+			// Archived workflows are hidden from the list by default; `?archived=include`
+			// adds them back, `?archived=only` is the archive view. Filtered in SQL.
+			const archivedParam = url.searchParams.get("archived") ?? "exclude";
+			if (!ARCHIVED_FILTERS.includes(archivedParam as ArchivedFilter)) {
+				sendJson(res, 400, { error: `invalid archived filter (allowed: ${ARCHIVED_FILTERS.join(", ")})` });
+				return;
+			}
 			expireStale(cfg, log);
-			sendJson(res, 200, { workflows: listWorkflows().map(publicWorkflow) });
+			sendJson(res, 200, {
+				workflows: listWorkflows({ archived: archivedParam as ArchivedFilter }).map(publicWorkflow),
+			});
 			return;
 		}
 		if (req.method === "POST") {
@@ -3416,7 +3678,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				}
 				sendJson(res, 200, { step: publicStep(step, cfg) });
 			} catch (err) {
-				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				sendRunError(res, err);
 			}
 		})();
 		return;
@@ -3676,10 +3938,116 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 									: await restartWorkflow(workflowId, cfg, log, stepIds);
 					sendJson(res, 200, { workflow: publicWorkflow(workflow) });
 				} catch (err) {
-					sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+					sendRunError(res, err);
 				}
 			})();
 		});
+		return;
+	}
+
+	// --- /api/workflows/:id/{archive,unarchive} ---
+	//
+	// Archiving files a finished (completed/failed) workflow away: hidden from the
+	// default list, refused by start/resume/restart/▶ until unarchived. A flag,
+	// not a status — see `archiveWorkflow`. Archiving an archived workflow and
+	// unarchiving a live one are both no-ops that answer 200.
+
+	if (workflowId && (parts[3] === "archive" || parts[3] === "unarchive") && !parts[4] && req.method === "POST") {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
+			return;
+		}
+		if (!getWorkflow(workflowId)) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		try {
+			const workflow = parts[3] === "archive" ? archiveWorkflow(workflowId) : unarchiveWorkflow(workflowId);
+			log(`workflow ${workflowId} ${parts[3]}d`);
+			sendJson(res, 200, { workflow: publicWorkflow(workflow) });
+		} catch (err) {
+			if (err instanceof WorkflowNotArchivableError) {
+				sendJson(res, 409, { error: "not_archivable", message: err.message });
+				return;
+			}
+			sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+		}
+		return;
+	}
+
+	// --- /api/workflows/:id/schedule ---
+	//
+	// Scheduling turns the workflow into the ARMED instance of a series: the next
+	// execution, which the scheduler fires at `nextRunAt` and which can't be run
+	// by hand meanwhile (D2). Every mutation needs execute AND manage (D22); a
+	// series created from the server is managed there only (409 server_managed).
+
+	if (workflowId && parts[3] === "schedule" && !parts[4] && req.method === "GET") {
+		const workflow = getWorkflow(workflowId);
+		if (!workflow) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		const instances = workflow.seriesId
+			? listSeriesInstances(workflow.seriesId).map((w) => ({
+					id: w.id,
+					name: w.name,
+					status: w.status,
+					scheduleState: w.scheduleState,
+					scheduledFor: w.scheduledFor,
+				}))
+			: [];
+		sendJson(res, 200, {
+			schedule: publicSchedule(workflow),
+			nextRunAt: workflow.scheduleState === "armed" ? workflow.nextRunAt : null,
+			instances,
+		});
+		return;
+	}
+
+	if (
+		workflowId &&
+		parts[3] === "schedule" &&
+		(!parts[4] ? req.method === "PUT" || req.method === "DELETE" : req.method === "POST") &&
+		(!parts[4] || parts[4] === "run-now" || parts[4] === "reschedule" || parts[4] === "dismiss") &&
+		!parts[5]
+	) {
+		if (!requireAllPermissions(cfg, req, res, ...SCHEDULE_PERMISSIONS)) {
+			return;
+		}
+		if (!getWorkflow(workflowId)) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		const action = parts[4] ?? (req.method === "PUT" ? "set" : "cancel");
+		const respond = (workflow: Workflow) => sendJson(res, 200, { workflow: publicWorkflow(workflow) });
+		if (action === "set" || action === "reschedule") {
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				try {
+					const input = readScheduleInput(body);
+					const workflow =
+						action === "set" ? setSchedule(workflowId, input) : rescheduleMissed(workflowId, input);
+					log(`workflow ${workflowId} scheduled (${workflow.nextRunAt})`);
+					respond(workflow);
+				} catch (err) {
+					sendScheduleError(res, err);
+				}
+			});
+			return;
+		}
+		(async () => {
+			try {
+				const workflow =
+					action === "cancel"
+						? cancelSchedule(workflowId)
+						: action === "dismiss"
+							? dismissMissed(workflowId)
+							: await runMissedNow(workflowId, cfg, log);
+				log(`workflow ${workflowId} schedule ${action}`);
+				respond(workflow);
+			} catch (err) {
+				sendScheduleError(res, err);
+			}
+		})();
 		return;
 	}
 

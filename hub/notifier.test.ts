@@ -1,5 +1,8 @@
 /**
- * Tests for the manual-review notification (notifier.ts).
+ * Tests for the manual-review notification (notifier.ts), and — at the end —
+ * the schedule notices (D11): the messages themselves, and the scheduler
+ * sending them for missed, skipped, broken and failed scheduled runs while a
+ * failed NON-scheduled workflow still sends nothing.
  *
  * Two halves, both offline:
  *
@@ -581,4 +584,266 @@ test("sendTestNotification: enabled=false still sends when transports work", asy
 	assert.deepEqual(await sendTestNotification(), { sent: true });
 	assert.equal(calls.send.length, 1);
 	assert.equal(calls.send[0]!.username, "ada");
+});
+
+// --- schedule notices (D11) ------------------------------------------------------
+
+const http = await import("node:http");
+const { completeStep, getWorkflow, insertStep, insertWorkflow, listNotices, listSteps, setWorkflowStatus } =
+	await import("./db.ts");
+const { loadConfig } = await import("./config.ts");
+const { setSchedule } = await import("./workflow.ts");
+const { runSchedulerTick } = await import("./scheduler.ts");
+const { scheduleNoticeMessage, sendScheduleNoticeNotification } = await import("./notifier.ts");
+
+const scheduleNotice = {
+	kind: "missed" as const,
+	seriesName: "Nightly audit",
+	workflowName: "Nightly audit · 2026-09-30 09:00",
+	reason: "offline",
+	occurrences: ["2026-09-28 09:00", "2026-09-29 09:00"],
+	nextRun: "2026-10-01 09:00",
+	recurring: true,
+	detail: "",
+};
+
+test("missed message names the series, every missed run, why, and the next run", () => {
+	const message = scheduleNoticeMessage(scheduleNotice);
+	assert.match(message, /Scheduled run missed/);
+	assert.match(message, /\*Nightly audit\*/);
+	assert.match(message, /Missed \(2 runs\):\* 2026-09-28 09:00, 2026-09-29 09:00/);
+	assert.match(message, /Why:\* the hub was offline/);
+	assert.match(message, /Next run:\* 2026-10-01 09:00/);
+});
+
+test("a missed once says it waits for Run now / Reschedule / Dismiss", () => {
+	const message = scheduleNoticeMessage({
+		...scheduleNotice,
+		occurrences: ["2026-09-30 09:00"],
+		nextRun: null,
+		recurring: false,
+	});
+	assert.match(message, /Missed \(1 run\):\* 2026-09-30 09:00/);
+	assert.match(message, /Run now\*, \*Reschedule\* or \*Dismiss/);
+});
+
+test("skipped message spells out each skip reason", () => {
+	const reasons = {
+		busy: /previous run was still in progress/,
+		forbidden: /client\.workflows\.execute/,
+		stale: /could not confirm the owner's permissions/,
+	};
+	for (const [reason, pattern] of Object.entries(reasons)) {
+		const message = scheduleNoticeMessage({ ...scheduleNotice, kind: "skipped", reason, occurrences: ["2026-09-30 09:00"] });
+		assert.match(message, /Scheduled run skipped/, reason);
+		assert.match(message, /\*Nightly audit\*/, reason);
+		assert.match(message, /Run:\* 2026-09-30 09:00/, reason);
+		assert.match(message, pattern, reason);
+		assert.match(message, /Next run:\* 2026-10-01 09:00/, reason);
+	}
+});
+
+test("broken message says no further runs will happen until rescheduled — and names no next run", () => {
+	const message = scheduleNoticeMessage({
+		...scheduleNotice,
+		kind: "broken",
+		reason: "clone_failed",
+		occurrences: ["2026-09-30 09:00"],
+		detail: "disk full",
+	});
+	assert.match(message, /Schedule broken/);
+	assert.match(message, /\*Nightly audit\*/);
+	assert.match(message, /next run could not be created/);
+	assert.match(message, /Detail:\* disk full/);
+	assert.match(message, /No further runs will happen until the schedule is rescheduled/);
+	assert.doesNotMatch(message, /Next run:/);
+});
+
+test("failed-run message names the run, its series, the failed step and the next run", () => {
+	const message = scheduleNoticeMessage({
+		...scheduleNotice,
+		kind: "failed",
+		reason: "run_failed",
+		occurrences: ["2026-09-30 09:00"],
+		detail: "step 2 (deploy): exit 1",
+	});
+	assert.match(message, /Scheduled run failed/);
+	assert.match(message, /\*Nightly audit · 2026-09-30 09:00\* \(schedule \*Nightly audit\*\)/);
+	assert.match(message, /Why:\* a step failed/);
+	assert.match(message, /Detail:\* step 2 \(deploy\): exit 1/);
+	assert.match(message, /Next run:\* 2026-10-01 09:00/);
+});
+
+test("schedule notices obey the same opt-in as every other notification", async (t) => {
+	saveNotificationSettings({ enabled: false, channels: { slack: { username: "ada" } } });
+	const calls = stubImpl(t, { detect: () => [endpoint] });
+	assert.deepEqual(await sendScheduleNoticeNotification(scheduleNotice), {
+		sent: false,
+		reason: "notifications-disabled",
+	});
+	assert.equal(calls.send.length, 0);
+
+	saveNotificationSettings({ enabled: true, channels: { slack: { username: "ada" } } });
+	assert.deepEqual(await sendScheduleNoticeNotification(scheduleNotice), { sent: true });
+	assert.equal(calls.send.length, 1);
+	assert.equal(calls.send[0]!.username, "ada");
+});
+
+// The scheduler end of it. Fired runs are started for real against a fake awb
+// hook that accepts every dispatch and never calls back, so they sit `running`.
+
+const hook = http.createServer((req, res) => {
+	req.resume();
+	req.on("end", () => {
+		res.writeHead(200, { "content-type": "application/json" });
+		res.end(JSON.stringify({ ok: true }));
+	});
+});
+await new Promise<void>((resolve) => hook.listen(0, "127.0.0.1", resolve));
+const hookAddress = hook.address();
+if (!hookAddress || typeof hookAddress === "string") throw new Error("fake hook did not bind");
+const hookBase = `http://127.0.0.1:${hookAddress.port}/hook`;
+test.after(() => hook.close());
+
+const cfg = loadConfig();
+const ARMED_AT = new Date("2026-09-30T08:00:00.000Z");
+const DUE = new Date("2026-09-30T09:00:00.000Z");
+const MIN = 60_000;
+let schedSeq = 0;
+
+/** A plain workflow on the fake hook with two task steps. */
+function plainWorkflow(name: string): string {
+	schedSeq += 1;
+	const id = `wf-notify-${schedSeq}`;
+	insertWorkflow({
+		id,
+		name,
+		agentName: `notify-agent-${schedSeq}`,
+		hookUrl: `${hookBase}/${id}`,
+		secret: "s",
+		mdPath: path.join(tmpHome, `${id}.md`),
+	});
+	insertStep(id, "collect");
+	insertStep(id, "deploy");
+	return id;
+}
+
+/** An armed daily 09:00 UTC series; every earlier armed instance is disarmed so a tick is about this one only. */
+function armedSeries(name: string) {
+	open()
+		.prepare("UPDATE workflows SET schedule_state = 'cancelled', next_run_at = NULL WHERE schedule_state = 'armed'")
+		.run();
+	return setSchedule(plainWorkflow(name), { spec: { kind: "daily", time: "09:00" }, timezone: "UTC" }, { now: ARMED_AT });
+}
+
+/** Sets up Slack and records every message sent; returns them. */
+function captureSlack(t: { after: (fn: () => void) => void }) {
+	saveNotificationSettings({ enabled: true, channels: { slack: { username: "ada" } } });
+	return stubImpl(t, { detect: () => [endpoint] });
+}
+
+/** Notices are sent fire-and-forget; give the stubbed send a moment to run. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+const tick = (now: Date, extra: Partial<Parameters<typeof runSchedulerTick>[0]> = {}) =>
+	runSchedulerTick({ cfg, log: () => {}, now, permissionState: () => ({ kind: "unrestricted" }), ...extra });
+
+test("scheduler: runs missed while the hub was offline are sent to Slack", async (t) => {
+	const calls = captureSlack(t);
+	const wf = armedSeries("Missed audit");
+	await tick(new Date(DUE.getTime() + 2 * 24 * 60 * MIN + 30 * MIN));
+	await settle();
+	assert.equal(calls.send.length, 1);
+	const message = calls.send[0]!.message;
+	assert.match(message, /Scheduled run missed/);
+	assert.match(message, /\*Missed audit\*/);
+	assert.match(message, /Missed \(3 runs\):\* 2026-09-30 09:00, 2026-10-01 09:00, 2026-10-02 09:00/);
+	assert.match(message, /the hub was offline/);
+	assert.match(message, /Next run:\* 2026-10-03 09:00/);
+	assert.equal(listNotices({ seriesId: wf.seriesId! }).length, 1, "the notice is recorded as well");
+});
+
+test("scheduler: a skipped run is sent to Slack with its reason", async (t) => {
+	const calls = captureSlack(t);
+	armedSeries("Forbidden audit");
+	await tick(DUE, { permissionState: () => ({ kind: "enforced", permissions: [] }) });
+	await settle();
+	assert.equal(calls.send.length, 1);
+	const message = calls.send[0]!.message;
+	assert.match(message, /Scheduled run skipped/);
+	assert.match(message, /\*Forbidden audit\*/);
+	assert.match(message, /Run:\* 2026-09-30 09:00/);
+	assert.match(message, /client\.workflows\.execute/);
+	assert.match(message, /Next run:\* 2026-10-01 09:00/);
+});
+
+test("scheduler: a broken series is sent to Slack saying no further runs will happen", async (t) => {
+	const calls = captureSlack(t);
+	const wf = armedSeries("Broken audit");
+	await tick(DUE, {
+		clone: () => {
+			throw new Error("disk full");
+		},
+	});
+	await settle();
+	assert.equal(getWorkflow(wf.id)!.status, "running", "the current run still started");
+	assert.equal(calls.send.length, 1);
+	const message = calls.send[0]!.message;
+	assert.match(message, /Schedule broken/);
+	assert.match(message, /\*Broken audit\*/);
+	assert.match(message, /Run:\* 2026-09-30 09:00/);
+	assert.match(message, /disk full/);
+	assert.match(message, /No further runs will happen until the schedule is rescheduled/);
+});
+
+test("scheduler: a fired scheduled run that ends failed is sent to Slack once, and again after a restart fails it", async (t) => {
+	const calls = captureSlack(t);
+	const wf = armedSeries("Failing audit");
+	await tick(DUE);
+	await settle();
+	assert.equal(calls.send.length, 0, "an on-time fire sends nothing");
+	const step = listSteps(wf.id).filter((s) => s.kind === "task")[0]!;
+	completeStep(step.id, { ok: false, error: "exit 1" });
+	setWorkflowStatus(wf.id, "failed");
+
+	await tick(new Date(DUE.getTime() + MIN));
+	await settle();
+	assert.equal(calls.send.length, 1);
+	const message = calls.send[0]!.message;
+	assert.match(message, /Scheduled run failed/);
+	assert.match(message, /\*Failing audit\*/);
+	assert.match(message, /Run:\* 2026-09-30 09:00/);
+	assert.match(message, /step 1 \(collect\): exit 1/);
+	assert.match(message, /Next run:\* 2026-10-01 09:00/, "the series carries on with its next instance");
+	const failedNotices = listNotices({ seriesId: wf.seriesId! }).filter((n) => n.kind === "failed");
+	assert.equal(failedNotices.length, 1);
+	assert.equal(failedNotices[0]!.reason, "run_failed");
+
+	await tick(new Date(DUE.getTime() + 2 * MIN));
+	await settle();
+	assert.equal(calls.send.length, 1, "the same failure is announced once");
+
+	// Leaving `failed` (a restart) re-arms the announcement; failing again is a new failure.
+	setWorkflowStatus(wf.id, "running");
+	setWorkflowStatus(wf.id, "failed");
+	await tick(new Date(DUE.getTime() + 3 * MIN));
+	await settle();
+	assert.equal(calls.send.length, 2);
+});
+
+test("scheduler: a failed NON-scheduled workflow still sends nothing", async (t) => {
+	const calls = captureSlack(t);
+	const id = plainWorkflow("Interactive run");
+	const step = listSteps(id).filter((s) => s.kind === "task")[0]!;
+	completeStep(step.id, { ok: false, error: "exit 1" });
+	setWorkflowStatus(id, "failed");
+
+	await tick(new Date(DUE.getTime() + 10 * MIN));
+	await settle();
+	assert.equal(calls.send.length, 0);
+	assert.equal(
+		listNotices({ includeAcknowledged: true }).filter((n) => n.workflowId === id).length,
+		0,
+		"and records no notice",
+	);
 });

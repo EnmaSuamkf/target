@@ -193,6 +193,228 @@ Both flags default to **`false`** (catalogs hidden) until the operator turns the
 on in Settings. Saved preferences override that default. Hiding a catalog does
 not remove stored selections on workflows or templates — it only hides the UI.
 
+### Archiving workflows
+
+Archiving is a flag (`archivedAt`), not a status: only a **completed** or
+**failed** workflow can be archived, and it keeps that status. Running,
+waiting, paused and draft workflows are never archived.
+
+- **Automatic.** The daemon's 60s sweep archives completed/failed workflows
+  whose last activity — the later of `updated_at` and the steps' latest
+  `finished_at` — is older than `archive_after_days` (default 30, `0` turns it
+  off; Settings → Auto-archive, or `/api/settings/archive`).
+- **Manual.** Archive / Unarchive in the workflow detail, the routes below, or
+  the MCP tools. Unarchiving bumps `updated_at`, so the sweep doesn't
+  immediately re-archive it.
+- **Listing.** `GET /api/workflows` hides archived workflows by default
+  (`?archived=exclude`); `?archived=include` returns everything and
+  `?archived=only` just the archive (anything else is a 400). The UI rail and
+  All workflows page have an **Archived** filter.
+- **Refusals.** An archived workflow answers 409 `{"error":"archived"}` to
+  start/resume/restart/step run until unarchived (enforced in the engine, so
+  sync commands and MCP get the same refusal).
+
+| Method | Path | Auth | Body / response |
+|--------|------|------|-----------------|
+| `POST` | `/api/workflows/:id/archive` | admin Bearer (`client.workflows.manage`) | → `{ "workflow" }` with `archivedAt`; 409 `not_archivable` unless completed/failed; 404 `unknown_workflow` |
+| `POST` | `/api/workflows/:id/unarchive` | admin Bearer (`client.workflows.manage`) | → `{ "workflow" }` with `archivedAt: null` |
+| `GET` | `/api/settings/archive` | session or admin Bearer | `{ "settings": { "archive_after_days": 30, "updatedAt": null \| ISO } }` |
+| `PUT` | `/api/settings/archive` | admin Bearer | `{ "archive_after_days": 7 }` → saved settings; 400 unless a non-negative integer |
+
+MCP: `archive_workflow`, `unarchive_workflow`, and `list_workflows { archived }`.
+
+Archiving or unarchiving a remote-origin workflow (by hand or by the sweep)
+queues a `workflow.archived` / `workflow.unarchived` sync event with the
+workflow's `remote_id` and payload `{ "archived_at": ISO | null }` — only
+when the linked server advertises that event type (see Remote sync below).
+Local workflows never emit it.
+
+### Scheduled workflows
+
+A workflow can be scheduled to run on its own — **once** (a date and time),
+**daily** (a time) or **weekly** (days of the week and a time) — in an explicit
+IANA timezone. Recurrence is computed with `Intl` only (no date library). On a
+daylight-saving change a time that doesn't exist runs at the moment the clocks
+change (02:30 → 03:00), and a time that happens twice runs once, at its first
+occurrence.
+
+- **Series and instances.** A schedule is a **series**, and every execution is
+  a workflow of its own (an **instance**). A series always has exactly one
+  **armed** instance: the next execution, waiting for its `nextRunAt`. Each run
+  shows up as a separate workflow with its own results, named
+  `<series name> · YYYY-MM-DD HH:mm` in the schedule's timezone. Names never
+  chain; the series' first instance keeps the name you gave it.
+- **The armed instance.** It can't be run by hand: start, resume, restart and a
+  step's ▶ run answer 409 `{"error":"scheduled_armed"}` on every entry point
+  (HTTP, sync commands, MCP). It **is** editable — steps, context, TCP/RCI —
+  and edits carry into every later run, because the next instance is cloned
+  from it. It is never archived. Deleting it ends the series; past runs stay.
+- **Firing.** The daemon ticks every 30s and once at boot, with the same logic
+  both times, so a laptop waking from suspend behaves like a fresh boot. A due
+  run is claimed atomically (armed → fired), so two processes on one DB never
+  fire it twice. For a recurring series the **next instance is cloned first**,
+  so a run that fails or hangs never ends the series. The run then starts with
+  every task step selected, using restart semantics if its steps already ran
+  (an existing completed workflow turned into a schedule).
+- **Previous run.** With `includePrevious` (on by default) each run is told
+  which instance ran before it, how that ended, and where its step results are
+  on disk (`~/.target/steps/<agent>/`). This goes through the context step,
+  never into the conversation context, so it doesn't pile up across runs. In a
+  docker sandbox that folder is mounted into the container. awb has no
+  read-only mount option, so the hub makes the folder and its files
+  non-writable instead: a write from inside the container fails with EACCES.
+- **Missed runs.** A run may fire up to 10 minutes late. Later than that it is
+  **missed** and never runs late:
+  - A recurring series moves on to its next future occurrence without creating
+    any workflow, and records a notice such as "3 runs missed (…) because the
+    hub was offline; next: …".
+  - A **once** schedule becomes `missed` and offers **Run now** (the only
+    manual run of a scheduled instance), **Reschedule** or **Dismiss**.
+  - If the hub comes back within 10 minutes of the latest occurrence, that one
+    still runs and only the earlier ones count as missed.
+- **Overlap.** If the previous run of the series is still running, waiting or
+  paused when the next one is due, the due run is **skipped** with a notice
+  (reason `busy`) and the series re-armed at the following occurrence.
+- **Permissions.** On a linked hub a run fires only if the device owner holds
+  `client.workflows.execute`.
+  - After a boot the hub waits up to 5 minutes for the first live heartbeat.
+  - Without a live heartbeat it falls back to the last known owner snapshot if
+    that is less than 7 days old.
+  - Otherwise the run is skipped with a notice (reason `stale`, or `forbidden`
+    when the permission is missing).
+  - An unlinked hub always fires.
+- **Broken series.** If the next instance can't be created, the current run
+  still starts, the series is marked `broken`, and a critical notice is
+  recorded.
+- **Notices** (missed, skipped, broken, failed) are stored in the database and
+  stay until acknowledged. Each one is also sent as a Slack DM through the
+  existing notification settings (the same opt-in and destination as the
+  "workflow finished" message). A scheduled run that ends `failed` is recorded
+  as a `failed` notice and sent within one scheduler tick, once per failure. A
+  failed workflow that isn't a scheduled run still sends nothing; only
+  completions notify.
+- **Restrictions.** Only a draft, completed or failed workflow can be
+  scheduled. A workflow that continues an adopted conversation can't be
+  scheduled, since every run is a clone and a clone can't continue someone
+  else's thread. A series created from the server is managed there only
+  (`managedBy: "server"`), and local schedule edits answer 409 `server_managed`.
+
+| Method | Path | Auth | Body / response |
+|--------|------|------|-----------------|
+| `GET` | `/api/workflows/:id/schedule` | — | `{ "schedule": {…} \| null, "nextRunAt", "instances": [{ id, name, status, scheduleState, scheduledFor }] }` |
+| `PUT` | `/api/workflows/:id/schedule` | admin Bearer (`client.workflows.execute` **and** `client.workflows.manage`) | `{ "spec", "timezone", "includePrevious"? }` → `{ "workflow" }`; 400 `invalid_schedule` with `fields: [{ field, message }]`; 409 `server_managed` |
+| `DELETE` | `/api/workflows/:id/schedule` | same | cancels: the armed instance becomes a normal workflow (`state: "cancelled"`); 409 `server_managed` |
+| `POST` | `/api/workflows/:id/schedule/run-now` | same | runs a **missed once**; 409 `not_missed` otherwise |
+| `POST` | `/api/workflows/:id/schedule/reschedule` | same | `{ "spec", "timezone", "includePrevious"? }` re-arms a missed once; 409 `not_missed` / `server_managed` |
+| `POST` | `/api/workflows/:id/schedule/dismiss` | same | releases a missed once as a normal workflow; 409 `not_missed` |
+| `GET` | `/api/schedule-notices` | — | `{ "notices": [{ id, workflowId, seriesId, kind, reason, detail, createdAt, acknowledgedAt }] }`; `?unacknowledged=1`, `?seriesId=` |
+| `POST` | `/api/schedule-notices/:id/ack` | admin Bearer | → `{ "notice" }`; 404 `unknown_notice` |
+| `POST` | `/api/schedule/preview` | admin Bearer | `{ "spec", "timezone" }` → `{ "timezone", "occurrences": [{ at: ISO, local: "YYYY-MM-DD HH:mm" }] }` (the next 3) |
+
+`spec` is `{ "kind": "once", "at": "YYYY-MM-DDTHH:mm" }`,
+`{ "kind": "daily", "time": "HH:mm" }` or
+`{ "kind": "weekly", "days": [1, 3, 5], "time": "HH:mm" }` (0 = Sunday). The
+workflow DTO carries `schedule` (series id and name, spec, timezone,
+`includePrevious`, `state` — `armed | fired | missed | cancelled | broken` —
+`scheduledFor`, `managedBy`) and a top-level `nextRunAt`, which is set only
+while the instance is armed. MCP: `get_schedule`, `set_schedule`,
+`cancel_schedule`, `preview_schedule`, `list_schedule_notices`,
+`acknowledge_schedule_notice`.
+
+#### Scheduling from the UI
+
+- **Schedule / Edit schedule** in a workflow's header opens the schedule dialog.
+  It covers once (date + time), daily (time) or weekly (weekday chips + time),
+  and a searchable timezone list that defaults to the browser's zone. It also
+  has the **Include a reference to the previous run** toggle (on by default)
+  and a live preview of the next 3 runs, computed by the hub
+  (`/api/schedule/preview`), so DST rules are the scheduler's own.
+  - It warns when a step has manual review, since a scheduled run stops there
+    until someone presses Continue.
+  - The same dialog changes the schedule or cancels it (**Cancel schedule**).
+  - A server-managed series opens read-only.
+  - A workflow on an adopted conversation can't be scheduled, and the button
+    says why.
+- **Badges.** Cards and the detail header show `Scheduled · next in 14h` on the
+  armed instance (absolute time and zone in the tooltip), and
+  `Run of <series> · <occurrence>` on a past run. A missed run or a broken
+  series gets an orange warning badge.
+- **Run gate.** On the armed instance Start and a step's Retry are disabled with
+  "Scheduled — runs automatically". Editing stays possible.
+- **Filters.** The rail and the All workflows page have
+  **All / Scheduled / Scheduled runs**. **Scheduled** shows each series once,
+  by its armed instance; **Scheduled runs** shows past runs. The filter
+  combines with Archived, status and search.
+- **Series panel.** The detail pane lists every instance of the series, newest
+  first, marking the next run and the one that's open. Each row shows its
+  status and links to that instance, archived runs included.
+- **Notices banner.** A banner under the header lists every unacknowledged
+  notice with **Acknowledge**. For a **missed once** the banner and the
+  workflow's detail pane both offer **Run now**, **Reschedule** (the schedule
+  dialog, saved through `/schedule/reschedule`) and **Dismiss**. Scheduling and
+  these three actions need `client.workflows.execute` **and**
+  `client.workflows.manage`.
+
+![The schedule dialog: daily at 09:00 in Europe/Madrid, with the next three runs previewed](web-docs/ui-schedule-modal.png)
+
+![A scheduled workflow: the "Scheduled · next in 14h" badge on its card and header, with Start disabled](web-docs/ui-scheduled-card.png)
+
+![The Scheduled filter, leaving one card per series](web-docs/ui-scheduled-filter.png)
+
+![The notices banner for a missed once, with Run now, Reschedule, Dismiss and Acknowledge](web-docs/ui-schedule-notice.png)
+
+#### Remote series (scheduled from the server)
+
+A linked target-server can schedule a remote workflow. The series is then
+**managed by the server only** (`managedBy: "server"`): the hub shows it
+read-only and answers 409 `server_managed` to local schedule edits, while the
+scheduler fires it exactly like a local series.
+
+- **Commands address the series, not a workflow.**
+  - `workflow.set_schedule { series_id, spec, timezone, include_previous? }`:
+    - For a series the hub doesn't know yet, the command's `remote_id` names
+      the workflow that becomes its first armed instance, under the
+      server's `series_id`.
+    - Otherwise the command applies to the series' **current** armed instance,
+      or to its missed once or broken instance, and `remote_id` is ignored.
+      A command that races a fire still lands on the next run.
+    - An invalid spec or timezone acks `failed` with the field errors.
+  - `workflow.cancel_schedule { series_id }`: cancels the current armed
+    instance. It is a no-op when nothing is live.
+  - Both refuse a series the hub manages itself.
+  - `step.add|edit|remove|move|run` aimed at an instance that has already
+    fired ack `failed` with `instance_already_fired`. `step.abort` and
+    `step.continue` still work on a running past run.
+- **Later instances are remote too.**
+  - When a server series fires, the clone gets a **hub-generated** `remote_id`
+    (a UUID), the same `series_id` and `managed_by='server'`.
+  - Its sync step map reuses the previous instance's `step_key`s, matched by
+    position. A step added on the hub gets a fresh key.
+- **Announcement (`schedule.instance_created`).**
+  - Every sync tick announces each such instance whose `announced_at` is
+    NULL. The event id is always `instance-created:<remote_id>`.
+  - The payload is `series_id`, `previous_remote_id`, `name`,
+    `scheduled_for`, `schedule {spec, timezone, include_previous}`, `agent`,
+    `sandbox`, `conversation_context`, `steps [{step_key, description,
+    acceptance_criteria, manual_review, use_subagent, max_retries,
+    retry_interval_seconds}]`, `tcp_selections` and `resource_selections`.
+  - `announced_at` is set only when the server returns the id in `accepted`
+    or `duplicates`. A restart or a lost push simply re-announces, and the
+    server answers `duplicate`.
+  - An id in `rejected` breaks the series, with a critical `broken` notice
+    and a Slack message carrying the server's reason.
+  - The first instance, created by the server, is never announced back.
+- **Other events.**
+  - `workflow.schedule_changed { series_id, state, next_run_at }` is derived
+    each tick from the series' current instance. It covers set, updated,
+    cancelled, re-armed and broken. The first tick after a restart re-sends
+    the current state.
+  - `schedule.run_missed { series_id, occurrences }` and
+    `schedule.run_skipped { series_id, reason, occurrence }` follow the
+    scheduler's notices.
+- All four event types are sent only when the server advertises them (see
+  Remote sync below).
+
 `ui:dev` gives hot reload while proxying API calls to a hub started separately
 with `npm start`. Point it at a hub on another port with `TARGET_HUB_ORIGIN`.
 
@@ -686,6 +908,17 @@ TARGET_SYNC_ENABLED=true
 Presence on the server is derived from this heartbeat traffic (not an explicit
 online/offline event); the server's online TTL is expected to be ~3× the hub
 interval (30s when the default is 10s).
+
+Register and heartbeat responses carry `server_capabilities.events`, the
+event types the server accepts. One unknown type makes the server reject the
+whole event batch with 400 (and the hub re-queues it, stalling all sync), so
+event types newer than the original contract (currently `workflow.archived`,
+`workflow.unarchived`, `schedule.instance_created`, `workflow.schedule_changed`,
+`schedule.run_missed` and `schedule.run_skipped`) are queued only if listed there — see `queueGatedEvent`
+in `hub/sync.ts`; the original types are always sent. The last value is kept in
+the `settings` table (`server_capabilities_v1`), replaced on every parsed
+register/heartbeat response (a response without the field, i.e. an older
+server, clears it), kept on a failed heartbeat, and cleared on unlink.
 
 Wire contract: `target-server/docs/remote-sync.md`. Moving this into Settings is
 future work; there is no checked-in env template for it.

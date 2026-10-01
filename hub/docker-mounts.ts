@@ -6,7 +6,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { replaceHookMounts, hookRuntime } from "./awb.ts";
-import { getDockerMountSettings, type Workflow } from "./db.ts";
+import { getDockerMountSettings, getWorkflow, type Workflow } from "./db.ts";
 import { stepResultsDir } from "./step-results.ts";
 
 export class DockerMountError extends Error {
@@ -71,10 +71,31 @@ export function effectiveDockerMounts(agentName: string, workflowMounts: string[
 	return mergeDockerMounts(defaults, workflowMounts, extras);
 }
 
-export function syncWorkflowDockerMounts(workflow: Pick<Workflow, "hookUrl" | "agentName" | "dockerMounts">): void {
+/**
+ * The previous scheduled run's results directory, when this instance was given
+ * a previous-run block that points at it (see `attachPreviousRun` in
+ * workflow.ts) and the directory exists.
+ */
+function previousRunMounts(workflow: Partial<Pick<Workflow, "previousInstanceId" | "previousRunBlock">>): string[] {
+	if (!workflow.previousRunBlock || !workflow.previousInstanceId) return [];
+	const previous = getWorkflow(workflow.previousInstanceId);
+	if (!previous) return [];
+	const dir = stepResultsDir(previous.agentName);
+	return fs.existsSync(dir) ? [dir] : [];
+}
+
+export function syncWorkflowDockerMounts(
+	workflow: Pick<Workflow, "hookUrl" | "agentName" | "dockerMounts"> &
+		Partial<Pick<Workflow, "previousInstanceId" | "previousRunBlock">>,
+): void {
 	const runtime = hookRuntime(workflow.hookUrl);
 	if (runtime.sandbox?.kind !== "docker") return;
-	replaceHookMounts(workflow.hookUrl, effectiveDockerMounts(workflow.agentName, workflow.dockerMounts));
+	// The hook's list is replaced wholesale, so a scheduled run's previous-run
+	// mount has to be part of it or a Settings save would silently drop it.
+	replaceHookMounts(
+		workflow.hookUrl,
+		mergeDockerMounts(effectiveDockerMounts(workflow.agentName, workflow.dockerMounts), previousRunMounts(workflow)),
+	);
 }
 
 export function resyncAllDockerWorkflowMounts(workflows: Workflow[]): void {
