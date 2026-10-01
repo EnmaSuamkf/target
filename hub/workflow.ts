@@ -2695,7 +2695,8 @@ function reportUsageSnapshot(workflow: Workflow, step: Step): void {
 	if (!rc.enabled) return;
 	const sessionId = step.sessionId ?? workflow.lastSessionId;
 	if (!sessionId) return;
-	const workdir = hookRuntime(workflow.hookUrl).workdir;
+	const runtime = hookRuntime(workflow.hookUrl);
+	const workdir = runtime.workdir;
 	if (!workdir) return;
 	try {
 		const u = readTokenUsage(workdir, sessionId);
@@ -2704,7 +2705,7 @@ function reportUsageSnapshot(workflow: Workflow, step: Step): void {
 			{
 				workflowId: workflow.id,
 				sessionId,
-				data: usageSnapshot(u),
+				data: usageSnapshot(u, runtime.harness),
 			},
 			rc,
 		);

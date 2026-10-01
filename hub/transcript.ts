@@ -1074,8 +1074,14 @@ export function contextPercent(usage: TokenUsage): number {
  * `cache_creation`, `cache_read`) so the total stays auditable and the server
  * can still price the three rates apart — nothing is lost by leading with the
  * total, only by leading with a part of it.
+ *
+ * `agent` is the runner id (`claude` | `free-code` | `cursor`) the session ran
+ * on. A transcript can't say which runner wrote it, so the caller passes it in;
+ * when it doesn't know, the field is omitted rather than guessed. The server
+ * prices a session by (agent, model), so it needs both on the same event.
  */
-export function usageSnapshot(usage: TokenUsage): {
+export function usageSnapshot(usage: TokenUsage, agent?: string | null): {
+	agent?: string;
 	input_tokens: number;
 	output_tokens: number;
 	input_tokens_uncached: number;
@@ -1092,6 +1098,7 @@ export function usageSnapshot(usage: TokenUsage): {
 	cost_usd: null;
 } {
 	return {
+		...(agent ? { agent } : {}),
 		// The headline the dashboard tiles show — the same total the client's
 		// "in 16.0M" is.
 		input_tokens: usage.totalInputTokens,

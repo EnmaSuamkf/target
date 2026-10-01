@@ -206,7 +206,7 @@ test("context percentage is against the model's real window, and is 0 rather tha
 
 test("the report event is built from usageSnapshot, so the wire can't drift from the meter", () => {
 	const source = read("workflow.ts");
-	assert.match(source, /reportEmit\(\s*"usage\.snapshot",[\s\S]{0,200}data: usageSnapshot\(u\),/);
+	assert.match(source, /reportEmit\(\s*"usage\.snapshot",[\s\S]{0,200}data: usageSnapshot\(u, runtime\.harness\),/);
 	// The old hand-rolled payload, which is what quoted the bare field.
 	assert.doesNotMatch(source, /input_tokens: u\.inputTokens/);
 });
@@ -260,4 +260,20 @@ test("canReadTokenUsage accepts free-code session paths without a workdir", asyn
 	assert.equal(canReadTokenUsage(null, file), true);
 	assert.equal(canReadTokenUsage(null, "sess-uuid"), false);
 	assert.equal(canReadTokenUsage("/work", "sess-uuid"), true);
+});
+
+test("usageSnapshot carries the runner id as `agent` for each runner, and omits it when unknown", () => {
+	const usage = readTokenUsage(workdir, "no-such-session");
+	for (const agent of ["claude", "free-code", "cursor"]) {
+		assert.equal(usageSnapshot(usage, agent).agent, agent);
+	}
+	for (const unknown of [undefined, null, ""]) {
+		const payload = usageSnapshot(usage, unknown);
+		assert.equal("agent" in payload, false, "an unknown runner is omitted, never guessed");
+		assert.equal(payload.input_tokens, usage.totalInputTokens, "the rest of the payload is unchanged");
+	}
+});
+
+test("reportUsageSnapshot threads the workflow's harness into the payload", () => {
+	assert.match(read("workflow.ts"), /const runtime = hookRuntime\(workflow\.hookUrl\);[\s\S]{0,600}usageSnapshot\(u, runtime\.harness\)/);
 });
