@@ -1,0 +1,94 @@
+{
+ "_comment": "REAL data, copied 2026-10-01. `logHead`/`resultLine`: the `$ agent -p …` line and the result line of awb run log implementar-rbac-dinamico-y-gestion-remota-6592d45f-1789842382973.log, verbatim (Cursor session 497dc5a3, a judge run). `tracking`: the schema of ~/.cursor/ai-tracking/ai-code-tracking.db table ai_code_hashes and that session's two latest rows. `cliConfig`: the modelParameters / selectedModel of ~/.cursor/cli-config.json.",
+ "sessionId": "497dc5a3-fb74-4825-8e74-9537a8121b60",
+ "logHead": "$ agent -p \"You are the agent of a workflow in The Target Project named \\\"Implementar RBAC dinámico y gestión remota\\\". This session is reused in order for every step of the workflow. Current step:\\n\\n{\\n  \\\"input\\\": \\\"Evaluate whether the result of the previous step of this workflow meets the following acceptance criterion:\\\\n\\\\n\\\\\\\"pr should be merged and branch should be deleted from remote and local, , use the TCP tools availables\\\\\\\"\\\\n\\\\nImportant: do NOT trust your memory or what you said while doing the step. What this thread holds is your narration, not the real output. Verify the criterion by inspecting the actual artifacts with your tools — read the files, run the commands, check the real state — BEFORE deciding.\\\\n\\\\nOnce you have verified, end your reply with a JSON object on its own final line, and nothing after it, in exactly this shape: {\\\\\\\"ok\\\\\\\": true|false, \\\\\\\"reason\\\\\\\": \\\\\\\"<brief explanation>\\\\\\\"}\\\\n\\\\\\\"ok\\\\\\\" is true ONLY if you confirmed the result meets the criterion. If it does not meet it, or you could not verify it, set \\\\\\\"ok\\\\\\\": false and in \\\\\\\"reason\\\\\\\" explain concretely what is missing or what to fix. When in doubt, \\\\\\\"ok\\\\\\\": false.\\\"\\n}\\n\\nCarry out the step and respond with the final result of that step.\" --output-format json --trust --approve-mcps --workspace /home/lenovo/Documentos/target-server --force --resume 497dc5a3-fb74-4825-8e74-9537a8121b60",
+ "resultLine": "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":10907,\"duration_api_ms\":10907,\"result\":\"Verificado: el checkout está en `main`, el nombre de la rama feature no existe localmente ni aparece en `git ls-remote`, y el árbol de trabajo está limpio. El PR [#14](https://github.com/EnmaSuamkf/target-server/pull/14) figura como `MERGED` con commit `c2a17bd…`. La fusión se realizó usando el TCP disponible.\\n\\n{\\\"ok\\\":true,\\\"reason\\\":\\\"El PR está fusionado y la rama feat/dynamic-rbac-remote-resources fue eliminada tanto del repositorio remoto como del local.\\\"}\",\"session_id\":\"497dc5a3-fb74-4825-8e74-9537a8121b60\",\"request_id\":\"d1ea52c9-a627-4b1f-935b-a7f017bdae30\",\"usage\":{\"inputTokens\":6,\"outputTokens\":370,\"cacheReadTokens\":183708,\"cacheWriteTokens\":880}}",
+ "tracking": {
+  "schema": "CREATE TABLE ai_code_hashes (\n        hash TEXT PRIMARY KEY,\n        source TEXT NOT NULL,\n        fileExtension TEXT,\n        fileName TEXT,\n        requestId TEXT,\n        conversationId TEXT,\n        timestamp INTEGER,\n        model TEXT,\n        createdAt INTEGER NOT NULL\n      )",
+  "rows": [
+   {
+    "hash": "1bbcf1b5",
+    "source": "cli",
+    "fileExtension": "md",
+    "fileName": "/home/lenovo/Documentos/target-server/docs/rbac.md",
+    "requestId": "call_Ig9ZLy7djBREI2qJNjXbrGYK\nctc_0fd330432594b1cf016aaecf3c6ad487d186751829b860c0d5",
+    "conversationId": "497dc5a3-fb74-4825-8e74-9537a8121b60",
+    "timestamp": 1789841213190,
+    "model": "gpt-5.6-terra",
+    "createdAt": 1789841213190
+   },
+   {
+    "hash": "da90ff53",
+    "source": "cli",
+    "fileExtension": "md",
+    "fileName": "/home/lenovo/Documentos/target-server/docs/rbac.md",
+    "requestId": "call_Ig9ZLy7djBREI2qJNjXbrGYK\nctc_0fd330432594b1cf016aaecf3c6ad487d186751829b860c0d5",
+    "conversationId": "497dc5a3-fb74-4825-8e74-9537a8121b60",
+    "timestamp": 1789841213190,
+    "model": "gpt-5.6-terra",
+    "createdAt": 1789841213190
+   }
+  ]
+ },
+ "cliConfig": {
+  "selectedModel": {
+   "modelId": "grok-4.6",
+   "parameters": [
+    {
+     "id": "effort",
+     "value": "high"
+    },
+    {
+     "id": "fast",
+     "value": "true"
+    }
+   ]
+  },
+  "modelParameters": {
+   "gpt-5.6-terra": [
+    {
+     "id": "context",
+     "value": "272k"
+    },
+    {
+     "id": "reasoning",
+     "value": "medium"
+    },
+    {
+     "id": "fast",
+     "value": "false"
+    }
+   ],
+   "gpt-5.6-sol": [
+    {
+     "id": "context",
+     "value": "272k"
+    },
+    {
+     "id": "reasoning",
+     "value": "medium"
+    },
+    {
+     "id": "fast",
+     "value": "false"
+    }
+   ],
+   "grok-4.6": [
+    {
+     "id": "effort",
+     "value": "high"
+    },
+    {
+     "id": "fast",
+     "value": "true"
+    }
+   ],
+   "composer-2.5": [
+    {
+     "id": "fast",
+     "value": "true"
+    }
+   ]
+  }
+ }
+}

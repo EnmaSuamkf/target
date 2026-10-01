@@ -566,9 +566,15 @@ prompt is the path the agent opens either way. (The `~/.target/<name>-<id>.md`
 progress file stays the operator-facing view, results still truncated to 500
 chars.)
 
-The context meter's window is derived from the model the session actually ran
-on, not assumed — override it per model with `modelContextWindows` in
-`~/.target/config.json`. Full write-up in `docs/compaction-resilience.md`.
+The Conversation panel's context meter reads each harness's own records — the
+Claude Code and free-code transcripts, and for Cursor the awb run logs plus its
+agent-transcript — and measures them against the window of the model the
+session actually ran on, not an assumed one. Cursor only reports usage summed
+over every API call of a run, so its reading is an estimate and the meter marks
+it `≈`. Override a model's window with `modelContextWindows` (and the default
+with `fallbackContextWindowTokens`) in `~/.target/config.json`. Full write-up,
+including the model table and when the hub's number can differ from the agent's
+own `/context` bar: [`docs/context-meter.md`](docs/context-meter.md).
 
 ### Status and progress bar always agree
 

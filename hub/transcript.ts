@@ -33,14 +33,19 @@
  *   JSONL for turns, but those lines carry no per-message usage. Each headless
  *   `agent -p` run instead writes a one-line JSON result (with `usage.inputTokens`,
  *   `cacheReadTokens`, …) into the awb run log under
- *   `~/.agent-webhook-bridge/logs/`; that is what the hub sums. Occupancy is
- *   derived from that result with a correction when cache reads are cumulative
- *   across a multi-tool run (see `cursorContextOccupancy`), and the window
- *   comes from `models.ts` (Composer models are 200k, not 1M).
+ *   `~/.agent-webhook-bridge/logs/`; that is what the hub sums. That usage is
+ *   CUMULATIVE over every API round of the run, so occupancy can only be
+ *   estimated — from the run's round count in the agent-transcript (see
+ *   `estimateCursorOccupancy`) — and is flagged as such (`contextEstimated`).
+ *   Neither the result nor the transcript names the model on this machine, so
+ *   it comes from the run's `--model` flag when there is one, else from
+ *   Cursor's own tracking database (`cursorModelFromTracking`); the window is
+ *   the size the run or the CLI config states for it, else `models.ts`.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { awbDir } from "./awb.ts";
 import { contextWindowForModel } from "./models.ts";
 
@@ -135,6 +140,14 @@ export interface TokenUsage {
 	 */
 	contextTokens: number;
 	/**
+	 * True when `contextTokens` is an estimate rather than a reading the harness
+	 * wrote down. Only Cursor sets it: its headless runs report usage summed over
+	 * every API round, never the occupancy of the last one (see
+	 * `estimateCursorOccupancy`). The UI says so instead of presenting the number
+	 * as exact, because it can and does differ from Cursor's own `/context` bar.
+	 */
+	contextEstimated: boolean;
+	/**
 	 * Derived from `model`, not assumed — see models.ts. Falls back to
 	 * FALLBACK_CONTEXT_WINDOW_TOKENS when the transcript hasn't named a model
 	 * yet (no assistant turn, no `model_change` record).
@@ -174,16 +187,32 @@ interface RawUsage {
 	 * is a "what did the previous turn say" buffer, not a history.
 	 */
 	recentContexts: number[];
-	/** Cursor-only: billing fields of the last headless `agent -p` result (for occupancy correction). */
-	lastBillingInput: number;
-	lastBillingCacheCreation: number;
-	lastBillingCacheRead: number;
-	lastBillingOutput: number;
+	/** Cursor-only: every headless `agent -p` result for the session, oldest first (for the occupancy estimate). */
+	cursorRuns: CursorRunUsage[];
+	/** Cursor-only: a window the run itself declared (`--model 'x[context=1m]'`), or null. See `contextWindowForModel`'s `stated`. */
+	statedContextWindow: number | null;
 	/** Model id of the last turn / `model_change` record seen, for the window lookup. */
 	lastModel: string | null;
 	/** Latest compaction boundary in this file, and how many there were. */
 	lastCompaction: CompactionBoundary | null;
 	compactions: number;
+}
+
+function emptyRawUsage(): RawUsage {
+	return {
+		input: 0,
+		cacheCreation: 0,
+		cacheRead: 0,
+		output: 0,
+		turns: 0,
+		lastContext: 0,
+		recentContexts: [],
+		cursorRuns: [],
+		statedContextWindow: null,
+		lastModel: null,
+		lastCompaction: null,
+		compactions: 0,
+	};
 }
 
 /** Reads `key` off a record as a number, or null when it's absent or not a number. Every token field of every boundary record is optional. */
@@ -301,22 +330,7 @@ function usageOfLine(obj: Record<string, unknown>): { id: string | null; input: 
  * into separate passes would just read the same growing transcript three times.
  */
 function accumulateUsage(file: string): RawUsage {
-	const acc: RawUsage = {
-		input: 0,
-		cacheCreation: 0,
-		cacheRead: 0,
-		output: 0,
-		turns: 0,
-		lastContext: 0,
-		recentContexts: [],
-		lastBillingInput: 0,
-		lastBillingCacheCreation: 0,
-		lastBillingCacheRead: 0,
-		lastBillingOutput: 0,
-		lastModel: null,
-		lastCompaction: null,
-		compactions: 0,
-	};
+	const acc = emptyRawUsage();
 	let raw: string;
 	try {
 		raw = fs.readFileSync(file, "utf8");
@@ -431,30 +445,328 @@ export function cursorModelFromTranscript(sessionId: string): string | null {
 	return last;
 }
 
+/** One headless `agent -p` result: the run's usage SUMMED over all its API rounds, plus the text it answered with. */
+export interface CursorRunUsage {
+	input: number;
+	cacheCreation: number;
+	cacheRead: number;
+	output: number;
+	/** The result's `result` text — how the run is found again in the agent-transcript. */
+	resultText: string;
+}
+
+/** One user prompt and the assistant turns that answered it, as the Cursor agent-transcript records them. */
+export interface CursorTranscriptRun {
+	/** API rounds this run made — see `cursorTranscriptRuns` for how it is counted. */
+	rounds: number;
+	/** The run's last non-empty text block, for matching it against a result. */
+	lastText: string;
+}
+
 /**
- * Context occupancy for a Cursor headless run, aligned with the CLI /context
- * bar. Single-turn usage (input + cache creation + cache read) fits in the
- * model window and is taken as-is. Multi-tool runs report cumulative cache
- * reads summed across every API round in one `agent -p` invocation — those are
- * billing totals, not window occupancy; scale them back with the run's billed
- * output (measured on session 20a54c9d…: cacheRead×output÷(input+output) matches
- * the CLI bar to the token).
+ * Cursor redacts its reasoning in the transcript as a literal `[REDACTED]`,
+ * sometimes inside a text block, and the result text never carries it; the two
+ * only compare equal once that marker is gone and whitespace is collapsed.
  */
-export function cursorContextOccupancy(
-	input: number,
-	cacheCreation: number,
-	cacheRead: number,
-	output: number,
+function normalizeCursorText(text: string): string {
+	return text.replaceAll("[REDACTED]", " ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Splits a Cursor agent-transcript into runs (one per `user` line) and counts
+ * each run's API rounds.
+ *
+ * A round is an `assistant` line — tool calls the model makes in parallel share
+ * one line — plus one when the run's LAST line still calls tools, because the
+ * tool results had to be sent back for the final answer, whose round left no
+ * text of its own. This is a floor, not an exact count: Cursor can fold
+ * sequential tool-only rounds into one line. Measured over 867 real runs on
+ * this machine, it is still the count that keeps a session's per-run readings
+ * most consistent (5% of consecutive readings drop by >15%, against 24% when
+ * every tool call is counted as its own round).
+ */
+export function cursorTranscriptRuns(file: string): CursorTranscriptRun[] {
+	let raw: string;
+	try {
+		raw = fs.readFileSync(file, "utf8");
+	} catch {
+		return [];
+	}
+	const runs: (CursorTranscriptRun & { lastHasTool: boolean })[] = [];
+	for (const line of raw.split("\n")) {
+		if (!line.trim()) continue;
+		try {
+			const obj = JSON.parse(line) as Record<string, unknown>;
+			if (obj.role === "user") {
+				runs.push({ rounds: 0, lastText: "", lastHasTool: false });
+				continue;
+			}
+			const run = runs[runs.length - 1];
+			if (obj.role !== "assistant" || !run) continue;
+			run.rounds += 1;
+			const content = (obj.message as Record<string, unknown> | undefined)?.content;
+			let tools = 0;
+			for (const part of Array.isArray(content) ? content : []) {
+				const p = part as Record<string, unknown>;
+				if (p.type === "tool_use") tools += 1;
+				if (p.type === "text" && typeof p.text === "string" && normalizeCursorText(p.text)) run.lastText = p.text;
+			}
+			run.lastHasTool = tools > 0;
+		} catch {
+			// Malformed/partial line — skip.
+		}
+	}
+	return runs.map(({ rounds, lastText, lastHasTool }) => ({ rounds: rounds + (lastHasTool ? 1 : 0), lastText }));
+}
+
+/**
+ * Pairs each result with its run in the transcript, in order: a result matches
+ * the first not-yet-used run whose last text block its own text ends with.
+ * The transcript also holds runs the awb logs don't (the operator's own CLI
+ * prompts, `/context` checks), which is why this matches on content and not on
+ * position. Unmatched results get null.
+ */
+function matchCursorRuns(runs: CursorRunUsage[], transcript: CursorTranscriptRun[]): (number | null)[] {
+	let next = 0;
+	return runs.map((run) => {
+		const result = normalizeCursorText(run.resultText);
+		if (!result) return null;
+		for (let i = next; i < transcript.length; i++) {
+			const last = normalizeCursorText(transcript[i]?.lastText ?? "");
+			if (last && result.endsWith(last.slice(-300))) {
+				next = i + 1;
+				return transcript[i]?.rounds ?? null;
+			}
+		}
+		return null;
+	});
+}
+
+/**
+ * Estimated context occupancy at the end of a Cursor session's latest run.
+ *
+ * Cursor's headless JSON result is the only usage it writes, and it is the SUM
+ * over every API round of the run: a run that made 20 rounds reports roughly 20
+ * times its context in `cacheReadTokens`. Publishing that as occupancy (or
+ * clamping it to the window, which is what this used to do) is what made the
+ * meter fill up while a step was being judged — during a judge pass the latest
+ * finished run is the long, tool-heavy exec run, and its billed total read as
+ * 100% until the short judge run replaced it. Measured over 390 judge passes:
+ * 46% showed >=95% during the judge, with a mean swing of 31 points.
+ *
+ * With `S` the run's summed input and `n` its rounds (`cursorTranscriptRuns`):
+ *
+ * - `n = 1` → `S` is the round's occupancy, exactly;
+ * - otherwise the context grew from `C_first` to `C_last` across the rounds,
+ *   so `S/n` (the mean) is a floor on `C_last`, and assuming linear growth
+ *   `C_last = 2·S/n − C_first`, with `C_first` at least the previous reading
+ *   (0 for a session's first run: a fresh conversation starts nearly empty,
+ *   and anchoring it on its own mean instead read a real 55k run as 38k).
+ *   That extrapolation overshoots when growth isn't linear, the mean
+ *   undershoots, so the estimate is their midpoint. On the one run here with a
+ *   reading from Cursor's own `/context` bar (79.8k), it says 69k; the mean
+ *   alone said 51k, the old formula 80k only because it was fitted to that run.
+ *
+ * When a run can't be estimated — no transcript, no matching run, or an
+ * estimate the window couldn't hold — the previous reading stands. The very
+ * first run of a session is usually the single-round context step, so with no
+ * reading yet its `S` is taken when it fits the window. Nothing here is ever
+ * clamped to the window: a clamp is exactly the "100% full" that isn't true.
+ */
+export function estimateCursorOccupancy(
+	runs: CursorRunUsage[],
+	transcript: CursorTranscriptRun[] | null,
 	contextWindow: number,
 ): number {
-	const billed = input + cacheCreation + cacheRead;
-	if (contextWindow <= 0) return billed;
-	if (billed <= contextWindow) return billed;
-	const billedTurn = input + output;
-	if (cacheRead > 0 && output > 0 && billedTurn > 0) {
-		return Math.min(contextWindow, Math.round((cacheRead * output) / billedTurn));
+	const rounds = transcript ? matchCursorRuns(runs, transcript) : runs.map(() => null);
+	const fits = (value: number): boolean => contextWindow <= 0 || value <= contextWindow;
+	let reading: number | null = null;
+	runs.forEach((run, i) => {
+		const summed = run.input + run.cacheCreation + run.cacheRead;
+		const n = rounds[i] ?? null;
+		let estimate: number | null = null;
+		if (n === 1 || (n === null && reading === null)) {
+			estimate = summed;
+		} else if (n !== null) {
+			const mean = summed / n;
+			const linear = Math.min(summed, Math.max(mean, 2 * mean - (reading ?? 0)));
+			estimate = (mean + linear) / 2;
+		}
+		if (estimate !== null && estimate > 0 && fits(estimate)) reading = estimate;
+	});
+	return Math.round(reading ?? 0);
+}
+
+/**
+ * `"1m"` / `"272k"` / `"200000"` → tokens, as Cursor writes a context size in
+ * its CLI config and in `--model 'x[context=1m]'`; null for anything else.
+ */
+export function parseCursorContextSize(value: string): number | null {
+	const match = /^\s*(\d+(?:\.\d+)?)\s*([km]?)\s*$/i.exec(value);
+	if (!match) return null;
+	const n = Number(match[1]) * ({ k: 1_000, m: 1_000_000 }[match[2]!.toLowerCase() as "k" | "m"] ?? 1);
+	return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+}
+
+/**
+ * The model a logged `agent -p` command line asked for, and the window it
+ * declared with it, if any.
+ *
+ * awb writes the spawned command as the log's `$ …` line, the prompt as a JSON
+ * string. The prompt is skipped before looking for `--model`, because prompts
+ * routinely QUOTE command lines (this machine's logs have hundreds of
+ * `--model claude-3-5-haiku…` inside prompts that were never a flag). Cursor's
+ * parameterised form `--model 'claude-opus-4-8[context=1m,effort=high]'`
+ * yields the bare id plus the stated window.
+ *
+ * awb's Cursor adapter doesn't pass `--model` today, so for awb's own runs
+ * this finds nothing and the model comes from Cursor's tracking database
+ * instead (`cursorModelFromTracking`); it is read first because a flag on the
+ * run's own command line is the most direct record there can be.
+ */
+export function cursorModelFromCommandLine(commandLine: string): { model: string; statedWindow: number | null } | null {
+	let rest = commandLine;
+	const promptAt = commandLine.indexOf(' -p "');
+	if (promptAt >= 0) {
+		let i = promptAt + 5;
+		for (; i < commandLine.length; i++) {
+			if (commandLine[i] === "\\") i++;
+			else if (commandLine[i] === '"') break;
+		}
+		rest = commandLine.slice(i + 1);
 	}
-	return Math.min(contextWindow, input + cacheCreation);
+	const flag = /(?:^|\s)--model(?:=|\s+)(?:'([^']*)'|"([^"]*)"|(\S+))/.exec(rest);
+	const raw = flag ? (flag[1] ?? flag[2] ?? flag[3] ?? "").trim() : "";
+	if (!raw) return null;
+	const bracket = raw.indexOf("[");
+	const model = normalizeCursorModelId(bracket >= 0 ? raw.slice(0, bracket) : raw);
+	let statedWindow: number | null = null;
+	if (bracket >= 0) {
+		const close = raw.lastIndexOf("]");
+		for (const param of raw.slice(bracket + 1, close > bracket ? close : undefined).split(",")) {
+			const [key, value] = param.split("=").map((part) => part.trim());
+			if (key?.toLowerCase() === "context" && value) statedWindow = parseCursorContextSize(value);
+		}
+	}
+	return model ? { model, statedWindow } : null;
+}
+
+/**
+ * The `$ …` command line at the top of an awb run log (after any MCP warm-up
+ * block), or null when it isn't within the first `maxBytes` — a prompt can be
+ * long, and a line cut short could hide the flags that follow it.
+ */
+function loggedCommandLine(file: string, maxBytes = 1024 * 1024): string | null {
+	let head: string;
+	try {
+		const fd = fs.openSync(file, "r");
+		try {
+			const buf = Buffer.alloc(Math.min(maxBytes, fs.fstatSync(fd).size));
+			fs.readSync(fd, buf, 0, buf.length, 0);
+			head = buf.toString("utf8");
+		} finally {
+			fs.closeSync(fd);
+		}
+	} catch {
+		return null;
+	}
+	for (const line of head.split("\n")) {
+		if (line.startsWith("$ ") && line.includes(" -p ")) return line;
+	}
+	return null;
+}
+
+/** Cached by stat so the hub's polling doesn't re-query on every call — the database only changes when Cursor writes code. */
+let trackingCache: { key: string; sessions: Map<string, string | null> } | null = null;
+
+/**
+ * The model Cursor itself recorded for a conversation, from its own AI code
+ * tracking database (`~/.cursor/ai-tracking/ai-code-tracking.db`, table
+ * `ai_code_hashes`: `conversationId`, `model`, `timestamp` per change the
+ * agent made). It is the only per-session record of the model Cursor keeps on
+ * this machine: the headless result JSON and the agent-transcripts never name
+ * it, and awb doesn't pass `--model`, so a run uses whatever the CLI had
+ * selected at the time — which `cli-config.json` only knows for NOW. Verified
+ * 2026-10-01: session a8abe85e → composer-2.5, dd9f5248 → grok-4.6, both
+ * matching what those workflows ran on.
+ *
+ * Only runs that changed files leave a row, so a session that never wrote
+ * anything has no record here (null); the latest row wins when the model was
+ * switched mid-conversation.
+ */
+export function cursorModelFromTracking(sessionId: string): string | null {
+	const db = path.join(os.homedir(), ".cursor", "ai-tracking", "ai-code-tracking.db");
+	let key: string;
+	try {
+		// The WAL is where fresh rows land first, so it is part of the key.
+		const main = fs.statSync(db);
+		let wal = "";
+		try {
+			wal = String(fs.statSync(`${db}-wal`).mtimeMs);
+		} catch {
+			// No WAL file: everything is in the main database.
+		}
+		key = `${main.mtimeMs}:${main.size}:${wal}`;
+	} catch {
+		return null;
+	}
+	if (!trackingCache || trackingCache.key !== key) trackingCache = { key, sessions: new Map() };
+	const cached = trackingCache.sessions.get(sessionId);
+	if (cached !== undefined) return cached;
+	let model: string | null = null;
+	try {
+		const conn = new DatabaseSync(db, { readOnly: true });
+		try {
+			const row = conn
+				.prepare(
+					"SELECT model FROM ai_code_hashes WHERE conversationId = ? AND model IS NOT NULL AND model != '' ORDER BY timestamp DESC LIMIT 1",
+				)
+				.get(sessionId) as { model?: unknown } | undefined;
+			if (typeof row?.model === "string") model = normalizeCursorModelId(row.model);
+		} finally {
+			conn.close();
+		}
+	} catch {
+		// Missing table, locked or foreign database — no record, not an error.
+	}
+	trackingCache.sessions.set(sessionId, model);
+	return model;
+}
+
+/**
+ * The context size the Cursor CLI is configured to run `model` at, from
+ * `~/.cursor/cli-config.json` → `modelParameters[model]` → `{id:"context"}`
+ * (e.g. `gpt-5.6-terra: context=272k` here). Several Cursor models are
+ * offered at more than one size, so this is what tells a 272k run from a 1M
+ * one; null when the CLI sets no size for that model.
+ */
+let cliConfigCache: { key: string; parsed: Record<string, unknown> | null } | null = null;
+
+export function cursorConfiguredContext(model: string): number | null {
+	const file = path.join(os.homedir(), ".cursor", "cli-config.json");
+	let key: string;
+	try {
+		const st = fs.statSync(file);
+		key = `${st.mtimeMs}:${st.size}:${st.ino}`;
+	} catch {
+		return null;
+	}
+	if (!cliConfigCache || cliConfigCache.key !== key) {
+		let parsed: Record<string, unknown> | null = null;
+		try {
+			parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+		} catch {
+			// Half-written or not JSON — no configured size this time.
+		}
+		cliConfigCache = { key, parsed };
+	}
+	const params = (cliConfigCache.parsed?.modelParameters as Record<string, unknown> | undefined)?.[model];
+	if (!Array.isArray(params)) return null;
+	for (const param of params) {
+		const p = param as Record<string, unknown>;
+		if (p.id === "context" && typeof p.value === "string") return parseCursorContextSize(p.value);
+	}
+	return null;
 }
 
 /** Normalises Cursor Agent's JSON `usage` block from a headless run result. */
@@ -490,22 +802,7 @@ function cursorUsageOfResult(obj: Record<string, unknown>): {
  * the end of each file is read so a large logs directory stays fast.
  */
 function accumulateCursorUsageFromLogs(sessionId: string): RawUsage {
-	const acc: RawUsage = {
-		input: 0,
-		cacheCreation: 0,
-		cacheRead: 0,
-		output: 0,
-		turns: 0,
-		lastContext: 0,
-		recentContexts: [],
-		lastBillingInput: 0,
-		lastBillingCacheCreation: 0,
-		lastBillingCacheRead: 0,
-		lastBillingOutput: 0,
-		lastModel: null,
-		lastCompaction: null,
-		compactions: 0,
-	};
+	const acc = emptyRawUsage();
 	const logDir = path.join(awbDir(), "logs");
 	let files: string[];
 	try {
@@ -543,6 +840,10 @@ function accumulateCursorUsageFromLogs(sessionId: string): RawUsage {
 			continue;
 		}
 		if (!raw.includes(sessionId) || !raw.includes('"type":"result"')) continue;
+		// The flags this run was spawned with — read once per log that holds a
+		// result for this session, and only consulted when the result itself
+		// doesn't name a model.
+		let commandModel: ReturnType<typeof cursorModelFromCommandLine> | undefined;
 		for (const line of raw.split("\n")) {
 			if (!line.includes('"type":"result"') || !line.includes(sessionId)) continue;
 			try {
@@ -555,12 +856,26 @@ function accumulateCursorUsageFromLogs(sessionId: string): RawUsage {
 				acc.cacheRead += rec.cacheRead;
 				acc.output += rec.output;
 				acc.turns += 1;
-				acc.lastBillingInput = rec.input;
-				acc.lastBillingCacheCreation = rec.cacheCreation;
-				acc.lastBillingCacheRead = rec.cacheRead;
-				acc.lastBillingOutput = rec.output;
-				acc.lastContext = rec.input + rec.cacheCreation + rec.cacheRead;
-				if (rec.model) acc.lastModel = normalizeCursorModelId(rec.model);
+				acc.cursorRuns.push({
+					input: rec.input,
+					cacheCreation: rec.cacheCreation,
+					cacheRead: rec.cacheRead,
+					output: rec.output,
+					resultText: typeof obj.result === "string" ? obj.result : "",
+				});
+				if (rec.model) {
+					acc.lastModel = normalizeCursorModelId(rec.model);
+					acc.statedContextWindow = null;
+				} else {
+					if (commandModel === undefined) {
+						const commandLine = loggedCommandLine(file);
+						commandModel = commandLine ? cursorModelFromCommandLine(commandLine) : null;
+					}
+					if (commandModel) {
+						acc.lastModel = commandModel.model;
+						acc.statedContextWindow = commandModel.statedWindow;
+					}
+				}
 			} catch {
 				// Malformed/partial line in a growing log — skip.
 			}
@@ -594,7 +909,16 @@ function plausibleOccupancy(recent: number[], last: number, contextWindow: numbe
 	return contextWindow;
 }
 
-function tokenUsageFromRaw(main: RawUsage, subs: RawUsage[], cursorSession: boolean): TokenUsage {
+/**
+ * `cursor` is set for a Cursor session — carrying its agent-transcript runs, or
+ * null when there is no transcript on this machine — and switches occupancy to
+ * the estimate; Claude Code and free-code pass null and read it off the turns.
+ */
+function tokenUsageFromRaw(
+	main: RawUsage,
+	subs: RawUsage[],
+	cursor: { transcript: CursorTranscriptRun[] | null } | null,
+): TokenUsage {
 	let { input, cacheCreation, cacheRead, output, turns } = main;
 	for (const sub of subs) {
 		input += sub.input;
@@ -603,18 +927,13 @@ function tokenUsageFromRaw(main: RawUsage, subs: RawUsage[], cursorSession: bool
 		output += sub.output;
 		turns += sub.turns;
 	}
-	const contextWindow = contextWindowForModel(main.lastModel);
-	const contextTokens = cursorSession
-		? cursorContextOccupancy(
-				main.lastBillingInput,
-				main.lastBillingCacheCreation,
-				main.lastBillingCacheRead,
-				main.lastBillingOutput,
-				contextWindow,
-			)
+	const contextWindow = contextWindowForModel(main.lastModel, main.statedContextWindow);
+	const contextTokens = cursor
+		? estimateCursorOccupancy(main.cursorRuns, cursor.transcript, contextWindow)
 		: plausibleOccupancy(main.recentContexts, main.lastContext, contextWindow);
 	return {
 		contextTokens,
+		contextEstimated: cursor !== null,
 		contextWindow,
 		model: main.lastModel,
 		lastCompactionAt: main.lastCompaction?.at ?? null,
@@ -664,7 +983,7 @@ export function readTokenUsage(workdir: string, sessionId: string): TokenUsage {
 	const isFreeCodeSession = sessionId.endsWith(".jsonl") && path.isAbsolute(sessionId);
 	if (isFreeCodeSession) {
 		const main = accumulateUsage(sessionId);
-		return tokenUsageFromRaw(main, [], false);
+		return tokenUsageFromRaw(main, [], null);
 	}
 
 	const claudeFile = transcriptPath(workdir, sessionId);
@@ -689,32 +1008,19 @@ export function readTokenUsage(workdir: string, sessionId: string): TokenUsage {
 				? cursorLogs
 				: cursorTranscript
 					? accumulateUsage(cursorTranscript)
-					: (cursorLogs ?? {
-							input: 0,
-							cacheCreation: 0,
-							cacheRead: 0,
-							output: 0,
-							turns: 0,
-							lastContext: 0,
-							recentContexts: [],
-							lastBillingInput: 0,
-							lastBillingCacheCreation: 0,
-							lastBillingCacheRead: 0,
-							lastBillingOutput: 0,
-							lastModel: null,
-							lastCompaction: null,
-							compactions: 0,
-						});
-		if (!main.lastModel) {
-			const fromTranscript = cursorModelFromTranscript(sessionId);
-			if (fromTranscript) main.lastModel = fromTranscript;
-		}
-		return tokenUsageFromRaw(main, [], true);
+					: (cursorLogs ?? emptyRawUsage());
+		// Neither the result nor the command line named the model (awb's own
+		// runs, today): Cursor's tracking database, then the transcript.
+		if (!main.lastModel) main.lastModel = cursorModelFromTracking(sessionId) ?? cursorModelFromTranscript(sessionId);
+		// No size on the command line: the size the CLI is configured to run that
+		// model at, when it sets one.
+		if (main.lastModel && main.statedContextWindow === null) main.statedContextWindow = cursorConfiguredContext(main.lastModel);
+		return tokenUsageFromRaw(main, [], { transcript: cursorTranscript ? cursorTranscriptRuns(cursorTranscript) : null });
 	}
 
 	const main = accumulateUsage(claudeFile);
 	const subs = subagentFiles(workdir, sessionId).map((file) => accumulateUsage(file));
-	return tokenUsageFromRaw(main, subs, false);
+	return tokenUsageFromRaw(main, subs, null);
 }
 
 /**
@@ -756,6 +1062,7 @@ export function usageSnapshot(usage: TokenUsage): {
 	context_tokens: number;
 	context_window: number;
 	context_pct: number;
+	context_estimated: boolean;
 	model: string | null;
 	turns: number;
 	includes_subagents: boolean;
@@ -777,6 +1084,9 @@ export function usageSnapshot(usage: TokenUsage): {
 		context_tokens: usage.contextTokens,
 		context_window: usage.contextWindow,
 		context_pct: Number(contextPercent(usage).toFixed(1)),
+		// Cursor occupancy is an estimate (see estimateCursorOccupancy); the server
+		// gets the same number the panel shows and is told what kind it is.
+		context_estimated: usage.contextEstimated,
 		model: usage.model,
 		turns: usage.turns,
 		// Whether subagent transcripts were folded in — the client says "incl.

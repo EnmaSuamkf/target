@@ -67,8 +67,10 @@ that assumed Claude's session/transcript conventions.
   `bypassPermissions`/`auto`/`dontAsk` → full incl. bash; `manual`/`plan` →
   read-only). Same opt-in risk model.
 - **Token usage** comes from free-code's own per-message usage records; the
-  context-window meter uses the same 200k default and there are no subagent
-  transcripts to fold in.
+  context-window meter measures them against the window of the model in the
+  last `model_change` record (`hub/models.ts`, e.g. kimi-k3 → 1,048,576), and
+  there are no subagent transcripts to fold in. See
+  [`context-meter.md`](context-meter.md).
 - **The runner is fixed at creation** — it's baked into the hook's
   `consumers` — so switching runtime means creating a new workflow.
 - **Only installed agents are offered.** The create form probes each runner

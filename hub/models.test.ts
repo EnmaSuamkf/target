@@ -26,7 +26,7 @@ process.env.HOME = tmpHome;
 process.env.TARGET_HOME = path.join(tmpHome, ".target");
 process.env.AWB_HOME = path.join(tmpHome, ".agent-webhook-bridge");
 
-const { contextWindowForModel, FALLBACK_CONTEXT_WINDOW_TOKENS, MODEL_CONTEXT_WINDOWS } = await import("./models.ts");
+const { _stats, contextWindowForModel, FALLBACK_CONTEXT_WINDOW_TOKENS, MODEL_CONTEXT_WINDOWS } = await import("./models.ts");
 const { claudeProjectDir, readTokenUsage } = await import("./transcript.ts");
 
 const workdir = path.join(tmpHome, "workdir");
@@ -121,6 +121,73 @@ test("the fallback itself is configurable, and garbage overrides are ignored", (
 		assert.equal(contextWindowForModel("bad"), FALLBACK_CONTEXT_WINDOW_TOKENS);
 		assert.equal(contextWindowForModel("worse"), FALLBACK_CONTEXT_WINDOW_TOKENS);
 	});
+});
+
+test("config.json is read once per edit, not once per lookup — and an edit is still picked up", () => {
+	// contextWindowForModel runs on every /session-info poll. It used to re-read
+	// and re-parse config.json each time; now a stat decides whether it changed.
+	const file = path.join(String(process.env.TARGET_HOME), "config.json");
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, JSON.stringify({ modelContextWindows: { "cache-probe": 111_000 } }));
+	try {
+		assert.equal(contextWindowForModel("cache-probe"), 111_000);
+		const reads = _stats.configReads;
+		for (let i = 0; i < 50; i++) contextWindowForModel(i % 2 ? "cache-probe" : "claude-sonnet-5");
+		assert.equal(_stats.configReads, reads, "50 lookups, zero re-reads of an unchanged file");
+
+		// An edit lands on the very next lookup — including one that keeps the
+		// file the same size, which only the mtime gives away.
+		fs.writeFileSync(file, JSON.stringify({ modelContextWindows: { "cache-probe": 222_000 } }));
+		const later = new Date(Date.now() + 5_000);
+		fs.utimesSync(file, later, later);
+		assert.equal(contextWindowForModel("cache-probe"), 222_000);
+		assert.equal(_stats.configReads, reads + 1);
+
+		// Deleting the file is an edit too: the overrides go away.
+		fs.rmSync(file);
+		assert.equal(contextWindowForModel("cache-probe"), FALLBACK_CONTEXT_WINDOW_TOKENS);
+	} finally {
+		fs.rmSync(file, { force: true });
+	}
+});
+
+test("a window the run stated beats the table, but not the operator", () => {
+	// Cursor runs the same model id at more than one size (272k or 1M), so what
+	// the run itself declared outranks the table entry for the id.
+	assert.equal(contextWindowForModel("gpt-5.6-sol", 272_000), 272_000);
+	assert.equal(contextWindowForModel("gpt-5.6-sol"), MODEL_CONTEXT_WINDOWS["gpt-5.6-sol"]);
+	assert.equal(contextWindowForModel(null, 300_000), 300_000, "a stated size needs no model id");
+	assert.equal(contextWindowForModel("gpt-5.6-sol", 0), MODEL_CONTEXT_WINDOWS["gpt-5.6-sol"], "a non-size is ignored");
+	withConfig({ modelContextWindows: { "gpt-5.6-sol": 400_000 } }, () => {
+		assert.equal(contextWindowForModel("gpt-5.6-sol", 272_000), 400_000, "the operator's override still wins");
+	});
+});
+
+test("free-code's kimi-k3 has its published 1M window, not the 200k fallback", () => {
+	// Fireworks: "1,048,576 tokens". Measured here: 191,734 in one turn — which a
+	// 200k (or free-code's own 128k) denominator would put at 96% (150%).
+	assert.equal(contextWindowForModel("accounts/fireworks/models/kimi-k3"), 1_048_576);
+	const file = writeFreeCode("kimi.jsonl", [
+		JSON.stringify({ type: "model_change", id: "m0", timestamp: "2026-08-06T21:40:00.000Z", provider: "fireworks", modelId: "accounts/fireworks/models/kimi-k3" }),
+		JSON.stringify({
+			type: "message",
+			id: "a1",
+			timestamp: "2026-08-06T22:28:19.489Z",
+			message: { role: "assistant", content: [], usage: { input: 1_734, output: 900, cacheRead: 190_000, cacheWrite: 0 } },
+		}),
+	]);
+	const usage = readTokenUsage("/irrelevant", file);
+	assert.equal(usage.model, "accounts/fireworks/models/kimi-k3");
+	assert.equal(usage.contextWindow, 1_048_576);
+	assert.equal(usage.contextTokens, 191_734);
+});
+
+test("docs/context-meter.md lists MODEL_CONTEXT_WINDOWS entry for entry", () => {
+	// The doc promises its table IS the table in models.ts; this keeps it true.
+	const doc = fs.readFileSync(new URL("../docs/context-meter.md", import.meta.url), "utf8");
+	const section = doc.slice(doc.indexOf("### Model table"), doc.indexOf("## When the hub's number differs"));
+	const rows = [...section.matchAll(/^\| `([^`]+)` \| ([\d,]+) \|/gm)].map((m) => [m[1], Number(m[2]!.replaceAll(",", ""))]);
+	assert.deepEqual(rows, Object.entries(MODEL_CONTEXT_WINDOWS), "same ids, same windows, same order");
 });
 
 // --- reading the model out of each harness's transcript --------------------

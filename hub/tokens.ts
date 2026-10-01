@@ -74,7 +74,7 @@ function print(label: string, usage: TokenUsage): void {
 		"".padEnd(52, "="),
 		"",
 		`Context window (main thread, last turn):`,
-		`  ${fmt(usage.contextTokens)} / ${fmt(usage.contextWindow)} tokens  (${pct}%)`,
+		`  ${usage.contextEstimated ? "≈" : ""}${fmt(usage.contextTokens)} / ${fmt(usage.contextWindow)} tokens  (${pct}%)${usage.contextEstimated ? "  — estimated, see estimateCursorOccupancy" : ""}`,
 		"",
 		`Billed totals${usage.includesSubagents ? " (incl. subagents)" : ""} over ${fmt(usage.turns)} turn(s):`,
 		`  input (new):     ${fmt(usage.inputTokens)}`,

@@ -948,6 +948,8 @@ export interface PermissionsState {
 export interface TokenUsage {
 	turns: number;
 	contextTokens: number;
+	/** True when `contextTokens` is the hub's estimate, not the harness's own reading (Cursor — see hub/transcript.ts). */
+	contextEstimated: boolean;
 	/** Derived from `model`, not a constant — see hub/models.ts. */
 	contextWindow: number;
 	/** Model id the last turn ran on, as the harness wrote it; null before the first turn. */

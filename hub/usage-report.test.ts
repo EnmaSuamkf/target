@@ -138,6 +138,7 @@ test("usageSnapshot leads with the total the client shows, and keeps every compo
 	// dashboard read 416 next to a client reading 16.0M.
 	const usage = {
 		contextTokens: 202_014,
+		contextEstimated: false,
 		contextWindow: 1_000_000,
 		model: "claude-opus-5",
 		lastCompactionAt: null,
@@ -172,6 +173,7 @@ test("usageSnapshot leads with the total the client shows, and keeps every compo
 	assert.equal(payload.context_tokens, 202_014);
 	assert.equal(payload.context_window, 1_000_000);
 	assert.equal(payload.context_pct, 20.2, "the same 20.2% the client's bar reads");
+	assert.equal(payload.context_estimated, false, "a Claude Code reading is the harness's own, not an estimate");
 	assert.equal(payload.model, "claude-opus-5");
 	assert.equal(payload.turns, 143);
 	assert.equal(payload.includes_subagents, true);
@@ -181,6 +183,7 @@ test("usageSnapshot leads with the total the client shows, and keeps every compo
 test("context percentage is against the model's real window, and is 0 rather than NaN with no window", () => {
 	const base = {
 		contextTokens: 100_000,
+		contextEstimated: false,
 		contextWindow: 200_000,
 		model: "claude-sonnet-4",
 		lastCompactionAt: null,
@@ -227,9 +230,11 @@ test("the workflow detail page states the token readout once, in the Conversatio
 test("the meter quotes the total, in the client's own abbreviations", () => {
 	const meter = read("ui/src/views/UsageMeter.tsx");
 
-	// "Context 202.0k / 1.0M" … "20.2%"
-	assert.match(meter, /Context \{compactNumber\(usage\.contextTokens\)\} \/ \{compactNumber\(usage\.contextWindow\)\}/);
-	assert.match(meter, /\{pct\.toFixed\(1\)\}%/);
+	// "Context 202.0k / 1.0M" … "20.2%" — or "Context ≈96.7k / 200.0k" … "≈48.4%"
+	// when the hub had to estimate it (Cursor), so an estimate never passes for a reading.
+	assert.match(meter, /Context \{approx\}\{compactNumber\(usage\.contextTokens\)\} \/ \{compactNumber\(usage\.contextWindow\)\}/);
+	assert.match(meter, /\{approx\}\{pct\.toFixed\(1\)\}%/);
+	assert.match(meter, /usage\.contextEstimated \? "≈" : ""/);
 	// "143 turns · in 16.0M · out 98.6k · incl. subagents"
 	assert.match(meter, /\{usage\.turns\} turns · in \{compactNumber\(usage\.totalInputTokens\)\}/);
 	assert.match(meter, /out \{compactNumber\(usage\.outputTokens\)\}/);

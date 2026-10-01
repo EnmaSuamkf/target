@@ -74,6 +74,15 @@ export const MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
 	// free-code's non-Anthropic model here. Measured 219,145, so its window is
 	// at least that; 256k is the tier it's published at.
 	"accounts/fireworks/models/glm-5p2": 256_000,
+	// free-code's default model here (2026-10-01). Fireworks' model page
+	// (fireworks.ai/models/fireworks/kimi-k3): "1,048,576 tokens, which Moonshot
+	// describes as a 1-million-token window". Consistent with what was measured:
+	// across 1,434 kimi-k3 turns the largest was 191,734 and the provider never
+	// rejected one for length. Note free-code itself assumes 128,000 for it
+	// (model-registry.js gives any models.json entry without `contextWindow`
+	// 128k) and compacts at ~112k on that basis — set `contextWindow` in
+	// ~/.free-code/agent/models.json if its own bar should agree with this one.
+	"accounts/fireworks/models/kimi-k3": 1_048_576,
 	// Cursor Agent Composer models — the CLI /context bar uses a 200k window for
 	// these (e.g. "Composer 2.5 Fast · 39.9%" reads as 79.8k / 200k). Prefix
 	// matching covers dated ids like `composer-2.5-fast`.
@@ -103,11 +112,48 @@ export const MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
  * as "no overrides" — an unreadable config must never make the hub stop
  * reporting context at all.
  */
-function configuredWindows(): { windows: Record<string, number>; fallback: number } {
+interface ConfiguredWindows {
+	windows: Record<string, number>;
+	fallback: number;
+}
+
+/**
+ * The last parse of config.json, keyed by what `stat` says about the file.
+ * `contextWindowForModel` runs on every /session-info poll (several per second
+ * with a few tabs open), and re-reading and re-parsing the whole config each
+ * time is wasted work for a file that changes by hand, rarely. A `stat` is
+ * enough to notice an edit: mtime + size + inode change on any save, including
+ * an editor's write-then-rename. `null` key = the file was absent last time.
+ */
+let windowsCache: { key: string | null; value: ConfiguredWindows } | null = null;
+
+function configStatKey(file: string): string | null {
+	try {
+		const st = fs.statSync(file);
+		return `${st.mtimeMs}:${st.size}:${st.ino}`;
+	} catch {
+		return null;
+	}
+}
+
+function configuredWindows(): ConfiguredWindows {
+	const file = path.join(targetDir(), "config.json");
+	const key = configStatKey(file);
+	if (windowsCache && windowsCache.key === key) return windowsCache.value;
+	const value = parseConfiguredWindows(file);
+	windowsCache = { key, value };
+	return value;
+}
+
+/** Test seam: how many times config.json was actually read and parsed. */
+export const _stats = { configReads: 0 };
+
+function parseConfiguredWindows(file: string): ConfiguredWindows {
 	const empty = { windows: {}, fallback: FALLBACK_CONTEXT_WINDOW_TOKENS };
 	let parsed: Record<string, unknown>;
+	_stats.configReads += 1;
 	try {
-		parsed = JSON.parse(fs.readFileSync(path.join(targetDir(), "config.json"), "utf8")) as Record<string, unknown>;
+		parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
 	} catch {
 		return empty;
 	}
@@ -133,16 +179,22 @@ function configuredWindows(): { windows: Record<string, number>; fallback: numbe
  * documented fallback, never a throw: a missing model id is a transcript that
  * hasn't got an assistant turn yet, which is normal, not an error.
  *
- * Lookup order is override → exact table entry → longest matching table prefix
- * → fallback. The prefix step is what keeps dated model ids
+ * Lookup order is override → `stated` → exact table entry → longest matching
+ * table prefix → fallback. The prefix step is what keeps dated model ids
  * (`claude-sonnet-5-20260101`) working without an entry each.
+ *
+ * `stated` is a window the harness itself declared for this run — Cursor's
+ * `--model 'x[context=1m]'` or the `context` parameter its CLI config sets for
+ * a model (see transcript.ts). It beats the table because it is what the run
+ * actually used (the same model id can run at 272k or 1M), but not the
+ * operator, whose override is the escape hatch for every source being wrong.
  */
-export function contextWindowForModel(model: string | null | undefined): number {
+export function contextWindowForModel(model: string | null | undefined, stated?: number | null): number {
 	const { windows, fallback } = configuredWindows();
-	if (!model) return fallback;
-	const id = model.trim().toLowerCase();
+	const id = model ? model.trim().toLowerCase() : "";
+	if (id && windows[id] !== undefined) return windows[id];
+	if (typeof stated === "number" && Number.isFinite(stated) && stated > 0) return stated;
 	if (!id || id === "<synthetic>") return fallback;
-	if (windows[id] !== undefined) return windows[id];
 	const table: Record<string, number> = { ...MODEL_CONTEXT_WINDOWS, ...windows };
 	if (table[id] !== undefined) return table[id];
 	// Longest prefix wins, so `claude-opus-4-8-2026…` prefers `claude-opus-4-8`

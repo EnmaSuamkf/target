@@ -222,13 +222,17 @@ test("readTokenUsage reads cursor usage from awb run logs when the session id is
 	assert.equal(usage.cacheReadTokens, 10000);
 	assert.equal(usage.outputTokens, 70);
 	assert.equal(usage.totalInputTokens, 11600);
-	// Occupancy is the last step's input + cache.
-	assert.equal(usage.contextTokens, 8500);
+	// Occupancy is an estimate for Cursor (cursor-occupancy.test.ts has the real
+	// cases). With no agent-transcript there is no round count to estimate the
+	// second run from, so the first run's reading (its whole input, the only
+	// thing known) stands rather than the second run's summed billing.
+	assert.equal(usage.contextTokens, 3100);
+	assert.equal(usage.contextEstimated, true);
 	assert.equal(usage.contextWindow, 200_000);
 	assert.equal(usage.includesSubagents, false);
 });
 
-test("readTokenUsage corrects inflated Cursor cache reads from multi-tool headless runs", (t) => {
+test("readTokenUsage never publishes a Cursor run's summed billing as a full window", (t) => {
 	const sessionId = "cursor-chat-cumulative";
 	const logsDir = path.join(tmpHome, "logs");
 	fs.mkdirSync(logsDir, { recursive: true });
@@ -246,9 +250,11 @@ test("readTokenUsage corrects inflated Cursor cache reads from multi-tool headle
 
 	const usage = readTokenUsage("/irrelevant/workdir", sessionId);
 	assert.equal(usage.contextWindow, 200_000);
-	// Cumulative billing would read 821k (410%); corrected occupancy ~80k (~40%).
-	assert.ok(Math.abs(usage.contextTokens - 80_000) <= 50, `expected ~80000 occupancy, got ${usage.contextTokens}`);
-	assert.ok(Math.abs(usage.contextTokens / usage.contextWindow - 0.4) < 0.01);
+	// 821k summed over the run's rounds is four windows: not occupancy, and with
+	// no transcript and no earlier reading there is nothing to estimate from.
+	// Unmeasured reads as 0 — the old code clamped it to 200k, a full bar.
+	assert.equal(usage.contextTokens, 0);
+	assert.equal(usage.contextEstimated, true);
 	assert.equal(usage.includesSubagents, false);
 });
 
