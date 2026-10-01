@@ -43,6 +43,15 @@
 	color: var(--accent-700);
 }
 
+/* The "All" tab when it is the selection: marked, but in neutral ink, not the accent. */
+.tabDefault,
+.tabDefault:hover:not(:disabled) {
+	background: var(--surface);
+	border-color: var(--border-strong);
+	color: var(--text);
+	font-weight: 600;
+}
+
 .tabCount {
 	font-variant-numeric: tabular-nums;
 	opacity: 0.8;
@@ -54,7 +63,7 @@
 	align-items: center;
 	gap: var(--space-1);
 	flex: none;
-	padding: 0.125rem var(--space-2);
+	padding: 0.3125rem var(--space-3);
 	border: 1px solid var(--border-strong);
 	border-radius: var(--radius-full);
 	background: var(--surface);
@@ -88,10 +97,10 @@
 
 /* --- popover --- */
 .popover {
-	position: absolute;
-	top: calc(100% + var(--space-1));
-	right: 0;
-	z-index: 30;
+	/* top/right are set inline from the trigger's rect (see FiltersPopover). */
+	position: fixed;
+	/* Above the sticky header (50); the phone's bottom tab bar (90) is passed below. */
+	z-index: 60;
 	display: flex;
 	flex-direction: column;
 	width: 19rem;
@@ -280,7 +289,7 @@
 		display: block;
 		position: fixed;
 		inset: 0;
-		z-index: 29;
+		z-index: 95;
 		background: rgba(15, 23, 42, 0.4);
 	}
 
@@ -293,8 +302,13 @@
 		width: auto;
 		max-width: none;
 		max-height: 85vh;
+		z-index: 96;
 		border-radius: var(--radius-lg) var(--radius-lg) 0 0;
 		border-bottom: none;
+	}
+
+	.popoverFooter {
+		padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
 	}
 
 	/* Thumb-sized targets: the tabs, the trigger, the options and the chips'

@@ -1,4 +1,6 @@
-import { useEffect, useId, useRef } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { useIsMobile } from "../hooks/useIsMobile.ts";
 import type { WorkflowStatus } from "../api/types.ts";
 import type { ScheduleFilter } from "../lib/scheduleView.ts";
 import { type ArchiveFilter, type OriginFilter, STATUS_ORDER, type StatusFilter } from "../lib/workflowFilter.ts";
@@ -45,7 +47,7 @@ export function StatusTabs({
 		.sort((a, b) => STATUS_ORDER[a] - STATUS_ORDER[b]);
 	return (
 		<div className={styles.tabs} role="group" aria-label="Filter by status" data-status-tabs>
-			<StatusTab label="All" count={counts.all} selected={value === "all"} onClick={() => onChange("all")} />
+			<StatusTab label="All" count={counts.all} selected={value === "all"} neutral onClick={() => onChange("all")} />
 			{statuses.map((s) => (
 				<StatusTab
 					key={s}
@@ -65,18 +67,21 @@ function StatusTab({
 	count,
 	selected,
 	disabled,
+	neutral,
 	onClick,
 }: {
 	label: string;
 	count: number;
 	selected: boolean;
 	disabled?: boolean;
+	/** The default tab: selected but not accented, so the bar reads as unfiltered at rest. */
+	neutral?: boolean;
 	onClick: () => void;
 }): React.JSX.Element {
 	return (
 		<button
 			type="button"
-			className={`${styles.tab} ${selected ? styles.tabSelected : ""}`}
+			className={`${styles.tab} ${selected ? (neutral ? styles.tabDefault : styles.tabSelected) : ""}`}
 			aria-pressed={selected}
 			disabled={disabled}
 			onClick={onClick}
@@ -107,6 +112,7 @@ export function FiltersButton({
 			type="button"
 			className={`${styles.filtersBtn} ${count > 0 ? styles.filtersBtnApplied : ""}`}
 			onClick={onClick}
+			aria-label={count > 0 ? `Filters, ${count} applied` : "Filters"}
 			aria-haspopup="dialog"
 			aria-expanded={open}
 			aria-controls={open ? controlsId : undefined}
@@ -242,9 +248,31 @@ export function FiltersPopover({
 	const panelRef = useRef<HTMLDivElement | null>(null);
 	const onCloseRef = useRef(onClose);
 	onCloseRef.current = onClose;
+	const isMobile = useIsMobile();
+	// Rendered in a portal and placed under the trigger: the rail's panel clips
+	// its overflow, which cut the popover off at the rail's bottom edge. On a
+	// phone the CSS bottom sheet takes over and no inline position is applied.
+	const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
+
+	useLayoutEffect(() => {
+		if (!open || isMobile) return;
+		const place = (): void => {
+			const rect = anchorRef.current?.getBoundingClientRect();
+			if (rect) setPos({ top: rect.bottom + 4, right: Math.max(8, document.documentElement.clientWidth - rect.right) });
+		};
+		place();
+		window.addEventListener("resize", place);
+		window.addEventListener("scroll", place, true);
+		return () => {
+			window.removeEventListener("resize", place);
+			window.removeEventListener("scroll", place, true);
+		};
+	}, [open, isMobile, anchorRef]);
+
+	const shown = open && (isMobile || pos !== null);
 
 	useEffect(() => {
-		if (!open) return;
+		if (!shown) return;
 		const anchor = anchorRef.current;
 		const panel = panelRef.current;
 		(panel?.querySelector<HTMLElement>('[role="radio"][tabindex="0"]') ?? panel)?.focus();
@@ -266,14 +294,24 @@ export function FiltersPopover({
 			document.removeEventListener("mousedown", onPointer);
 			anchor?.focus();
 		};
-	}, [open, anchorRef]);
+	}, [shown, anchorRef]);
 
 	if (!open) return null;
 	const { show, created, scheduling } = FILTER_COPY;
-	return (
+	if (!isMobile && !pos) return null;
+	return createPortal(
 		<>
 			<div className={styles.backdrop} aria-hidden="true" />
-			<div ref={panelRef} id={id} className={styles.popover} role="dialog" aria-label="Filters" tabIndex={-1} data-filters-popover>
+			<div
+				ref={panelRef}
+				id={id}
+				className={styles.popover}
+				style={isMobile || !pos ? undefined : { top: pos.top, right: pos.right }}
+				role="dialog"
+				aria-label="Filters"
+				tabIndex={-1}
+				data-filters-popover
+			>
 				<div className={styles.popoverBody}>
 					{leadingSection}
 					<FilterSection<ArchiveFilter>
@@ -328,7 +366,8 @@ export function FiltersPopover({
 					</button>
 				</div>
 			</div>
-		</>
+		</>,
+		document.body,
 	);
 }
 
