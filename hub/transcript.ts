@@ -170,6 +170,13 @@ export interface TokenUsage {
 	turns: number;
 	/** Whether any subagent transcript was found and folded into the totals. */
 	includesSubagents: boolean;
+	/**
+	 * Session cost in USD as the RUNNER itself recorded it, summed over the same
+	 * turns as the token buckets — or null when the runner records none. Never
+	 * derived from token counts here: pricing is the report server's job. See
+	 * `costOfTurns`.
+	 */
+	costUsd: number | null;
 }
 
 interface RawUsage {
@@ -196,6 +203,8 @@ interface RawUsage {
 	/** Latest compaction boundary in this file, and how many there were. */
 	lastCompaction: CompactionBoundary | null;
 	compactions: number;
+	/** Runner-recorded cost of this file's turns (see `costOfTurns`); null when not authoritative. */
+	costUsd: number | null;
 }
 
 function emptyRawUsage(): RawUsage {
@@ -212,6 +221,7 @@ function emptyRawUsage(): RawUsage {
 		lastModel: null,
 		lastCompaction: null,
 		compactions: 0,
+		costUsd: null,
 	};
 }
 
@@ -297,7 +307,7 @@ function modelOfLine(obj: Record<string, unknown>): string | null {
  * free-code writes `usage.input`/`cacheWrite`/`cacheRead`. Returns null when
  * the line carries no usage (non-message events, user messages, …).
  */
-function usageOfLine(obj: Record<string, unknown>): { id: string | null; input: number; cacheCreation: number; cacheRead: number; output: number } | null {
+function usageOfLine(obj: Record<string, unknown>): { id: string | null; input: number; cacheCreation: number; cacheRead: number; output: number; cost: number | null } | null {
 	const message = obj.message as Record<string, unknown> | undefined;
 	const usage = message?.usage as Record<string, number> | undefined;
 	if (!usage) return null;
@@ -317,7 +327,44 @@ function usageOfLine(obj: Record<string, unknown>): { id: string | null; input: 
 		cacheCreation: usage.cache_creation_input_tokens ?? usage.cacheWrite ?? 0,
 		cacheRead: usage.cache_read_input_tokens ?? usage.cacheRead ?? 0,
 		output: usage.output_tokens ?? usage.output ?? 0,
+		cost: isFreeCodeShape ? freeCodeTurnCost(usage) : null,
 	};
+}
+
+/**
+ * free-code stamps the cost it computed for each assistant turn on the turn's
+ * usage block (`usage.cost.total`, USD). Null when the turn has none. Claude
+ * Code transcripts carry no per-turn cost (its `cost-state` records are per
+ * process, so they reset on every resume — not a session figure).
+ */
+function freeCodeTurnCost(usage: Record<string, unknown>): number | null {
+	const total = (usage.cost as Record<string, unknown> | undefined)?.total;
+	return typeof total === "number" && Number.isFinite(total) ? total : null;
+}
+
+/**
+ * Sums the runner-recorded cost of the turns just read, deduped like the token
+ * buckets. Authoritative only when EVERY turn that spent tokens carries a
+ * positive cost: free-code reports `cost.total: 0` for a model it has no price
+ * for (kimi-k3, glm-5p2 here), and a 0 on a session that used millions of tokens
+ * is not "free", it is unknown — so that session stays null and the server
+ * prices it by (agent, model). A turn that spent nothing (an aborted turn) may
+ * cost 0.
+ */
+function costOfTurns(turns: Iterable<{ input: number; cacheCreation: number; cacheRead: number; output: number; cost: number | null }>): number | null {
+	let total = 0;
+	let any = false;
+	for (const turn of turns) {
+		const spent = turn.input + turn.cacheCreation + turn.cacheRead + turn.output > 0;
+		if (turn.cost === null) {
+			if (spent) return null;
+			continue;
+		}
+		if (spent && turn.cost <= 0) return null;
+		total += turn.cost;
+		any = any || spent;
+	}
+	return any ? total : null;
 }
 
 /**
@@ -338,7 +385,7 @@ function accumulateUsage(file: string): RawUsage {
 		return acc;
 	}
 	/** Per-message billed totals; replaced when a later line carries the same id. */
-	const seen = new Map<string, { input: number; cacheCreation: number; cacheRead: number; output: number }>();
+	const seen = new Map<string, { input: number; cacheCreation: number; cacheRead: number; output: number; cost: number | null }>();
 	for (const line of raw.split("\n")) {
 		if (!line.trim()) continue;
 		try {
@@ -369,7 +416,7 @@ function accumulateUsage(file: string): RawUsage {
 			} else {
 				acc.turns += 1;
 			}
-			const billed = { input: rec.input, cacheCreation: rec.cacheCreation, cacheRead: rec.cacheRead, output: rec.output };
+			const billed = { input: rec.input, cacheCreation: rec.cacheCreation, cacheRead: rec.cacheRead, output: rec.output, cost: rec.cost };
 			seen.set(id, billed);
 			acc.input += billed.input;
 			acc.cacheCreation += billed.cacheCreation;
@@ -398,6 +445,7 @@ function accumulateUsage(file: string): RawUsage {
 			// the process is still running is expected, not an error.
 		}
 	}
+	acc.costUsd = costOfTurns(seen.values());
 	return acc;
 }
 
@@ -742,7 +790,7 @@ export function cursorModelFromTracking(sessionId: string): string | null {
  */
 let cliConfigCache: { key: string; parsed: Record<string, unknown> | null } | null = null;
 
-export function cursorConfiguredContext(model: string): number | null {
+function cursorCliConfig(): Record<string, unknown> | null {
 	const file = path.join(os.homedir(), ".cursor", "cli-config.json");
 	let key: string;
 	try {
@@ -760,7 +808,23 @@ export function cursorConfiguredContext(model: string): number | null {
 		}
 		cliConfigCache = { key, parsed };
 	}
-	const params = (cliConfigCache.parsed?.modelParameters as Record<string, unknown> | undefined)?.[model];
+	return cliConfigCache.parsed;
+}
+
+/**
+ * The model a flag-less `agent -p` runs on: `~/.cursor/cli-config.json` →
+ * `model.modelId`. Last resort for a session nothing else names (awb passes no
+ * `--model`, and the tracking database only has rows for sessions that edited
+ * files). It is the CLI's setting NOW, not a per-session record, so it is only
+ * consulted after every per-session source came up empty.
+ */
+export function cursorDefaultModel(): string | null {
+	const model = (cursorCliConfig()?.model as Record<string, unknown> | undefined)?.modelId;
+	return typeof model === "string" && model !== "" ? normalizeCursorModelId(model) : null;
+}
+
+export function cursorConfiguredContext(model: string): number | null {
+	const params = (cursorCliConfig()?.modelParameters as Record<string, unknown> | undefined)?.[model];
 	if (!Array.isArray(params)) return null;
 	for (const param of params) {
 		const p = param as Record<string, unknown>;
@@ -945,6 +1009,9 @@ function tokenUsageFromRaw(
 		totalInputTokens: input + cacheCreation + cacheRead,
 		turns,
 		includesSubagents: subs.length > 0,
+		// Subagent transcripts are only folded into the token totals; their cost is
+		// not read, so a figure that left them out would under-report.
+		costUsd: subs.length > 0 ? null : main.costUsd,
 	};
 }
 
@@ -1010,8 +1077,11 @@ export function readTokenUsage(workdir: string, sessionId: string): TokenUsage {
 					? accumulateUsage(cursorTranscript)
 					: (cursorLogs ?? emptyRawUsage());
 		// Neither the result nor the command line named the model (awb's own
-		// runs, today): Cursor's tracking database, then the transcript.
-		if (!main.lastModel) main.lastModel = cursorModelFromTracking(sessionId) ?? cursorModelFromTranscript(sessionId);
+		// runs, today): Cursor's tracking database, then the transcript, then the
+		// CLI's default model (a session that edited nothing has no tracking rows).
+		if (!main.lastModel) {
+			main.lastModel = cursorModelFromTracking(sessionId) ?? cursorModelFromTranscript(sessionId) ?? cursorDefaultModel();
+		}
 		// No size on the command line: the size the CLI is configured to run that
 		// model at, when it sets one.
 		if (main.lastModel && main.statedContextWindow === null) main.statedContextWindow = cursorConfiguredContext(main.lastModel);
@@ -1020,6 +1090,9 @@ export function readTokenUsage(workdir: string, sessionId: string): TokenUsage {
 
 	const main = accumulateUsage(claudeFile);
 	const subs = subagentFiles(workdir, sessionId).map((file) => accumulateUsage(file));
+	// The main thread ran no real turn (only a `<synthetic>` notice, say) but its
+	// subagents did: they are billed in these totals, so their model is the one.
+	if (!main.lastModel) main.lastModel = subs.map((sub) => sub.lastModel).findLast((m) => m !== null) ?? null;
 	return tokenUsageFromRaw(main, subs, null);
 }
 
@@ -1052,8 +1125,14 @@ export function contextPercent(usage: TokenUsage): number {
  * `cache_creation`, `cache_read`) so the total stays auditable and the server
  * can still price the three rates apart — nothing is lost by leading with the
  * total, only by leading with a part of it.
+ *
+ * `agent` is the runner id (`claude` | `free-code` | `cursor`) the session ran
+ * on. A transcript can't say which runner wrote it, so the caller passes it in;
+ * when it doesn't know, the field is omitted rather than guessed. The server
+ * prices a session by (agent, model), so it needs both on the same event.
  */
-export function usageSnapshot(usage: TokenUsage): {
+export function usageSnapshot(usage: TokenUsage, agent?: string | null): {
+	agent?: string;
 	input_tokens: number;
 	output_tokens: number;
 	input_tokens_uncached: number;
@@ -1067,9 +1146,10 @@ export function usageSnapshot(usage: TokenUsage): {
 	turns: number;
 	includes_subagents: boolean;
 	compacted: boolean;
-	cost_usd: null;
+	cost_usd: number | null;
 } {
 	return {
+		...(agent ? { agent } : {}),
 		// The headline the dashboard tiles show — the same total the client's
 		// "in 16.0M" is.
 		input_tokens: usage.totalInputTokens,
@@ -1094,6 +1174,8 @@ export function usageSnapshot(usage: TokenUsage): {
 		// (a step's real work runs in a subagent).
 		includes_subagents: usage.includesSubagents,
 		compacted: usage.compactions > 0,
-		cost_usd: null,
+		// The runner's own figure (free-code only today), or null — never computed
+		// here. When null the server prices the session by (agent, model).
+		cost_usd: usage.costUsd,
 	};
 }
