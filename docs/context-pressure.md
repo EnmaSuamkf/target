@@ -1,8 +1,15 @@
-# Feature: Context-pressure override
+# Feature (removed): Context-pressure override
 
-> **Removed.** The hub no longer overrides a step's "Use subagent" toggle based
-> on session occupancy. Each step always runs according to its configured
-> `useSubagent` value. The rest of this document is kept for historical context.
+> **Historical — this feature no longer exists.** It was removed on 2026-09-15
+> (commit `422ac47`). Today the hub never overrides a step's "Use subagent"
+> toggle: every step runs exactly as its `useSubagent` value says, however full
+> the conversation is. Nothing below describes current behavior —
+> `hub/context-pressure.ts`, its test and the panel/badge hints it mentions are
+> gone. For how the context meter works now, see
+> [`context-meter.md`](context-meter.md).
+>
+> The rest of this page is the original design note, kept for context, with
+> its tense left as written.
 
 Once a workflow's shared conversation is **more than 60% full**, a step was
 delegated to a subagent even when its own "Use subagent" toggle said inline.
@@ -91,7 +98,7 @@ lives in a subagent's transcript, not in this thread's narration. Judging an
 overridden step by re-reading a thread that never held the work is exactly the
 blind pass the judge prompt otherwise works hard to prevent.
 
-## Where it shows up
+## Where it showed up (removed)
 
 - **Conversation panel** — past 60% the usage meter carries a line saying inline
   steps are now being delegated.
@@ -105,7 +112,7 @@ step. The toggle in the UI still says what the operator chose, and once the
 session is roomy again (a fresh conversation, a restart) that choice is honoured
 without anyone having to reset anything.
 
-## Code
+## Code (deleted in `422ac47`)
 
 | | |
 |---|---|

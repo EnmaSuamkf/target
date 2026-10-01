@@ -99,31 +99,18 @@ Maximum single-turn context measured in real transcripts on this machine:
 | `accounts/fireworks/models/glm-5p2` | 219,145 | 200,000 |
 
 Every threshold that divides by the window inherited that error: the 60%
-delegation gate fired from the first step of every workflow, and the UI meter
-was pinned red. A wrong denominator isn't cosmetic — it's the feature not
-working.
+delegation gate of the time (since removed, see
+[`context-pressure.md`](context-pressure.md)) fired from the first step of every
+workflow, and the UI meter was pinned red. A wrong denominator isn't cosmetic —
+it's the feature not working.
 
-The window now comes from the model actually in use, read per harness
-(`message.model` on Claude Code's assistant lines, the `model_change` record's
-`modelId` on free-code's) and looked up in `hub/models.ts`. Three layers:
-
-1. `modelContextWindows` in `~/.target/config.json` — the operator's override;
-2. the table, matched exactly then by longest id prefix (so
-   `claude-sonnet-5-20260101` resolves through `claude-sonnet-5`);
-3. `FALLBACK_CONTEXT_WINDOW_TOKENS` for anything unknown.
-
-The fallback is deliberately the **smallest** window in the table. The error is
-asymmetric: too small a denominator over-reports pressure, whose worst outcome
-is delegating a step that didn't need it; too large under-reports it, and the
-failure mode there is a conversation quietly filling up while the hub reports
-"42% full". An unknown model errs toward crying wolf.
-
-Override a model without a code change:
-
-```json
-{ "modelContextWindows": { "some-new-model": 512000 },
-  "fallbackContextWindowTokens": 200000 }
-```
+The window now comes from the model actually in use — read per harness, and
+looked up in `hub/models.ts` behind an operator override in
+`~/.target/config.json`. How that works today for all three harnesses (Claude
+Code, free-code and Cursor), the full model table, the `modelContextWindows` /
+`fallbackContextWindowTokens` keys with an example, and when the hub's number can
+differ from the agent's own `/context` bar are documented in
+**[`context-meter.md`](context-meter.md)**.
 
 ## 4. Failures that say what went wrong
 

@@ -182,6 +182,14 @@ test("free-code's kimi-k3 has its published 1M window, not the 200k fallback", (
 	assert.equal(usage.contextTokens, 191_734);
 });
 
+test("docs/context-meter.md lists MODEL_CONTEXT_WINDOWS entry for entry", () => {
+	// The doc promises its table IS the table in models.ts; this keeps it true.
+	const doc = fs.readFileSync(new URL("../docs/context-meter.md", import.meta.url), "utf8");
+	const section = doc.slice(doc.indexOf("### Model table"), doc.indexOf("## When the hub's number differs"));
+	const rows = [...section.matchAll(/^\| `([^`]+)` \| ([\d,]+) \|/gm)].map((m) => [m[1], Number(m[2]!.replaceAll(",", ""))]);
+	assert.deepEqual(rows, Object.entries(MODEL_CONTEXT_WINDOWS), "same ids, same windows, same order");
+});
+
 // --- reading the model out of each harness's transcript --------------------
 
 test("claude: the window follows message.model on the last assistant turn", () => {
