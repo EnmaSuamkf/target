@@ -25,6 +25,11 @@ Final full run on exactly these commits: **13/13 scenarios PASS, exit code 0**. 
 | 6 | target-server | [#28 feat(sync): scheduled series API and protocol](https://github.com/EnmaSuamkf/target-server/pull/28) |
 | 7 | target-server | [#29 feat(ui): schedule remote workflows and browse series](https://github.com/EnmaSuamkf/target-server/pull/29) |
 
+## Pull requests of this work (none merged by the workflow)
+
+- E2E harness + this report: [target #114](https://github.com/EnmaSuamkf/target/pull/114) → `integration/scheduled-workflows`
+- Release `integration/scheduled-workflows` → `main`, titled "Scheduled workflows and archiving": [target #115](https://github.com/EnmaSuamkf/target/pull/115) and [target-server #30](https://github.com/EnmaSuamkf/target-server/pull/30)
+
 ## Environment
 
 - Linux 7.0.0-34-generic, Node v24.21.0. The hub has zero runtime dependencies.
