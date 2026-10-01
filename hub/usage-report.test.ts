@@ -150,6 +150,7 @@ test("usageSnapshot leads with the total the client shows, and keeps every compo
 		totalInputTokens: 16_015_192,
 		turns: 143,
 		includesSubagents: true,
+		costUsd: null,
 	};
 
 	const payload = usageSnapshot(usage);
@@ -195,6 +196,7 @@ test("context percentage is against the model's real window, and is 0 rather tha
 		totalInputTokens: 6,
 		turns: 1,
 		includesSubagents: false,
+		costUsd: null,
 	};
 	assert.equal(contextPercent(base), 50);
 	// A 200k-window session at 100k is half full; the same occupancy against a
@@ -276,4 +278,70 @@ test("usageSnapshot carries the runner id as `agent` for each runner, and omits 
 
 test("reportUsageSnapshot threads the workflow's harness into the payload", () => {
 	assert.match(read("workflow.ts"), /const runtime = hookRuntime\(workflow\.hookUrl\);[\s\S]{0,600}usageSnapshot\(u, runtime\.harness\)/);
+});
+
+// --- cost_usd: only a figure the runner itself recorded, never computed here ---
+
+function freeCodeTurn(id: string, tokens: { input: number; output: number }, cost?: { total: number }): string {
+	return JSON.stringify({
+		type: "message",
+		id,
+		message: { role: "assistant", usage: { input: tokens.input, output: tokens.output, cacheRead: 0, cacheWrite: 0, ...(cost ? { cost } : {}) } },
+	});
+}
+
+function freeCodeFile(name: string, lines: string[]): string {
+	const file = path.join(tmpHome, "fc-cost", name);
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, `${lines.join("\n")}\n`);
+	return file;
+}
+
+test("cost_usd: free-code's own per-turn cost is summed over the session, like the token buckets", () => {
+	const file = freeCodeFile("priced.jsonl", [
+		JSON.stringify({ type: "model_change", modelId: "claude-sonnet-4-5" }),
+		freeCodeTurn("a", { input: 3_381, output: 46 }, { total: 0.0091425 }),
+		freeCodeTurn("b", { input: 5_000, output: 100 }, { total: 0.0165 }),
+		// The same turn written twice: counted once, the last copy wins.
+		freeCodeTurn("b", { input: 5_000, output: 100 }, { total: 0.0165 }),
+	]);
+	const payload = usageSnapshot(readTokenUsage("/nowhere", file), "free-code");
+	assert.equal(payload.turns, 2);
+	assert.ok(Math.abs((payload.cost_usd ?? NaN) - 0.0256425) < 1e-9, `cost_usd was ${payload.cost_usd}`);
+});
+
+test("cost_usd: a free-code session on a model the runner has no price for stays null", () => {
+	// kimi-k3 / glm-5p2 turns carry `cost.total: 0` next to millions of tokens:
+	// that is "unpriced", not "free". The server prices it by (agent, model).
+	const file = freeCodeFile("unpriced.jsonl", [
+		JSON.stringify({ type: "model_change", modelId: "accounts/fireworks/models/kimi-k3" }),
+		freeCodeTurn("a", { input: 338, output: 372 }, { total: 0 }),
+	]);
+	assert.equal(usageSnapshot(readTokenUsage("/nowhere", file), "free-code").cost_usd, null);
+});
+
+test("cost_usd: one unpriced turn makes the whole free-code figure null rather than an undercount", () => {
+	const file = freeCodeFile("mixed.jsonl", [
+		freeCodeTurn("a", { input: 1_000, output: 10 }, { total: 0.01 }),
+		freeCodeTurn("b", { input: 1_000, output: 10 }),
+	]);
+	assert.equal(readTokenUsage("/nowhere", file).costUsd, null);
+});
+
+test("cost_usd: claude stays null — its result `total_cost_usd` and `cost-state` records are per run, not per session", () => {
+	writeMain("sess-cost-claude", [
+		turn("m1", { input: 10, cacheCreation: 0, cacheRead: 5_000, output: 20 }),
+		// What Claude Code writes: a per-process snapshot that resets on --resume.
+		JSON.stringify({ type: "cost-state", sessionId: "sess-cost-claude", totalCostUSD: 1.13, modelUsage: {} }),
+	]);
+	assert.equal(usageSnapshot(readTokenUsage(workdir, "sess-cost-claude"), "claude").cost_usd, null);
+});
+
+test("cost_usd: cursor stays null — its result JSON carries tokens and no cost", () => {
+	assert.equal(usageSnapshot({ ...readTokenUsage(workdir, "no-such-session"), turns: 1 }, "cursor").cost_usd, null);
+});
+
+test("no hub code multiplies token counts by a price", () => {
+	assert.doesNotMatch(read("transcript.ts"), /(?:inputTokens|outputTokens|cacheReadTokens|cacheCreationTokens)\s*\*\s*\w*(?:price|rate|usd|cost)/i);
+	assert.doesNotMatch(read("workflow.ts"), /cost_usd:\s*[^n]/);
 });

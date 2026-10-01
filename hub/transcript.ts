@@ -170,6 +170,13 @@ export interface TokenUsage {
 	turns: number;
 	/** Whether any subagent transcript was found and folded into the totals. */
 	includesSubagents: boolean;
+	/**
+	 * Session cost in USD as the RUNNER itself recorded it, summed over the same
+	 * turns as the token buckets — or null when the runner records none. Never
+	 * derived from token counts here: pricing is the report server's job. See
+	 * `costOfTurns`.
+	 */
+	costUsd: number | null;
 }
 
 interface RawUsage {
@@ -196,6 +203,8 @@ interface RawUsage {
 	/** Latest compaction boundary in this file, and how many there were. */
 	lastCompaction: CompactionBoundary | null;
 	compactions: number;
+	/** Runner-recorded cost of this file's turns (see `costOfTurns`); null when not authoritative. */
+	costUsd: number | null;
 }
 
 function emptyRawUsage(): RawUsage {
@@ -212,6 +221,7 @@ function emptyRawUsage(): RawUsage {
 		lastModel: null,
 		lastCompaction: null,
 		compactions: 0,
+		costUsd: null,
 	};
 }
 
@@ -297,7 +307,7 @@ function modelOfLine(obj: Record<string, unknown>): string | null {
  * free-code writes `usage.input`/`cacheWrite`/`cacheRead`. Returns null when
  * the line carries no usage (non-message events, user messages, …).
  */
-function usageOfLine(obj: Record<string, unknown>): { id: string | null; input: number; cacheCreation: number; cacheRead: number; output: number } | null {
+function usageOfLine(obj: Record<string, unknown>): { id: string | null; input: number; cacheCreation: number; cacheRead: number; output: number; cost: number | null } | null {
 	const message = obj.message as Record<string, unknown> | undefined;
 	const usage = message?.usage as Record<string, number> | undefined;
 	if (!usage) return null;
@@ -317,7 +327,44 @@ function usageOfLine(obj: Record<string, unknown>): { id: string | null; input: 
 		cacheCreation: usage.cache_creation_input_tokens ?? usage.cacheWrite ?? 0,
 		cacheRead: usage.cache_read_input_tokens ?? usage.cacheRead ?? 0,
 		output: usage.output_tokens ?? usage.output ?? 0,
+		cost: isFreeCodeShape ? freeCodeTurnCost(usage) : null,
 	};
+}
+
+/**
+ * free-code stamps the cost it computed for each assistant turn on the turn's
+ * usage block (`usage.cost.total`, USD). Null when the turn has none. Claude
+ * Code transcripts carry no per-turn cost (its `cost-state` records are per
+ * process, so they reset on every resume — not a session figure).
+ */
+function freeCodeTurnCost(usage: Record<string, unknown>): number | null {
+	const total = (usage.cost as Record<string, unknown> | undefined)?.total;
+	return typeof total === "number" && Number.isFinite(total) ? total : null;
+}
+
+/**
+ * Sums the runner-recorded cost of the turns just read, deduped like the token
+ * buckets. Authoritative only when EVERY turn that spent tokens carries a
+ * positive cost: free-code reports `cost.total: 0` for a model it has no price
+ * for (kimi-k3, glm-5p2 here), and a 0 on a session that used millions of tokens
+ * is not "free", it is unknown — so that session stays null and the server
+ * prices it by (agent, model). A turn that spent nothing (an aborted turn) may
+ * cost 0.
+ */
+function costOfTurns(turns: Iterable<{ input: number; cacheCreation: number; cacheRead: number; output: number; cost: number | null }>): number | null {
+	let total = 0;
+	let any = false;
+	for (const turn of turns) {
+		const spent = turn.input + turn.cacheCreation + turn.cacheRead + turn.output > 0;
+		if (turn.cost === null) {
+			if (spent) return null;
+			continue;
+		}
+		if (spent && turn.cost <= 0) return null;
+		total += turn.cost;
+		any = any || spent;
+	}
+	return any ? total : null;
 }
 
 /**
@@ -338,7 +385,7 @@ function accumulateUsage(file: string): RawUsage {
 		return acc;
 	}
 	/** Per-message billed totals; replaced when a later line carries the same id. */
-	const seen = new Map<string, { input: number; cacheCreation: number; cacheRead: number; output: number }>();
+	const seen = new Map<string, { input: number; cacheCreation: number; cacheRead: number; output: number; cost: number | null }>();
 	for (const line of raw.split("\n")) {
 		if (!line.trim()) continue;
 		try {
@@ -369,7 +416,7 @@ function accumulateUsage(file: string): RawUsage {
 			} else {
 				acc.turns += 1;
 			}
-			const billed = { input: rec.input, cacheCreation: rec.cacheCreation, cacheRead: rec.cacheRead, output: rec.output };
+			const billed = { input: rec.input, cacheCreation: rec.cacheCreation, cacheRead: rec.cacheRead, output: rec.output, cost: rec.cost };
 			seen.set(id, billed);
 			acc.input += billed.input;
 			acc.cacheCreation += billed.cacheCreation;
@@ -398,6 +445,7 @@ function accumulateUsage(file: string): RawUsage {
 			// the process is still running is expected, not an error.
 		}
 	}
+	acc.costUsd = costOfTurns(seen.values());
 	return acc;
 }
 
@@ -961,6 +1009,9 @@ function tokenUsageFromRaw(
 		totalInputTokens: input + cacheCreation + cacheRead,
 		turns,
 		includesSubagents: subs.length > 0,
+		// Subagent transcripts are only folded into the token totals; their cost is
+		// not read, so a figure that left them out would under-report.
+		costUsd: subs.length > 0 ? null : main.costUsd,
 	};
 }
 
@@ -1095,7 +1146,7 @@ export function usageSnapshot(usage: TokenUsage, agent?: string | null): {
 	turns: number;
 	includes_subagents: boolean;
 	compacted: boolean;
-	cost_usd: null;
+	cost_usd: number | null;
 } {
 	return {
 		...(agent ? { agent } : {}),
@@ -1123,6 +1174,8 @@ export function usageSnapshot(usage: TokenUsage, agent?: string | null): {
 		// (a step's real work runs in a subagent).
 		includes_subagents: usage.includesSubagents,
 		compacted: usage.compactions > 0,
-		cost_usd: null,
+		// The runner's own figure (free-code only today), or null — never computed
+		// here. When null the server prices the session by (agent, model).
+		cost_usd: usage.costUsd,
 	};
 }

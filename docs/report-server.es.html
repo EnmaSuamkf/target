@@ -629,7 +629,7 @@ X-Target-Version: 0.2.0
             <tr><td><code>step.failed</code></td><td><code>step_id</code>, <code>order_index</code>, <code>phase</code>, <code>duration_ms</code>, <code>retry_count</code>, <code>max_retries</code>, <code>error</code> (§7.3)</td></tr>
             <tr><td><code>step.waiting</code></td><td><code>step_id</code>, <code>order_index</code>, <code>reason: "manual_review"</code></td></tr>
             <tr><td><code>step.judged</code></td><td><code>step_id</code>, <code>ok</code> (bool), <code>acceptance_criteria</code>, y si <code>ok=false</code> el <code>error</code> con <code>reason</code> del veredicto</td></tr>
-            <tr><td><code>usage.snapshot</code></td><td><code>agent</code> (runner de la sesión: <code>claude|free-code|cursor</code>; se omite si el hub no lo conoce), <code>input_tokens</code> (<strong>total</strong>: nuevo + creación de caché + lectura de caché — el mismo número que el cliente del operador muestra como «in»), <code>output_tokens</code>, y sus componentes <code>input_tokens_uncached</code>, <code>cache_creation</code>, <code>cache_read</code>; ocupación de contexto <code>context_tokens</code>, <code>context_window</code>, <code>context_pct</code>, <code>model</code>; <code>turns</code>, <code>includes_subagents</code> (bool), <code>compacted</code> (bool), <code>cost_usd</code></td></tr>
+            <tr><td><code>usage.snapshot</code></td><td><code>agent</code> (runner de la sesión: <code>claude|free-code|cursor</code>; se omite si el hub no lo conoce), <code>input_tokens</code> (<strong>total</strong>: nuevo + creación de caché + lectura de caché — el mismo número que el cliente del operador muestra como «in»), <code>output_tokens</code>, y sus componentes <code>input_tokens_uncached</code>, <code>cache_creation</code>, <code>cache_read</code>; ocupación de contexto <code>context_tokens</code>, <code>context_window</code>, <code>context_pct</code>, <code>model</code>; <code>turns</code>, <code>includes_subagents</code> (bool), <code>compacted</code> (bool), <code>cost_usd</code> (número solo si el runner registra un coste acumulado de la sesión — hoy únicamente <code>free-code</code>, suma de <code>usage.cost.total</code> de sus turnos y solo si todos los turnos con tokens traen un precio; en otro caso <code>null</code>)</td></tr>
             <tr><td><code>conversation.snapshot</code></td><td><code>turns</code>, <code>mode</code> (<code>digest|full</code>), <code>digest</code> o <code>messages[]</code> según privacidad</td></tr>
             <tr><td><code>heartbeat</code></td><td><code>version</code>, <code>os</code>, <code>uptime_ms</code>, <code>workflows_total</code>, <code>queue_pending</code></td></tr>
           </tbody>
@@ -642,6 +642,21 @@ X-Target-Version: 0.2.0
         <code>agent</code> de <code>workflow.created</code> / <code>workflow.updated</code>.
         Junto con <code>model</code> es la clave con la que el servidor tarifica la
         sesión; ningún campo existente cambia de nombre ni desaparece.
+      </p>
+      <p>
+        <strong>Política de <code>cost_usd</code>:</strong> el hub nunca calcula un
+        coste a partir de los tokens; solo reenvía una cifra que el propio runner
+        registró y que es acumulada por sesión. <code>free-code</code> la da por turno
+        (<code>usage.cost.total</code>) y el hub la suma; si el runner no tiene precio
+        para el modelo (<code>cost.total: 0</code> con tokens gastados) o la sesión
+        incluye subagentes, el valor es <code>null</code>. <code>claude</code> no la
+        da por sesión (<code>total_cost_usd</code> del JSON de resultado y los
+        registros <code>cost-state</code> del transcript son por ejecución y se
+        reinician al reanudar) y <code>cursor</code> no expone coste; ambos envían
+        <code>null</code>. Con <code>cost_usd = null</code> el servidor calcula el
+        coste con su tabla de precios por organización, por
+        (<code>agent</code>, <code>model</code>) y, si el modelo es desconocido, por
+        (<code>agent</code>, <code>'*'</code>).
       </p>
 
       <h3>7.3 &nbsp;El objeto <code>error</code> (lo que faltaba)</h3>
