@@ -98,8 +98,8 @@ export function emptyListMessage(
 	if (scopedCount === 0) {
 		return {
 			title: "No active workflows",
-			description: "Every workflow is archived. Switch to Archived to see them, or create a new one.",
+			description: "Every workflow is archived. Open Filters and choose Show: Archived to see them, or create a new one.",
 		};
 	}
-	return { title: "No matches", description: "Try a different search or clear the status filter." };
+	return { title: "No matches", description: "Try a different search or clear the filters." };
 }
