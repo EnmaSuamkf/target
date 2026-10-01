@@ -742,7 +742,7 @@ export function cursorModelFromTracking(sessionId: string): string | null {
  */
 let cliConfigCache: { key: string; parsed: Record<string, unknown> | null } | null = null;
 
-export function cursorConfiguredContext(model: string): number | null {
+function cursorCliConfig(): Record<string, unknown> | null {
 	const file = path.join(os.homedir(), ".cursor", "cli-config.json");
 	let key: string;
 	try {
@@ -760,7 +760,23 @@ export function cursorConfiguredContext(model: string): number | null {
 		}
 		cliConfigCache = { key, parsed };
 	}
-	const params = (cliConfigCache.parsed?.modelParameters as Record<string, unknown> | undefined)?.[model];
+	return cliConfigCache.parsed;
+}
+
+/**
+ * The model a flag-less `agent -p` runs on: `~/.cursor/cli-config.json` →
+ * `model.modelId`. Last resort for a session nothing else names (awb passes no
+ * `--model`, and the tracking database only has rows for sessions that edited
+ * files). It is the CLI's setting NOW, not a per-session record, so it is only
+ * consulted after every per-session source came up empty.
+ */
+export function cursorDefaultModel(): string | null {
+	const model = (cursorCliConfig()?.model as Record<string, unknown> | undefined)?.modelId;
+	return typeof model === "string" && model !== "" ? normalizeCursorModelId(model) : null;
+}
+
+export function cursorConfiguredContext(model: string): number | null {
+	const params = (cursorCliConfig()?.modelParameters as Record<string, unknown> | undefined)?.[model];
 	if (!Array.isArray(params)) return null;
 	for (const param of params) {
 		const p = param as Record<string, unknown>;
@@ -1010,8 +1026,11 @@ export function readTokenUsage(workdir: string, sessionId: string): TokenUsage {
 					? accumulateUsage(cursorTranscript)
 					: (cursorLogs ?? emptyRawUsage());
 		// Neither the result nor the command line named the model (awb's own
-		// runs, today): Cursor's tracking database, then the transcript.
-		if (!main.lastModel) main.lastModel = cursorModelFromTracking(sessionId) ?? cursorModelFromTranscript(sessionId);
+		// runs, today): Cursor's tracking database, then the transcript, then the
+		// CLI's default model (a session that edited nothing has no tracking rows).
+		if (!main.lastModel) {
+			main.lastModel = cursorModelFromTracking(sessionId) ?? cursorModelFromTranscript(sessionId) ?? cursorDefaultModel();
+		}
 		// No size on the command line: the size the CLI is configured to run that
 		// model at, when it sets one.
 		if (main.lastModel && main.statedContextWindow === null) main.statedContextWindow = cursorConfiguredContext(main.lastModel);
@@ -1020,6 +1039,9 @@ export function readTokenUsage(workdir: string, sessionId: string): TokenUsage {
 
 	const main = accumulateUsage(claudeFile);
 	const subs = subagentFiles(workdir, sessionId).map((file) => accumulateUsage(file));
+	// The main thread ran no real turn (only a `<synthetic>` notice, say) but its
+	// subagents did: they are billed in these totals, so their model is the one.
+	if (!main.lastModel) main.lastModel = subs.map((sub) => sub.lastModel).findLast((m) => m !== null) ?? null;
 	return tokenUsageFromRaw(main, subs, null);
 }
 
