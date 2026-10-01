@@ -2,10 +2,13 @@
  * Agent skill + MCP sync.
  */
 import * as assert from "node:assert/strict";
+import fsDefault from "node:fs";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { syncBuiltinESMExports } from "node:module";
 import { test } from "node:test";
+import * as cp from "node:child_process";
 import { repoRoot, writeJsonFile } from "./repo-paths.ts";
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-agent-sync-"));
@@ -15,6 +18,19 @@ fs.writeFileSync(
 	path.join(process.env.TARGET_HOME, "config.json"),
 	`${JSON.stringify({ host: "127.0.0.1", port: 8893, adminToken: "sync-test-token" })}\n`,
 );
+
+// Real `claude` binary (if any), resolved before the stubs below shadow it on PATH.
+const realClaude = (process.env.PATH ?? "")
+	.split(path.delimiter)
+	.map((dir) => path.join(dir, "claude"))
+	.find((candidate) => {
+		try {
+			fs.accessSync(candidate, fs.constants.X_OK);
+			return fs.statSync(candidate).isFile();
+		} catch {
+			return false;
+		}
+	});
 
 // Stub runner CLIs so sync tests do not depend on host-installed agents (CI has none).
 const mockBin = fs.mkdtempSync(path.join(os.tmpdir(), "target-mock-runners-"));
@@ -240,4 +256,53 @@ test("syncMcp tells claude-desktop users to restart it", () => {
 	const a = syncMcp({ homeDir: home, repoDir: repoRoot() }).find((x) => x.harness === "claude-desktop");
 	assert.equal(a?.action, "synced");
 	assert.equal(a?.detail, "restart Claude Desktop to load it");
+});
+
+test("syncMcp writes claude-code to .claude.json and never creates .claude/settings.json", () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "target-agent-sync-dest-"));
+	const actions = syncMcp({ homeDir: home, repoDir: repoRoot() });
+	const a = actions.find((x) => x.harness === "claude-code" && x.action === "synced");
+	assert.equal(a?.path, path.join(home, ".claude.json"));
+	assert.ok(readJson(path.join(home, ".claude.json")).mcpServers.target);
+	assert.equal(fs.existsSync(path.join(home, ".claude", "settings.json")), false);
+});
+
+test("syncMcp reports failed when the written entry does not read back", () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "target-agent-sync-verify-"));
+	const dest = path.join(home, ".claude.json");
+	const realRead = fsDefault.readFileSync;
+	// Simulate a destination that silently loses our entry after the write.
+	(fsDefault as any).readFileSync = (file: any, ...rest: any[]) => {
+		const out = (realRead as any)(file, ...rest);
+		if (file === dest && typeof out === "string" && out.includes('"managedBy"')) {
+			const doc = JSON.parse(out);
+			delete doc.mcpServers.target;
+			return JSON.stringify(doc);
+		}
+		return out;
+	};
+	syncBuiltinESMExports();
+	try {
+		const actions = syncMcp({ homeDir: home, repoDir: repoRoot() });
+		const a = actions.find((x) => x.harness === "claude-code");
+		assert.equal(a?.action, "failed");
+		assert.equal(a?.detail, "verify_mismatch");
+	} finally {
+		(fsDefault as any).readFileSync = realRead;
+		syncBuiltinESMExports();
+	}
+});
+
+test("claude mcp list shows the synced target server as Connected", { skip: realClaude ? false : "claude binary not installed" }, () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "target-agent-sync-claude-cli-"));
+	syncMcp({ homeDir: home, repoDir: repoRoot() });
+	const out = cp.spawnSync(realClaude as string, ["mcp", "list"], {
+		env: { ...process.env, HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: path.join(home, ".config") },
+		cwd: home,
+		encoding: "utf8",
+		timeout: 90_000,
+	});
+	const text = `${out.stdout}${out.stderr}`;
+	assert.match(text, /target:/);
+	assert.match(text, /Connected/);
 });
