@@ -273,7 +273,7 @@
         <p class="tagline">
           <strong>The Target Project</strong> is a small local hub. You write a
           <strong>workflow</strong> as a list of <strong>steps</strong>, and a coding
-          agent &mdash; <strong>Claude Code</strong> or <strong>free-code</strong> &mdash;
+          agent &mdash; <strong>Claude Code</strong>, <strong>free-code</strong>, <strong>Cursor Agent</strong> or <strong>GitHub Copilot CLI</strong> &mdash;
           runs them in order, on one shared conversation. You watch the progress, approve
           the steps that need a human, and reuse the step lists you repeat. This page walks
           through it like a story.
@@ -392,9 +392,9 @@
         <h3>What you pick here</h3>
         <ul>
           <li><strong>Working directory</strong> &mdash; where the agent works. Leave it empty for a private sandbox under <code>~/.target/sandboxes/</code>, or point it at a real repo. The <code>&hellip;</code> button browses the server&rsquo;s folders.</li>
-          <li><strong>Agent runtime</strong> &mdash; <code>Claude Code</code> (the default) or <code>free-code</code>. Only agent CLIs actually installed on this machine are offered (the hub probes each with <code>--version</code>); if none are installed, or the hub can&rsquo;t be reached to check, the dialog says so and won&rsquo;t let you create until one is. The engine, judges and retries behave the same either way; only the spawned CLI and the session-id shape differ. The runner is fixed for the workflow&rsquo;s life &mdash; to switch, make a new workflow.</li>
+          <li><strong>Agent runtime</strong> &mdash; <code>Claude Code</code> (the default), <code>free-code</code>, <code>Cursor Agent</code> or <code>GitHub Copilot</code> (<code>--runner claude|free-code|cursor|copilot</code>). Only agent CLIs actually installed on this machine are offered (the hub probes each with <code>--version</code>, and checks that the awb checkout ships its adapter); if none are installed, or the hub can&rsquo;t be reached to check, the dialog says so and won&rsquo;t let you create until one is. The engine, judges and retries behave the same either way; only the spawned CLI and the session-id shape differ. The runner is fixed for the workflow&rsquo;s life &mdash; to switch, make a new workflow.</li>
           <li><strong>Sandbox</strong> &mdash; <em>where</em> that runtime runs. <code>This machine</code> is the default and is what The Target Project has always done: the CLI runs as you, on your real filesystem. <code>Docker container</code> runs the very same invocation inside <code>docker run --rm</code>, with only the working directory and the harness&rsquo;s own state mounted in. It sits right next to the runtime because the two answer different halves of the same question &mdash; and because the sandbox is what bounds the permission choice underneath it. See <a href="#sandbox">Host or Docker</a>.</li>
-          <li><strong>Container image</strong> &mdash; only appears when you pick <code>Docker container</code>. Leave it empty for <code>target-agent:latest</code>, the image built from the repo&rsquo;s <code>Dockerfile</code>, or name your own: the image is a per-workflow field, so a Python repo and a Node repo can use different toolchains.</li>
+          <li><strong>Container image</strong> &mdash; only appears when you pick <code>Docker container</code>. Leave it empty for the runner&rsquo;s default (<code>target-agent:latest</code> for claude, <code>target-agent-freecode:latest</code>, <code>target-agent-cursor:latest</code>, <code>target-agent-copilot:latest</code>), or name your own: the image is a per-workflow field, so a Python repo and a Node repo can use different toolchains.</li>
           <li><strong>Agent permissions</strong> &mdash; how much the agent may do. <code>Read-only</code> by default: it can answer but can&rsquo;t write files or run commands. <code>acceptEdits</code> lets it write files inside its sandbox. <code>bypassPermissions</code> removes every check &mdash; so it asks you to confirm the risk first.</li>
           <li><strong>Start from template</strong> &mdash; copy a saved step list into the new workflow (more on <a href="#templates">templates</a> below).</li>
         </ul>
@@ -610,8 +610,8 @@
         <p>
           <strong>Open conversation</strong> opens a terminal on this machine,
           <code>cd</code>&rsquo;d into the workflow&rsquo;s working directory, running the
-          harness&rsquo;s resume command (<code>claude --resume &lt;id&gt;</code> or
-          <code>free-code --session &lt;path&gt;</code>) so you can pick up the conversation
+          harness&rsquo;s resume command (<code>claude --resume &lt;id&gt;</code>,
+          <code>free-code --session &lt;path&gt;</code> or <code>copilot --resume=&lt;id&gt;</code>) so you can pick up the conversation
           by hand.
         </p>
         <p>
@@ -713,11 +713,12 @@ target create my-flow --workdir ~/repos/thing --sandbox docker --image my-python
           The mounts are exactly three things: the working directory, the harness&rsquo;s home
           state (<code>~/.claude</code> and <code>~/.claude.json</code>, plus awb&rsquo;s
           <code>sessions/</code> directory and <code>~/.free-code</code> for free-code, whose
-          session ids <em>are</em> absolute paths), and whatever extra paths the hook was
+          session ids <em>are</em> absolute paths; <code>~/.cursor</code> for Cursor;
+          <code>~/.copilot</code> and <code>~/.cache/copilot</code> for Copilot), and whatever extra paths the hook was
           configured with. Nothing is derived from a step&rsquo;s text.
         </p>
 
-        <h3>Both runtimes are containerised &mdash; but they need different images</h3>
+        <h3>Every runtime is containerised &mdash; but they need different images</h3>
         <p>
           Docker is orthogonal to the runtime: a <code>claude</code> workflow and a
           <code>free-code</code> workflow both containerise through the same code path. What
@@ -731,6 +732,8 @@ target create my-flow --workdir ~/repos/thing --sandbox docker --image my-python
         </p>
         <pre><code>docker build -t target-agent:latest .                                    # claude
 docker build -t target-agent-freecode:latest -f Dockerfile.free-code .   # + free-code
+docker build -t target-agent-cursor:latest -f Dockerfile.cursor .        # + Cursor Agent
+docker build -t target-agent-copilot:latest -f Dockerfile.copilot .      # + GitHub Copilot CLI
 
 target create my-flow --runner free-code --sandbox docker \
   --image target-agent-freecode:latest</code></pre>
@@ -745,6 +748,42 @@ target create my-flow --runner free-code --sandbox docker \
           <code>-e</code>. That is what makes <code>subagent_create</code> work inside the
           container while the workdir stays untrusted.
         </p>
+        <p>
+          <strong>Copilot in a container needs a token.</strong> Its login lives in the OS
+          keyring, which a container cannot reach, so a <code>copilot</code> +
+          <code>docker</code> workflow authenticates with <code>COPILOT_GITHUB_TOKEN</code>
+          inside the container. You do not have to export anything: the hub finds the token
+          itself, in this order: its environment (<code>COPILOT_GITHUB_TOKEN</code>, then
+          <code>GH_TOKEN</code>, then <code>GITHUB_TOKEN</code>; an optional override, no longer
+          required), a token pasted in <em>Settings &rarr; Copilot in Docker</em>, then
+          <code>gh auth token</code> (GitHub CLI, also looked up in <code>/usr/bin</code>,
+          <code>/usr/local/bin</code> and <code>/opt/homebrew/bin</code> for apps started from
+          the desktop menu).
+        </p>
+        <p>
+          The check is lazy: only when a copilot docker workflow is created or dispatched. With
+          no token, creation answers <code>400 copilot_token_required</code> and the dialog
+          offers <strong>Sign in with GitHub CLI</strong> (the hub opens a terminal running
+          <code>gh auth login --web --hostname github.com</code>), <strong>Paste a token</strong>
+          and <strong>Check again</strong>. Copilot CLI accepts <code>gho_</code> OAuth tokens and
+          fine-grained <code>github_pat…</code> tokens; classic <code>ghp_</code> tokens are
+          rejected. A <code>gh</code> token has broader scopes (repo, workflow&hellip;) than
+          needed, so the hub warns: prefer a fine-grained token with only the
+          <em>Copilot Requests</em> permission.
+        </p>
+        <p>
+          The hub writes <code>COPILOT_GITHUB_TOKEN=&lt;value&gt;</code> into the hook&rsquo;s
+          <code>sandbox.env</code> (because the broker is a separate process that does not see
+          the hub&rsquo;s environment) and refreshes it before every dispatch, so rotation needs
+          no restart; <code>hooks.json</code> is written with mode 600. awb runs
+          <code>docker run -e COPILOT_GITHUB_TOKEN</code> (the name only) and sets the value in
+          the <code>docker</code> client&rsquo;s own environment, so it is not in <code>ps</code>
+          or the run log; the hub never returns it from the API or writes it to logs, progress
+          files or reports. <code>~/.copilot</code> (sessions) and <code>~/.cache/copilot</code>
+          (the bundled CLI) are mounted at their own paths. The desktop app inherits the GUI
+          session&rsquo;s environment rather than your shell&rsquo;s; the in-app sign-in or paste
+          flow removes the need to launch it from a terminal.
+        </p>
 
         <div class="callout warn">
           <span class="tag">same path inside and out</span>
@@ -757,7 +796,7 @@ target create my-flow --runner free-code --sandbox docker \
 
         <h3>The image</h3>
         <p>
-          The default is <code>target-agent:latest</code>, built from the <code>Dockerfile</code>
+          The default for claude is <code>target-agent:latest</code>, built from the <code>Dockerfile</code>
           at the root of the repo &mdash; Node&nbsp;24, the <code>claude</code> CLI,
           <code>git</code>, <code>ripgrep</code>, and a non-root user:
         </p>
@@ -786,7 +825,7 @@ docker build -t target-agent:latest \
         <p>
           A <code>running</code> step isn&rsquo;t failed on a wall clock. The hub watches the
           files the agent writes while it works (Claude transcripts &mdash; subagent
-          transcripts included &mdash; free-code session files, and the run log) and only
+          transcripts included &mdash; free-code session files, Copilot&rsquo;s <code>events.jsonl</code>, and the run log) and only
           declares a timeout when <strong>nothing has changed</strong> for
           <code>stepIdleTimeoutMs</code> (default 10 minutes), or when the step blows past the
           absolute ceiling <code>stepHardTimeoutMs</code> (default 6 hours) however busy it
@@ -808,6 +847,33 @@ docker build -t target-agent:latest \
           confirmation. What that check-free agent can actually reach is then bounded by its
           <a href="#sandbox">sandbox</a>: on the host, your whole machine; in a container, its
           mounts.
+        </p>
+        <h3>GitHub Copilot CLI (<code>--runner copilot</code>)</h3>
+        <p>
+          A <code>copilot</code> workflow runs <code>copilot -p</code> for every step. Its session
+          ids are bare uuids: the first step creates one with <code>--session-id=&lt;uuid&gt;</code>,
+          the rest (and the judge) continue it with <code>--resume=&lt;id&gt;</code>, and
+          <em>Open conversation</em> runs <code>copilot --resume=&lt;id&gt;</code>. A resumed
+          session keeps the directory it was created in. Copilot can&rsquo;t ask in
+          <code>-p</code>, so the permission mode becomes tool flags that deny whatever isn&rsquo;t
+          approved at once (and it still exits 0):
+        </p>
+        <table>
+          <thead><tr><th>Permissions</th><th>Copilot flags</th><th>Effect</th></tr></thead>
+          <tbody>
+            <tr><td>Read-only (unset, <code>manual</code>, <code>plan</code>)</td><td><code>--available-tools=view,grep,glob --deny-tool=write --deny-tool=shell</code></td><td>read-only</td></tr>
+            <tr><td><code>acceptEdits</code></td><td><code>--allow-tool=write --deny-tool=shell</code></td><td>edits yes, shell no</td></tr>
+            <tr><td><code>auto</code>, <code>dontAsk</code></td><td><code>--allow-all-tools</code></td><td>all tools, workdir and <code>/tmp</code> only</td></tr>
+            <tr><td><code>bypassPermissions</code></td><td><code>--allow-all</code></td><td>everything</td></tr>
+          </tbody>
+        </table>
+        <p>
+          Tokens, model and context come from the session&rsquo;s own
+          <code>~/.copilot/session-state/&lt;id&gt;/events.jsonl</code>. The context meter shows
+          Copilot&rsquo;s exact occupancy (<code>currentTokens</code>) against the model&rsquo;s
+          prompt limit, never marked as an estimate, and a successful
+          <code>session.compaction_complete</code> there re-arms the conversation-context
+          recovery like the other runners&rsquo; compaction records.
         </p>
         <h3>Abort a stuck step</h3>
         <p>
@@ -867,7 +933,7 @@ npm run target:install</code></pre>
           <table>
             <thead><tr><th>Command</th><th>What it does</th></tr></thead>
             <tbody>
-              <tr><td><code>target create &lt;name&gt;</code></td><td>Creates a workflow (+ its agent/hook). Flags: <code>--workdir</code>, <code>--permission-mode</code>, <code>--runner claude|free-code</code>, <code>--sandbox host|docker</code>, <code>--image &lt;name&gt;</code>, <code>--yes-bypass-risk</code>. Prints the sandbox it settled on.</td></tr>
+              <tr><td><code>target create &lt;name&gt;</code></td><td>Creates a workflow (+ its agent/hook). Flags: <code>--workdir</code>, <code>--permission-mode</code>, <code>--runner claude|free-code|cursor|copilot</code>, <code>--sandbox host|docker</code>, <code>--image &lt;name&gt;</code>, <code>--yes-bypass-risk</code>. Prints the sandbox it settled on.</td></tr>
               <tr><td><code>target create-from-template &lt;templateId&gt; &lt;name&gt;</code></td><td>Same, seeded with a template&rsquo;s steps. Takes the same <code>--workdir</code> / <code>--permission-mode</code> / <code>--runner</code> / <code>--sandbox</code> / <code>--image</code> flags.</td></tr>
               <tr><td><code>target set-context &lt;id&gt; "&lt;text&gt;"</code></td><td>Sets (or clears, with <code>""</code>) the conversation context.</td></tr>
               <tr><td><code>target add-step &lt;id&gt; &lt;description&gt;</code></td><td>Appends a step.</td></tr>
@@ -901,7 +967,7 @@ npm run target:install</code></pre>
 awb    →  <span class="hl">queued</span> (waiting on the workdir lock)      serialized per workdir; the lock survives broker restarts
 awb    →  POST startedCallbackUrl {started:true}   the instant the lock is acquired
 hub    →  step <span class="hl">running</span> (idle clock starts here)
-awb    →  spawns <span class="hl">claude</span> or <span class="hl">free-code</span>             the step's description, with the subagent instruction appended
+awb    →  spawns <span class="hl">claude</span>, <span class="hl">free-code</span>, <span class="hl">cursor</span> or <span class="hl">copilot</span>       the step's description, with the subagent instruction appended
           …on the host, or wrapped in <span class="hl">docker run --rm</span>   only if the workflow chose sandbox: docker; the broker itself never moves
 awb    →  POST callbackUrl {ok, result, session_id}  when the run finishes
 hub    →  step <span class="hl">done</span> · <span class="hl">judging</span> · or <span class="hl">waiting</span>     done if no criteria; judging if it has them; waiting if gated

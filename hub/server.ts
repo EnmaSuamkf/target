@@ -11,7 +11,7 @@
  *   POST   /api/auth/password/reset                   → recovery-token password reset (open, per-IP throttled)
  *   GET    /api/permissions                           → owner-role mode for the UI (admin token; no permission required)
  *   GET    /api/workflows                             → list (with progress %); ?archived=exclude|include|only (default exclude; else 400)
- *   GET    /api/runners                               → which agent CLIs (claude/free-code) are installed on this host, for the create form
+ *   GET    /api/runners                               → which agent CLIs (claude/free-code/cursor/copilot) are installed on this host, for the create form
  *   POST   /api/workflows                             → create (admin token) — makes the awb hook too; optional templateId seeds its steps
  *   GET    /api/workflows/:id                          → detail + steps
  *   GET    /api/workflows/:id/session-info                → harness + session id + token usage of the current/last session
@@ -66,6 +66,10 @@
  *   PUT    /api/settings/notifications                     → replace the notification preferences (admin token)
  *   GET    /api/settings/notifications/slack-credentials   → Slack delivery tokens (flags; admin also gets effective xoxc/xoxd)
  *   PUT    /api/settings/notifications/slack-credentials   → replace Slack delivery tokens (admin token; blank keeps existing)
+ *   GET    /api/copilot/token-status                      → non-secret facts about the GitHub token copilot+docker would use (admin token)
+ *   PUT    /api/settings/copilot-token                    → store a pasted GitHub token {token}; classic ghp_ rejected (admin token; never echoed back)
+ *   DELETE /api/settings/copilot-token                    → forget the stored token (admin token)
+ *   POST   /api/copilot/gh-login                          → open a local terminal running `gh auth login --web` (admin token)
  *   POST   /api/settings/notifications/test                → send a Slack connection-test DM (admin token)
  *   GET    /api/settings/shortcuts                        → keyboard-shortcut preferences (master switch + key per action)
  *   PUT    /api/settings/shortcuts                        → replace the shortcut preferences (admin token)
@@ -107,7 +111,10 @@ import {
 	explainRunError,
 	harnessResumeCommand,
 	harnessResumeEnv,
+	harnessResumeSecretEnv,
 	hookRuntime,
+	sandboxTokenProblem,
+	type SandboxTokenProblem,
 	PUBLISHABLE_PERMISSION_MODES,
 	type PublishablePermissionMode,
 	PUBLISHABLE_RUNNERS,
@@ -173,7 +180,9 @@ import {
 	saveReportSettings,
 	saveSyncSettings,
 	toPublicReportSettings,
+	clearCopilotToken,
 	getSlackDeliverySettings,
+	saveCopilotToken,
 	saveSlackDeliverySettings,
 	toPublicSlackDeliverySettings,
 	saveShortcutSettings,
@@ -235,7 +244,13 @@ import { importResourcesFromFolder, MAX_RESOURCE_SET_BYTES, ResourceImportError 
 import { sendTestNotification } from "./notifier.ts";
 import { stepActivity } from "./progress.ts";
 import type { Logger } from "./runner.ts";
-import { openResumeTerminal } from "./terminal.ts";
+import { NoTerminalEmulatorError, openResumeTerminal } from "./terminal.ts";
+import {
+	CLASSIC_TOKEN_MESSAGE,
+	classifyToken,
+	copilotTokenStatus,
+	ghInstalled,
+} from "./copilot-token.ts";
 import { canReadTokenUsage, readTokenUsage } from "./transcript.ts";
 import {
 	abortStep,
@@ -465,6 +480,18 @@ function resetThrottleClear(key: string): void {
  * the legacy admin bearer token (automation/scripts, the transition path) or
  * a valid login-session cookie (what the UI uses after setup + login).
  */
+/**
+ * The 400 for a copilot+docker workflow with no usable GitHub token. `error`
+ * stays a plain string code for old clients; `message`, `actions` and the
+ * (token-free) `status` let the UI offer "Sign in with GitHub CLI" / "Paste a token".
+ */
+function sendTokenRequired(res: http.ServerResponse, problem: SandboxTokenProblem): void {
+	sendJson(res, 400, problem);
+}
+
+/** What "Sign in with GitHub CLI" runs in the terminal. A constant: never built from request input. */
+const GH_LOGIN_COMMAND = "gh auth login --web --hostname github.com";
+
 function isAdmin(cfg: HubConfig, headers: http.IncomingHttpHeaders): boolean {
 	const provided = bearerToken(headers);
 	if (provided.length > 0 && timingSafeEqualStr(provided, cfg.adminToken)) return true;
@@ -999,6 +1026,13 @@ function parseCloneOverrides(body: Record<string, unknown>, res: http.ServerResp
 				"docker is not available on this host (no docker on PATH, or the daemon isn't running), so a docker workflow's steps could not run. Start Docker and retry, or clone this workflow onto the host sandbox.",
 		});
 		return null;
+	}
+	if (overrides.sandbox === "docker" && overrides.runner) {
+		const tokenProblem = sandboxTokenProblem(overrides.runner, "docker");
+		if (tokenProblem) {
+			sendTokenRequired(res, tokenProblem);
+			return null;
+		}
 	}
 	if (overrides.sandbox === "host" && overrides.runner !== undefined) {
 		const runner = overrides.runner ?? "claude";
@@ -2098,6 +2132,86 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 
+	// --- /api/copilot/token-status, /api/copilot/gh-login, /api/settings/copilot-token ---
+	//
+	// The GitHub token a copilot + docker workflow needs (see copilot-token.ts).
+	// Everything here is admin-gated and none of it ever returns or logs the
+	// token: the status carries non-secret facts only, PUT answers with that
+	// same status, and the pasted value is stored in the settings table.
+
+	if (parts[1] === "copilot" && parts[2] === "token-status" && !parts[3] && req.method === "GET") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		sendJson(res, 200, { status: copilotTokenStatus() });
+		return;
+	}
+
+	if (parts[1] === "settings" && parts[2] === "copilot-token" && !parts[3]) {
+		if (req.method !== "PUT" && req.method !== "DELETE") {
+			sendJson(res, 404, { error: "not_found" });
+			return;
+		}
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		if (req.method === "DELETE") {
+			clearCopilotToken();
+			log("copilot token removed from settings");
+			sendJson(res, 200, { status: copilotTokenStatus() });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const token = typeof body.token === "string" ? body.token.trim() : "";
+			if (token === "") {
+				sendJson(res, 400, { error: "token is required" });
+				return;
+			}
+			if (/\s/.test(token)) {
+				sendJson(res, 400, { error: "token must not contain whitespace or newlines" });
+				return;
+			}
+			if (classifyToken(token) === "classic") {
+				sendJson(res, 400, { error: CLASSIC_TOKEN_MESSAGE });
+				return;
+			}
+			saveCopilotToken(token);
+			log("copilot token stored in settings");
+			sendJson(res, 200, { status: copilotTokenStatus() });
+		});
+		return;
+	}
+
+	// Opens a real terminal on this machine (the hub is a local single-user
+	// tool, like "Open conversation") for the operator to finish gh's browser /
+	// device flow. The command is a constant: nothing from the request reaches it.
+	if (parts[1] === "copilot" && parts[2] === "gh-login" && !parts[3] && req.method === "POST") {
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		if (!ghInstalled()) {
+			sendJson(res, 400, {
+				error: "gh_not_installed",
+				message: "GitHub CLI (gh) is not installed. Install it from https://cli.github.com and try again, or paste a token instead.",
+			});
+			return;
+		}
+		(async () => {
+			try {
+				await openResumeTerminal(os.homedir(), GH_LOGIN_COMMAND);
+				log("gh auth login terminal opened");
+				sendJson(res, 202, { opened: true });
+			} catch (err) {
+				const noTerminal = err instanceof NoTerminalEmulatorError;
+				sendJson(res, noTerminal ? 409 : 500, { error: String((err as Error).message ?? err) });
+			}
+		})();
+		return;
+	}
+
 	// --- /api/settings/notifications/slack-credentials ---
 	//
 	// Slack web-client tokens (xoxc / xoxd) used for direct delivery. Nested under
@@ -2972,6 +3086,14 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					});
 					return;
 				}
+				// Copilot inside a container can't use the host keyring login: the hub
+				// has to find a GitHub token (env, Settings or gh) to hand it in. Fail
+				// here with the fix rather than at the first step.
+				const tokenProblem = sandboxTokenProblem(runner ?? "claude", sandbox);
+				if (tokenProblem) {
+					sendTokenRequired(res, tokenProblem);
+					return;
+				}
 				// Host sandbox: the runner's CLI has to actually be installed on THIS
 				// machine, because the broker — which runs here in phase 1 — later
 				// execs that binary directly; a runner not on PATH is doomed to fail at
@@ -3436,8 +3558,8 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			sandbox: runtime.sandbox?.kind ?? "host",
 			image: runtime.sandbox?.image ?? null,
 			usage:
-				sessionId && canReadTokenUsage(runtime.workdir, sessionId)
-					? readTokenUsage(runtime.workdir ?? "", sessionId)
+				sessionId && canReadTokenUsage(runtime.workdir, sessionId, runtime.harness)
+					? readTokenUsage(runtime.workdir ?? "", sessionId, runtime.harness)
 					: null,
 			lastCompactionAt: observed.lastCompactionAt,
 			/** True between observing a boundary and the next dispatch re-stating the conversation context. */
@@ -3489,7 +3611,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		const workdir = runtime.workdir;
 		(async () => {
 			try {
-				await openResumeTerminal(workdir, resumeCommand, harnessResumeEnv(runtime.harness));
+				await openResumeTerminal(workdir, resumeCommand, harnessResumeEnv(runtime.harness), harnessResumeSecretEnv(runtime.harness, runtime.sandbox));
 				sendJson(res, 200, { ok: true, sessionId, workdir });
 			} catch (err) {
 				sendJson(res, 500, { error: String((err as Error).message ?? err) });
@@ -3785,7 +3907,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		const sessionId = step.sessionId;
 		(async () => {
 			try {
-				await openResumeTerminal(workdir, resumeCommand, harnessResumeEnv(runtime.harness));
+				await openResumeTerminal(workdir, resumeCommand, harnessResumeEnv(runtime.harness), harnessResumeSecretEnv(runtime.harness, runtime.sandbox));
 				sendJson(res, 200, { ok: true, sessionId, workdir });
 			} catch (err) {
 				sendJson(res, 500, { error: String((err as Error).message ?? err) });

@@ -34,7 +34,7 @@ const realClaude = (process.env.PATH ?? "")
 
 // Stub runner CLIs so sync tests do not depend on host-installed agents (CI has none).
 const mockBin = fs.mkdtempSync(path.join(os.tmpdir(), "target-mock-runners-"));
-for (const name of ["agent", "claude", "free-code"]) {
+for (const name of ["agent", "claude", "free-code", "copilot"]) {
 	fs.writeFileSync(path.join(mockBin, name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 }
 process.env.PATH = `${mockBin}${path.delimiter}${process.env.PATH ?? ""}`;
@@ -49,6 +49,14 @@ test("syncSkills writes skill files for installed runners", () => {
 	assert.ok(fs.existsSync(workflowsPath));
 	assert.ok(fs.existsSync(createPath));
 	assert.match(fs.readFileSync(workflowsPath, "utf8"), new RegExp(`TARGET_SKILL_VERSION: "${TARGET_SKILL_VERSION}"`));
+	assert.match(fs.readFileSync(createPath, "utf8"), /name: create-workflow/);
+});
+
+test("syncSkills installs skills for copilot under ~/.copilot/skills", () => {
+	const actions = syncSkills({ homeDir: tmpHome, repoDir: repoRoot(), force: true });
+	assert.ok(actions.some((a) => a.harness === "copilot" && a.action === "synced"));
+	const createPath = path.join(tmpHome, ".copilot/skills/create-workflow/SKILL.md");
+	assert.ok(fs.existsSync(createPath));
 	assert.match(fs.readFileSync(createPath, "utf8"), /name: create-workflow/);
 });
 
@@ -87,6 +95,33 @@ test("syncMcp merges target server into cursor mcp.json", () => {
 	assert.equal(parsed.mcpServers.target.env?.TARGET_ADMIN_TOKEN, "sync-test-token");
 	assert.equal(parsed.mcpServers.target.managedBy, "target");
 	assert.ok(parsed.mcpServers.other);
+});
+
+test("syncMcp merges target server into copilot mcp-config.json under mcpServers", () => {
+	const mcpFile = path.join(tmpHome, ".copilot/mcp-config.json");
+	fs.rmSync(mcpFile, { force: true });
+	const actions = syncMcp({
+		homeDir: tmpHome,
+		repoDir: repoRoot(),
+		cfg: {
+			host: "127.0.0.1",
+			port: 8893,
+			adminToken: "sync-test-token",
+			stepTimeoutMs: 1,
+			stepIdleTimeoutMs: 1,
+			stepIdleWarnMs: 1,
+			stepHardTimeoutMs: 1,
+			progressProbeThrottleMs: 1,
+			queuedTimeoutMs: 1,
+			maxInputBytes: 1024,
+		},
+		force: true,
+	});
+	assert.ok(actions.some((a) => a.harness === "copilot" && a.action === "synced"));
+	const parsed = JSON.parse(fs.readFileSync(mcpFile, "utf8")) as {
+		mcpServers: Record<string, { env?: Record<string, string> }>;
+	};
+	assert.equal(parsed.mcpServers.target.env?.TARGET_ADMIN_TOKEN, "sync-test-token");
 });
 
 test("syncMcp enables free-code mcp status when configured", () => {

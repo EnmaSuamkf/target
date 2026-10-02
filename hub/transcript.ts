@@ -16,7 +16,11 @@
  *   conversation for all its steps, so that boundary is the point at which the
  *   agent stops remembering the steps before it, and the hub has to know.
  *
- * Two harnesses, two layouts:
+ * Four harnesses, four layouts. Callers pass the workflow's harness
+ * (`hookRuntime(...).harness`) to `readTokenUsage`, which then dispatches on it.
+ * Shape-sniffing the session id is only the fallback for an unknown harness,
+ * and it is unsafe on its own: Claude, Cursor and Copilot session ids are all
+ * bare uuids, so nothing in the id says which tree to look in.
  *
  * - **Claude Code** — `~/.claude/projects/<slug>/<sessionId>.jsonl`, where the
  *   slug is the absolute workdir with every character that isn't
@@ -41,6 +45,8 @@
  *   it comes from the run's `--model` flag when there is one, else from
  *   Cursor's own tracking database (`cursorModelFromTracking`); the window is
  *   the size the run or the CLI config states for it, else `models.ts`.
+ * - **GitHub Copilot CLI** — `~/.copilot/session-state/<id>/events.jsonl`
+ *   (read from the tail only; see `readCopilotUsage`).
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -115,17 +121,21 @@ export function cursorChatDir(sessionId: string): string | null {
  * One compaction boundary read out of a transcript: the moment the harness
  * replaced the conversation's earlier history with a summary.
  *
- * The two harnesses write completely different records for it, and only one of
- * them says anything about tokens, so everything except `at` is optional. `at`
+ * The three harnesses write completely different records for it, and only some
+ * of them say anything about tokens, so everything except `at` is optional. `at`
  * is the whole signal — a boundary newer than the hub's last dispatch means the
  * history that dispatch relied on is gone.
  */
 export interface CompactionBoundary {
 	/** ISO timestamp the harness stamped on the boundary record. */
 	at: string;
-	/** Which harness's record this came from — worth surfacing, the two mean the same thing but look nothing alike. */
-	format: "claude" | "free-code";
-	/** claude's `compactMetadata.trigger` ("manual" | "auto"). free-code records none. */
+	/** Which harness's record this came from — worth surfacing, they mean the same thing but look nothing alike. */
+	format: "claude" | "free-code" | "copilot";
+	/**
+	 * claude's `compactMetadata.trigger` ("manual" | "auto"); Copilot's
+	 * `session.compaction_complete.data.trigger` ("manual" | "threshold", the same
+	 * value its `compaction_start` carries). free-code records none.
+	 */
 	trigger: string | null;
 	/** Context occupancy either side of the boundary, when the record carries it at all. Never required. */
 	preTokens: number | null;
@@ -198,6 +208,8 @@ interface RawUsage {
 	cursorRuns: CursorRunUsage[];
 	/** Cursor-only: a window the run itself declared (`--model 'x[context=1m]'`), or null. See `contextWindowForModel`'s `stated`. */
 	statedContextWindow: number | null;
+	/** Harness whose model table the window lookup should prefer (`"copilot"`: its ids overlap other harnesses'). */
+	windowHarness: string | null;
 	/** Model id of the last turn / `model_change` record seen, for the window lookup. */
 	lastModel: string | null;
 	/** Latest compaction boundary in this file, and how many there were. */
@@ -218,6 +230,7 @@ function emptyRawUsage(): RawUsage {
 		recentContexts: [],
 		cursorRuns: [],
 		statedContextWindow: null,
+		windowHarness: null,
 		lastModel: null,
 		lastCompaction: null,
 		compactions: 0,
@@ -273,13 +286,37 @@ function freeCodeBoundary(obj: Record<string, unknown>): CompactionBoundary | nu
 }
 
 /**
+ * Copilot CLI's compaction record, written into the session's `events.jsonl`:
+ * `{"type":"session.compaction_complete","data":{"success":true,"preCompactionTokens":N,
+ * "postCompactionTokens":N,"trigger":"manual"|"threshold",…},"timestamp":…}`.
+ * A boundary ONLY when `data.success === true`: a failed compaction (seen for
+ * automatic ones) threw nothing away. The token figures count the conversation
+ * only, not the system prompt or tool definitions. `session.compaction_start`
+ * is not a boundary — the work may still fail.
+ */
+function copilotBoundary(obj: Record<string, unknown>): CompactionBoundary | null {
+	if (obj.type !== "session.compaction_complete") return null;
+	if (typeof obj.timestamp !== "string") return null;
+	const data = obj.data as Record<string, unknown> | undefined;
+	if (!data || data.success !== true) return null;
+	return {
+		at: obj.timestamp,
+		format: "copilot",
+		trigger: typeof data.trigger === "string" ? data.trigger : null,
+		preTokens: optionalNumber(data, "preCompactionTokens"),
+		postTokens: optionalNumber(data, "postCompactionTokens"),
+	};
+}
+
+/**
  * One reader per transcript format, tried in turn. Exported so the format
  * contract can be pinned against REAL boundary records copied out of
- * `~/.claude/projects/` and `~/.agent-webhook-bridge/sessions/` rather than
+ * `~/.claude/projects/`, `~/.agent-webhook-bridge/sessions/` and
+ * `~/.copilot/session-state/` rather than
  * against a shape we invented.
  */
 export function compactionBoundaryOfLine(obj: Record<string, unknown>): CompactionBoundary | null {
-	return claudeBoundary(obj) ?? freeCodeBoundary(obj);
+	return claudeBoundary(obj) ?? freeCodeBoundary(obj) ?? copilotBoundary(obj);
 }
 
 /**
@@ -991,7 +1028,7 @@ function tokenUsageFromRaw(
 		output += sub.output;
 		turns += sub.turns;
 	}
-	const contextWindow = contextWindowForModel(main.lastModel, main.statedContextWindow);
+	const contextWindow = contextWindowForModel(main.lastModel, main.statedContextWindow, main.windowHarness);
 	const contextTokens = cursor
 		? estimateCursorOccupancy(main.cursorRuns, cursor.transcript, contextWindow)
 		: plausibleOccupancy(main.recentContexts, main.lastContext, contextWindow);
@@ -1036,22 +1073,372 @@ function subagentFiles(workdir: string, sessionId: string): string[] {
  * its real work to a subagent. All-zero if the session's transcript doesn't
  * exist yet.
  */
-/** True when `readTokenUsage` can resolve a transcript for this session id. */
-export function canReadTokenUsage(workdir: string | null, sessionId: string): boolean {
+/**
+ * True when `readTokenUsage` can resolve a transcript for this session id.
+ * `harness` is the runner the workflow's hook reports (`hookRuntime(...).harness`);
+ * null/unknown falls back to sniffing the id's shape.
+ */
+export function canReadTokenUsage(workdir: string | null, sessionId: string, harness?: string | null): boolean {
 	if (!sessionId) return false;
+	switch (harness) {
+		case "free-code":
+			return true;
+		case "copilot":
+			// Looked up by session id under the Copilot state dir; no workdir slug.
+			return true;
+		case "claude":
+		case "cursor":
+			return Boolean(workdir);
+	}
 	// free-code sessions ARE absolute .jsonl paths — no workdir slug applies.
 	if (sessionId.endsWith(".jsonl") && path.isAbsolute(sessionId)) return true;
 	return Boolean(workdir);
 }
 
-export function readTokenUsage(workdir: string, sessionId: string): TokenUsage {
-	// free-code sessions ARE .jsonl paths — read the transcript directly; there
-	// is no per-workdir project folder and no subagent-transcript convention.
-	const isFreeCodeSession = sessionId.endsWith(".jsonl") && path.isAbsolute(sessionId);
-	if (isFreeCodeSession) {
-		const main = accumulateUsage(sessionId);
-		return tokenUsageFromRaw(main, [], null);
+/** The all-zero usage: what a session with no readable transcript reports. */
+function emptyTokenUsage(): TokenUsage {
+	return tokenUsageFromRaw(emptyRawUsage(), [], null);
+}
+
+/** free-code: the session id IS the `.jsonl` path; no project folder, no subagent convention. */
+function readFreeCodeUsage(sessionId: string): TokenUsage {
+	const raw = accumulateUsage(sessionId);
+	raw.windowHarness = "free-code";
+	return tokenUsageFromRaw(raw, [], null);
+}
+
+/**
+ * Base directory the Copilot CLI keeps its state in: `COPILOT_HOME` when set
+ * (the CLI honours it too), else `~/.copilot`. One function so tests can point
+ * every Copilot reader at a temp dir.
+ */
+export function copilotHome(): string {
+	return process.env.COPILOT_HOME || path.join(os.homedir(), ".copilot");
+}
+
+/** `<copilot home>/session-state/<sessionId>/events.jsonl` when it is a regular file; null otherwise (ids with path separators never resolve). */
+export function copilotEventsPath(sessionId: string): string | null {
+	if (!sessionId || sessionId.includes("/") || sessionId.includes("\\") || sessionId.includes("..")) return null;
+	const file = path.join(copilotHome(), "session-state", sessionId, "events.jsonl");
+	try {
+		return fs.statSync(file).isFile() ? file : null;
+	} catch {
+		return null;
 	}
+}
+
+/** What the tail of a Copilot `events.jsonl` says about a session. */
+interface CopilotTailReading {
+	model: string | null;
+	/** `data` of the LAST `session.shutdown`, or null while the session has none yet. */
+	shutdown: Record<string, unknown> | null;
+}
+
+const COPILOT_TAIL_START_BYTES = 1024 * 1024;
+/** A session that never wrote a shutdown stops growing the read here rather than re-reading a huge file. */
+const COPILOT_TAIL_MAX_BYTES = 64 * 1024 * 1024;
+const COPILOT_CACHE_MAX_ENTRIES = 32;
+const copilotReadingCache = new Map<string, { mtimeMs: number; size: number; reading: CopilotTailReading }>();
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+	return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function nonEmptyString(value: unknown): string | null {
+	return typeof value === "string" && value.trim() ? value : null;
+}
+
+/** Reads the last `bytes` bytes of `file` (all of it when shorter) and whether that reaches the file start. */
+function readFileTail(file: string, size: number, bytes: number): { text: string; atStart: boolean } {
+	const start = Math.max(0, size - bytes);
+	const length = size - start;
+	const buf = Buffer.alloc(length);
+	const fd = fs.openSync(file, "r");
+	try {
+		let read = 0;
+		while (read < length) {
+			const n = fs.readSync(fd, buf, read, length - read, start + read);
+			if (n <= 0) break;
+			read += n;
+		}
+		return { text: buf.toString("utf8", 0, read), atStart: start === 0 };
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+/**
+ * Scans the tail of a Copilot events file for the last shutdown and the model.
+ * Lines are classified by their leading `"type"` (always the first key) before
+ * any JSON.parse: the file is dominated by encrypted reasoning blobs and
+ * snapshots, and only a handful of lines are worth parsing.
+ *
+ * The read starts at 1 MiB and doubles until a shutdown is found (it carries
+ * the cumulative totals) or the file start is reached. Without a shutdown (a
+ * running or crashed session) it also keeps growing until a model is found.
+ */
+function scanCopilotEvents(file: string, size: number): CopilotTailReading {
+	let bytes = COPILOT_TAIL_START_BYTES;
+	for (;;) {
+		const { text, atStart } = readFileTail(file, size, bytes);
+		const lines = text.split("\n");
+		// Without the file start, the first line is cut mid-record.
+		if (!atStart) lines.shift();
+		let shutdown: Record<string, unknown> | null = null;
+		let mainModel: string | null = null;
+		let anyModel: string | null = null;
+		let changedModel: string | null = null;
+		for (let i = lines.length - 1; i >= 0; i--) {
+			const line = lines[i];
+			if (!line) continue;
+			const head = line.slice(0, 64);
+			const isShutdown = shutdown === null && head.includes('"session.shutdown"');
+			const isMessage = mainModel === null && head.includes('"assistant.message"');
+			const isChange = changedModel === null && head.includes('"session.model_change"');
+			if (!isShutdown && !isMessage && !isChange) continue;
+			let event: Record<string, unknown> | null;
+			try {
+				event = asRecord(JSON.parse(line));
+			} catch {
+				continue; // a torn line (the agent was mid-write)
+			}
+			const data = asRecord(event?.data);
+			if (!data) continue;
+			if (isShutdown) shutdown = data;
+			else if (isMessage) {
+				const model = nonEmptyString(data.model);
+				if (!model) continue;
+				// A subagent's message (it has a parent tool call) may name a cheaper model than the main thread's.
+				if (data.parentToolCallId === undefined || data.parentToolCallId === null) mainModel = model;
+				else anyModel ??= model;
+			} else changedModel = nonEmptyString(data.newModel);
+			if (shutdown !== null && mainModel !== null) break;
+		}
+		const model = mainModel ?? anyModel ?? changedModel ?? (shutdown ? nonEmptyString(shutdown.currentModel) : null);
+		if (atStart || bytes >= COPILOT_TAIL_MAX_BYTES || shutdown !== null || model !== null) return { model, shutdown };
+		bytes *= 2;
+	}
+}
+
+/** `scanCopilotEvents` cached by (path, mtime, size): the UI polls this every couple of seconds. */
+function copilotReading(file: string): CopilotTailReading | null {
+	let stat: fs.Stats;
+	try {
+		stat = fs.statSync(file);
+	} catch {
+		return null;
+	}
+	const cached = copilotReadingCache.get(file);
+	if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.reading;
+	let reading: CopilotTailReading;
+	try {
+		reading = scanCopilotEvents(file, stat.size);
+	} catch {
+		return null;
+	}
+	if (copilotReadingCache.size >= COPILOT_CACHE_MAX_ENTRIES) {
+		const oldest = copilotReadingCache.keys().next().value;
+		if (oldest !== undefined) copilotReadingCache.delete(oldest);
+	}
+	copilotReadingCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, reading });
+	return reading;
+}
+
+/**
+ * Every successful compaction in a Copilot `events.jsonl`, over the WHOLE
+ * history. The usage reader only looks at the file's tail, but a compaction can
+ * be megabytes back and the boundary count has to be right regardless.
+ *
+ * Cheap by construction: lines are only substring-searched, and only the few
+ * that contain `session.compaction_complete` are parsed. The scan is
+ * incremental — the cache remembers how far it got (the end of the last
+ * complete line), so a growing file is read from there, not from the start; a
+ * file that shrank is read again from zero.
+ */
+interface CopilotCompactions {
+	/** Byte offset just past the last newline scanned. */
+	offset: number;
+	count: number;
+	last: CompactionBoundary | null;
+}
+
+const copilotCompactionCache = new Map<string, CopilotCompactions>();
+const COPILOT_SCAN_CHUNK_BYTES = 4 * 1024 * 1024;
+
+function copilotCompactions(file: string): CopilotCompactions {
+	let size: number;
+	try {
+		size = fs.statSync(file).size;
+	} catch {
+		return { offset: 0, count: 0, last: null };
+	}
+	let state = copilotCompactionCache.get(file) ?? { offset: 0, count: 0, last: null };
+	if (state.offset > size) state = { offset: 0, count: 0, last: null };
+	if (state.offset === size) return state;
+	let { offset, count, last } = state;
+	let fd: number;
+	try {
+		fd = fs.openSync(file, "r");
+	} catch {
+		return state;
+	}
+	try {
+		let carry: Buffer = Buffer.alloc(0);
+		let position = offset;
+		const chunk = Buffer.alloc(COPILOT_SCAN_CHUNK_BYTES);
+		while (position < size) {
+			const n = fs.readSync(fd, chunk, 0, Math.min(chunk.length, size - position), position);
+			if (n <= 0) break;
+			position += n;
+			const data: Buffer = carry.length ? Buffer.concat([carry, chunk.subarray(0, n)]) : Buffer.from(chunk.subarray(0, n));
+			const end = data.lastIndexOf(10);
+			if (end < 0) {
+				carry = data;
+				continue;
+			}
+			for (const line of data.toString("utf8", 0, end).split("\n")) {
+				if (!line.includes('"session.compaction_complete"')) continue;
+				try {
+					const boundary = compactionBoundaryOfLine(JSON.parse(line) as Record<string, unknown>);
+					if (boundary) {
+						count += 1;
+						last = boundary;
+					}
+				} catch {
+					// not a record we can read: a torn or foreign line
+				}
+			}
+			offset += end + 1;
+			carry = Buffer.from(data.subarray(end + 1));
+		}
+	} catch {
+		return state;
+	} finally {
+		fs.closeSync(fd);
+	}
+	state = { offset, count, last };
+	copilotCompactionCache.set(file, state);
+	return state;
+}
+
+function numberOr0(value: unknown): number {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/**
+ * GitHub Copilot CLI: usage from `session.shutdown`, written at EVERY process
+ * exit with metrics that are CUMULATIVE for the whole session (across resumes),
+ * so only the last one is read. Its `modelMetrics` already include subagents.
+ *
+ * `usage.inputTokens` is the TOTAL input and already contains `cacheReadTokens`
+ * and `cacheWriteTokens`, whereas the hub's `totalInputTokens` is
+ * input + cacheCreation + cacheRead. So the hub's uncached bucket is
+ * `inputTokens - cacheRead - cacheWrite`, which keeps `totalInputTokens` equal
+ * to Copilot's own `inputTokens` instead of double counting the cache.
+ * `currentTokens` is the exact occupancy, not an estimate. Compactions come from a
+ * second, whole-file pass (`copilotCompactions`) because they can be far from the tail. A session with no
+ * shutdown yet (running, or crashed) has no totals: zero tokens, but still the model.
+ */
+function readCopilotUsage(sessionId: string): TokenUsage {
+	const file = copilotEventsPath(sessionId);
+	if (!file) return emptyTokenUsage();
+	const reading = copilotReading(file);
+	if (!reading) return emptyTokenUsage();
+	const raw = emptyRawUsage();
+	raw.lastModel = reading.model;
+	raw.windowHarness = "copilot";
+	const compactions = copilotCompactions(file);
+	raw.compactions = compactions.count;
+	raw.lastCompaction = compactions.last;
+	const shutdown = reading.shutdown;
+	if (shutdown) {
+		const metrics = asRecord(shutdown.modelMetrics) ?? {};
+		for (const entry of Object.values(metrics)) {
+			const metric = asRecord(entry);
+			if (!metric) continue;
+			const usage = asRecord(metric.usage) ?? {};
+			const cacheRead = numberOr0(usage.cacheReadTokens);
+			const cacheWrite = numberOr0(usage.cacheWriteTokens);
+			raw.input += Math.max(0, numberOr0(usage.inputTokens) - cacheRead - cacheWrite);
+			raw.cacheRead += cacheRead;
+			raw.cacheCreation += cacheWrite;
+			raw.output += numberOr0(usage.outputTokens);
+			raw.turns += numberOr0(asRecord(metric.requests)?.count);
+		}
+		raw.lastContext = numberOr0(shutdown.currentTokens);
+		raw.recentContexts = [raw.lastContext];
+	}
+	const usage = tokenUsageFromRaw(raw, [], null);
+	// The spike's decision: modelMetrics are the sum of main + every subagent, so
+	// the totals include subagents whether or not one ran in this session.
+	usage.includesSubagents = true;
+	// Copilot accounts report premium requests / AI credits, not USD, and the
+	// report server prices by agent + model, so no cost is claimed here.
+	usage.costUsd = null;
+	// `currentTokens` is exact, so it is quoted as-is, not clamped to a window the hub may know less well.
+	usage.contextTokens = raw.lastContext;
+	usage.contextEstimated = false;
+	return usage;
+}
+
+/** Claude Code: the main transcript plus every subagent transcript. */
+function readClaudeUsage(workdir: string, sessionId: string, claudeFile: string): TokenUsage {
+	const main = accumulateUsage(claudeFile);
+	main.windowHarness = "claude";
+	const subs = subagentFiles(workdir, sessionId).map((file) => accumulateUsage(file));
+	// The main thread ran no real turn (only a `<synthetic>` notice, say) but its
+	// subagents did: they are billed in these totals, so their model is the one.
+	if (!main.lastModel) main.lastModel = subs.map((sub) => sub.lastModel).findLast((m) => m !== null) ?? null;
+	return tokenUsageFromRaw(main, subs, null);
+}
+
+/** Cursor Agent: awb run-log results, then the agent-transcript as a fallback. */
+function readCursorUsage(
+	sessionId: string,
+	cursorTranscript: string | null,
+	cursorLogs: RawUsage | null,
+): TokenUsage {
+	const main =
+		cursorLogs && cursorLogs.turns > 0
+			? cursorLogs
+			: cursorTranscript
+				? accumulateUsage(cursorTranscript)
+				: (cursorLogs ?? emptyRawUsage());
+	main.windowHarness = "cursor";
+	// Neither the result nor the command line named the model (awb's own
+	// runs, today): Cursor's tracking database, then the transcript, then the
+	// CLI's default model (a session that edited nothing has no tracking rows).
+	if (!main.lastModel) {
+		main.lastModel = cursorModelFromTracking(sessionId) ?? cursorModelFromTranscript(sessionId) ?? cursorDefaultModel();
+	}
+	// No size on the command line: the size the CLI is configured to run that
+	// model at, when it sets one.
+	if (main.lastModel && main.statedContextWindow === null) main.statedContextWindow = cursorConfiguredContext(main.lastModel);
+	return tokenUsageFromRaw(main, [], { transcript: cursorTranscript ? cursorTranscriptRuns(cursorTranscript) : null });
+}
+
+/**
+ * `harness` is the runner the workflow's hook reports (`hookRuntime(...).harness`).
+ * When given and known it decides the reader outright; null/undefined/unknown
+ * keeps the shape-sniffing below, which is only a fallback: Claude, Cursor and
+ * Copilot session ids are all bare uuids, so the id alone cannot say whose it is.
+ */
+export function readTokenUsage(workdir: string, sessionId: string, harness?: string | null): TokenUsage {
+	switch (harness) {
+		case "free-code":
+			return readFreeCodeUsage(sessionId);
+		case "copilot":
+			return readCopilotUsage(sessionId);
+		case "claude":
+			return readClaudeUsage(workdir, sessionId, transcriptPath(workdir, sessionId));
+		case "cursor": {
+			const cursorTranscript = cursorTranscriptPath(sessionId);
+			return readCursorUsage(sessionId, cursorTranscript, accumulateCursorUsageFromLogs(sessionId));
+		}
+	}
+
+	// free-code sessions ARE .jsonl paths — read the transcript directly.
+	if (sessionId.endsWith(".jsonl") && path.isAbsolute(sessionId)) return readFreeCodeUsage(sessionId);
 
 	const claudeFile = transcriptPath(workdir, sessionId);
 	const claudeExists = (() => {
@@ -1069,31 +1456,10 @@ export function readTokenUsage(workdir: string, sessionId: string): TokenUsage {
 		!claudeExists &&
 		(cursorTranscript !== null || cursorChat !== null || (cursorLogs?.turns ?? 0) > 0);
 
-	if (isCursorSession) {
-		const main =
-			cursorLogs && cursorLogs.turns > 0
-				? cursorLogs
-				: cursorTranscript
-					? accumulateUsage(cursorTranscript)
-					: (cursorLogs ?? emptyRawUsage());
-		// Neither the result nor the command line named the model (awb's own
-		// runs, today): Cursor's tracking database, then the transcript, then the
-		// CLI's default model (a session that edited nothing has no tracking rows).
-		if (!main.lastModel) {
-			main.lastModel = cursorModelFromTracking(sessionId) ?? cursorModelFromTranscript(sessionId) ?? cursorDefaultModel();
-		}
-		// No size on the command line: the size the CLI is configured to run that
-		// model at, when it sets one.
-		if (main.lastModel && main.statedContextWindow === null) main.statedContextWindow = cursorConfiguredContext(main.lastModel);
-		return tokenUsageFromRaw(main, [], { transcript: cursorTranscript ? cursorTranscriptRuns(cursorTranscript) : null });
-	}
-
-	const main = accumulateUsage(claudeFile);
-	const subs = subagentFiles(workdir, sessionId).map((file) => accumulateUsage(file));
-	// The main thread ran no real turn (only a `<synthetic>` notice, say) but its
-	// subagents did: they are billed in these totals, so their model is the one.
-	if (!main.lastModel) main.lastModel = subs.map((sub) => sub.lastModel).findLast((m) => m !== null) ?? null;
-	return tokenUsageFromRaw(main, subs, null);
+	if (isCursorSession) return readCursorUsage(sessionId, cursorTranscript, cursorLogs);
+	// Only a Copilot session dir that exists, with no Claude/Cursor artefact above, counts.
+	if (!claudeExists && copilotEventsPath(sessionId)) return readCopilotUsage(sessionId);
+	return readClaudeUsage(workdir, sessionId, claudeFile);
 }
 
 /**

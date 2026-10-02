@@ -26,13 +26,13 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-test-sandbox-"));
 process.env.TARGET_HOME = tmpHome;
 process.env.AWB_HOME = tmpHome;
 
-const { createAwbHook, DEFAULT_SANDBOX_IMAGE, DEFAULT_SANDBOX_IMAGES, defaultSandboxImage, harnessResumeCommand, hookRuntime, PUBLISHABLE_SANDBOXES } =
+const { createAwbHook, DEFAULT_SANDBOX_IMAGE, DEFAULT_SANDBOX_IMAGES, defaultSandboxImage, harnessResumeCommand, hookRuntime, missingSandboxToken, PUBLISHABLE_SANDBOXES } =
 	await import("./awb.ts");
 const { loadConfig } = await import("./config.ts");
 const { createServer } = await import("./server.ts");
@@ -391,4 +391,144 @@ test("POST /api/workflows/:id/open-terminal on a docker workflow runs the resume
 	assert.ok(shellCmd.includes(`-v '${workdir}:${workdir}'`), shellCmd);
 	assert.ok(shellCmd.includes(`-w '${workdir}'`), shellCmd);
 	assert.ok(shellCmd.endsWith(`'target-agent:latest' claude --resume 'sess-docker-1'; exec bash`), shellCmd);
+});
+
+// --- copilot: image, token env NAME, early validation ------------------------
+
+const DUMMY_TOKEN = "dummy-not-a-token";
+
+/** No GH_TOKEN/GITHUB_TOKEN and no `gh` token for one test: "nothing resolves" is only true then. */
+function withNoOtherTokens(t: TestContext): void {
+	const saved = { GH_TOKEN: process.env.GH_TOKEN, GITHUB_TOKEN: process.env.GITHUB_TOKEN };
+	delete process.env.GH_TOKEN;
+	delete process.env.GITHUB_TOKEN;
+	t.after(() => {
+		for (const [k, v] of Object.entries(saved)) {
+			if (v === undefined) delete process.env[k];
+			else process.env[k] = v;
+		}
+	});
+}
+
+/** Sets (or clears, with undefined) COPILOT_GITHUB_TOKEN for one test and restores it after. */
+function withCopilotToken(t: TestContext, value: string | undefined): void {
+	const saved = process.env.COPILOT_GITHUB_TOKEN;
+	t.after(() => {
+		if (saved === undefined) delete process.env.COPILOT_GITHUB_TOKEN;
+		else process.env.COPILOT_GITHUB_TOKEN = saved;
+	});
+	if (value === undefined) delete process.env.COPILOT_GITHUB_TOKEN;
+	else process.env.COPILOT_GITHUB_TOKEN = value;
+}
+
+test("defaultSandboxImage(copilot) is the copilot image", () => {
+	assert.equal(defaultSandboxImage("copilot"), "target-agent-copilot:latest");
+	assert.equal(DEFAULT_SANDBOX_IMAGES.copilot, "target-agent-copilot:latest");
+});
+
+test("a copilot docker hook writes the image and COPILOT_GITHUB_TOKEN=<value>; hookRuntime reads back the NAME only", (t) => {
+	withCopilotToken(t, DUMMY_TOKEN);
+	const { hookUrl } = createAwbHook("docker-copilot-hook", path.join(tmpHome, "wd-copilot-docker"), "{{payload}}", {
+		sandbox: "docker",
+		runner: "copilot",
+	});
+	assert.deepEqual(hooksJson()["docker-copilot-hook"].sandbox, {
+		kind: "docker",
+		image: "target-agent-copilot:latest",
+		env: [`COPILOT_GITHUB_TOKEN=${DUMMY_TOKEN}`],
+	});
+	const runtime = hookRuntime(hookUrl);
+	assert.ok(!JSON.stringify(runtime).includes(DUMMY_TOKEN), "the value never comes back through hookRuntime");
+	assert.equal(runtime.harness, "copilot");
+	assert.deepEqual(runtime.sandbox?.env, ["COPILOT_GITHUB_TOKEN"]);
+});
+
+test("claude, cursor and free-code docker hooks carry no env", () => {
+	for (const runner of ["claude", "cursor", "free-code"] as const) {
+		const { hookUrl } = createAwbHook(`docker-noenv-${runner}`, path.join(tmpHome, `wd-noenv-${runner}`), "{{payload}}", {
+			sandbox: "docker",
+			runner,
+		});
+		assert.ok(!("env" in (hooksJson()[`docker-noenv-${runner}`].sandbox as object)), runner);
+		assert.equal(hookRuntime(hookUrl).sandbox?.env, undefined, runner);
+	}
+});
+
+test("a copilot HOST hook has no sandbox block, so no env either", () => {
+	createAwbHook("host-copilot-hook", path.join(tmpHome, "wd-copilot-host"), "{{payload}}", { runner: "copilot" });
+	assert.ok(!("sandbox" in hooksJson()["host-copilot-hook"]));
+});
+
+test("hookRuntime reads an env entry that carries a value (NAME=value) back as the NAME only", () => {
+	const { hookUrl } = createAwbHook("hand-edited-env-hook", path.join(tmpHome, "wd-hand-env"), "{{payload}}", {
+		sandbox: "docker",
+		runner: "copilot",
+	});
+	const file = path.join(tmpHome, "hooks.json");
+	const json = JSON.parse(fs.readFileSync(file, "utf8")) as { hooks: Record<string, { sandbox: { env: string[] } }> };
+	json.hooks["hand-edited-env-hook"].sandbox.env = ["COPILOT_GITHUB_TOKEN", `OTHER=${DUMMY_TOKEN}`];
+	fs.writeFileSync(file, JSON.stringify(json, null, 2));
+	assert.deepEqual(hookRuntime(hookUrl).sandbox?.env, ["COPILOT_GITHUB_TOKEN", "OTHER"]);
+	assert.ok(!JSON.stringify(hookRuntime(hookUrl)).includes(DUMMY_TOKEN));
+});
+
+test("missingSandboxToken only objects to a copilot docker workflow without a usable token", (t) => {
+	withNoOtherTokens(t);
+	withCopilotToken(t, undefined);
+	assert.match(missingSandboxToken("copilot", "docker") ?? "", /gh auth login/);
+	withCopilotToken(t, "   ");
+	assert.notEqual(missingSandboxToken("copilot", "docker"), null, "a blank value is as good as unset");
+	withCopilotToken(t, "ghp_dummyDummyDummyDummyClassic000006");
+	assert.match(missingSandboxToken("copilot", "docker") ?? "", /classic personal access token/);
+	withCopilotToken(t, DUMMY_TOKEN);
+	assert.equal(missingSandboxToken("copilot", "docker"), null);
+	assert.equal(missingSandboxToken("copilot", "host"), null);
+	assert.equal(missingSandboxToken("claude", "docker"), null);
+	assert.equal(missingSandboxToken(null, "docker"), null);
+});
+
+test("POST /api/workflows {runner: copilot, sandbox: docker} without an image lands on the copilot image", async (t) => {
+	withCopilotToken(t, DUMMY_TOKEN);
+	const res = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ name: "copilot docker workflow", runner: "copilot", sandbox: "docker" }),
+	});
+	assert.equal(res.status, 200);
+	const { workflow } = (await res.json()) as { workflow: { agentName: string; sandbox: string; image: string | null } };
+	assert.equal(workflow.sandbox, "docker");
+	assert.equal(workflow.image, "target-agent-copilot:latest");
+	const hook = hooksJson()[workflow.agentName];
+	assert.deepEqual(hook.consumers, ["spawn:copilot"]);
+	assert.deepEqual(hook.sandbox, { kind: "docker", image: "target-agent-copilot:latest", env: [`COPILOT_GITHUB_TOKEN=${DUMMY_TOKEN}`] });
+	assert.ok(!JSON.stringify(workflow).includes(DUMMY_TOKEN), "the response never carries the token");
+});
+
+test("POST /api/workflows {runner: copilot, sandbox: docker} with no token is a structured 400 (copilot_token_required), and creates nothing", async (t) => {
+	withNoOtherTokens(t);
+	withCopilotToken(t, undefined);
+	const res = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ name: "copilot docker no token", runner: "copilot", sandbox: "docker" }),
+	});
+	assert.equal(res.status, 400);
+	const body = (await res.json()) as { error: string; message: string; actions: string[]; status: { available: boolean; usable: boolean } };
+	assert.equal(body.error, "copilot_token_required");
+	assert.match(body.message, /gh auth login/);
+	assert.deepEqual(body.actions, ["gh-login", "paste-token"]);
+	assert.equal(body.status.available, false);
+	assert.equal(body.status.usable, false);
+	const list = (await (await fetch(`${baseUrl}/api/workflows`, { headers: adminHeaders() })).json()) as { workflows: { name: string }[] };
+	assert.ok(!list.workflows.some((w) => w.name === "copilot docker no token"));
+});
+
+test("the token check does not touch other runners' docker workflows", async (t) => {
+	withCopilotToken(t, undefined);
+	const res = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ name: "claude docker no copilot token", runner: "claude", sandbox: "docker" }),
+	});
+	assert.equal(res.status, 200);
 });

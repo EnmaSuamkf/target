@@ -14,6 +14,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as cp from "node:child_process";
+import { classifyToken, copilotTokenStatus, resolveCopilotToken, type CopilotTokenStatus } from "./copilot-token.ts";
+import { registerSecret } from "./redact.ts";
 
 interface AwbConfig {
 	host: string;
@@ -97,6 +99,12 @@ export interface HookSandbox {
 	image: string;
 	/** Extra host paths the hook bind-mounts on top of the workdir and the harness state. */
 	mounts?: string[];
+	/**
+	 * Variable NAMES forwarded into the container, as `hookRuntime` reads them
+	 * back (hooks.json may hold `NAME=value` entries, but the value never leaves
+	 * that file: see `ensureHookTokenEnv`).
+	 */
+	env?: string[];
 }
 
 export interface HookRuntime {
@@ -139,13 +147,27 @@ export function hookRuntime(hookUrl: string): HookRuntime {
 		}
 	}
 	const workdir = typeof hook?.workdir === "string" && hook.workdir !== "" ? hook.workdir : null;
-	const block = hook?.sandbox as { kind?: unknown; image?: unknown; mounts?: unknown } | undefined;
+	const block = hook?.sandbox as { kind?: unknown; image?: unknown; mounts?: unknown; env?: unknown } | undefined;
+	// Names only: a `NAME=value` entry (the copilot token, see
+	// `ensureHookTokenEnv`) is cut at the first `=`, so no value read back from
+	// hooks.json can leave through the API.
+	const envNames = Array.isArray(block?.env)
+		? [
+				...new Set(
+					(block.env as unknown[])
+						.filter((e): e is string => typeof e === "string")
+						.map((e) => e.split("=")[0]!)
+						.filter((name) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)),
+				),
+			]
+		: [];
 	const sandbox =
 		block?.kind === "docker" && typeof block.image === "string" && block.image !== ""
 			? {
 					kind: "docker" as const,
 					image: block.image,
 					mounts: Array.isArray(block.mounts) ? block.mounts.filter((m) => typeof m === "string") : [],
+					...(envNames.length > 0 ? { env: envNames } : {}),
 				}
 			: null;
 	// Only the modes the hub is allowed to publish come back as themselves; a
@@ -173,10 +195,11 @@ export function shellQuote(value: string): string {
 /**
  * Shell command that reopens a harness session in a terminal, keyed by the
  * harness name `hookRuntime` reports. awb ships the `spawn:claude`,
- * `spawn:free-code`, and `spawn:cursor` adapters (broker/dispatch.ts); their
- * resume mechanics differ — claude resumes by session uuid, free-code by the
- * session's .jsonl path (`--session <path>`), cursor by chat uuid with
- * `--workspace <cwd>` — but all reopen the exact conversation the workflow's
+ * `spawn:free-code`, `spawn:cursor`, and `spawn:copilot` adapters
+ * (broker/dispatch.ts); their resume mechanics differ — claude resumes by
+ * session uuid, free-code by the session's .jsonl path (`--session <path>`),
+ * cursor by chat uuid with `--workspace <cwd>`, copilot by bare uuid
+ * (`--resume=<id>`) — but all reopen the exact conversation the workflow's
  * steps have been chaining.
  */
 const HARNESS_RESUME_COMMANDS: Record<string, (sessionId: string, workdir: string | null) => string | null> = {
@@ -198,6 +221,11 @@ const HARNESS_RESUME_COMMANDS: Record<string, (sessionId: string, workdir: strin
 		workdir
 			? `agent --resume ${shellQuote(sessionId)} --trust --approve-mcps --workspace ${shellQuote(workdir)}`
 			: null,
+	// A copilot session is looked up by its bare uuid under `~/.copilot` and
+	// keeps the cwd it was created in, so — unlike cursor — the workdir is not
+	// needed on the command line. `--resume=<id>` (with `=`) is the form the
+	// awb adapter uses; a space-separated value is read as a session name.
+	copilot: (sessionId) => `copilot --resume=${shellQuote(sessionId)}`,
 };
 
 /**
@@ -246,6 +274,13 @@ function existingPaths(paths: string[]): string[] {
  *    Claude's credentials (under `~/.claude`), the CLI stores login state here;
  *    mounting only `~/.cursor` leaves docker runs failing with "Authentication
  *    required" even when the operator is logged in on the host.
+ *  - `~/.copilot` — Copilot CLI's session-state (`session-state/<uuid>/` with
+ *    `events.jsonl`), logs, config and session store. A resumed session is
+ *    looked up by id under this tree, so it has to be the same absolute path
+ *    inside the container; read-write.
+ *  - `~/.cache/copilot` — the CLI extracts a ~185 MB bundled package here on
+ *    every start; mounting it avoids re-extracting on each run. Optional for
+ *    correctness (the CLI recreates it) but cheap to share.
  *  - `<awbDir>/sessions` — free-code resumes by absolute `.jsonl` path, so that
  *    path has to resolve inside the container too. Only the sessions
  *    subdirectory: the awb dir itself holds `hooks.json`, i.e. every hook's
@@ -265,6 +300,8 @@ function harnessStateMounts(): string[] {
 		path.join(os.homedir(), ".free-code"),
 		path.join(os.homedir(), ".cursor"),
 		path.join(os.homedir(), ".config", "cursor"),
+		path.join(os.homedir(), ".copilot"),
+		path.join(os.homedir(), ".cache", "copilot"),
 		path.join(awbDir(), "sessions"),
 	]);
 }
@@ -281,11 +318,94 @@ const HARNESS_RESUME_ENV: Record<string, Record<string, string>> = {
 	// profile" picker — without it the reopened terminal would stop on that
 	// prompt before the conversation paints.
 	"free-code": { FREE_CODE_STARTUP_PROFILE: "default" },
+	// Stops the CLI self-updating (and re-extracting its bundle) when the
+	// operator reopens a session, the same thing the awb adapter pins for steps.
+	copilot: { COPILOT_AUTO_UPDATE: "false" },
 };
+
+/**
+ * Variables (by NAME) a docker hook of each runner needs. Copilot CLI inside a
+ * container cannot use the host's keyring login (spike, section 1), so
+ * `COPILOT_GITHUB_TOKEN` is the only way it authenticates. The hub resolves
+ * the token itself (copilot-token.ts) and writes `NAME=value` into the hook's
+ * sandbox env, which awb's broker re-reads on every request; awb then hands the
+ * value to the docker client through its own environment, never the command line.
+ */
+export const SANDBOX_TOKEN_ENV: Partial<Record<PublishableRunner, string[]>> = {
+	copilot: ["COPILOT_GITHUB_TOKEN"],
+};
+
+/** The token variables `runner` needs in a docker sandbox ([] for the runners that authenticate through mounts). */
+export function sandboxTokenEnv(runner: string | null): string[] {
+	return (runner && SANDBOX_TOKEN_ENV[runner as PublishableRunner]) || [];
+}
+
+/** The two ways an operator can give a copilot docker workflow a token; the UI offers both. */
+export const COPILOT_TOKEN_ACTIONS = ["gh-login", "paste-token"] as const;
+
+/** Why a copilot+docker workflow can't authenticate, in the shape of the 400 body (the status carries no token). */
+export interface SandboxTokenProblem {
+	error: "copilot_token_required";
+	message: string;
+	actions: readonly string[];
+	status: CopilotTokenStatus;
+}
+
+/**
+ * The structured reason a copilot+docker workflow can't authenticate, or null
+ * when it can (other runner/sandbox, or a usable token resolves). A classic
+ * `ghp_` token counts as unusable and gets its own message. Never carries a
+ * token: only `copilotTokenStatus()`'s non-secret facts.
+ */
+export function sandboxTokenProblem(
+	runner: string | null | undefined,
+	sandbox: string | null | undefined,
+): SandboxTokenProblem | null {
+	if (sandbox !== "docker" || sandboxTokenEnv(runner ?? null).length === 0) return null;
+	const status = copilotTokenStatus();
+	if (status.usable) return null;
+	const fix =
+		"Sign in with the GitHub CLI (`gh auth login` in a terminal), or paste a token in Settings (PUT /api/settings/copilot-token), then try again.";
+	const message =
+		status.available && status.tokenType === "classic"
+			? `runner '${runner}' in a docker sandbox needs a GitHub token, but the one found (${status.source === "env" ? status.envName : status.source}) is a classic personal access token (ghp_...), which Copilot CLI does not support. ${fix} A fine-grained token with the "Copilot Requests" permission works.`
+			: `runner '${runner}' in a docker sandbox authenticates with a GitHub token (the host's keyring login is not available inside the container), but none was found in the hub's environment (COPILOT_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN), in Settings or from \`gh auth token\`. ${fix}`;
+	return { error: "copilot_token_required", message, actions: COPILOT_TOKEN_ACTIONS, status };
+}
+
+/** `sandboxTokenProblem`'s message alone, or null (kept for callers that only need the text). */
+export function missingSandboxToken(runner: string | null | undefined, sandbox: string | null | undefined): string | null {
+	return sandboxTokenProblem(runner, sandbox)?.message ?? null;
+}
+
+/**
+ * The sandbox `env` entries a new `runner` hook gets: `NAME=value` when a
+ * usable token resolves, otherwise just `NAME` (forward the broker's own).
+ */
+function sandboxEnvEntries(runner: string): string[] {
+	const resolved = resolveCopilotToken();
+	const usable = resolved !== null && classifyToken(resolved.token) !== "classic";
+	return sandboxTokenEnv(runner).map((name) => (usable ? `${name}=${resolved.token}` : name));
+}
 
 /** The resume-time environment for `harness` ({} when it needs none). */
 export function harnessResumeEnv(harness: string | null): Record<string, string> {
 	return (harness && HARNESS_RESUME_ENV[harness]) || {};
+}
+
+/**
+ * Secret variables a docker resume of `harness` needs in the terminal's own
+ * environment (never on a command line): the copilot token, as the hub
+ * resolves it now. Empty value = none found (terminal.ts prints a hint). {}
+ * for the host sandbox and for runners that don't need one.
+ */
+export function harnessResumeSecretEnv(harness: string | null, sandbox: HookSandbox | null): Record<string, string> {
+	if (!sandbox) return {};
+	const names = sandboxTokenEnv(harness);
+	if (names.length === 0) return {};
+	const resolved = resolveCopilotToken();
+	const token = resolved && classifyToken(resolved.token) !== "classic" ? resolved.token : "";
+	return Object.fromEntries(names.map((name) => [name, token]));
 }
 
 /**
@@ -294,7 +414,12 @@ export function harnessResumeEnv(harness: string | null): Record<string, string>
  * use). Every path is mounted at its own absolute path — that identity is the
  * whole reason the session the steps built is findable from in here.
  */
-function dockerResumePrefix(sandbox: HookSandbox, workdir: string, env: Record<string, string> = {}): string {
+function dockerResumePrefix(
+	sandbox: HookSandbox,
+	workdir: string,
+	env: Record<string, string> = {},
+	forwardEnv: string[] = [],
+): string {
 	const mounts = [workdir, ...harnessStateMounts(), ...existingPaths(sandbox.mounts ?? [])];
 	const parts = [
 		"docker run --rm -it",
@@ -305,6 +430,9 @@ function dockerResumePrefix(sandbox: HookSandbox, workdir: string, env: Record<s
 		...mounts.map((m) => `-v ${shellQuote(`${m}:${m}`)}`),
 		`-e ${shellQuote(`HOME=${os.homedir()}`)}`,
 		...Object.entries(env).map(([k, v]) => `-e ${shellQuote(`${k}=${v}`)}`),
+		// By name only (no `=value`): docker reads it from the terminal shell's
+		// environment, so the secret never lands on a command line.
+		...forwardEnv.map((name) => `-e ${name}`),
 		`-w ${shellQuote(workdir)}`,
 		shellQuote(sandbox.image),
 	];
@@ -335,7 +463,15 @@ export function harnessResumeCommand(
 	if (!command) return null;
 	if (!sandbox) return command;
 	if (!workdir) return null;
-	return `${dockerResumePrefix(sandbox, workdir, harnessResumeEnv(harness))} ${command}`;
+	// The union of what the hook forwards and what the runner needs. A token
+	// variable is always forwarded by name (the terminal gets its value through
+	// `harnessResumeSecretEnv`, or prints a hint); any other one only when set
+	// here, so it doesn't yield a bare `-e`.
+	const tokenNames = sandboxTokenEnv(harness);
+	const forward = [...new Set([...(sandbox.env ?? []), ...tokenNames])].filter(
+		(name) => tokenNames.includes(name) || process.env[name],
+	);
+	return `${dockerResumePrefix(sandbox, workdir, harnessResumeEnv(harness), forward)} ${command}`;
 }
 
 /**
@@ -354,9 +490,9 @@ export type PublishablePermissionMode = (typeof PUBLISHABLE_PERMISSION_MODES)[nu
  * Both share the same hook protocol (secret, `callbackUrl`, `sessionId`), so
  * the hub, the runner, and the step callbacks stay runtime-agnostic — only
  * the spawned binary and the session-id shape differ (a claude uuid vs. a
- * free-code `.jsonl` path, cursor chat uuid).
+ * free-code `.jsonl` path, a cursor chat uuid, a bare uuid for copilot).
  */
-export const PUBLISHABLE_RUNNERS = ["claude", "free-code", "cursor"] as const;
+export const PUBLISHABLE_RUNNERS = ["claude", "free-code", "cursor", "copilot"] as const;
 export type PublishableRunner = (typeof PUBLISHABLE_RUNNERS)[number];
 
 /**
@@ -368,6 +504,7 @@ export const RUNNER_BINARIES: Record<PublishableRunner, string> = {
 	claude: "claude",
 	"free-code": "free-code",
 	cursor: "agent",
+	copilot: "copilot",
 };
 
 export function runnerBinary(runner: PublishableRunner): string {
@@ -400,10 +537,31 @@ export function runnerBinary(runner: PublishableRunner): string {
 // on-demand `docker build` of a missing sandbox image (`ensureSandboxImage`),
 // which is async precisely because it takes minutes and must not block the
 // hub's event loop the way the synchronous probes can afford to.
-export const _impl = { spawnSync: cp.spawnSync, spawn: cp.spawn };
+//
+// `adapterExists` is the seam for the adapter-file guard in `availableRunners`
+// (the test setup stubs it to true so the suite doesn't depend on the vendored
+// awb checkout).
+export const _impl = { spawnSync: cp.spawnSync, spawn: cp.spawn, adapterExists: runnerAdapterExists };
+
+/**
+ * The awb checkout the hub's broker runs from: `AWB_DIR`, else the clone under
+ * `vendor/` — the same resolution scripts/start.ts uses.
+ */
+function awbCheckoutDir(): string {
+	return process.env.AWB_DIR ?? path.join(import.meta.dirname, "..", "vendor", "agent-webhook-bridge");
+}
+
+/** Whether that checkout ships the `spawn:<runner>` adapter. */
+export function runnerAdapterExists(runner: PublishableRunner): boolean {
+	return fs.existsSync(path.join(awbCheckoutDir(), "adapters", "spawn-runner", `${runner}.ts`));
+}
 
 export function availableRunners(): { id: PublishableRunner; installed: boolean }[] {
 	return PUBLISHABLE_RUNNERS.map((id) => {
+		// A broker without the adapter doesn't reject `spawn:<runner>`: it stores
+		// the event and the step hangs until its timeout. An outdated awb checkout
+		// must therefore read as "not installed" even when the CLI is on PATH.
+		if (!_impl.adapterExists(id)) return { id, installed: false };
 		const result = _impl.spawnSync(runnerBinary(id), ["--version"], {
 			stdio: ["ignore", "pipe", "pipe"],
 			timeout: 5000,
@@ -445,6 +603,7 @@ export const DEFAULT_SANDBOX_IMAGES: Record<PublishableRunner, string> = {
 	claude: "target-agent:latest",
 	"free-code": "target-agent-freecode:latest",
 	cursor: "target-agent-cursor:latest",
+	copilot: "target-agent-copilot:latest",
 };
 
 /** Back-compat alias for the claude default; prefer `defaultSandboxImage(runner)`. */
@@ -547,6 +706,12 @@ export const BUILDABLE_SANDBOX_IMAGES: BuildableImage[] = [
 		tag: DEFAULT_SANDBOX_IMAGES.cursor,
 		dockerfile: "Dockerfile.cursor",
 		runner: "cursor",
+		base: DEFAULT_SANDBOX_IMAGES.claude,
+	},
+	{
+		tag: DEFAULT_SANDBOX_IMAGES.copilot,
+		dockerfile: "Dockerfile.copilot",
+		runner: "copilot",
 		base: DEFAULT_SANDBOX_IMAGES.claude,
 	},
 ];
@@ -798,13 +963,12 @@ export function createAwbHook(
 						kind: "docker",
 						image: options.image || defaultSandboxImage(runner),
 						...(options.mounts && options.mounts.length > 0 ? { mounts: options.mounts } : {}),
+						...(sandboxTokenEnv(runner).length > 0 ? { env: sandboxEnvEntries(runner) } : {}),
 					},
 				}
 			: {}),
 	};
-	const file = awbConfigFile();
-	fs.mkdirSync(path.dirname(file), { recursive: true });
-	fs.writeFileSync(file, `${JSON.stringify(cfg, null, 2)}\n`);
+	writeAwbConfig(cfg);
 
 	return { hookUrl: `http://${cfg.host}:${cfg.port}/hook/${encodeURIComponent(name)}`, secret };
 }
@@ -841,6 +1005,24 @@ export function ensureHookMounts(hookUrl: string, mounts: string[]): boolean {
 }
 
 /**
+ * Makes sure a copilot docker hook carries the token the hub resolves RIGHT NOW
+ * (see `ensureHookTokenEnv`). Called before every dispatch of such a step and
+ * once at startup. `ok: false` carries the actionable message (no token inside)
+ * when none resolves; hooks that aren't copilot+docker are `ok: true` untouched.
+ */
+export function refreshCopilotHookToken(hookUrl: string): { ok: true; changed: boolean } | { ok: false; message: string } {
+	const runtime = hookRuntime(hookUrl);
+	if (runtime.harness !== "copilot" || !runtime.sandbox) return { ok: true, changed: false };
+	const problem = sandboxTokenProblem("copilot", "docker");
+	if (problem) return { ok: false, message: problem.message };
+	const resolved = resolveCopilotToken();
+	if (!resolved) return { ok: false, message: sandboxTokenProblem("copilot", "docker")?.message ?? "no GitHub token available" };
+	let changed = false;
+	for (const name of sandboxTokenEnv("copilot")) changed = ensureHookTokenEnv(hookUrl, name, resolved.token) || changed;
+	return { ok: true, changed };
+}
+
+/**
  * Replaces a docker hook's bind-mount list wholesale. Returns whether hooks.json
  * was rewritten — false when the hook is missing, not docker, or unchanged.
  */
@@ -861,11 +1043,50 @@ export function replaceHookMounts(hookUrl: string, mounts: string[]): boolean {
 	}
 }
 
+/**
+ * Writes hooks.json owner-only (0600): it can hold the copilot token. `mode`
+ * is ignored when the file already exists and is masked by the umask, hence
+ * the chmod after the write.
+ */
 function writeAwbConfig(cfg: AwbConfig): boolean {
 	const file = awbConfigFile();
 	fs.mkdirSync(path.dirname(file), { recursive: true });
-	fs.writeFileSync(file, `${JSON.stringify(cfg, null, 2)}\n`);
+	fs.writeFileSync(file, `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
+	fs.chmodSync(file, 0o600);
 	return true;
+}
+
+/**
+ * Sets `name=value` in a copilot docker hook's sandbox env, so the broker
+ * (which re-reads hooks.json per request) hands the CURRENT token to the
+ * container: a rotated token, a fresh `gh auth login` or one pasted in Settings
+ * later needs no restart. Replaces any entry for `name` (bare or valued), keeps
+ * the others, and rewrites hooks.json only when the entry changed. Only docker
+ * hooks of copilot are touched. Best-effort, never throws; returns whether it
+ * rewrote the file.
+ */
+export function ensureHookTokenEnv(hookUrl: string, name: string, value: string): boolean {
+	try {
+		registerSecret(value);
+		const info = inspectLocalHook(hookUrl);
+		if (!info.local || !info.found || !info.name) return false;
+		const cfg = loadAwbConfig();
+		const hook = cfg.hooks[info.name];
+		const sandbox = hook?.sandbox as { kind?: unknown; env?: unknown } | undefined;
+		if (!hook || !sandbox || sandbox.kind !== "docker") return false;
+		if (!(Array.isArray(hook.consumers) && (hook.consumers as unknown[]).includes("spawn:copilot"))) return false;
+		const current = Array.isArray(sandbox.env) ? (sandbox.env as unknown[]).filter((e): e is string => typeof e === "string") : [];
+		const entry = `${name}=${value}`;
+		const isName = (e: string) => e === name || e.startsWith(`${name}=`);
+		const at = current.findIndex(isName);
+		const next = [...current.filter((e) => !isName(e))];
+		next.splice(at === -1 ? next.length : at, 0, entry);
+		if (current.length === next.length && current.every((e, i) => e === next[i])) return false;
+		sandbox.env = next;
+		return writeAwbConfig(cfg);
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -879,10 +1100,7 @@ export function deleteAwbHook(name: string): boolean {
 		const cfg = loadAwbConfig();
 		if (!cfg.hooks[name]) return false;
 		delete cfg.hooks[name];
-		const file = awbConfigFile();
-		fs.mkdirSync(path.dirname(file), { recursive: true });
-		fs.writeFileSync(file, `${JSON.stringify(cfg, null, 2)}\n`);
-		return true;
+		return writeAwbConfig(cfg);
 	} catch {
 		return false;
 	}

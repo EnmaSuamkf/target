@@ -37,7 +37,7 @@
  * server refuses a create that can't satisfy them, rather than producing a
  * workflow that dies at step 1 or silently opens a fresh session.
  *
- * Two harnesses, two on-disk layouts — the same split transcript.ts documents,
+ * Four harnesses, four on-disk layouts — the same split transcript.ts documents,
  * but walked in the opposite direction (there: workdir + session id → file;
  * here: enumerate the files and report what's in them):
  *
@@ -56,6 +56,13 @@
  *   `~/.cursor/projects/.../agent-transcripts/<chatId>/`. The session id is the
  *   chat uuid (what `agent --resume` takes), scoped to the workspace recorded
  *   in the transcript's `system` init line when one exists.
+ * - **GitHub Copilot CLI** — `<COPILOT_HOME or ~/.copilot>/session-state/<uuid>/`,
+ *   whose `events.jsonl` is the transcript (a directory without one — a bare
+ *   `workspace.yaml`, say — is not a conversation and is skipped). The session
+ *   id is the directory name, a bare uuid (what `copilot --resume=` takes).
+ *   `workspace.yaml` names the directory it ran in (`cwd:`) and the session
+ *   (`name:`); the `session.start` event's `data.context.cwd` and the first user
+ *   turn are the fallbacks.
  *
  * Only depth 2 is walked (a session dir's `.jsonl` children), which is also what
  * keeps subagent transcripts out: claude nests those at
@@ -77,6 +84,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { PublishableRunner } from "./awb.ts";
+import { copilotHome } from "./transcript.ts";
 
 /** One conversation the operator can pick as the source for a new workflow. */
 export interface ConversationSummary {
@@ -185,6 +193,7 @@ function sessionRoots(runner: PublishableRunner): string[] {
 	const home = os.homedir();
 	if (runner === "claude") return [path.join(home, ".claude", "projects")];
 	if (runner === "cursor") return [path.join(home, ".cursor", "chats")];
+	if (runner === "copilot") return [path.join(copilotHome(), "session-state")];
 	return [
 		path.join(home, ".free-code", "agent", "sessions"),
 		// awb's free-code adapter writes the sessions IT spawned here — including
@@ -226,6 +235,27 @@ function transcriptFiles(root: string): string[] {
 			}
 		} catch {
 			// Unreadable session dir: skip it, keep listing the rest.
+		}
+	}
+	return files;
+}
+
+/** `events.jsonl` of every Copilot session directory of `root` (depth 1: session-state/<uuid>/). */
+function copilotEventFiles(root: string): string[] {
+	let dirs: fs.Dirent[];
+	try {
+		dirs = fs.readdirSync(root, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	const files: string[] = [];
+	for (const dir of dirs) {
+		if (!dir.isDirectory()) continue;
+		const file = path.join(root, dir.name, "events.jsonl");
+		try {
+			if (fs.statSync(file).isFile()) files.push(file);
+		} catch {
+			// No events.jsonl: a session dir that holds only a workspace.yaml.
 		}
 	}
 	return files;
@@ -333,7 +363,7 @@ function indexFiles(runner: PublishableRunner): FileEntry[] {
 		}
 	} else {
 		for (const root of sessionRoots(runner)) {
-			for (const file of transcriptFiles(root)) {
+			for (const file of runner === "copilot" ? copilotEventFiles(root) : transcriptFiles(root)) {
 				try {
 					const stat = fs.statSync(file);
 					// A zero-byte transcript is a session that never said anything; it has
@@ -360,6 +390,8 @@ function sessionIdOf(runner: PublishableRunner, file: string): string {
 		if (idx !== -1 && parts[idx + 1]) return parts[idx + 1] as string;
 		return path.basename(file, ".jsonl");
 	}
+	// Copilot: `<session-state>/<uuid>/events.jsonl` — the directory name is the id.
+	if (runner === "copilot") return path.basename(path.dirname(file));
 	return file;
 }
 
@@ -413,6 +445,24 @@ interface Turn {
 }
 
 /**
+ * Copilot's `{"type":"user.message"|"assistant.message","data":{"content":…}}`.
+ * Only the plain `content` is the prose (`transformedContent` is the model's view,
+ * with the CLI's `<current_datetime>` wrapper). A subagent's messages are not the
+ * operator's conversation: they carry a top-level `agentId` on the envelope, and
+ * an assistant one also `data.parentToolCallId`. An assistant message that only
+ * requests tools has empty `content` and is dropped with every other empty one.
+ */
+function copilotTurn(obj: Record<string, unknown>): Turn | null {
+	if (typeof obj.agentId === "string" && obj.agentId !== "") return null;
+	const data = obj.data as Record<string, unknown> | undefined;
+	if (!data || typeof data.content !== "string") return null;
+	if (typeof data.parentToolCallId === "string" && data.parentToolCallId !== "") return null;
+	const text = stripNoise(data.content);
+	if (!text) return null;
+	return { role: obj.type === "user.message" ? "user" : "assistant", text };
+}
+
+/**
  * One conversation turn out of a parsed transcript line, or null when the line
  * carries no prose (a tool result, a mode change, an all-thinking assistant
  * turn, a sidechain's message).
@@ -422,6 +472,7 @@ interface Turn {
  * the role on the message.
  */
 export function turnOfLine(obj: Record<string, unknown>): Turn | null {
+	if (typeof obj.type === "string" && (obj.type === "user.message" || obj.type === "assistant.message")) return copilotTurn(obj);
 	// Sidechain = a subagent's conversation, not the one the operator had. Meta =
 	// something the CLI injected into the thread on the user's behalf.
 	if (obj.isSidechain === true || obj.isMeta === true) return null;
@@ -486,6 +537,11 @@ function readHead(file: string): { workdir: string | null; title: string | null 
 		if (!head.workdir && typeof obj.cwd === "string" && obj.cwd !== "") head.workdir = obj.cwd;
 		// Cursor's system init line carries the workspace path as `cwd`.
 		if (!head.workdir && obj.type === "system" && typeof obj.cwd === "string" && obj.cwd !== "") head.workdir = obj.cwd;
+		// Copilot's session.start records where the session began.
+		if (!head.workdir && obj.type === "session.start") {
+			const context = (obj.data as Record<string, unknown> | undefined)?.context as Record<string, unknown> | undefined;
+			if (typeof context?.cwd === "string" && context.cwd !== "") head.workdir = context.cwd;
+		}
 		if (!head.title) {
 			const turn = turnOfLine(obj);
 			if (turn?.role === "user") head.title = titleOf(turn.text);
@@ -570,8 +626,60 @@ function cursorChatDirFor(runner: PublishableRunner, file: string, sessionId: st
 	return null;
 }
 
+/**
+ * A YAML scalar as `workspace.yaml` writes it: plain, single-quoted (`''`
+ * escapes a quote) or double-quoted. Anything fancier (block scalars) reads as
+ * absent rather than as garbage. Deliberately not a YAML parser.
+ */
+function yamlScalar(raw: string): string | null {
+	const value = raw.trim();
+	if (!value || value.startsWith("|") || value.startsWith(">")) return null;
+	if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1).replaceAll("''", "'");
+	if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+		try {
+			const parsed: unknown = JSON.parse(value);
+			if (typeof parsed === "string") return parsed;
+		} catch {
+			// Not valid JSON escaping: use the text between the quotes.
+		}
+		return value.slice(1, -1);
+	}
+	return value;
+}
+
+/** `cwd` and `name` from a Copilot session's `workspace.yaml` (next to `events.jsonl`); nulls when absent. */
+function readCopilotWorkspace(eventsFile: string): { workdir: string | null; title: string | null } {
+	let text: string;
+	try {
+		text = fs.readFileSync(path.join(path.dirname(eventsFile), "workspace.yaml"), "utf8");
+	} catch {
+		return { workdir: null, title: null };
+	}
+	const out: { workdir: string | null; title: string | null } = { workdir: null, title: null };
+	for (const line of text.split("\n")) {
+		const match = /^(cwd|name):(.*)$/.exec(line.replace(/\r$/, ""));
+		if (!match) continue;
+		const value = yamlScalar(match[2] ?? "");
+		if (!value) continue;
+		if (match[1] === "cwd") out.workdir = value;
+		else out.title = value;
+	}
+	return out;
+}
+
 function summarize(runner: PublishableRunner, entry: FileEntry): ConversationSummary {
-	let head = readHead(entry.file);
+	let head: { workdir: string | null; title: string | null };
+	if (runner === "copilot") {
+		const meta = readCopilotWorkspace(entry.file);
+		const named = meta.title ? titleOf(meta.title) : null;
+		// workspace.yaml answers both questions for a normal session; the events
+		// head (session.start's cwd, the first user turn) only fills what it lacks.
+		head = meta.workdir && named ? { workdir: meta.workdir, title: named } : readHead(entry.file);
+		if (meta.workdir) head = { ...head, workdir: meta.workdir };
+		if (named) head = { ...head, title: named };
+	} else {
+		head = readHead(entry.file);
+	}
 	if (runner === "cursor") {
 		const sessionId = sessionIdOf(runner, entry.file);
 		const chatDir = cursorChatDirFor(runner, entry.file, sessionId);
@@ -586,7 +694,7 @@ function summarize(runner: PublishableRunner, entry: FileEntry): ConversationSum
 		sessionId: sessionIdOf(runner, entry.file),
 		path: entry.file,
 		workdir: head.workdir,
-		title: head.title || path.basename(entry.file, ".jsonl"),
+		title: head.title || (runner === "copilot" ? sessionIdOf(runner, entry.file) : path.basename(entry.file, ".jsonl")),
 		updatedAt: new Date(entry.mtimeMs).toISOString(),
 		sizeBytes: entry.size,
 	};
@@ -689,6 +797,13 @@ export function readConversationPreview(
  * in the wrong repo. A transcript that never recorded a `cwd` therefore cannot
  * be adopted — the alternative is guessing a directory and finding out at step
  * 1, on the operator's real conversation.
+ *
+ * For `copilot` the requirement is about consistency rather than lookup: a
+ * resumed Copilot session is found by its uuid from any directory and keeps
+ * running in the cwd it was CREATED in, ignoring the invoking one. The workflow
+ * still has to be told that same directory, though, because the hub keys its
+ * per-workdir lock (flock) and the docker bind mount on it — a workdir the
+ * session doesn't actually run in would lock and mount the wrong tree.
  *
  * The runner is not checked here because it isn't a question: the conversation
  * knows which harness wrote it, and the caller takes it from `conversation.runner`

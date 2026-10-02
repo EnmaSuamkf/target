@@ -1,9 +1,12 @@
 # Feature: Per-workflow runtime (`--runner`)
 
 Let a workflow choose which coding-agent CLI its dedicated agent spawns:
-**Claude Code** (the default, unchanged) or
-**[free-code](https://github.com/EnmaSuamkf/free-code)** — the same two
-runtimes agent-webhook-bridge's spawn adapter and agentmesh already support.
+**Claude Code** (the default, unchanged),
+**[free-code](https://github.com/EnmaSuamkf/free-code)**, **Cursor Agent** or
+**GitHub Copilot CLI** — the runtimes agent-webhook-bridge's spawn adapters
+support. The text below was written for free-code and still describes its
+details; [GitHub Copilot CLI](#github-copilot-cli-runner-copilot) has its own
+section at the end.
 
 ## Why
 
@@ -19,10 +22,10 @@ that assumed Claude's session/transcript conventions.
 
 | File | Change |
 |---|---|
-| `hub/awb.ts` | `PUBLISHABLE_RUNNERS` (`claude`, `free-code`); `HookOptions.runner`; `createAwbHook` writes `spawn:<runner>`; `HARNESS_RESUME_COMMANDS` gains `free-code --session <path>` |
+| `hub/awb.ts` | `PUBLISHABLE_RUNNERS` (`claude`, `free-code`, `cursor`, `copilot`); `HookOptions.runner`; `createAwbHook` writes `spawn:<runner>`; `HARNESS_RESUME_COMMANDS` gains `free-code --session <path>` |
 | `hub/workflow.ts` | `createWorkflow` accepts and forwards `runner` |
 | `hub/server.ts` | `POST /api/workflows` validates an optional `runner` body field against `PUBLISHABLE_RUNNERS`, and for a host sandbox rejects a runner whose CLI isn't installed on this machine (via `availableRunners()`); `GET /api/runners` exposes that probe to the create form |
-| `hub/cli.ts` | `target create` / `create-from-template` accept `--runner <claude\|free-code>` and verify that CLI is installed on the host before POSTing (host only; `--force` warns-and-proceeds, docker isn't blocked) |
+| `hub/cli.ts` | `target create` / `create-from-template` accept `--runner <claude\|free-code\|cursor\|copilot>` and verify that CLI is installed on the host before POSTing (host only; `--force` warns-and-proceeds, docker isn't blocked) |
 | `hub/transcript.ts` | `readTokenUsage` detects a free-code session (an absolute `.jsonl` path), reads the transcript directly, and normalises free-code's usage shape (`input`/`output`/`cacheRead`/`cacheWrite`) alongside Claude's (`input_tokens`/…) |
 | `hub/tokens.ts` | the CLI accepts a free-code `.jsonl` path as its argument |
 | `hub/ui` | `Runner` type + `runner` on `CreateWorkflowInput`; an **Agent runtime** selector in the New-workflow modal that offers ONLY the agents `GET /api/runners` reports as installed — with an explicit error when the hub is unreachable or none are installed, never a silent fallback to both |
@@ -79,6 +82,78 @@ that assumed Claude's session/transcript conventions.
   "(not installed)" entry. A host workflow whose runner isn't installed is
   rejected at creation (server and CLI both), while a docker workflow is not —
   the image ships its own binary.
+
+## GitHub Copilot CLI (runner `copilot`)
+
+`--runner copilot` spawns `copilot -p` per step through awb's `spawn:copilot`
+adapter. What differs from the other runners:
+
+- **Session ids are bare uuids**, the same shape as claude's and Cursor's, so
+  the id alone cannot say which runner owns it: the hub decides from the
+  workflow's runner. Shape-sniffing is only the fallback for a bare session id
+  with no workflow, and treats it as Copilot only when
+  `~/.copilot/session-state/<id>/` exists and no Claude or Cursor artefact does. The
+  first step runs with `--session-id=<fresh uuid>` and every later step and
+  judge with `--resume=<id>`; an unknown id exits 1 with `No session, task, or
+  name matched …` instead of silently starting a new session.
+- **"Open conversation"** runs `copilot --resume=<id>` (with the `=`; a
+  space-separated value is read as a session name). A docker workflow gets the
+  same `docker run --rm -it …` shape as the others, with `~/.copilot` and
+  `~/.cache/copilot` mounted at their own paths and `COPILOT_AUTO_UPDATE=false`.
+- **A resumed session keeps its original cwd.** Lookup by id is independent of
+  the directory, but the session keeps running in the one it was created in,
+  which is why the workflow's workdir is fixed at creation too.
+- **Permissions** are tool flags, evaluated per call and not stored in the
+  session, so awb passes them on every call, first and resumed. Copilot cannot
+  ask in `-p`: an unapproved call is denied at once and the process still
+  exits 0 (the denial shows as `error.code: "denied"` on the tool event).
+
+  | Permission mode | Flags | Effect |
+  |---|---|---|
+  | unset, `manual`, `plan` | `--available-tools=view,grep,glob --deny-tool=write --deny-tool=shell` | read-only |
+  | `acceptEdits` | `--allow-tool=write --deny-tool=shell` | edits yes, shell no |
+  | `auto`, `dontAsk` | `--allow-all-tools` | all tools; paths limited to the workdir and `/tmp` |
+  | `bypassPermissions` | `--allow-all` | everything: tools, any path, any URL |
+
+  `task` (subagents) is left out of the read-only set on purpose: nested
+  subagents recurse and cost requests.
+- **Usage, model and context** are read from
+  `~/.copilot/session-state/<id>/events.jsonl` (`COPILOT_HOME` overrides the
+  base): the last `session.shutdown` event, written at every process exit,
+  carries cumulative `modelMetrics` for the whole session, subagents included.
+  The hub reads only the tail of the file, since it grows quickly. Copilot's
+  `inputTokens` already **includes** its cache buckets, so the hub shows
+  `inputTokens − cacheRead − cacheWrite` as the uncached part. Occupancy is the
+  exact `currentTokens`. The hub never computes a cost for Copilot: `cost_usd`
+  stays null and the report server prices by (agent, model). See
+  [`context-meter.md`](context-meter.md#github-copilot-cli).
+- **Compaction** is detected from a successful `session.compaction_complete`
+  record in the same `events.jsonl`; see
+  [`compaction-resilience.md`](compaction-resilience.md).
+- **Model**: the hub passes no `--model`, so the CLI's own default applies
+  (the CLI's own `COPILOT_MODEL` variable is the lever: it worked in the docker
+  end-to-end run once added to the hook's `sandbox.env`, which does not forward
+  it by default; not separately verified on the host); the model that ran is
+  read back from the session.
+- **Docker** needs a token inside the container (the host keyring login is
+  not reachable). The hub finds it itself: environment (`COPILOT_GITHUB_TOKEN`,
+  `GH_TOKEN`, `GITHUB_TOKEN`), then a token pasted in Settings, then
+  `gh auth token`, checked lazily when a copilot docker workflow is created or
+  dispatched (`400 copilot_token_required` with the in-app "Sign in with GitHub
+  CLI" / "Paste a token" flow when none is found). `ghp_` classic tokens are
+  rejected; a gh token gets a broader-scopes warning (a fine-grained PAT with
+  only "Copilot Requests" is safer). The value is written into the awb hook's
+  `sandbox.env` as `COPILOT_GITHUB_TOKEN=<value>` (hooks.json mode 600),
+  refreshed before every dispatch, and handed to the container through the
+  docker client's environment, never argv. No `export` is needed before
+  `npm start`; see the README and
+  [`copilot-docker-token-report.md`](copilot-docker-token-report.md). Image:
+  `target-agent-copilot:latest`, from `Dockerfile.copilot`.
+- **The runner is fixed at creation**, as for the others, and **only runners
+  that are installed and that the broker can run are offered**: the hub probes
+  `<cli> --version` and also checks that the awb checkout ships
+  `adapters/spawn-runner/<runner>.ts`, because a broker without the adapter
+  accepts the event and the step hangs until its timeout.
 
 ## Status
 

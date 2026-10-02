@@ -47,10 +47,12 @@ const {
 	_impl: awbImpl,
 	availableSandboxes,
 	clearDockerProbe,
+	BUILDABLE_SANDBOX_IMAGES,
 	DEFAULT_SANDBOX_IMAGES,
 	dockerAvailable,
 	ensureSandboxImage,
 	explainRunError,
+	imageBuildCommand,
 } = await import("./awb.ts");
 const { getStep, getWorkflow, insertStep, insertWorkflow, listSteps, markStepRunning } = await import("./db.ts");
 const { loadConfig } = await import("./config.ts");
@@ -227,6 +229,38 @@ test("POST /api/workflows with sandbox docker is still accepted when docker is a
 	assert.equal(workflow.sandbox, "docker");
 });
 
+test("POST /api/workflows with runner copilot + sandbox docker is refused (structured 400) when no token resolves, and accepted when one does", async (t) => {
+	forceDocker(t, true);
+	const saved = { ...process.env };
+	t.after(() => {
+		for (const k of ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]) {
+			if (saved[k] === undefined) delete process.env[k];
+			else process.env[k] = saved[k];
+		}
+	});
+	delete process.env.GH_TOKEN;
+	delete process.env.GITHUB_TOKEN;
+	const post = (name: string) =>
+		fetch(`${baseUrl}/api/workflows`, {
+			method: "POST",
+			headers: adminHeaders(),
+			body: JSON.stringify({ name, runner: "copilot", sandbox: "docker" }),
+		});
+
+	delete process.env.COPILOT_GITHUB_TOKEN;
+	const refused = await post("copilot docker no token");
+	assert.equal(refused.status, 400);
+	const body = (await refused.json()) as { error: string; message: string; actions: string[] };
+	assert.equal(body.error, "copilot_token_required");
+	assert.match(body.message, /gh auth login/);
+	assert.deepEqual(body.actions, ["gh-login", "paste-token"]);
+
+	process.env.COPILOT_GITHUB_TOKEN = "dummy-not-a-real-token";
+	const accepted = await post("copilot docker with token");
+	assert.equal(accepted.status, 200);
+	assert.ok(!JSON.stringify(await accepted.json()).includes("dummy-not-a-real-token"), "the value never comes back");
+});
+
 // --- 4. the error the operator actually saw --------------------------------
 
 test("explainRunError turns docker's registry-login error into the thing that fixes it", () => {
@@ -237,6 +271,17 @@ test("explainRunError turns docker's registry-login error into the thing that fi
 	assert.match(explained, /npm run target:install/, "the one command that builds it");
 	assert.match(explained, /docker build -t target-agent:latest/, "and the by-hand equivalent");
 	assert.match(explained, /never pulled from a registry/, "says why `docker login` is the wrong road");
+});
+
+test("explainRunError for the copilot image points at the installer and Dockerfile.copilot, not the base image", () => {
+	const raw =
+		"Unable to find image 'target-agent-copilot:latest' locally\ndocker: Error response from daemon: pull access denied for target-agent-copilot, repository does not exist or may require 'docker login'";
+	const explained = explainRunError(raw);
+	assert.ok(explained.startsWith(raw));
+	assert.match(explained, /npm run target:install/);
+	assert.match(explained, /docker build -t target-agent-copilot:latest .*-f Dockerfile\.copilot/);
+	assert.match(explained, /'target-agent-copilot:latest' is built on this machine/);
+	assert.doesNotMatch(explained, /docker build -t target-agent:latest/, "not confused with the base image");
 });
 
 test("explainRunError does NOT send the installer after an image the repo doesn't build", () => {
@@ -354,6 +399,37 @@ test("the free-code image builds its base first — `FROM target-agent:latest` c
 	assert.equal(builds.length, 2);
 	assert.ok(builds[0]!.includes(DEFAULT_SANDBOX_IMAGES.claude), "the base first");
 	assert.ok(builds[1]!.includes(DEFAULT_SANDBOX_IMAGES["free-code"]));
+});
+
+test("the copilot image builds its base first, then Dockerfile.copilot", async (t) => {
+	const { builds } = forceImages(t, {
+		missing: [DEFAULT_SANDBOX_IMAGES.claude, DEFAULT_SANDBOX_IMAGES.copilot],
+	});
+
+	assert.deepEqual(await ensureSandboxImage(DEFAULT_SANDBOX_IMAGES.copilot), { ok: true, built: true });
+	assert.equal(builds.length, 2);
+	assert.ok(builds[0]!.includes("target-agent:latest") && builds[0]!.includes("Dockerfile"), "the base first");
+	assert.ok(builds[1]!.includes("target-agent-copilot:latest"));
+	assert.ok(builds[1]!.includes("Dockerfile.copilot"), builds[1]!.join(" "));
+});
+
+test("with the base already present only the copilot image is built", async (t) => {
+	const { builds } = forceImages(t, { missing: [DEFAULT_SANDBOX_IMAGES.copilot] });
+
+	assert.deepEqual(await ensureSandboxImage(DEFAULT_SANDBOX_IMAGES.copilot), { ok: true, built: true });
+	assert.equal(builds.length, 1);
+	assert.ok(builds[0]!.includes("Dockerfile.copilot"));
+});
+
+test("BUILDABLE_SANDBOX_IMAGES lists copilot after its base, with a Dockerfile that exists — what `npm run target:install` iterates", () => {
+	const tags = BUILDABLE_SANDBOX_IMAGES.map((spec) => spec.tag);
+	assert.ok(tags.includes("target-agent-copilot:latest"));
+	assert.ok(tags.indexOf("target-agent:latest") < tags.indexOf("target-agent-copilot:latest"), "the base is built first");
+	const spec = BUILDABLE_SANDBOX_IMAGES.find((s) => s.tag === "target-agent-copilot:latest")!;
+	assert.equal(spec.runner, "copilot");
+	assert.equal(spec.dockerfile, "Dockerfile.copilot");
+	assert.ok(fs.existsSync(path.join(import.meta.dirname, "..", spec.dockerfile)), "the Dockerfile is in the repo root");
+	assert.ok(imageBuildCommand(spec).args.includes("Dockerfile.copilot"));
 });
 
 test("two dispatches racing for the same missing image share one build", async (t) => {

@@ -38,6 +38,7 @@ import type {
 	NotificationConnectionTestResult,
 	NotificationSettings,
 	NotificationSettingsInput,
+	CopilotTokenStatus,
 	SlackDeliverySettings,
 	SlackDeliverySettingsInput,
 	ReportSettings,
@@ -989,6 +990,40 @@ export async function saveSlackDeliverySettings(
 		},
 	);
 	return data.settings;
+}
+
+// --- Copilot token (copilot + docker workflows) ---
+//
+// None of these ever returns the token: the status is non-secret facts, and the
+// PUT answers with that same status. The pasted value goes out once, in the body.
+
+/** What the hub would use as the GitHub token for copilot in docker, and what is missing. */
+export async function getCopilotTokenStatus(): Promise<CopilotTokenStatus> {
+	const data = await request<{ status: CopilotTokenStatus }>("/api/copilot/token-status", { admin: true });
+	return data.status;
+}
+
+/** Stores a pasted token in Settings. The hub rejects classic `ghp_` tokens (400). */
+export async function saveCopilotToken(token: string): Promise<CopilotTokenStatus> {
+	const data = await request<{ status: CopilotTokenStatus }>("/api/settings/copilot-token", {
+		method: "PUT",
+		admin: true,
+		body: json({ token }),
+	});
+	return data.status;
+}
+
+export async function deleteCopilotToken(): Promise<CopilotTokenStatus> {
+	const data = await request<{ status: CopilotTokenStatus }>("/api/settings/copilot-token", {
+		method: "DELETE",
+		admin: true,
+	});
+	return data.status;
+}
+
+/** Opens a terminal on the hub's machine running `gh auth login --web`; 202 once it launched. */
+export function startGhLogin(): Promise<{ opened: true }> {
+	return request<{ opened: true }>("/api/copilot/gh-login", { method: "POST", admin: true });
 }
 
 /**

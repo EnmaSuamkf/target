@@ -38,6 +38,11 @@
       "detect": { "binary": "free-code", "probe": ["--version"] },
       "dest": { "file": "~/.free-code/agent/mcp.json", "pointer": "mcpServers" },
       "postSync": ["enableInFreeCodeMcpStatus"]
+    },
+    "copilot": {
+      "runnerId": "copilot",
+      "detect": { "binary": "copilot", "probe": ["--version"] },
+      "dest": { "file": "~/.copilot/mcp-config.json", "pointer": "mcpServers" }
     }
   }
 }

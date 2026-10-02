@@ -2,7 +2,7 @@
 
 The **Conversation** panel of a workflow shows a meter like
 `Context 108.9k / 1.0M · 10.9%`. This page explains where both numbers come
-from for each harness the hub runs: Claude Code, free-code and Cursor. It also
+from for each harness the hub runs: Claude Code, free-code, Cursor and GitHub Copilot CLI. It also
 covers how to correct the window, and when the hub's number can differ from the
 one in the agent's own `/context` bar.
 
@@ -213,6 +213,62 @@ Cursor models with no entry, such as `grok-4.6`, `grok-4.5` and
 (`gpt-5.6-terra` → 272k here), else the fallback. No local source gives a
 window for `grok-4.6`; set it in `modelContextWindows` if you know it.
 
+## GitHub Copilot CLI
+
+**Source.** Copilot writes `session.shutdown` into
+`~/.copilot/session-state/<id>/events.jsonl` (base overridable with `COPILOT_HOME`)
+at every process exit; the hub reads the last one from the tail of the file, which
+grows fast, and caches the reading by mtime and size. Its `modelMetrics` are
+cumulative for the whole session across resumes and already include subagents, so
+the hub never adds `agentMetrics` on top. A session with no shutdown yet (still
+running, or crashed) shows zero tokens but still its model.
+
+**Numerator.** Occupancy is exact: `session.shutdown.currentTokens`
+(system prompt + tool definitions + conversation), so `contextEstimated` is
+`false` and the meter has no `≈`. Unlike the other harnesses it is quoted as is,
+not clamped to the window.
+
+**No double counting.** Copilot's `usage.inputTokens` is the TOTAL input and
+already contains `cacheReadTokens` and `cacheWriteTokens` (observed: input 15,704 =
+cache write 15,694 + 10 uncached). The hub's usual total is `input + cacheCreation +
+cacheRead`, so for Copilot the uncached bucket is
+`inputTokens − cacheReadTokens − cacheWriteTokens` and the hub's total equals
+Copilot's own `inputTokens`. Adding the cache buckets again would inflate every
+total.
+
+**Denominator.** The denominator is Copilot's
+`max_prompt_tokens` (not the full window): the CLI compacts against it and
+`currentTokens` is a prompt-side figure. Decision recorded in
+`docs/copilot-runner-spike.md` §4.
+
+| Model id | Denominator (`max_prompt_tokens`) | Basis |
+|---|---|---|
+| `claude-haiku-4.5` | 128,000 (window 144,000) | observed 2026-10-01, also the compaction `tokenLimit` |
+| `gpt-5.4` | 922,000 (window 1,050,000) | observed, identical on both context tiers |
+| `gpt-5.4-nano` | 272,000 (window 400,000) | observed earlier in an interactive session |
+| `gpt-4o-mini` | 64,000 (window 128,000) | observed earlier in an interactive session; dated ids such as `gpt-4o-mini-2024-07-18` match by prefix |
+| other ids in `COPILOT_MODEL_CONTEXT_WINDOWS` (`gpt-5-mini`, `claude-sonnet-4.6`, `mai-code-1.1-flash`, the Opus/Sonnet/Fable/GPT-5.x/6.x/Gemini/Grok/Kimi ids the GitHub docs list, …) | 128,000 | **inferred, not measured**: a conservative figure, because the one measured Claude model is 128,000 and a too-small denominator only over-reports pressure |
+
+A model that is in no table gets the general fallback (200,000 by default, not a
+Copilot-specific value), and the meter does not mark it as an estimate because
+`currentTokens` itself is exact. The window is resolved from the model that
+actually ran (`assistant.message.model` / the shutdown's `currentModel`), never
+from the literal `auto`. There is no headless source of the real limit for an
+ordinary run: it appears (`session.compaction_start.tokenLimit`,
+`model.turn_ended.modelInfo`) only around a compaction. Override per model with
+`modelContextWindows`. A Copilot session
+looks that table up before the main one, since ids such as `claude-opus-5` mean
+different windows under Claude Code. `--context long_context` is recorded in
+`session.start`/`session.resume` (`contextTier`) but changed no limit when tested, so
+it is not used.
+
+**Cost.** The hub keeps `cost_usd` null for Copilot; Copilot bills per token (1 AI
+credit = $0.01) and the report server prices by (agent, model). `usage.snapshot`
+carries `agent: "copilot"`.
+
+Not verified: the window of every inferred id above, and whether `--context
+long_context` changes the window above 272k tokens.
+
 ## When the hub's number differs from the agent's own `/context`
 
 For Claude Code and free-code the **tokens** are the usage the harness itself
@@ -232,8 +288,8 @@ tokens:
 
 | | |
 |---|---|
-| `hub/transcript.ts` | Reading every harness: `readTokenUsage`, `estimateCursorOccupancy`, `cursorModelFromCommandLine`, `cursorModelFromTracking`, `cursorConfiguredContext`, `usageSnapshot` |
-| `hub/models.ts` | `MODEL_CONTEXT_WINDOWS`, `FALLBACK_CONTEXT_WINDOW_TOKENS`, `contextWindowForModel` |
+| `hub/transcript.ts` | Reading every harness (Copilot: `readCopilotUsage`, `copilotEventsPath`): `readTokenUsage`, `estimateCursorOccupancy`, `cursorModelFromCommandLine`, `cursorModelFromTracking`, `cursorConfiguredContext`, `usageSnapshot` |
+| `hub/models.ts` | `MODEL_CONTEXT_WINDOWS`, `COPILOT_MODEL_CONTEXT_WINDOWS`, `FALLBACK_CONTEXT_WINDOW_TOKENS`, `contextWindowForModel` |
 | `hub/ui/src/views/UsageMeter.tsx` | The meter, including the `≈` and its tooltip for estimates |
 | `hub/context-occupancy.test.ts`, `hub/cursor-occupancy.test.ts`, `hub/cursor-model.test.ts`, `hub/models.test.ts` | Tests, built on real transcript and log lines from this machine |
 

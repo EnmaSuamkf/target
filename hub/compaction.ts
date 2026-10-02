@@ -50,9 +50,9 @@ import { readTokenUsage } from "./transcript.ts";
  * which is precisely the harness where compaction has already been observed in
  * the wild.
  */
-export function boundaryFor(workdir: string | null, sessionId: string | null): string | null {
+export function boundaryFor(workdir: string | null, sessionId: string | null, harness?: string | null): string | null {
 	if (!workdir || !sessionId) return null;
-	return readTokenUsage(workdir, sessionId).lastCompactionAt;
+	return readTokenUsage(workdir, sessionId, harness).lastCompactionAt;
 }
 
 /**
@@ -66,7 +66,8 @@ export function boundaryFor(workdir: string | null, sessionId: string | null): s
  * seconds.
  */
 export function observeCompaction(workflow: Workflow, sessionId: string | null, log?: Logger): Workflow {
-	const at = boundaryFor(hookRuntime(workflow.hookUrl).workdir, sessionId);
+	const runtime = hookRuntime(workflow.hookUrl);
+	const at = boundaryFor(runtime.workdir, sessionId, runtime.harness);
 	if (!at) return workflow;
 	if (!recordCompaction(workflow.id, at)) return workflow;
 	log?.(

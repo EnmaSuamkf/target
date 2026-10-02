@@ -26,7 +26,7 @@ process.env.HOME = tmpHome;
 process.env.TARGET_HOME = path.join(tmpHome, ".target");
 process.env.AWB_HOME = path.join(tmpHome, ".agent-webhook-bridge");
 
-const { _stats, contextWindowForModel, FALLBACK_CONTEXT_WINDOW_TOKENS, MODEL_CONTEXT_WINDOWS } = await import("./models.ts");
+const { _stats, contextWindowForModel, COPILOT_MODEL_CONTEXT_WINDOWS, FALLBACK_CONTEXT_WINDOW_TOKENS, MODEL_CONTEXT_WINDOWS } = await import("./models.ts");
 const { claudeProjectDir, readTokenUsage } = await import("./transcript.ts");
 
 const workdir = path.join(tmpHome, "workdir");
@@ -188,6 +188,94 @@ test("docs/context-meter.md lists MODEL_CONTEXT_WINDOWS entry for entry", () => 
 	const section = doc.slice(doc.indexOf("### Model table"), doc.indexOf("## When the hub's number differs"));
 	const rows = [...section.matchAll(/^\| `([^`]+)` \| ([\d,]+) \|/gm)].map((m) => [m[1], Number(m[2]!.replaceAll(",", ""))]);
 	assert.deepEqual(rows, Object.entries(MODEL_CONTEXT_WINDOWS), "same ids, same windows, same order");
+});
+
+// --- GitHub Copilot CLI ids -------------------------------------------------
+
+test("copilot: observed ids resolve to Copilot's max_prompt_tokens, not the full window", () => {
+	assert.equal(contextWindowForModel("claude-haiku-4.5"), 128_000);
+	assert.equal(contextWindowForModel("gpt-5.4"), 922_000);
+	assert.equal(contextWindowForModel("gpt-5.4-nano"), 272_000);
+	assert.equal(contextWindowForModel("gpt-4o-mini-2024-07-18"), 64_000, "a dated variant resolves through its prefix");
+	// gpt-5.4 must not swallow its siblings through the prefix match.
+	assert.equal(contextWindowForModel("gpt-5.4-mini"), 128_000);
+	assert.equal(contextWindowForModel("gpt-5.4-nano"), 272_000);
+});
+
+test("copilot: every documented id has an exact entry", () => {
+	for (const id of [
+		"claude-haiku-4.5", "claude-sonnet-4.6", "claude-sonnet-5", "claude-sonnet-5.5", "claude-opus-4.7", "claude-opus-4.8",
+		"claude-opus-5", "claude-opus-5.5", "claude-fable-5", "claude-fable-5.1", "gpt-5-mini", "gpt-5.3-codex", "gpt-5.4",
+		"gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-astra", "gpt-6-luna",
+		"gpt-6-sol", "gpt-6.1-sol", "gemini-3.6-flash", "gemini-3.7-flash", "grok-4.5", "kimi-k2.7-code", "kimi-k3",
+	]) {
+		assert.ok(COPILOT_MODEL_CONTEXT_WINDOWS[id] !== undefined, `${id} has no Copilot entry`);
+	}
+});
+
+test("copilot: claude-opus-5.5 does not resolve through claude-opus-5 (and the reverse)", () => {
+	assert.equal(contextWindowForModel("claude-opus-5"), 1_000_000, "no harness: Claude Code's measured window");
+	assert.equal(contextWindowForModel("claude-opus-5", null, "copilot"), 128_000, "a Copilot session: its own table wins");
+	assert.equal(contextWindowForModel("claude-opus-5.5"), 128_000);
+	assert.equal(contextWindowForModel("claude-opus-5.5", null, "copilot"), 128_000);
+	assert.equal(contextWindowForModel("claude-sonnet-5.5"), 128_000);
+	assert.equal(contextWindowForModel("claude-fable-5.1"), 128_000);
+	// A dated Claude Code id still resolves through its entry.
+	assert.equal(contextWindowForModel("claude-opus-5-20260430"), 1_000_000);
+	// An unlisted point release never inherits a neighbour's window.
+	assert.equal(contextWindowForModel("claude-opus-5.9"), FALLBACK_CONTEXT_WINDOW_TOKENS);
+	assert.equal(contextWindowForModel("claude-opus-5.5-20261001"), 128_000, "a dated Copilot id uses the longest prefix");
+});
+
+test("copilot: an id that Cursor also spells keeps Cursor's window without a harness", () => {
+	assert.equal(contextWindowForModel("gpt-5.6-sol"), 1_000_000);
+	assert.equal(contextWindowForModel("gpt-5.6-sol", null, "copilot"), 128_000);
+});
+
+test("copilot: other named harnesses never inherit Copilot's ids", () => {
+	assert.equal(contextWindowForModel("claude-haiku-4.5", null, "cursor"), FALLBACK_CONTEXT_WINDOW_TOKENS);
+	assert.equal(contextWindowForModel("claude-opus-5", null, "claude"), 1_000_000);
+});
+
+test("copilot: an unknown model falls back to FALLBACK_CONTEXT_WINDOW_TOKENS", () => {
+	assert.equal(contextWindowForModel("mystery-model-9.9", null, "copilot"), FALLBACK_CONTEXT_WINDOW_TOKENS);
+	assert.equal(contextWindowForModel("gpt-5.4-ultra", null, "copilot"), 922_000, "a longer suffix after a dash is still the gpt-5.4 family");
+});
+
+test("copilot: the operator override and a stated window still win", () => {
+	const file = path.join(tmpHome, ".target", "config.json");
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, JSON.stringify({ modelContextWindows: { "claude-haiku-4.5": 90_000, "claude-opus-5.5": 700_000 } }));
+	try {
+		assert.equal(contextWindowForModel("claude-haiku-4.5", null, "copilot"), 90_000);
+		assert.equal(contextWindowForModel("claude-haiku-4.5", 50_000, "copilot"), 90_000, "override beats stated");
+		assert.equal(contextWindowForModel("claude-opus-5.5"), 700_000);
+		assert.equal(contextWindowForModel("gpt-5.4", 500_000, "copilot"), 500_000, "stated beats the table");
+	} finally {
+		fs.rmSync(file, { force: true });
+	}
+});
+
+test("copilot: a Copilot session's window comes from its own table end to end", () => {
+	const copilotHome = path.join(tmpHome, "copilot");
+	const prevHome = process.env.COPILOT_HOME;
+	process.env.COPILOT_HOME = copilotHome;
+	try {
+		const id = "abababab-0000-4000-8000-000000000001";
+		const dir = path.join(copilotHome, "session-state", id);
+		fs.mkdirSync(dir, { recursive: true });
+		const lines = [
+			{ type: "assistant.message", data: { model: "claude-opus-5", content: "hi", toolRequests: [] } },
+			{ type: "session.shutdown", data: { currentTokens: 20_000, modelMetrics: { "claude-opus-5": { requests: { count: 1 }, usage: { inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } } } } },
+		];
+		fs.writeFileSync(path.join(dir, "events.jsonl"), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
+		const u = readTokenUsage(workdir, id, "copilot");
+		assert.equal(u.contextWindow, 128_000, "not Claude Code's 1M for the same id");
+		assert.equal(u.contextTokens, 20_000);
+	} finally {
+		if (prevHome === undefined) delete process.env.COPILOT_HOME;
+		else process.env.COPILOT_HOME = prevHome;
+	}
 });
 
 // --- reading the model out of each harness's transcript --------------------

@@ -11,6 +11,53 @@ The current version is reported by every instance to the central server (see
 
 ### Added
 
+- **GitHub Copilot CLI as a fourth runner (`copilot`).**
+  - **Runner.** `--runner <claude|free-code|cursor|copilot>` (CLI, MCP tools
+    and the New-workflow form) writes `spawn:copilot` into the hook. Steps run
+    `copilot -p` through awb's new adapter; sessions are bare uuids chained with
+    `--session-id=<uuid>` (first step) and `--resume=<id>` (the rest). The
+    permission mode maps to tool flags passed on every call: read-only
+    (`unset`/`manual`/`plan`), edits without shell (`acceptEdits`), all tools
+    inside the workdir and `/tmp` (`auto`/`dontAsk`), and everything
+    (`bypassPermissions`). "Open conversation" runs `copilot --resume=<id>`. A
+    resumed session keeps the cwd it was created in. A runner is offered only
+    when its CLI is installed and the awb checkout ships its adapter.
+  - **Usage and context.** Tokens, model and turns come from the last
+    `session.shutdown` of `~/.copilot/session-state/<id>/events.jsonl`, read
+    from the tail. Copilot's `inputTokens` already contains the cache buckets,
+    so the hub subtracts them instead of adding them twice, and the report
+    server prices the (agent `copilot`, model) pair. Occupancy is the exact
+    `currentTokens`, so `context_estimated` is false, measured against the
+    model's `max_prompt_tokens` (static table in `hub/models.ts`).
+  - **Compaction.** A successful `session.compaction_complete` in
+    `events.jsonl` is the third boundary format the hub detects; failed ones
+    are ignored. Whether an automatic compaction writes the same record on
+    success is unverified.
+  - **Docker.** `Dockerfile.copilot` builds `target-agent-copilot:latest`,
+    built by `npm run target:install`. The host keyring login is not reachable
+    from a container, so the token is found by the hub itself (environment,
+    then a token pasted in Settings, then `gh auth token`), lazily when a
+    copilot docker workflow is created or dispatched; no `export` before
+    `npm start` is needed. Without one, creation answers `400
+    copilot_token_required` and the UI offers "Sign in with GitHub CLI" (a
+    real terminal runs `gh auth login --web`), "Paste a token" and "Check
+    again"; classic `ghp_` tokens are rejected and a gh token gets a
+    broader-scopes warning (prefer a fine-grained PAT with only "Copilot
+    Requests"). The value is written into the awb hook's `sandbox.env` as
+    `COPILOT_GITHUB_TOKEN=<value>`, refreshed before every dispatch and
+    removed with the hook, so `hooks.json` is written with mode 600 (hub and
+    awb). awb passes only `-e COPILOT_GITHUB_TOKEN` and sets the value in the
+    `docker` client's environment, so it is not in `ps` or the run log; the
+    hub never returns it from the API and masks token-shaped text in step
+    errors, progress files and reports. This replaces the earlier name-only
+    rule and needs the matching awb change (restart the broker). The desktop
+    app inherits the GUI session's environment, not the shell's; the in-app
+    flow removes the need to launch it from a terminal.
+  - **Conversations and sync.** Copilot sessions appear in the conversation
+    picker and preview, and the Copilot MCP config is kept in sync like the
+    other harnesses'. `usage.snapshot` reports `agent: "copilot"`; the pricing rules
+    for the report server are in target-server's
+    `docs/copilot-pricing-rules.json`.
 - **Scheduled workflows (remote series sync).**
   - **Commands.** `workflow.set_schedule { series_id, spec, timezone,
     include_previous }` and `workflow.cancel_schedule { series_id }`. They

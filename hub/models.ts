@@ -56,7 +56,9 @@ export const FALLBACK_CONTEXT_WINDOW_TOKENS = 200_000;
  * numbers are evidence and which are documentation.
  *
  * Match is exact first, then longest id prefix — `claude-opus-5-20260430`
- * resolves through `claude-opus-5`. Not exhaustive by design; anything missing
+ * resolves through `claude-opus-5`. A prefix only counts at a version boundary
+ * (see `matchesAtBoundary`): `claude-opus-5.5` must NOT resolve through
+ * `claude-opus-5`. Not exhaustive by design; anything missing
  * lands on FALLBACK_CONTEXT_WINDOW_TOKENS and can be corrected from config.
  */
 export const MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
@@ -100,6 +102,86 @@ export const MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
 	sonnet: 1_000_000,
 	fable: 1_000_000,
 	haiku: 200_000,
+};
+
+/**
+ * GitHub Copilot CLI model ids (dotted: `claude-haiku-4.5`, `gpt-5.4`), with the
+ * denominator chosen in docs/copilot-runner-spike.md section 4: Copilot's
+ * `max_prompt_tokens`, NOT `max_context_window_tokens`. The CLI compacts against
+ * it (`compaction_start.tokenLimit` equals it on both measured models) and the
+ * hub's occupancy, `session.shutdown.currentTokens`, is a prompt-side figure.
+ *
+ * No runtime source of the limit exists for a plain headless run, so these are
+ * static. Evidence is quoted per group; "inferred" means NOT measured.
+ *
+ * Some Copilot ids are spelled exactly like an id another harness already has
+ * in MODEL_CONTEXT_WINDOWS with a different meaning (`claude-opus-5` is Claude
+ * Code's 1M window, `gpt-5.6-sol` is Cursor's 1M tier). A Copilot session looks
+ * this table up FIRST (`contextWindowForModel`'s `harness`); a caller without a
+ * harness sees the main table first and falls to this one only for ids the main
+ * table does not know.
+ *
+ * Long-context tier: `--context long_context` is recorded in
+ * `session.start.data.contextTier` / `session.resume.data.contextTier`
+ * (`"long_context"`, else null), but on 2026-10-01 it changed no limit: gpt-5.4
+ * reported 1050000/922000 on both tiers and haiku ignored the flag. So the tier is
+ * detectable but deliberately NOT plumbed into `stated`; the table value stays
+ * the denominator. If a model is later seen with a larger limit under that tier,
+ * the operator override is the escape hatch.
+ */
+export const COPILOT_MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
+	// OBSERVED 2026-10-01 on CLI 1.0.91: `model.turn_ended.modelInfo` 144000 window /
+	// 128000 max_prompt, and compaction `tokenLimit` 128000. The docs' "1M in CLI"
+	// claim for Haiku 4.5 was falsified (`--context long_context` ignored).
+	"claude-haiku-4.5": 128_000,
+	// OBSERVED 2026-10-01: modelInfo 1050000 window / 922000 max_prompt, identical on
+	// the default and long_context tiers; compaction `tokenLimit` 922000.
+	"gpt-5.4": 922_000,
+	// OBSERVED earlier in an interactive session (spike section 4): 400000 window /
+	// 272000 max_prompt. Rejected by `--model` on this account on 2026-10-01.
+	"gpt-5.4-nano": 272_000,
+	// OBSERVED earlier in an interactive session: 128000 window / 64000 max_prompt
+	// (reported as the dated `gpt-4o-mini-2024-07-18`, which the prefix match covers).
+	"gpt-4o-mini": 64_000,
+	// INFERRED, not measured: ids seen in events (gpt-5-mini, gpt-5.4-mini,
+	// claude-sonnet-4.6, mai-code-1.1-flash) whose limits were never captured, and the
+	// ids the GitHub docs list for the Copilot CLI (docs.github.com, "Supported AI
+	// models in GitHub Copilot", read 2026-10-01; it states no limits) that were
+	// rejected or not probed on this account. The id spellings below follow the
+	// docs' display names. The value is the spike's conservative figure: the one
+	// measured Claude model is 128000 and the docs' 1M claims proved wrong for it, and
+	// a too-small denominator only over-reports pressure. Override per model in
+	// ~/.target/config.json once a real limit is known.
+	"gpt-5-mini": 128_000,
+	"gpt-5.3-codex": 128_000,
+	"gpt-5.4-mini": 128_000,
+	"gpt-5.5": 128_000,
+	"gpt-5.6-luna": 128_000,
+	"gpt-5.6-sol": 128_000,
+	"gpt-5.6-terra": 128_000,
+	"gpt-6-astra": 128_000,
+	"gpt-6-luna": 128_000,
+	"gpt-6-sol": 128_000,
+	"gpt-6.1-sol": 128_000,
+	"claude-sonnet-4.6": 128_000,
+	"claude-sonnet-5": 128_000,
+	"claude-sonnet-5.5": 128_000,
+	"claude-opus-4.7": 128_000,
+	"claude-opus-4.8": 128_000,
+	"claude-opus-5": 128_000,
+	"claude-opus-5.5": 128_000,
+	"claude-fable-5": 128_000,
+	"claude-fable-5.1": 128_000,
+	"gemini-3.5-flash": 128_000,
+	"gemini-3.6-flash": 128_000,
+	"gemini-3.7-flash": 128_000,
+	"gemini-3.8-flash": 128_000,
+	"grok-4.5": 128_000,
+	"grok-4.6": 128_000,
+	"grok-4.7": 128_000,
+	"kimi-k2.7-code": 128_000,
+	"kimi-k3": 128_000,
+	"mai-code-1.1-flash": 128_000,
 };
 
 /**
@@ -175,6 +257,18 @@ function parseConfiguredWindows(file: string): ConfiguredWindows {
 }
 
 /**
+ * Whether `key` is a prefix of `id` that ends where a version ends. A key that
+ * ends in a digit must not be followed by another digit or a dot, so
+ * `claude-opus-5.5` and `claude-opus-5.1` do not resolve through `claude-opus-5`
+ * (a different model with its own window), while `claude-opus-5-20260430` does.
+ */
+function matchesAtBoundary(id: string, key: string): boolean {
+	if (!id.startsWith(key)) return false;
+	if (id.length === key.length) return true;
+	return !(/[0-9]$/.test(key) && /[0-9.]/.test(id[key.length] ?? ""));
+}
+
+/**
  * The context window to measure `model` against. `null`/unknown → the
  * documented fallback, never a throw: a missing model id is a transcript that
  * hasn't got an assistant turn yet, which is normal, not an error.
@@ -188,21 +282,32 @@ function parseConfiguredWindows(file: string): ConfiguredWindows {
  * a model (see transcript.ts). It beats the table because it is what the run
  * actually used (the same model id can run at 272k or 1M), but not the
  * operator, whose override is the escape hatch for every source being wrong.
+ *
+ * `harness` (`"copilot"`) makes COPILOT_MODEL_CONTEXT_WINDOWS win over the main
+ * table for ids both spell; any other named harness ignores the Copilot table;
+ * with none (a bare lookup) the main table wins and the Copilot one only fills
+ * ids the main table lacks.
  */
-export function contextWindowForModel(model: string | null | undefined, stated?: number | null): number {
+export function contextWindowForModel(model: string | null | undefined, stated?: number | null, harness?: string | null): number {
 	const { windows, fallback } = configuredWindows();
 	const id = model ? model.trim().toLowerCase() : "";
 	if (id && windows[id] !== undefined) return windows[id];
 	if (typeof stated === "number" && Number.isFinite(stated) && stated > 0) return stated;
 	if (!id || id === "<synthetic>") return fallback;
-	const table: Record<string, number> = { ...MODEL_CONTEXT_WINDOWS, ...windows };
+	const table: Record<string, number> =
+		harness === "copilot"
+			? { ...MODEL_CONTEXT_WINDOWS, ...COPILOT_MODEL_CONTEXT_WINDOWS, ...windows }
+			: harness
+				? // Another named harness never inherits Copilot's ids: an id only Copilot knows is the fallback for it.
+					{ ...MODEL_CONTEXT_WINDOWS, ...windows }
+				: { ...COPILOT_MODEL_CONTEXT_WINDOWS, ...MODEL_CONTEXT_WINDOWS, ...windows };
 	if (table[id] !== undefined) return table[id];
 	// Longest prefix wins, so `claude-opus-4-8-2026…` prefers `claude-opus-4-8`
 	// over a hypothetical shorter `claude-opus-4` entry.
 	let best: number | null = null;
 	let bestLength = 0;
 	for (const [key, value] of Object.entries(table)) {
-		if (id.startsWith(key) && key.length > bestLength) {
+		if (matchesAtBoundary(id, key) && key.length > bestLength) {
 			best = value;
 			bestLength = key.length;
 		}

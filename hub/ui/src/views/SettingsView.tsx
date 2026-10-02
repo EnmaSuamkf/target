@@ -25,6 +25,7 @@ import * as api from "../api/client.ts";
 import { ApiError } from "../api/client.ts";
 import type { CatalogSyncDomainResult, CatalogSyncResult } from "../api/types.ts";
 import { CollapsibleSection } from "../components/CollapsibleSection.tsx";
+import { CopilotTokenPanel } from "../components/CopilotTokenPanel.tsx";
 import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { Field } from "../components/Field.tsx";
 import { Switch } from "../components/Switch.tsx";
@@ -237,6 +238,7 @@ export function SettingsView({
 	const reportId = useId();
 	const dockerFriendlyId = useId();
 	const dockerMountsId = useId();
+	const copilotTokenId = useId();
 	const archiveId = useId();
 	const linkId = useId();
 
@@ -1145,6 +1147,25 @@ export function SettingsView({
 					)}
 				</div>
 			</form>
+
+			{/* Copilot in Docker: the GitHub token the hub hands to copilot workflows
+			    that run in a container. Acts immediately (no Save): every button
+			    talks to its own endpoint, and the token is never shown back. */}
+			<section className={styles.section} aria-labelledby={`${copilotTokenId}-section`}>
+				<h3 className={styles.sectionHeading} id={`${copilotTokenId}-section`}>
+					Copilot in Docker
+				</h3>
+				<p className="hint">
+					GitHub Copilot CLI inside a container has no keyring to read its login from, so it needs a GitHub
+					token. The hub looks for one in its environment (<code>COPILOT_GITHUB_TOKEN</code>,{" "}
+					<code>GH_TOKEN</code>, <code>GITHUB_TOKEN</code>), then in the token saved here, then in your GitHub
+					CLI login. It writes the token into the awb hook of each copilot docker workflow (file mode 600) and
+					refreshes it before every step. The app never shows it. A fine-grained token with only the
+					“Copilot Requests” permission is the safest choice; classic <code>ghp_</code> tokens are not
+					supported.
+				</p>
+				<CopilotTokenPanel disabled={busy} />
+			</section>
 
 			{/* Auto-archive: one number, committed by its own Save (a single PUT to
 			    /api/settings/archive) like every other section. */}

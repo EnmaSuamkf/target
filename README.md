@@ -7,13 +7,15 @@ a queue of loose jobs, each **workflow creates its own dedicated agent +
 hook**, and its steps run one after another **on the same harness session**
 (resume chained), like a single conversation that advances step by step.
 
-Two runtimes are supported, same as agent-webhook-bridge and agentmesh:
-**Claude Code** (the default) and **[free-code](https://github.com/EnmaSuamkf/free-code)**.
-Pick one per workflow with `--runner <claude|free-code>` (or the **Agent
-runtime** selector in the UI form). Both share the same hook protocol
+Four runtimes are supported, the ones agent-webhook-bridge's spawn adapters run:
+**Claude Code** (the default), **[free-code](https://github.com/EnmaSuamkf/free-code)**,
+**Cursor Agent** and **[GitHub Copilot CLI](https://docs.github.com/copilot/concepts/agents/about-copilot-cli)**.
+Pick one per workflow with `--runner <claude|free-code|cursor|copilot>` (or the **Agent
+runtime** selector in the UI form). All share the same hook protocol
 (secret, `callbackUrl`, `sessionId`), so steps, judges, retries, context
 injection and session chaining behave identically — only the spawned CLI and
-the session-id shape differ (a claude uuid vs. a free-code `.jsonl` path).
+the session-id shape differ (a claude, cursor or copilot uuid vs. a free-code
+`.jsonl` path).
 
 ## Pieces reused from agentmesh
 
@@ -102,6 +104,13 @@ build without it and you get an app that starts and then fails looking for the
 broker. Building on the wrong OS fails quietly the same way: ask for a `.dmg`
 from Linux and electron-builder hands you a `.zip` instead.
 
+**The app inherits the GUI session's environment, not your shell's.**
+Variables you `export` in a terminal profile do not reach an app started from
+the menu or dock. That no longer matters for Copilot in Docker: the in-app
+**Sign in with GitHub CLI** / **Paste a token** flow (see
+[Containing the agent](#containing-the-agent---sandbox)) gets the token without launching the app
+from a terminal.
+
 **The app bundles a snapshot of `hub/`, taken when you build.** It does not
 track the repo afterwards, so an app built before a change keeps running the
 old hub until you rebuild it. If you are testing a change you just made, use
@@ -136,7 +145,7 @@ working as a Bearer credential for scripts and automation, and the CLI talks
 to the database directly.
 
 ```bash
-node hub/cli.ts create "release-notes" [--workdir <dir>] [--permission-mode acceptEdits] [--runner free-code] [--sandbox docker] [--image <name>]
+node hub/cli.ts create "release-notes" [--workdir <dir>] [--permission-mode acceptEdits] [--runner <claude|free-code|cursor|copilot>] [--sandbox docker] [--image <name>]
 node hub/cli.ts set-context <workflowId> "<text>"   # set (or clear with "") the conversation context, on an existing workflow
 node hub/cli.ts add-step <workflowId> "Read the CHANGELOG and put together a summary"
 node hub/cli.ts add-step <workflowId> "Publish the summary to docs/release-notes.md"
@@ -531,7 +540,8 @@ detail panel).
 You can also start a workflow **from a conversation you're already having**. In
 the new-workflow form, the **Agent runtime** selector filters the list under it
 to that harness's sessions (`~/.claude/projects/…` for Claude Code,
-`~/.free-code/…` and awb's own session tree for free-code); pick one and it
+`~/.free-code/…` and awb's own session tree for free-code,
+`~/.copilot/session-state/<uuid>/` for Copilot); pick one and it
 becomes the new workflow's conversation context, delivered by the context step
 before the first real step. **Open in terminal** reopens the selected
 conversation in a terminal window here, so you can confirm by eye that it's the
@@ -548,9 +558,10 @@ survives, so nothing looks broken — but the agent stops being able to see the
 steps before it, and the conversation context injected at the top is gone with
 them.
 
-The hub detects the boundary in both harnesses' transcripts (Claude Code's
-`compact_boundary` system record and free-code's `type: "compaction"` record,
-which carries no token metadata at all), records it on the workflow, and
+The hub detects the boundary in the harnesses' transcripts (Claude Code's
+`compact_boundary` system record, free-code's `type: "compaction"` record,
+which carries no token metadata at all, and Copilot's successful
+`session.compaction_complete` event in its `events.jsonl`), records it on the workflow, and
 re-states the conversation context on the next step — no restart, no progress
 discarded. It shows up in the log, in the progress `.md` and in the
 **Conversation** panel.
@@ -567,11 +578,14 @@ progress file stays the operator-facing view, results still truncated to 500
 chars.)
 
 The Conversation panel's context meter reads each harness's own records — the
-Claude Code and free-code transcripts, and for Cursor the awb run logs plus its
-agent-transcript — and measures them against the window of the model the
+Claude Code and free-code transcripts, for Cursor the awb run logs plus its
+agent-transcript, and for Copilot the `session.shutdown` event in
+`~/.copilot/session-state/<id>/events.jsonl` — and measures them against the window of the model the
 session actually ran on, not an assumed one. Cursor only reports usage summed
 over every API call of a run, so its reading is an estimate and the meter marks
-it `≈`. Override a model's window with `modelContextWindows` (and the default
+it `≈`. Copilot reports its current occupancy exactly (`currentTokens`), measured
+against the model's `max_prompt_tokens`, so its reading is never marked `≈`.
+Override a model's window with `modelContextWindows` (and the default
 with `fallbackContextWindowTokens`) in `~/.target/config.json`. Full write-up,
 including the model table and when the hub's number can differ from the agent's
 own `/context` bar: [`docs/context-meter.md`](docs/context-meter.md).
@@ -732,7 +746,43 @@ What changes and what doesn't:
   the session file; there are no subagent transcripts to fold in.
 
 The runner is fixed at workflow creation (it's the hook's spawn consumer);
-to switch runtimes, create a new workflow.
+to switch runtimes, create a new workflow. Only runners that are installed on
+this machine **and** that the awb checkout the broker runs from has an adapter
+for are offered (`GET /api/runners`); an outdated broker would otherwise store
+the step's event and leave it hanging until its timeout.
+
+#### `--runner copilot`
+
+```bash
+node hub/cli.ts create "release-notes" --runner copilot --permission-mode acceptEdits
+```
+
+- **Sessions are bare uuids.** The first step runs
+  `copilot -p … --session-id=<uuid>` and every later step (and judge) runs
+  `copilot -p … --resume=<id>`. "Open conversation" opens a terminal running
+  `copilot --resume=<id>`. The session lives in
+  `~/.copilot/session-state/<id>/`, and a resumed session keeps running in the
+  directory it was **created** in, whatever directory the resume starts from.
+- **Permissions map to tool flags**, passed on every call (they are not stored
+  in the session). Copilot cannot ask in `-p`, so anything not approved is
+  denied at once instead of hanging, and it still exits 0:
+
+  | `--permission-mode` | Copilot flags | Effect |
+  | --- | --- | --- |
+  | unset, `manual`, `plan` | `--available-tools=view,grep,glob --deny-tool=write --deny-tool=shell` | read-only |
+  | `acceptEdits` | `--allow-tool=write --deny-tool=shell` | edits yes, shell no |
+  | `auto`, `dontAsk` | `--allow-all-tools` | all tools, paths limited to the workdir and `/tmp` |
+  | `bypassPermissions` | `--allow-all` | everything: tools, any path, any URL |
+
+- **Model.** The hub passes no `--model`; the CLI's own default (or its
+  `COPILOT_MODEL` variable) decides. The model that ran is read back from the
+  session.
+- **Token usage** is read from `session.shutdown` in the session's
+  `events.jsonl`. Copilot's `inputTokens` already **includes** the cache
+  buckets, so the hub subtracts them before showing them separately instead of
+  adding them a second time. Occupancy is exact (`currentTokens`). See
+  [`docs/runners.md`](docs/runners.md) and
+  [`docs/context-meter.md`](docs/context-meter.md).
 
 ### Containing the agent (`--sandbox`)
 
@@ -754,10 +804,12 @@ no separate step to remember. Build them by hand only if you skipped that
 ```bash
 docker build -t target-agent:latest .                                    # ./Dockerfile
 docker build -t target-agent-freecode:latest -f Dockerfile.free-code .   # ./Dockerfile.free-code
+docker build -t target-agent-cursor:latest -f Dockerfile.cursor .        # ./Dockerfile.cursor
+docker build -t target-agent-copilot:latest -f Dockerfile.copilot .      # ./Dockerfile.copilot
 ```
 
 The image built from `./Dockerfile` only ships `claude`. A workflow whose
-runner is `free-code` invokes `free-code` as the container command, so it needs
+runner is `free-code`, `cursor` or `copilot` invokes that CLI as the container command, so it needs
 an image that has it — otherwise the step dies with `exit 127` before an agent
 exists. **The default image follows the runner**:
 
@@ -765,8 +817,59 @@ exists. **The default image follows the runner**:
 | --- | --- | --- |
 | `claude` | `target-agent:latest` | `Dockerfile` |
 | `free-code` | `target-agent-freecode:latest` | `Dockerfile.free-code` |
+| `cursor` | `target-agent-cursor:latest` | `Dockerfile.cursor` |
+| `copilot` | `target-agent-copilot:latest` | `Dockerfile.copilot` |
 
-`--image` still overrides either one.
+`--image` still overrides any of them.
+
+**Copilot in a container needs a token.** Its login lives in the OS keyring,
+which a container cannot reach (and the `~/.copilot` it mounts holds no
+secret), so a `copilot` + `docker` workflow authenticates with the
+`COPILOT_GITHUB_TOKEN` environment variable inside the container. **You do not
+have to export anything**: the hub finds the token itself, in this order:
+
+1. the hub's environment: `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then
+   `GITHUB_TOKEN` (Copilot's own precedence). Optional override, e.g.
+   `export COPILOT_GITHUB_TOKEN=...` before `npm start`; no longer required;
+2. a token you pasted in **Settings → Copilot in Docker** (stored in the hub's
+   database, never shown again);
+3. `gh auth token` (GitHub CLI). The hub also tries `/usr/bin/gh`,
+   `/usr/local/bin/gh` and `/opt/homebrew/bin/gh`, because an app started from
+   the desktop menu may not have `gh` on its PATH.
+
+The check is **lazy**: nothing is looked up when the app starts, only when a
+`copilot` + `docker` workflow is created or a step of one is dispatched. If no
+token is found, creating the workflow answers `400 copilot_token_required` and
+the New-workflow dialog (and Settings) offers **Sign in with GitHub CLI** (the
+hub opens a terminal on this machine running
+`gh auth login --web --hostname github.com`; finish the browser flow there and
+the dialog notices), **Paste a token**, and **Check again**. The CLI prints the
+same two fixes.
+
+Copilot CLI accepts OAuth tokens (`gho_…`) and fine-grained personal access
+tokens (`github_pat…`); **classic `ghp_…` tokens are not supported** and are
+rejected with a clear message. A token from `gh auth token` works but carries
+broader scopes (repo, workflow, …) than Copilot needs, so the hub shows a
+warning: prefer a fine-grained PAT with only the **Copilot Requests**
+permission, pasted in Settings.
+
+How the token travels (this reverses the earlier "name only" rule, because the
+broker is a separate process that never sees the hub's environment, nor a
+desktop launch's): the hub writes `COPILOT_GITHUB_TOKEN=<value>` into the awb
+hook's `sandbox.env` and **refreshes it before every dispatch of a copilot
+docker step**, so a rotated token, a new `gh auth login` or a changed Settings
+value is picked up with no restart; it is removed with the hook. `hooks.json`
+is therefore written with **mode 600**. awb then runs `docker run -e
+COPILOT_GITHUB_TOKEN` (the name only) and puts the value in the environment of
+the `docker` client process alone: it is not on any command line, so not in
+`ps` and not in the run log header. The hub never returns it from the API and
+masks token-shaped strings in step errors, progress files and reports.
+
+The mounts for Copilot are `~/.copilot` (sessions, which the hub also reads)
+and `~/.cache/copilot` (the ~185 MB bundled CLI, so each step doesn't
+re-extract it), both read-write at their own paths. This needs the awb with the
+process-env change (`NAME=value` entries kept out of argv and `hooks.json`
+saved 0600); restart the broker after updating it.
 
 **A default image is built, never pulled.** These two names exist in no
 registry, so the installer builds them up front and the hub builds one on the
@@ -794,8 +897,8 @@ picked up without restarting the hub.
   path, the progress watchdog, the callbacks) is unchanged.
 - **Paths are identical inside and out.** The workdir is bind-mounted at its
   own absolute path and is also the container's `-w`, and `~/.claude`,
-  `~/.claude.json`, `~/.free-code` and `~/.agent-webhook-bridge/sessions` come
-  along at theirs. That identity is load-bearing: the hub finds a run's
+  `~/.claude.json`, `~/.free-code`, `~/.cursor`, `~/.copilot` and
+  `~/.agent-webhook-bridge/sessions` come along at theirs. That identity is load-bearing: the hub finds a run's
   transcripts by slugifying the workdir string, so a remapped path wouldn't
   error, it would just make every step look stalled after ten minutes. `$HOME`
   itself is never mounted, so each harness's state directory has to be named:
@@ -1002,8 +1105,8 @@ tests command application (`workflow.create`, `step.add`, `workflow.start`,
 ## External requirement
 
 It needs `agent-webhook-bridge` **running** — that's what actually spawns
-`claude -p` / `claude --resume` (or `free-code -p` / `free-code --session`)
-for each step. `npm run target:install` puts it
+`claude -p` / `claude --resume` (or `free-code -p` / `free-code --session`, or
+the `cursor` and `copilot -p` / `copilot --resume` equivalents) for each step. `npm run target:install` puts it
 in place and `npm start` boots it alongside the hub, so you don't have to start
 it yourself.
 

@@ -5,6 +5,7 @@ import type {
 	Account,
 	AttachmentField,
 	CloneWorkflowInput,
+	CopilotTokenRequired,
 	CreateWorkflowInput,
 	NotificationSettings,
 	NotificationSettingsInput,
@@ -61,6 +62,7 @@ import { useDictation } from "./hooks/useDictation.ts";
 import { useIsMobile } from "./hooks/useIsMobile.ts";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts.ts";
 import { usePolling } from "./hooks/usePolling.ts";
+import { HandledError, asCopilotTokenRequired } from "./lib/copilotToken.ts";
 import { downloadJson, jsonFilename } from "./lib/download.ts";
 import {
 	tcpToolChangeAction,
@@ -582,7 +584,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 				if (after) await after();
 				return true;
 			} catch (err) {
-				reportError(err, context);
+				if (!(err instanceof HandledError)) reportError(err, context);
 				return false;
 			} finally {
 				setBusy(false);
@@ -599,9 +601,18 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 
 	// --- workflow actions ---
 
-	const handleCreate = async (input: CreateWorkflowInput): Promise<void> => {
+	const handleCreate = async (input: CreateWorkflowInput): Promise<CopilotTokenRequired | null> => {
+		// The hub's structured "no GitHub token" refusal belongs in the token
+		// panel (handed back to the dialog), not in a generic error toast.
+		let refused: CopilotTokenRequired | null = null;
 		const ok = await act("Could not create the workflow", async () => {
-			const workflow = await api.createWorkflow(input);
+			let workflow: Workflow;
+			try {
+				workflow = await api.createWorkflow(input);
+			} catch (err) {
+				refused = asCopilotTokenRequired(err);
+				throw refused ? new HandledError("copilot_token_required") : err;
+			}
 			setSelectedId(workflow.id);
 			toast.success(`Workflow "${workflow.name}" created.`);
 		}, refreshCurrent);
@@ -612,6 +623,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 			setRailResetKey((n) => n + 1);
 			closeCreate();
 		}
+		return refused;
 	};
 
 	const handleStart = (stepIds: string[]): void => {
@@ -655,18 +667,26 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	 * confirmed: it creates something, changes nothing, and is undone by deleting
 	 * the copy.
 	 */
-	const handleCloneSubmit = async (input: CloneWorkflowInput): Promise<void> => {
-		if (!cloneSourceId) return;
+	const handleCloneSubmit = async (input: CloneWorkflowInput): Promise<CopilotTokenRequired | null> => {
+		if (!cloneSourceId) return null;
+		let refused: CopilotTokenRequired | null = null;
 		const ok = await act(
 			"Could not clone the workflow",
 			async () => {
-				const clone = await api.cloneWorkflow(cloneSourceId, input);
+				let clone: Workflow;
+				try {
+					clone = await api.cloneWorkflow(cloneSourceId, input);
+				} catch (err) {
+					refused = asCopilotTokenRequired(err);
+					throw refused ? new HandledError("copilot_token_required") : err;
+				}
 				setSelectedId(clone.id);
 				toast.success(`Workflow cloned as "${clone.name}".`);
 			},
 			refreshCurrent,
 		);
 		if (ok) closeCreate();
+		return refused;
 	};
 
 	// Returns whether the rename reached the server, so the dialog only closes on

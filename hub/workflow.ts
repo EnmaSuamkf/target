@@ -2699,7 +2699,7 @@ function reportUsageSnapshot(workflow: Workflow, step: Step): void {
 	const workdir = runtime.workdir;
 	if (!workdir) return;
 	try {
-		const u = readTokenUsage(workdir, sessionId);
+		const u = readTokenUsage(workdir, sessionId, runtime.harness);
 		reportEmit(
 			"usage.snapshot",
 			{

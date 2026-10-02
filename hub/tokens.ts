@@ -2,10 +2,10 @@
 /**
  * CLI: print the real token usage of a session, read straight from the
  * transcript the harness writes (no API calls). Accepts a workflow id/name, a
- * Claude session id, or a free-code session `.jsonl` path — a workflow
+ * Claude or Copilot session id, or a free-code session `.jsonl` path — a workflow
  * resolves to its shared session and the agent's workdir; a bare Claude
- * session id is located by scanning ~/.claude/projects; a `.jsonl` path is
- * read directly.
+ * session id is located by scanning ~/.claude/projects (else under the Copilot
+ * `session-state/`); a `.jsonl` path is read directly.
  *
  *   node hub/tokens.ts <sessionId | workflowId | workflow-name>
  *
@@ -18,7 +18,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { hookRuntime } from "./awb.ts";
 import { getWorkflow, latestStepSession, listWorkflows } from "./db.ts";
-import { readTokenUsage, transcriptPath, type TokenUsage } from "./transcript.ts";
+import { copilotEventsPath, readTokenUsage, transcriptPath, type TokenUsage } from "./transcript.ts";
 
 /** Finds the workdir whose Claude project folder holds `<sessionId>.jsonl`, by scanning ~/.claude/projects. */
 function findWorkdirForSession(sessionId: string): string | null {
@@ -41,26 +41,29 @@ function findWorkdirForSession(sessionId: string): string | null {
 }
 
 /** Resolves the CLI argument to the session + workdir whose usage we should read. */
-function resolve(arg: string): { sessionId: string; workdir: string; label: string } | { error: string } {
+function resolve(arg: string): { sessionId: string; workdir: string; label: string; harness: string | null } | { error: string } {
 	// A workflow id or name → its shared session and the agent's real workdir.
 	const workflow = getWorkflow(arg) ?? listWorkflows().find((w) => w.name === arg || w.agentName === arg);
 	if (workflow) {
 		const sessionId = latestStepSession(workflow.id) ?? workflow.lastSessionId;
 		if (!sessionId) return { error: `workflow '${workflow.name}' has no session yet (no step has finished running)` };
-		const workdir = hookRuntime(workflow.hookUrl).workdir;
+		const runtime = hookRuntime(workflow.hookUrl);
+		const workdir = runtime.workdir;
 		if (!workdir) return { error: `can't resolve the workdir for workflow '${workflow.name}' (remote or missing hook)` };
-		return { sessionId, workdir, label: `workflow ${workflow.name} · session ${sessionId}` };
+		return { sessionId, workdir, label: `workflow ${workflow.name} · session ${sessionId}`, harness: runtime.harness };
 	}
 	// A free-code session IS its transcript's absolute .jsonl path — read it
 	// directly (readTokenUsage detects the shape; the workdir is irrelevant).
 	if (arg.endsWith(".jsonl") && path.isAbsolute(arg)) {
 		if (!fs.existsSync(arg)) return { error: `no transcript found at '${arg}'` };
-		return { sessionId: arg, workdir: path.dirname(arg), label: `session ${arg}` };
+		return { sessionId: arg, workdir: path.dirname(arg), label: `session ${arg}`, harness: null };
 	}
 	// Otherwise treat the argument as a bare claude session id and locate its transcript.
 	const workdir = findWorkdirForSession(arg);
+	// A Copilot session is a directory name under session-state; no workdir applies.
+	if (!workdir && copilotEventsPath(arg)) return { sessionId: arg, workdir: "", label: `session ${arg}`, harness: "copilot" };
 	if (!workdir) return { error: `no transcript found for session '${arg}' (unknown session or workflow)` };
-	return { sessionId: arg, workdir, label: `session ${arg}` };
+	return { sessionId: arg, workdir, label: `session ${arg}`, harness: null };
 }
 
 function fmt(n: number): string {
@@ -100,11 +103,13 @@ function main(): void {
 		process.exitCode = 1;
 		return;
 	}
-	const usage = readTokenUsage(resolved.workdir, resolved.sessionId);
+	const usage = readTokenUsage(resolved.workdir, resolved.sessionId, resolved.harness);
 	const transcriptFile =
-		resolved.sessionId.endsWith(".jsonl") && path.isAbsolute(resolved.sessionId)
-			? resolved.sessionId
-			: transcriptPath(resolved.workdir, resolved.sessionId);
+		resolved.harness === "copilot"
+			? (copilotEventsPath(resolved.sessionId) ?? "")
+			: resolved.sessionId.endsWith(".jsonl") && path.isAbsolute(resolved.sessionId)
+				? resolved.sessionId
+				: transcriptPath(resolved.workdir, resolved.sessionId);
 	if (usage.turns === 0 && !fs.existsSync(transcriptFile)) {
 		console.error(`transcript is empty or missing for ${resolved.label}`);
 		process.exitCode = 1;

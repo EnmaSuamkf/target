@@ -67,9 +67,9 @@ export type PermissionMode = (typeof PERMISSION_MODES)[number];
 /**
  * Runtimes a workflow's hook can spawn (server-validated). Both share the
  * same step protocol; only the spawned CLI and the session-id shape differ
- * (a claude uuid vs. a free-code `.jsonl` path vs. a cursor chat uuid).
+ * (a claude uuid vs. a free-code `.jsonl` path vs. a cursor chat uuid vs. a bare copilot uuid).
  */
-export const RUNNERS = ["claude", "free-code", "cursor"] as const;
+export const RUNNERS = ["claude", "free-code", "cursor", "copilot"] as const;
 export type Runner = (typeof RUNNERS)[number];
 
 /** Whether each runner's CLI is installed on the host (from `GET /api/runners`). */
@@ -1097,4 +1097,36 @@ export function startActionFor(status: WorkflowStatus): StartAction | null {
 	// second is released by the held step's own Continue button (the server
 	// refuses a Start on a workflow waiting for a manual review).
 	return null;
+}
+
+// --- Copilot token (copilot + docker workflows) ---
+
+/** Where the hub found the GitHub token a copilot docker workflow needs. */
+export type CopilotTokenSource = "env" | "settings" | "gh";
+export type CopilotTokenType = "oauth" | "fine-grained" | "classic" | "unknown";
+
+/**
+ * GET /api/copilot/token-status — non-secret facts only. The token itself (or
+ * any part of it) never crosses the API, so nothing here can be displayed as one.
+ */
+export interface CopilotTokenStatus {
+	available: boolean;
+	source: CopilotTokenSource | null;
+	/** Which environment variable held it; only for source `env`. */
+	envName: string | null;
+	tokenType: CopilotTokenType | null;
+	/** False for a classic `ghp_` token (Copilot CLI rejects it) and when nothing was found. */
+	usable: boolean;
+	warning: string | null;
+	ghInstalled: boolean;
+	ghLoggedIn: boolean;
+	storedInSettings: boolean;
+}
+
+/** The structured 400 of POST /api/workflows (and clone) when a copilot docker workflow has no usable token. */
+export interface CopilotTokenRequired {
+	error: "copilot_token_required";
+	message: string;
+	actions: string[];
+	status: CopilotTokenStatus;
 }

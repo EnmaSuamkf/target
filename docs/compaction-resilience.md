@@ -43,9 +43,9 @@ The operator-facing `~/.target/<slug>-<id>.md` is unchanged, still truncated —
 it's the summary view, and these files are the untruncated ones. Two readers,
 two views.
 
-## 2. Detecting the boundary — for both harnesses
+## 2. Detecting the boundary — for every harness
 
-The two harnesses write completely different records, and only one of them says
+The harnesses write completely different records, and only some of them say
 anything about tokens:
 
 ```jsonc
@@ -56,7 +56,26 @@ anything about tokens:
 
 // free-code — a summary and a parentId chain. No token metadata.
 {"type":"compaction","id":"…","parentId":"…","timestamp":"…","summary":"…"}
+
+// GitHub Copilot CLI — written to the session's events.jsonl
+// (~/.copilot/session-state/<id>/), NOT to stdout
+{"type":"session.compaction_complete","timestamp":"…",
+ "data":{"success":true,"preCompactionTokens":1045,"postCompactionTokens":758,
+         "trigger":"manual","summaryContent":"…",…}}
 ```
+
+Copilot's record is the third format. It counts as a boundary only when
+`data.success === true`: a failed or cancelled compaction (several were seen for
+automatic ones) threw nothing away. `session.compaction_start` is never a
+boundary, since the work can still fail. `preCompactionTokens` and
+`postCompactionTokens` count only the conversation, not the system prompt and
+tool definitions, and `trigger` is `"manual"` (a `/compact` sent through `-p`)
+or `"threshold"` for the automatic path. The session id survives, so `--resume`
+keeps working, and the file is scanned over its whole length (in chunks,
+incrementally) because a boundary can be far from the tail the usage reader
+looks at. **Not verified:** a *successful* automatic compaction was never
+reproduced (the forced attempts all failed), so it is assumed to have the same
+shape as the manual one with `trigger: "threshold"`.
 
 So the detector keys off **the record's presence and its timestamp**, never off
 a drop in occupancy: a token-derived signal would work for Claude Code and be
@@ -106,8 +125,8 @@ it's the feature not working.
 
 The window now comes from the model actually in use — read per harness, and
 looked up in `hub/models.ts` behind an operator override in
-`~/.target/config.json`. How that works today for all three harnesses (Claude
-Code, free-code and Cursor), the full model table, the `modelContextWindows` /
+`~/.target/config.json`. How that works today for all four harnesses (Claude
+Code, free-code, Cursor and Copilot), the full model table, the `modelContextWindows` /
 `fallbackContextWindowTokens` keys with an example, and when the hub's number can
 differ from the agent's own `/context` bar are documented in
 **[`context-meter.md`](context-meter.md)**.

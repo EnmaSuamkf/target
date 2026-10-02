@@ -16,13 +16,13 @@ function usage(): void {
 
 Commands:
   start                                 Run the hub (foreground)
-  create <name> [--workdir <dir>] [--runner <claude|free-code|cursor>] [--sandbox <host|docker>] [--image <name>] [--force]
+  create <name> [--workdir <dir>] [--runner <claude|free-code|cursor|copilot>] [--sandbox <host|docker>] [--image <name>] [--force]
                                          Create a workflow (creates its agent + awb hook too)
   set-context <workflowId> "<text>"   Set (or clear with "") a workflow's conversation context
   add-step <workflowId> <description...>
                                          Append a step to a workflow
   templates                             List available workflow templates
-  create-from-template <templateId> <workflowName> [--workdir <dir>] [--runner <claude|free-code|cursor>] [--sandbox <host|docker>] [--image <name>] [--force]
+  create-from-template <templateId> <workflowName> [--workdir <dir>] [--runner <claude|free-code|cursor|copilot>] [--sandbox <host|docker>] [--image <name>] [--force]
                                          Create a workflow seeded with a template's steps
   list                                  List workflows with progress
   show <workflowId>                     Show a workflow's steps (and their ids)
@@ -188,7 +188,18 @@ async function main(): Promise<void> {
 	const authHeaders = { authorization: `Bearer ${cfg.adminToken}` };
 
 	async function fail(res: Response): Promise<never> {
-		const data = (await res.json().catch(() => ({}))) as { error?: string };
+		const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+		if (data.error === "copilot_token_required") {
+			// Structured 400: the message already names the ways out; spell them out
+			// for the terminal. The body never carries a token.
+			console.error(`Hub rejected the request: ${data.message ?? data.error}`);
+			console.error(
+				"Fix it either way, then run the command again:\n" +
+					"  - run `gh auth login` in a terminal (the hub then uses `gh auth token`), or\n" +
+					"  - store a token: PUT /api/settings/copilot-token {\"token\": \"...\"} or paste it in the Settings page.",
+			);
+			process.exit(1);
+		}
 		console.error(`Hub rejected the request: ${data.error ?? res.status}`);
 		process.exit(1);
 	}
@@ -203,7 +214,7 @@ async function main(): Promise<void> {
 		const force = rest.includes("--force");
 		if (!name) {
 			console.error(
-				"Usage: target create <name> [--workdir <dir>] [--permission-mode <mode>] [--runner <claude|free-code|cursor>]\n" +
+				"Usage: target create <name> [--workdir <dir>] [--permission-mode <mode>] [--runner <claude|free-code|cursor|copilot>]\n" +
 					"                        [--sandbox <host|docker>] [--image <name>] [--yes-bypass-risk] [--force]\n" +
 					"  modes: acceptEdits, auto, manual, dontAsk, plan, bypassPermissions (needs --yes-bypass-risk)\n" +
 					"  --sandbox docker runs every step inside a container (default host = directly on this machine);\n" +
@@ -288,7 +299,7 @@ async function main(): Promise<void> {
 		if (!templateId || !name) {
 			console.error(
 				"Usage: target create-from-template <templateId> <workflowName> [--workdir <dir>] [--permission-mode <mode>]\n" +
-					"                                     [--runner <claude|free-code|cursor>] [--sandbox <host|docker>] [--image <name>] [--force]",
+					"                                     [--runner <claude|free-code|cursor|copilot>] [--sandbox <host|docker>] [--image <name>] [--force]",
 			);
 			process.exitCode = 1;
 			return;

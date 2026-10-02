@@ -6,6 +6,7 @@
  */
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { refreshCopilotHookToken } from "./awb.ts";
 import { ensureBundledCatalog } from "./bundled-bootstrap.ts";
 import { isInsecureReportUrl, loadConfig } from "./config.ts";
 import { listWorkflows } from "./db.ts";
@@ -40,6 +41,13 @@ export function startHub(): void {
 		log(`bundled catalog: TCP '${tcp.name}', resource set '${resourceSet.name}'`);
 	} catch (err) {
 		log(`bundled catalog import failed: ${String(err)}`, "warning");
+	}
+	// Existing copilot docker workflows pick up the token the hub resolves now
+	// (best effort; every dispatch refreshes it again).
+	try {
+		for (const workflow of listWorkflows()) refreshCopilotHookToken(workflow.hookUrl);
+	} catch (err) {
+		log(`copilot token refresh at startup failed: ${String(err)}`, "warning");
 	}
 	const server = createServer(cfg, log);
 	server.listen(cfg.port, cfg.host, () => {
