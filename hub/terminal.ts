@@ -60,6 +60,28 @@ function posixEnvPrefix(env: Record<string, string>): string {
 		.join("");
 }
 
+/**
+ * One-line hint printed by the terminal's own shell when a secret variable did
+ * not arrive (nothing resolved, or the launcher doesn't pass the environment
+ * on: macOS `open -a Terminal` starts the app through LaunchServices). The
+ * resume then continues and fails visibly at the harness rather than silently.
+ */
+function secretHintMessage(name: string): string {
+	return `note: ${name} is not set in this terminal, so the container cannot authenticate; export it here (e.g. ${name}=$(gh auth token)) and re-run the command below`;
+}
+
+function posixSecretHints(secretEnv: Record<string, string>): string {
+	return Object.keys(secretEnv)
+		.map((k) => `{ [ -n "\${${k}:-}" ] || echo ${shellQuote(secretHintMessage(k))} >&2; } && `)
+		.join("");
+}
+
+function psSecretHints(secretEnv: Record<string, string>): string {
+	return Object.keys(secretEnv)
+		.map((k) => `if (-not $env:${k}) { Write-Host ${psQuote(secretHintMessage(k))} }\r\n`)
+		.join("");
+}
+
 /** `$env:KEY = 'value'` lines for the Windows PowerShell script. */
 function psEnvLines(env: Record<string, string>): string {
 	return Object.entries(env)
@@ -99,8 +121,8 @@ const LINUX_CANDIDATES: { bin: string; args: (shellCmd: string) => string[] }[] 
  * `; exec bash` keeps the window open once the harness exits instead of
  * dropping the user back to a dead terminal.
  */
-function linuxPlan(workdir: string, resumeCommand: string, env: Record<string, string>): TerminalCandidate[] {
-	const shellCmd = `cd ${shellQuote(workdir)} && ${posixEnvPrefix(env)}${resumeCommand}; exec bash`;
+function linuxPlan(workdir: string, resumeCommand: string, env: Record<string, string>, secretEnv: Record<string, string>): TerminalCandidate[] {
+	const shellCmd = `cd ${shellQuote(workdir)} && ${posixSecretHints(secretEnv)}${posixEnvPrefix(env)}${resumeCommand}; exec bash`;
 	return LINUX_CANDIDATES.map((c) => ({ bin: c.bin, args: c.args(shellCmd) }));
 }
 
@@ -118,8 +140,8 @@ function linuxPlan(workdir: string, resumeCommand: string, env: Record<string, s
  * has not been the default shell since Catalina, so the window would otherwise
  * hand the user a shell that isn't theirs.
  */
-async function darwinPlan(workdir: string, resumeCommand: string, env: Record<string, string>): Promise<TerminalCandidate[]> {
-	const script = `#!/bin/bash\ncd ${shellQuote(workdir)} && ${posixEnvPrefix(env)}${resumeCommand}\nexec "\${SHELL:-/bin/bash}"\n`;
+async function darwinPlan(workdir: string, resumeCommand: string, env: Record<string, string>, secretEnv: Record<string, string>): Promise<TerminalCandidate[]> {
+	const script = `#!/bin/bash\ncd ${shellQuote(workdir)} && ${posixSecretHints(secretEnv)}${posixEnvPrefix(env)}${resumeCommand}\nexec "\${SHELL:-/bin/bash}"\n`;
 	const file = await _impl.writeScript(script, ".command");
 	return [
 		{ bin: "open", args: ["-a", "Terminal", file], label: "Terminal.app", awaitExit: true },
@@ -142,8 +164,8 @@ async function darwinPlan(workdir: string, resumeCommand: string, env: Record<st
  * required because the default policy on a client Windows refuses to run a
  * `.ps1` from disk at all.
  */
-async function windowsPlan(workdir: string, resumeCommand: string, env: Record<string, string>): Promise<TerminalCandidate[]> {
-	const script = `Set-Location -LiteralPath ${psQuote(workdir)}\r\n${psEnvLines(env)}${resumeCommand}\r\n`;
+async function windowsPlan(workdir: string, resumeCommand: string, env: Record<string, string>, secretEnv: Record<string, string>): Promise<TerminalCandidate[]> {
+	const script = `Set-Location -LiteralPath ${psQuote(workdir)}\r\n${psEnvLines(env)}${psSecretHints(secretEnv)}${resumeCommand}\r\n`;
 	const file = await _impl.writeScript(script, ".ps1");
 	const pwsh = ["powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass", "-File", file];
 	return [
@@ -159,7 +181,7 @@ async function windowsPlan(workdir: string, resumeCommand: string, env: Record<s
 }
 
 /** Tries to launch one candidate; resolves false (never rejects) on ENOENT/spawn failure. */
-function trySpawn(candidate: TerminalCandidate): Promise<boolean> {
+function trySpawn(candidate: TerminalCandidate, secretEnv: Record<string, string>): Promise<boolean> {
 	return new Promise((resolve) => {
 		let settled = false;
 		const settle = (ok: boolean) => {
@@ -169,7 +191,13 @@ function trySpawn(candidate: TerminalCandidate): Promise<boolean> {
 		};
 		let child: ChildProcess;
 		try {
-			child = _impl.spawn(candidate.bin, candidate.args, { detached: true, stdio: "ignore" });
+			child = _impl.spawn(candidate.bin, candidate.args, {
+				detached: true,
+				stdio: "ignore",
+				// Secrets go in the launcher process's environment only — never the
+				// command line, a script file or a log.
+				...(Object.values(secretEnv).some((v) => v !== "") ? { env: { ...process.env, ...secretEnv } } : {}),
+			});
 		} catch {
 			resolve(false);
 			return;
@@ -192,10 +220,16 @@ function trySpawn(candidate: TerminalCandidate): Promise<boolean> {
 }
 
 /** The candidates for this machine's OS, in the order they should be tried. */
-async function planFor(platform: NodeJS.Platform, workdir: string, resumeCommand: string, env: Record<string, string>): Promise<TerminalCandidate[]> {
-	if (platform === "darwin") return darwinPlan(workdir, resumeCommand, env);
-	if (platform === "win32") return windowsPlan(workdir, resumeCommand, env);
-	return linuxPlan(workdir, resumeCommand, env);
+async function planFor(
+	platform: NodeJS.Platform,
+	workdir: string,
+	resumeCommand: string,
+	env: Record<string, string>,
+	secretEnv: Record<string, string>,
+): Promise<TerminalCandidate[]> {
+	if (platform === "darwin") return darwinPlan(workdir, resumeCommand, env, secretEnv);
+	if (platform === "win32") return windowsPlan(workdir, resumeCommand, env, secretEnv);
+	return linuxPlan(workdir, resumeCommand, env, secretEnv);
 }
 
 /**
@@ -203,12 +237,25 @@ async function planFor(platform: NodeJS.Platform, workdir: string, resumeCommand
  * known for this platform until one launches. `env` holds extra variables the
  * resumed harness needs (awb's `harnessResumeEnv`), set in the shell/script
  * the command runs in.
+ *
+ * `secretEnv` holds variables that must not appear on a command line or in a
+ * script file (the copilot token): they are set in the spawned launcher's own
+ * environment. Verified on GNOME Terminal 3.52 (also via x-terminal-emulator):
+ * the client forwards its environment to the shell it opens, so `docker run -e
+ * NAME` finds the value. macOS `open -a Terminal` starts the app through
+ * LaunchServices and does NOT pass it on — there (and whenever the value is
+ * empty) the terminal's shell prints a one-line hint instead of failing silently.
  * Throws NoTerminalEmulatorError if none of the candidates are available.
  */
-export async function openResumeTerminal(workdir: string, resumeCommand: string, env: Record<string, string> = {}): Promise<void> {
-	const candidates = await planFor(_impl.platform(), workdir, resumeCommand, env);
+export async function openResumeTerminal(
+	workdir: string,
+	resumeCommand: string,
+	env: Record<string, string> = {},
+	secretEnv: Record<string, string> = {},
+): Promise<void> {
+	const candidates = await planFor(_impl.platform(), workdir, resumeCommand, env, secretEnv);
 	for (const candidate of candidates) {
-		if (await trySpawn(candidate)) return;
+		if (await trySpawn(candidate, secretEnv)) return;
 	}
 	throw new NoTerminalEmulatorError(
 		`no terminal emulator found (tried ${candidates.map((c) => c.label ?? c.bin).join(", ")})`,

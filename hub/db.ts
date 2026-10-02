@@ -23,6 +23,7 @@ import { type ResourceSelection, normalizeResourceSelections } from "./rci-selec
 import * as path from "node:path";
 import { dbFile, ensureTargetDirSecure, type ConversationReportMode } from "./config.ts";
 import type { ProgressKind } from "./progress.ts";
+import { redactSecrets } from "./redact.ts";
 import type { ScheduleSpec } from "./schedule.ts";
 
 /**
@@ -2115,8 +2116,8 @@ export function completeStep(
 		)
 		.run(
 			status,
-			outcome.result ?? null,
-			outcome.error ?? null,
+			outcome.result == null ? null : redactSecrets(outcome.result),
+			outcome.error == null ? null : redactSecrets(outcome.error),
 			outcome.sessionId ?? null,
 			new Date().toISOString(),
 			status, // again, for the deselect CASE
@@ -2170,7 +2171,7 @@ export function failRunningStep(stepId: string, error: string): boolean {
 				`UPDATE steps SET status = 'failed', error = ?, finished_at = ?
 				 WHERE id = ? AND status IN ('running', 'queued')`,
 			)
-			.run(error, new Date().toISOString(), stepId).changes > 0
+			.run(redactSecrets(error), new Date().toISOString(), stepId).changes > 0
 	);
 }
 
@@ -3407,6 +3408,43 @@ export function saveSlackDeliverySettings(input: {
 			settings.updatedAt,
 		);
 	return settings;
+}
+
+// --- Copilot token (Settings) ----------------------------------------------
+//
+// A GitHub token the operator pasted for `copilot` + docker workflows (see
+// copilot-token.ts for where it ranks among the other sources). The value is
+// a secret: no API response, export or log ever carries it — callers learn
+// only whether one is stored.
+
+/** The single `settings` row the pasted Copilot token lives in. */
+const COPILOT_TOKEN_SETTINGS_KEY = "copilot_token";
+
+/** The stored Copilot token, or "" when none was pasted. */
+export function getCopilotToken(): string {
+	const row = open().prepare("SELECT * FROM settings WHERE key = ?").get(COPILOT_TOKEN_SETTINGS_KEY) as
+		| Record<string, unknown>
+		| undefined;
+	if (!row) return "";
+	try {
+		const parsed = JSON.parse(String(row.value)) as Record<string, unknown>;
+		return typeof parsed.token === "string" ? parsed.token.trim() : "";
+	} catch {
+		return "";
+	}
+}
+
+export function saveCopilotToken(token: string): void {
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(COPILOT_TOKEN_SETTINGS_KEY, JSON.stringify({ token: token.trim() }), new Date().toISOString());
+}
+
+export function clearCopilotToken(): void {
+	open().prepare("DELETE FROM settings WHERE key = ?").run(COPILOT_TOKEN_SETTINGS_KEY);
 }
 
 // --- Docker-friendly hub networking (Settings) ---------------------------

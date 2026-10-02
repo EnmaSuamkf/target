@@ -33,7 +33,7 @@
  * never allow again short of a full restart.
  */
 import { attachmentSection, listFieldAttachments } from "./attachments.ts";
-import { ensureSandboxImage, hookRuntime } from "./awb.ts";
+import { ensureSandboxImage, hookRuntime, refreshCopilotHookToken } from "./awb.ts";
 import { markContextReinjected, needsContextReinjection, observeCompaction } from "./compaction.ts";
 import type { HubConfig } from "./config.ts";
 import type { Attachment, Step, Workflow } from "./db.ts";
@@ -520,6 +520,18 @@ export async function dispatchStep(
 	// fix it, exactly like the two dispatch failures below. Images the repo
 	// doesn't own are left to docker (see `ensureSandboxImage`).
 	const sandbox = hookRuntime(workflow.hookUrl).sandbox;
+	// A copilot docker hook carries the GitHub token in its sandbox env; refresh
+	// it before every dispatch so a rotated token, a new `gh auth login` or one
+	// pasted in Settings is picked up with no restart. No token = fail now with
+	// the fix, not an auth error from inside the container.
+	if (sandbox) {
+		const token = refreshCopilotHookToken(workflow.hookUrl);
+		if (!token.ok) {
+			completeStep(step.id, { ok: false, error: token.message });
+			log(`step ${step.id} (workflow ${workflow.id}) has no GitHub token for its copilot docker run`, "error");
+			return;
+		}
+	}
 	if (sandbox) {
 		const ready = await ensureSandboxImage(sandbox.image, log);
 		if (!ready.ok) {

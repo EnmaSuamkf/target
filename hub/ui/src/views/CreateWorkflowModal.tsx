@@ -10,6 +10,8 @@ import {
 import {
 	PERMISSION_MODES,
 	type CloneWorkflowInput,
+	type CopilotTokenRequired,
+	type CopilotTokenStatus,
 	type Conversation,
 	type CreateWorkflowInput,
 	type PermissionMode,
@@ -20,12 +22,14 @@ import {
 	type Template,
 	type Workflow,
 } from "../api/types.ts";
+import { CopilotTokenPanel } from "../components/CopilotTokenPanel.tsx";
 import { DirectoryBrowser } from "../components/DirectoryBrowser.tsx";
 import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { Field } from "../components/Field.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { usePermissions, requires } from "../hooks/usePermissions.ts";
 import { isUsableCopy, templateOptionLabel } from "../lib/catalogCopy.ts";
+import { needsCopilotToken, tokenInfoLine, tokenSubmitBlock } from "../lib/copilotToken.ts";
 import { prettyPath, relativeTime, truncate } from "../lib/format.ts";
 import styles from "./CreateWorkflowModal.module.css";
 
@@ -51,7 +55,7 @@ import styles from "./CreateWorkflowModal.module.css";
  * The conversation picker under the runtime is the "run this workflow on a
  * conversation you're already having" path. It reads the chosen runtime's
  * on-disk sessions (`GET /api/conversations`), and the order is deliberate: the
- * agent selector above it is the filter, so picking claude or free-code narrows
+ * agent selector above it is the filter, so picking an agent narrows
  * the list to that harness's conversations. "Open in terminal" reopens the
  * selected one in a real terminal window, because the titles alone are not
  * enough to be sure it's the right conversation, and this is not something you
@@ -122,6 +126,11 @@ const RUNNER_OPTIONS: { value: Runner; label: string; description: string }[] = 
 		label: "Cursor Agent",
 		description: "Steps run on the Cursor Agent CLI (`agent`); sessions resume by chat id with --workspace.",
 	},
+	{
+		value: "copilot",
+		label: "GitHub Copilot",
+		description: "Steps run on the GitHub Copilot CLI (`copilot`); sessions are chained by session id with --resume.",
+	},
 ];
 
 /**
@@ -134,6 +143,23 @@ const DEFAULT_IMAGES: Record<Runner, string> = {
 	claude: "target-agent:latest",
 	"free-code": "target-agent-freecode:latest",
 	cursor: "target-agent-cursor:latest",
+	copilot: "target-agent-copilot:latest",
+};
+
+/** The Dockerfile in this repo each default image is built from (hub/awb.ts `BUILDABLE_SANDBOX_IMAGES`). */
+const DOCKERFILES: Record<Runner, string> = {
+	claude: "Dockerfile",
+	"free-code": "Dockerfile.free-code",
+	cursor: "Dockerfile.cursor",
+	copilot: "Dockerfile.copilot",
+};
+
+/** The CLI binary each runner execs inside the image (hub/awb.ts `RUNNER_BINARIES`). */
+const BINARIES: Record<Runner, string> = {
+	claude: "claude",
+	"free-code": "free-code",
+	cursor: "agent",
+	copilot: "copilot",
 };
 
 /** What a clone is proposed as — mirrors the hub's `cloneName` (hub/workflow.ts). */
@@ -154,9 +180,14 @@ export function CreateWorkflowModal({
 	/** Set to turn this into the clone dialog for that workflow — see "Clone mode". */
 	source?: Workflow | null;
 	onClose: () => void;
-	onCreate: (input: CreateWorkflowInput) => Promise<void>;
-	/** Called instead of `onCreate` in clone mode. */
-	onClone: (input: CloneWorkflowInput) => Promise<void>;
+	/**
+	 * Resolves with the hub's structured `copilot_token_required` refusal when
+	 * that is why it failed (the caller already skipped its error toast), so the
+	 * token panel can open with the server's message; void/null otherwise.
+	 */
+	onCreate: (input: CreateWorkflowInput) => Promise<CopilotTokenRequired | null | void>;
+	/** Called instead of `onCreate` in clone mode; same contract. */
+	onClone: (input: CloneWorkflowInput) => Promise<CopilotTokenRequired | null | void>;
 }): React.JSX.Element {
 	const { can } = usePermissions();
 	const canCreate = can("client.workflows.create");
@@ -202,6 +233,11 @@ export function CreateWorkflowModal({
 	const [previewing, setPreviewing] = useState(false);
 	const [opening, setOpening] = useState(false);
 	const [terminalNote, setTerminalNote] = useState<string | null>(null);
+	// Copilot inside a container needs a GitHub token the hub can hand in; the
+	// panel reports what it finds so submit can wait for one. `tokenNotice` is
+	// the server's own message when its check disagreed with ours at submit.
+	const [tokenStatus, setTokenStatus] = useState<CopilotTokenStatus | null>(null);
+	const [tokenNotice, setTokenNotice] = useState<string | null>(null);
 	const [defaultDockerMounts, setDefaultDockerMounts] = useState<string[]>([]);
 	const [dockerMounts, setDockerMounts] = useState<string[]>([]);
 
@@ -428,7 +464,7 @@ export function CreateWorkflowModal({
 	const runnerError = probeFailed
 		? "Couldn't reach the hub to verify installed agent CLIs. Please retry."
 		: noInstalled
-			? "No agent CLI is installed on this machine. Install `claude`, `free-code`, or `agent` (Cursor) to create a workflow."
+			? "No agent CLI is installed on this machine. Install `claude`, `free-code`, `agent` (Cursor), or `copilot` to create a workflow."
 			: undefined;
 	const runnerHint = loadingRunners
 		? "Checking which agent CLIs are installed on this machine…"
@@ -441,8 +477,10 @@ export function CreateWorkflowModal({
 	// The probe has to have succeeded with at least one installed runner before
 	// a workflow can be created — otherwise the form would POST a runner the
 	// host can't spawn (or, on a failed probe, one it couldn't even verify).
+	const tokenBlock = tokenSubmitBlock(runner, sandbox, tokenStatus);
 	const canSubmit =
 		probeDone &&
+		tokenBlock === null &&
 		installedOptions.length > 0 &&
 		name.trim() !== "" &&
 		!unusableConversation &&
@@ -469,7 +507,11 @@ export function CreateWorkflowModal({
 					permissionMode,
 					...(bypass ? { acceptBypassRisk: true } : {}),
 				};
-				await onClone(input);
+				const refused = await onClone(input);
+				if (refused) {
+					setTokenStatus(refused.status);
+					setTokenNotice(refused.message);
+				}
 				return;
 			}
 			const input: CreateWorkflowInput = { name: name.trim() };
@@ -487,7 +529,11 @@ export function CreateWorkflowModal({
 				if (conversationNote.trim()) input.conversationNote = conversationNote.trim();
 			}
 			if (bypass) input.acceptBypassRisk = true;
-			await onCreate(input);
+			const refused = await onCreate(input);
+			if (refused) {
+				setTokenStatus(refused.status);
+				setTokenNotice(refused.message);
+			}
 		} finally {
 			setSaving(false);
 		}
@@ -790,7 +836,7 @@ export function CreateWorkflowModal({
 				{sandbox === "docker" && (
 					<Field
 						label="Container image"
-						hint={`Optional — leave empty for ${DEFAULT_IMAGES[runner]}, built from this repo's ${runner === "free-code" ? "Dockerfile.free-code" : runner === "cursor" ? "Dockerfile.cursor" : "Dockerfile"}. It must ship the ${runner === "cursor" ? "agent" : runner} binary, or steps die with exit 127. The image is per workflow, so a Python repo and a Node repo can use different ones.`}
+						hint={`Optional — leave empty for ${DEFAULT_IMAGES[runner]}, built from this repo's ${DOCKERFILES[runner]}. It must ship the ${BINARIES[runner]} binary, or steps die with exit 127. The image is per workflow, so a Python repo and a Node repo can use different ones.${runner === "copilot" ? " Copilot also needs a GitHub token, handled right below." : ""}`}
 					>
 						{(props) => (
 							<input
@@ -815,6 +861,30 @@ export function CreateWorkflowModal({
 						}
 					>
 						{() => <DockerMountEditor mounts={dockerMounts} onChange={setDockerMounts} disabled={saving} />}
+					</Field>
+				)}
+
+				{needsCopilotToken(runner, sandbox) && (
+					<Field
+						label="GitHub token for Copilot"
+						hint="Copilot inside a container has no keyring login, so the hub hands it a GitHub token from this machine."
+					>
+						{() => (
+							<>
+								<CopilotTokenPanel
+									notice={tokenNotice}
+									disabled={saving}
+									onStatusChange={(next) => {
+										setTokenStatus(next);
+										if (next?.usable) setTokenNotice(null);
+									}}
+								/>
+								{tokenStatus && tokenInfoLine(tokenStatus) && (
+									<p className="hint">Steps will use this token; it is refreshed before every step.</p>
+								)}
+								{tokenBlock && <p className="hint">{tokenBlock}</p>}
+							</>
+						)}
 					</Field>
 				)}
 

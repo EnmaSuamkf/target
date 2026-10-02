@@ -4,7 +4,7 @@
  * 400, while a docker workflow is accepted (the image ships its own binary,
  * so the host PATH is not the source of truth there).
  *
- * Both `claude` and `free-code` are installed on the dev/CI box, so the
+ * The runner CLIs (`claude`, `free-code`, `agent`, `copilot`) are installed on the dev/CI box, so the
  * uninstalled path can only be exercised by swapping awb's `_impl.spawnSync`
  * — the same indirection terminal.ts exposes for its spawn — to make a chosen
  * runner answer `--version` with a missing status. The server's host check
@@ -129,4 +129,17 @@ test("POST /api/workflows on host with an installed runner is still accepted (co
 		body: JSON.stringify({ name: "host control", runner: "free-code" }),
 	});
 	assert.equal(res.status, 200);
+});
+
+test("POST /api/workflows on host with copilot uninstalled is refused", async (t) => {
+	forceUninstalled(t, "copilot");
+
+	const res = await fetch(`${baseUrl}/api/workflows`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ name: "host copilot missing", runner: "copilot" }),
+	});
+	assert.equal(res.status, 400);
+	assert.match(((await res.json()) as { error: string }).error, /runner 'copilot' is not installed on this host/);
+	assert.equal(availableRunners().find((r) => r.id === "copilot")?.installed, false);
 });

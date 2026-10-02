@@ -37,6 +37,7 @@ Display names:
 | `claude` | Claude Code |
 | `free-code` | free-code |
 | `cursor` | Cursor Agent |
+| `copilot` | GitHub Copilot |
 | `host` | This machine |
 | `docker` | Docker container |
 
@@ -81,6 +82,9 @@ If they pick `docker`, do not ask for an image unless they name one. Defaults:
 - `claude` → `target-agent:latest`
 - `free-code` → `target-agent-freecode:latest`
 - `cursor` → `target-agent-cursor:latest`
+- `copilot` → `target-agent-copilot:latest`
+
+A `copilot` + `docker` workflow also needs `COPILOT_GITHUB_TOKEN` exported in the hub's environment (the host keyring login is not available in a container); the hub refuses to create it otherwise. Tell the operator to export it before `npm start` (e.g. `export COPILOT_GITHUB_TOKEN="$(gh auth token)"`) rather than asking for or printing the token.
 
 If they pick `bypassPermissions`, confirm they accept unconstrained command execution. Do not create without that yes.
 

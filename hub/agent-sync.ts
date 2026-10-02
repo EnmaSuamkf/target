@@ -65,10 +65,14 @@ function skillsRoot(repoDir: string): string {
 	return path.join(repoDir, "skills");
 }
 
+// Copilot's home is fixed at `~/.copilot` here: it honours COPILOT_HOME, but
+// neither this table nor the manifest's `dest` supports a per-harness home
+// override, so an operator who relocates it must sync by hand.
 const SKILL_DEST_DIR: Record<PublishableRunner, string> = {
 	cursor: ".cursor/skills-cursor",
 	claude: ".claude/skills",
 	"free-code": ".free-code/skills",
+	copilot: ".copilot/skills",
 };
 
 export interface BundledSkill {

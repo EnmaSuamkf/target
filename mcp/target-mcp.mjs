@@ -10,7 +10,7 @@ const TOKEN = process.env.TARGET_ADMIN_TOKEN ?? "";
 const PROTOCOL = "2024-11-05";
 const SERVER_VERSION = "0.3.0";
 
-const RUNNERS = ["claude", "free-code", "cursor"];
+const RUNNERS = ["claude", "free-code", "cursor", "copilot"];
 const SANDBOXES = ["host", "docker"];
 const PERMISSION_MODES = ["acceptEdits", "auto", "manual", "dontAsk", "plan", "bypassPermissions"];
 const WORKFLOW_STATUSES = ["draft", "paused", "completed", "failed"];

@@ -13,6 +13,10 @@
  *   constantly during a run.
  * - **free-code** appends to its session `.jsonl` (whose absolute path *is* the
  *   session id).
+ * - **GitHub Copilot CLI** appends to `<COPILOT_HOME or ~/.copilot>/session-state/<id>/events.jsonl`;
+ *   the id is known from the second step on. The FIRST step of a workflow has no
+ *   session id yet (it is only reported in the final callback), so it falls back
+ *   to awb's run log, into which awb streams the CLI's JSONL stdout.
  * - Either way awb streams the run's output into
  *   `<awbDir>/logs/<agent>-<epoch>.log`.
  *
@@ -32,7 +36,7 @@ import * as path from "node:path";
 import { awbDir, hookRuntime } from "./awb.ts";
 import type { HubConfig } from "./config.ts";
 import type { Step, Workflow } from "./db.ts";
-import { claudeProjectDir } from "./transcript.ts";
+import { claudeProjectDir, copilotEventsPath } from "./transcript.ts";
 
 /** Which artifact a progress signal came from — persisted and shown, so a timeout can be diagnosed after the fact. */
 export type ProgressKind = "transcript" | "session-file" | "run-log";
@@ -185,6 +189,13 @@ function cursorSessionFiles(sessionId: string | null): string[] {
 	return files;
 }
 
+/** A Copilot session's `events.jsonl`, once the session id is known and the file exists. */
+function copilotSessionFiles(sessionId: string | null): string[] {
+	if (!sessionId) return [];
+	const file = copilotEventsPath(sessionId);
+	return file ? [file] : [];
+}
+
 /** awb's per-run logs for this agent (`<agent>-<epoch>.log`) — the harness-agnostic fallback. */
 function runLogs(agentName: string): string[] {
 	const dir = path.join(awbDir(), "logs");
@@ -230,8 +241,13 @@ export function probeStepProgress(
 	const looksFreeCode =
 		runtime.harness === "free-code" || (!!sessionId && sessionId.endsWith(".jsonl") && path.isAbsolute(sessionId));
 	const looksCursor = runtime.harness === "cursor";
+	const looksCopilot = runtime.harness === "copilot";
 
-	if (looksFreeCode) {
+	if (looksCopilot) {
+		// No session id yet (first step) or no file: fall through to the run log below.
+		const best = freshest(copilotSessionFiles(sessionId));
+		if (best) return signal(best, "session-file");
+	} else if (looksFreeCode) {
 		const best = freshest(freeCodeSessions(workflow.agentName, sessionId));
 		if (best) return signal(best, "session-file");
 	} else if (looksCursor) {

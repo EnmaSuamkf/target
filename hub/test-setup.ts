@@ -3,14 +3,16 @@
  * (see hub/package.json `test`).
  *
  * The hub's host install-check in POST /api/workflows calls availableRunners(),
- * which probes `claude`/`free-code`/`agent` (cursor) on PATH with `<cli> --version`.
- * are installed on dev machines but NOT on CI runners, so without this stub
- * every workflow-creation test would get a 400 ("runner not installed") and the
- * suite would be red on CI. Workflow-CRUD tests don't care whether the CLIs are
- * actually installed — they test the hub, not CLI execution — so the probe is
- * stubbed to report both runners installed, WITHOUT spawning (it returns
- * status 0 for any command, including a nonexistent one, so the result is
- * independent of what's on PATH).
+ * which probes `claude`/`free-code`/`agent` (cursor)/`copilot` on PATH with
+ * `<cli> --version` and checks that the awb checkout ships each runner's
+ * `spawn-runner/<runner>.ts` adapter. These are installed on dev machines but
+ * NOT on CI runners, so without this stub every workflow-creation test would
+ * get a 400 ("runner not installed") and the suite would be red on CI.
+ * Workflow-CRUD tests don't care whether the CLIs are actually installed —
+ * they test the hub, not CLI execution — so the probe is stubbed to report
+ * every runner installed, WITHOUT spawning (it returns status 0 for any
+ * command, including a nonexistent one, and the adapter-file check answers
+ * true), so the result is independent of what's on PATH or in vendor/.
  *
  * The same stub answers the docker probes (`dockerAvailable`, which gates
  * `sandbox: "docker"` creation, and `sandboxImageExists`, which decides whether
@@ -28,3 +30,6 @@
 import { _impl } from "./awb.ts";
 
 _impl.spawnSync = (() => ({ status: 0 })) as unknown as typeof _impl.spawnSync;
+// Same for the adapter-file guard: whether `adapters/spawn-runner/<runner>.ts`
+// exists depends on the vendored awb checkout, not on what these tests cover.
+_impl.adapterExists = () => true;

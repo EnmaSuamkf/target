@@ -312,7 +312,7 @@ export function LandingView({
 			<section className={styles.cta} aria-labelledby="cta-title">
 				<h2 id="cta-title">Run your first workflow today</h2>
 				<p>
-					Bring the harness you already use — Claude Code or free-code — point it at a repo, and give it three
+					Bring the harness you already use — Claude Code, free-code, Cursor Agent or GitHub Copilot — point it at a repo, and give it three
 					steps. Everything stays on this machine.
 				</p>
 				<div className={styles.heroActions}>
