@@ -708,6 +708,13 @@ export function open(): DatabaseSync {
 		addWorkflowColumn("failure_notified", "failure_notified INTEGER NOT NULL DEFAULT 0");
 		database.exec("UPDATE workflows SET failure_notified = 1 WHERE status = 'failed';");
 	}
+	// Digests of the last `workflow.updated` metadata and plan successfully
+	// queued for this workflow (see reportEmit/reportPlan in workflow.ts).
+	// Nullable with no default: an existing DB upgrades to "never announced",
+	// which makes the next reporter tick announce every workflow exactly once
+	// and then fall silent again until its reported content actually changes.
+	addWorkflowColumn("reported_meta_digest", "reported_meta_digest TEXT");
+	addWorkflowColumn("reported_plan_digest", "reported_plan_digest TEXT");
 	// The scheduler tick looks up armed instances by state on every tick, and
 	// series views list instances by series.
 	database.exec("CREATE INDEX IF NOT EXISTS idx_workflows_schedule_state ON workflows(schedule_state);");
@@ -1405,6 +1412,36 @@ export function takeStatusBeforeReview(id: string): WorkflowStatus | null {
 	const stashed = row?.s == null ? null : (String(row.s) as WorkflowStatus);
 	if (stashed !== null) setStatusBeforeReview(id, null);
 	return stashed;
+}
+
+/**
+ * Reads the digests of the `workflow.updated` metadata and plan this workflow
+ * last had successfully queued for reporting (see `announceWorkflows` /
+ * `reportPlan` in workflow.ts). Either field is null when that side has never
+ * been announced — true for every workflow on a freshly upgraded DB, and for
+ * one created while reporting was disabled.
+ */
+export function getReportedDigests(id: string): { meta: string | null; plan: string | null } {
+	const row = open()
+		.prepare("SELECT reported_meta_digest AS meta, reported_plan_digest AS plan FROM workflows WHERE id = ?")
+		.get(id) as Record<string, unknown> | undefined;
+	return { meta: nullableString(row?.meta), plan: nullableString(row?.plan) };
+}
+
+/**
+ * Records the digest(s) of what was just queued for reporting, so the next
+ * reporter tick (including one after a restart) can tell whether this
+ * workflow's metadata or plan actually changed before re-announcing it.
+ * Omitting a field leaves that digest untouched — callers set `meta` and
+ * `plan` independently since one can change without the other.
+ */
+export function setReportedDigests(id: string, digests: { meta?: string | null; plan?: string | null }): void {
+	if (digests.meta !== undefined) {
+		open().prepare("UPDATE workflows SET reported_meta_digest = ? WHERE id = ?").run(digests.meta, id);
+	}
+	if (digests.plan !== undefined) {
+		open().prepare("UPDATE workflows SET reported_plan_digest = ? WHERE id = ?").run(digests.plan, id);
+	}
 }
 
 /**

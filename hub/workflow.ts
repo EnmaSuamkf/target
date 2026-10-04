@@ -54,6 +54,7 @@ import {
 	finishStepDone,
 	getArchiveSettings,
 	getContextStep,
+	getReportedDigests,
 	getStep,
 	getSyncStepMap,
 	getWorkflow,
@@ -77,6 +78,7 @@ import {
 	resetSteps,
 	saveSyncStepMap,
 	setContextInjected,
+	setReportedDigests,
 	setWorkflowConversationContext,
 	setWorkflowDockerMounts,
 	setWorkflowName,
@@ -1296,25 +1298,47 @@ function workflowRuntimeMeta(hookUrl: string): { agent: string | null; sandbox: 
 }
 
 /**
- * Re-announce every known workflow's metadata (name, agent, sandbox) as
- * `workflow.updated`. Called once at hub startup: workflows created before a
- * field was reported — or while the server was down long enough to give up on
- * — get their dashboard rows filled in without rewriting history. No-op when
- * reporting is disabled (emit() checks).
+ * Re-announce every known workflow's metadata (name, agent, sandbox) and plan
+ * as `workflow.updated` / `workflow.plan`, but only for a workflow whose
+ * CONTENT has actually changed since the last one that was successfully
+ * queued for delivery. Called once per daemon start (see daemon.ts): without
+ * this check, a hub that has just learned to send a field — or that was
+ * offline long enough for the server to drop its history — would otherwise
+ * leave every existing workflow un-drawable until someone happened to touch
+ * it, and a finished one would never be touched again.
+ *
+ * Used to unconditionally re-emit everything on every call, because the
+ * in-memory `lastPlanDigest` map `reportPlan` dedups against starts empty in a
+ * fresh process. That made traffic scale with total workflow history on every
+ * restart, and made every old, completed workflow show a bogus fresh
+ * "updated" timestamp on the report dashboard forever. The fix is to persist,
+ * per workflow, a digest of what was last successfully queued
+ * (`reported_meta_digest` in db.ts) and skip the emit when the current
+ * metadata serializes to the same digest — a workflow with a NULL digest (never announced,
+ * e.g. just created or on a DB that just upgraded) or changed metadata still
+ * goes out. The plan half of this gets the same treatment inside `reportPlan`
+ * itself, since that's the one function with authority over `lastPlanDigest`.
+ *
+ * No-op entirely when reporting is disabled: emit() would no-op anyway, but
+ * skipping the loop also means the persisted digests are left untouched, so
+ * turning reporting on later still sees every workflow as unannounced rather
+ * than silently inheriting stale digests from a prior enabled period.
  */
 export function announceWorkflows(): void {
+	const rc = loadEffectiveReportConfig();
+	if (!rc.enabled) return;
 	for (const workflow of listWorkflows()) {
-		reportEmit("workflow.updated", {
-			workflowId: workflow.id,
-			data: { name: workflow.name, agent_name: workflow.agentName, ...workflowRuntimeMeta(workflow.hookUrl) },
-		});
-		// …and its plan, which is the whole point of announcing on startup: a
-		// snapshot is only emitted when something MUTATES a workflow, so without
-		// this a hub that has just learned to send them would leave every
-		// existing workflow un-drawable until someone happened to touch it. A
-		// finished one would never be touched again. One snapshot per workflow
-		// per daemon start, and the dedup in `reportPlan` means the ordinary
-		// `writeStatusMd` traffic afterwards costs nothing.
+		try {
+			const data = { name: workflow.name, agent_name: workflow.agentName, ...workflowRuntimeMeta(workflow.hookUrl) };
+			const digest = JSON.stringify(data);
+			if (getReportedDigests(workflow.id).meta !== digest) {
+				reportEmit("workflow.updated", { workflowId: workflow.id, data }, rc);
+				setReportedDigests(workflow.id, { meta: digest });
+			}
+		} catch {
+			// Reporting is best-effort: one workflow's metadata failing to build
+			// must not stop the rest of the loop from being checked.
+		}
 		reportPlan(workflow, listSteps(workflow.id));
 	}
 }
@@ -2585,6 +2609,11 @@ function forgetPlanDigest(workflowId: string): void {
 	lastPlanDigest.delete(workflowId);
 }
 
+/** Test hook so a test can simulate a daemon restart, where this in-memory cache starts empty. */
+export function resetPlanDigestCacheForTests(): void {
+	lastPlanDigest.clear();
+}
+
 /** One step, as the canvas needs to see it (mirrors `CanvasStep` in the UI). */
 function planStep(step: Step): Record<string, unknown> {
 	return {
@@ -2615,6 +2644,19 @@ function planStep(step: Step): Record<string, unknown> {
  * Unlike `reportStepEvent` this includes the hub-owned `context` step: the
  * canvas draws it as the card pinned above step 1, so leaving it out would draw
  * a different workflow than the operator sees.
+ *
+ * Two layers of dedup, for two different lifetimes. `lastPlanDigest` is an
+ * in-memory fast path: the ~40 `writeStatusMd` calls a workflow gets while
+ * polling with nothing happening collapse into zero DB reads, not just zero
+ * emits. `reported_plan_digest` (db.ts) is its persisted twin, consulted only
+ * on a miss (a real change, or the first time THIS process has looked at the
+ * workflow) — which is exactly what happens for every workflow right after a
+ * restart, since `lastPlanDigest` starts empty. Without it, `announceWorkflows`
+ * would re-send every existing plan on every daemon start; with it, a restart
+ * sees the persisted digest still matches and skips the emit, while a plan
+ * that genuinely changed while the hub was down still goes out. The persisted
+ * digest is written on every successful emit, from any caller, not just the
+ * startup announce — that's what keeps it correct between restarts.
  */
 function reportPlan(workflow: Workflow, steps: readonly Step[]): void {
 	const rc = loadReportConfig();
@@ -2628,8 +2670,13 @@ function reportPlan(workflow: Workflow, steps: readonly Step[]): void {
 		};
 		const body = JSON.stringify(payload);
 		if (lastPlanDigest.get(workflow.id) === body) return;
+		if (getReportedDigests(workflow.id).plan === body) {
+			lastPlanDigest.set(workflow.id, body);
+			return;
+		}
 		lastPlanDigest.set(workflow.id, body);
 		reportEmit("workflow.plan", { workflowId: workflow.id, data: payload }, rc);
+		setReportedDigests(workflow.id, { plan: body });
 	} catch {
 		// Reporting is best-effort: a snapshot that can't be built is skipped.
 	}
