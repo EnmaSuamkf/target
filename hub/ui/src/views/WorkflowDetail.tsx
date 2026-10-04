@@ -29,6 +29,7 @@ import { Switch } from "../components/Switch.tsx";
 import { usePermissions, requires } from "../hooks/usePermissions.ts";
 import { useStagedImages } from "../hooks/useStagedImages.ts";
 import { isUsableCopy, templateOptionLabel } from "../lib/catalogCopy.ts";
+import { copyText } from "../lib/copyText.ts";
 import { prettyPath, relativeTime } from "../lib/format.ts";
 import { canMoveStep } from "../lib/stepMove.ts";
 import { hasLiveSchedule, scheduleAvailability } from "../lib/scheduleForm.ts";
@@ -494,9 +495,10 @@ export function WorkflowDetail({
 						type="button"
 						className={`mono ${styles.workflowId}`}
 						onClick={() => {
-							void navigator.clipboard.writeText(workflow.id).then(
-								() => toast.success("Workflow ID copied."),
-								() => toast.error("Could not copy — select the ID and copy it by hand."),
+							void copyText(workflow.id).then((ok) =>
+								ok
+									? toast.success("Workflow ID copied.")
+									: toast.error("Could not copy — select the ID and copy it by hand."),
 							);
 						}}
 						title={`${workflow.id} — click to copy`}
