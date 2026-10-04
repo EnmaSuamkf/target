@@ -461,6 +461,13 @@ export class TemplateStoreError extends Error {
 let db: DatabaseSync | null = null;
 
 /**
+ * Settings key for the one-time list of workflow ids captured by `open()`'s
+ * migration the moment `reported_meta_digest`/`reported_plan_digest` are
+ * added — see `takeLegacyDigestBackfillIds` and its caller in workflow.ts.
+ */
+const REPORT_LEGACY_DIGEST_BACKFILL_KEY = "report:legacy_digest_backfill_ids";
+
+/**
  * Exported for `account.ts`, which owns the auth/sessions tables the same way
  * this module owns workflows/steps/templates. Nothing else should reach for it.
  */
@@ -707,6 +714,34 @@ export function open(): DatabaseSync {
 	if (!existingWorkflowColumns.has("failure_notified")) {
 		addWorkflowColumn("failure_notified", "failure_notified INTEGER NOT NULL DEFAULT 0");
 		database.exec("UPDATE workflows SET failure_notified = 1 WHERE status = 'failed';");
+	}
+	// Digests of the last `workflow.updated` metadata and plan successfully
+	// queued for this workflow (see reportEmit/reportPlan in workflow.ts).
+	// Nullable with no default: a workflow that reaches the normal announce
+	// path with a NULL digest reads as "never announced" and gets sent once,
+	// then falls silent again until its reported content actually changes.
+	const isFirstDigestMigration = !existingWorkflowColumns.has("reported_meta_digest");
+	addWorkflowColumn("reported_meta_digest", "reported_meta_digest TEXT");
+	addWorkflowColumn("reported_plan_digest", "reported_plan_digest TEXT");
+	if (isFirstDigestMigration) {
+		// Every workflow that exists at this exact moment predates these
+		// columns — capture their ids so workflow.ts can mark them as already
+		// announced (persisting their current digest directly, without ever
+		// calling reportEmit) instead of re-sending the operator's entire
+		// workflow history to the report server once more on the first
+		// post-upgrade restart. A workflow created after this point is
+		// correctly excluded: it never lands in this list, so it goes through
+		// the normal announce path and gets sent for real. Empty on a brand
+		// new install, since `workflows` has no rows yet at this point.
+		const legacyIds = (database.prepare("SELECT id FROM workflows").all() as { id: string }[]).map((r) => r.id);
+		if (legacyIds.length > 0) {
+			database
+				.prepare(
+					`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+					 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+				)
+				.run(REPORT_LEGACY_DIGEST_BACKFILL_KEY, JSON.stringify(legacyIds), new Date().toISOString());
+		}
 	}
 	// The scheduler tick looks up armed instances by state on every tick, and
 	// series views list instances by series.
@@ -1405,6 +1440,59 @@ export function takeStatusBeforeReview(id: string): WorkflowStatus | null {
 	const stashed = row?.s == null ? null : (String(row.s) as WorkflowStatus);
 	if (stashed !== null) setStatusBeforeReview(id, null);
 	return stashed;
+}
+
+/**
+ * Reads the digests of the `workflow.updated` metadata and plan this workflow
+ * last had successfully queued for reporting (see `announceWorkflows` /
+ * `reportPlan` in workflow.ts). Either field is null when that side has never
+ * been announced — true for every workflow on a freshly upgraded DB, and for
+ * one created while reporting was disabled.
+ */
+export function getReportedDigests(id: string): { meta: string | null; plan: string | null } {
+	const row = open()
+		.prepare("SELECT reported_meta_digest AS meta, reported_plan_digest AS plan FROM workflows WHERE id = ?")
+		.get(id) as Record<string, unknown> | undefined;
+	return { meta: nullableString(row?.meta), plan: nullableString(row?.plan) };
+}
+
+/**
+ * Records the digest(s) of what was just queued for reporting, so the next
+ * reporter tick (including one after a restart) can tell whether this
+ * workflow's metadata or plan actually changed before re-announcing it.
+ * Omitting a field leaves that digest untouched — callers set `meta` and
+ * `plan` independently since one can change without the other.
+ */
+export function setReportedDigests(id: string, digests: { meta?: string | null; plan?: string | null }): void {
+	if (digests.meta !== undefined) {
+		open().prepare("UPDATE workflows SET reported_meta_digest = ? WHERE id = ?").run(digests.meta, id);
+	}
+	if (digests.plan !== undefined) {
+		open().prepare("UPDATE workflows SET reported_plan_digest = ? WHERE id = ?").run(digests.plan, id);
+	}
+}
+
+/**
+ * Reads and clears, in one step, the list of workflow ids that predate
+ * `reported_meta_digest`/`reported_plan_digest` (captured once by `open()`'s
+ * migration). Consumed exactly once — normally by the first
+ * `announceWorkflows()` after the upgrade, which uses it to mark those
+ * workflows as already announced without ever sending them. Returns an empty
+ * array once consumed, and on every DB that never had a backfill list (any
+ * install created after this feature shipped).
+ */
+export function takeLegacyDigestBackfillIds(): string[] {
+	const row = open().prepare("SELECT value FROM settings WHERE key = ?").get(REPORT_LEGACY_DIGEST_BACKFILL_KEY) as
+		| { value: string }
+		| undefined;
+	if (!row?.value) return [];
+	open().prepare("DELETE FROM settings WHERE key = ?").run(REPORT_LEGACY_DIGEST_BACKFILL_KEY);
+	try {
+		const parsed = JSON.parse(row.value) as unknown;
+		return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
+	} catch {
+		return [];
+	}
 }
 
 /**
