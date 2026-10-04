@@ -22,6 +22,7 @@ import {
 	deleteAwbHook,
 	abortAwbRun,
 	ensureHookMounts,
+	defaultSandboxImage,
 	hookRuntime,
 	PUBLISHABLE_RUNNERS,
 	type HookOptions,
@@ -1548,7 +1549,15 @@ export function cloneWorkflow(workflowId: string, overrides: CloneOverrides = {}
 	const sandbox = pick(overrides.sandbox, runtime.sandbox ? ("docker" as const) : undefined);
 	// The image only means anything to a docker sandbox: a clone moved onto the
 	// host must not carry the original's image into a hook that won't use it.
-	const image = sandbox === "docker" ? pick(overrides.image, runtime.sandbox?.image) : undefined;
+	// A default image belongs to the runner it was derived for: moving the clone to
+	// another runner without naming an image must not leave `copilot` running in
+	// the claude image (which has no such binary), so the inherited default is
+	// dropped and createWorkflow picks the new runner's own.
+	const inheritedImage =
+		runtime.sandbox?.image === defaultSandboxImage(sourceRunner ?? "claude") && runner !== (sourceRunner ?? "claude")
+			? undefined
+			: runtime.sandbox?.image;
+	const image = sandbox === "docker" ? pick(overrides.image, inheritedImage) : undefined;
 	const dockerMounts =
 		overrides.dockerMounts === undefined ? source.dockerMounts : overrides.dockerMounts === null ? [] : overrides.dockerMounts;
 	const clone = createWorkflow(overrides.name ?? cloneName(source.name), {
