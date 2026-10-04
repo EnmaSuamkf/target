@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { copyText } from "../lib/copyText.ts";
 import { useToast } from "./Toast.tsx";
 import styles from "./RecoveryToken.module.css";
 
@@ -23,12 +24,8 @@ export function RecoveryToken({
 	const toast = useToast();
 
 	const copy = async (): Promise<void> => {
-		try {
-			await navigator.clipboard.writeText(token);
-			toast.success("Recovery token copied.");
-		} catch {
-			toast.error("Could not copy — select the token and copy it by hand.");
-		}
+		if (await copyText(token)) toast.success("Recovery token copied.");
+		else toast.error("Could not copy — select the token and copy it by hand.");
 	};
 
 	const download = (): void => {

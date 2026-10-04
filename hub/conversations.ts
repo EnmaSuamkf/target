@@ -507,12 +507,22 @@ function oneLine(text: string, max: number): string {
  */
 const WORKFLOW_PROMPT = /^You are the agent of a workflow in The Target Project named "(.+?)"\./;
 
-/** Title for a conversation, from the first thing said in it. */
+/**
+ * Title for a conversation, from the first thing said in it. A first line with
+ * no letter or digit (`{`, `[`, a lone fence) says nothing, as when the first
+ * prompt was pasted JSON; then the whole text is collapsed onto one line, and
+ * when even that has nothing readable the result is "" so callers fall back.
+ */
 function titleOf(text: string): string {
 	const workflow = WORKFLOW_PROMPT.exec(text);
 	if (workflow) return oneLine(`Workflow "${workflow[1]}"`, MAX_TITLE_CHARS);
-	return oneLine(text, MAX_TITLE_CHARS);
+	const first = oneLine(text, MAX_TITLE_CHARS);
+	if (READABLE.test(first)) return first;
+	const collapsed = oneLine(text.replace(/\s+/g, " "), MAX_TITLE_CHARS);
+	return READABLE.test(collapsed) ? collapsed : "";
 }
+
+const READABLE = /[\p{L}\p{N}]/u;
 
 /**
  * Reads the label for one transcript off the head of the file: the workdir (from
@@ -647,6 +657,17 @@ function yamlScalar(raw: string): string | null {
 	return value;
 }
 
+/** The indented lines after a `|`/`>` header, trimmed and joined by newlines; null when there are none. */
+function blockScalar(lines: string[], from: number): string | null {
+	const body: string[] = [];
+	for (const line of lines.slice(from)) {
+		if (line.trim() !== "" && !/^\s/.test(line)) break;
+		body.push(line.trim());
+	}
+	const joined = body.join("\n").trim();
+	return joined || null;
+}
+
 /** `cwd` and `name` from a Copilot session's `workspace.yaml` (next to `events.jsonl`); nulls when absent. */
 function readCopilotWorkspace(eventsFile: string): { workdir: string | null; title: string | null } {
 	let text: string;
@@ -656,15 +677,26 @@ function readCopilotWorkspace(eventsFile: string): { workdir: string | null; tit
 		return { workdir: null, title: null };
 	}
 	const out: { workdir: string | null; title: string | null } = { workdir: null, title: null };
-	for (const line of text.split("\n")) {
-		const match = /^(cwd|name):(.*)$/.exec(line.replace(/\r$/, ""));
+	const lines = text.split("\n").map((line) => line.replace(/\r$/, ""));
+	for (const [index, line] of lines.entries()) {
+		const match = /^(cwd|name):(.*)$/.exec(line);
 		if (!match) continue;
-		const value = yamlScalar(match[2] ?? "");
+		const raw = (match[2] ?? "").trim();
+		// A block scalar (`name: |-`) carries its text on the indented lines below;
+		// Copilot writes one when the first prompt was multi-line, e.g. JSON.
+		const value = /^[|>]/.test(raw) ? blockScalar(lines, index + 1) : yamlScalar(raw);
 		if (!value) continue;
 		if (match[1] === "cwd") out.workdir = value;
 		else out.title = value;
 	}
 	return out;
+}
+
+/** Title for a session that never said anything readable: where it ran, else its id / file name. */
+function fallbackTitle(runner: PublishableRunner, file: string, workdir: string | null): string {
+	if (runner !== "copilot") return path.basename(file, ".jsonl");
+	const dir = workdir ? path.basename(workdir.replace(/[\\/]+$/, "")) : "";
+	return dir ? `Session in ${dir}` : sessionIdOf(runner, file);
 }
 
 function summarize(runner: PublishableRunner, entry: FileEntry): ConversationSummary {
@@ -694,7 +726,7 @@ function summarize(runner: PublishableRunner, entry: FileEntry): ConversationSum
 		sessionId: sessionIdOf(runner, entry.file),
 		path: entry.file,
 		workdir: head.workdir,
-		title: head.title || (runner === "copilot" ? sessionIdOf(runner, entry.file) : path.basename(entry.file, ".jsonl")),
+		title: head.title || fallbackTitle(runner, entry.file, head.workdir),
 		updatedAt: new Date(entry.mtimeMs).toISOString(),
 		sizeBytes: entry.size,
 	};

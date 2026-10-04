@@ -290,3 +290,47 @@ test("a session id whose events.jsonl does not exist also falls back to the run 
 	const log = touch(path.join(String(process.env.AWB_HOME), "logs", `${agentName}-1785003818745.log`), new Date());
 	assert.equal(probeStepProgress(workflow, step, cfg, true)?.source, log);
 });
+
+/** Writes a throwaway session, reads its summary, then removes it so the shared fixtures' counts hold. */
+function titleOfSession(id: string, yaml: string, events: Record<string, unknown>[]): { title: string; workdir: string | null } {
+	session(id, { mtime: 1_800_000_600, yaml, events });
+	try {
+		const found = findConversation("copilot", id);
+		assert.ok(found);
+		return { title: found.title, workdir: found.workdir };
+	} finally {
+		fs.rmSync(path.join(copilotDir, "session-state", id), { recursive: true });
+	}
+}
+
+test("a name of '{}' is not a title: the first user turn names the session instead", () => {
+	const got = titleOfSession("aaaaaaaa-0000-4000-8000-0000000000b1", `cwd: ${projDir}\nname: '{}'\n`, [
+		startEv(projDir),
+		user("Summarise the release notes"),
+	]);
+	assert.equal(got.title, "Summarise the release notes");
+});
+
+test("a |- block scalar holding JSON becomes one readable line", () => {
+	const yaml = `cwd: ${projDir}\nname: |-\n  {\n    "task": "Remember the secret word"\n  }\nuser_named: false\n`;
+	const got = titleOfSession("aaaaaaaa-0000-4000-8000-0000000000b2", yaml, [startEv(projDir), user("ignored")]);
+	assert.equal(got.title, '{ "task": "Remember the secret word" }');
+	assert.equal(got.workdir, projDir, "the keys after the block scalar still parse");
+});
+
+test("a first prompt of bare JSON braces collapses to one line; nothing readable falls back to the directory", () => {
+	const json = titleOfSession("aaaaaaaa-0000-4000-8000-0000000000b3", `cwd: ${projDir}\nname: '{}'\n`, [
+		startEv(projDir),
+		user('{\n  "a": 1\n}'),
+	]);
+	assert.equal(json.title, '{ "a": 1 }');
+	const bare = titleOfSession("aaaaaaaa-0000-4000-8000-0000000000b4", `cwd: ${projDir}\nname: '{}'\n`, [startEv(projDir), user("{}")]);
+	assert.equal(bare.title, `Session in ${path.basename(projDir)}`);
+});
+
+test("a normal title is untouched, and the workflow prompt still reads as the workflow name", () => {
+	const normal = titleOfSession("aaaaaaaa-0000-4000-8000-0000000000b5", `cwd: ${projDir}\nname: 'Troubleshoot Models'\n`, [startEv(projDir), user("x")]);
+	assert.equal(normal.title, "Troubleshoot Models");
+	const wf = titleOfSession("aaaaaaaa-0000-4000-8000-0000000000b6", `cwd: ${projDir}\nname: 'You are the agent of a workflow in The Target Project named "demo". More text'\n`, [startEv(projDir), user("x")]);
+	assert.equal(wf.title, 'Workflow "demo"');
+});

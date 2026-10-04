@@ -162,6 +162,18 @@ const BINARIES: Record<Runner, string> = {
 	copilot: "copilot",
 };
 
+/**
+ * One picker row: title, the last two directory segments (the part that tells
+ * same-titled sessions apart) and the age. Kept short on purpose — the native
+ * popup is as wide as its longest option, so long rows overflow the form. The
+ * full title and path are in the option's tooltip.
+ */
+function conversationOptionLabel(option: Conversation): string {
+	const segments = (option.workdir ?? "").split("/").filter(Boolean);
+	const dir = segments.length > 2 ? `…/${segments.slice(-2).join("/")}` : prettyPath(option.workdir) || "unknown dir";
+	return `${truncate(option.title, 48)} · ${dir} · ${relativeTime(option.updatedAt)}`;
+}
+
 /** What a clone is proposed as — mirrors the hub's `cloneName` (hub/workflow.ts). */
 function cloneName(name: string): string {
 	return `Clone - ${name}`;
@@ -736,8 +748,12 @@ export function CreateWorkflowModal({
 								>
 									<option value="">No conversation — start a fresh session</option>
 									{visibleConversations.map((option) => (
-										<option key={option.sessionId} value={option.sessionId}>
-											{`${truncate(option.title, 70)} · ${prettyPath(option.workdir) || "unknown dir"} · ${relativeTime(option.updatedAt)}`}
+										<option
+											key={option.sessionId}
+											value={option.sessionId}
+											title={`${option.title}\n${prettyPath(option.workdir) || "unknown dir"}`}
+										>
+											{conversationOptionLabel(option)}
 										</option>
 									))}
 								</select>
