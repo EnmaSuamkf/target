@@ -92,6 +92,7 @@ import {
 	startManualRun,
 	stepProgress,
 	swapStepOrder,
+	takeLegacyDigestBackfillIds,
 	takeStatusBeforeReview,
 	updateStepConfig,
 	updateStepDescription,
@@ -1298,6 +1299,48 @@ function workflowRuntimeMeta(hookUrl: string): { agent: string | null; sandbox: 
 }
 
 /**
+ * One-time, silent catch-up for workflows that existed before
+ * `reported_meta_digest`/`reported_plan_digest` did (db.ts's migration
+ * captures their ids the moment the columns are added). Persists each one's
+ * CURRENT digest directly — via `setReportedDigests`, never `reportEmit` —
+ * so the very first `announceWorkflows()` after this feature ships does not
+ * re-send the operator's entire workflow history to the report server even
+ * once. A workflow created after the upgrade was never on that list, so it
+ * keeps going through the normal announce/mutation path below, which still
+ * announces it for real.
+ *
+ * `takeLegacyDigestBackfillIds` hands the list back exactly once (it deletes
+ * it from `settings` as it reads it), so this is a cheap no-op on every call
+ * after the first — safe to run unconditionally at the top of
+ * `announceWorkflows`, independent of whether reporting happens to be
+ * enabled right now: the point is that these workflows never look freshly
+ * updated, whenever reporting eventually does get turned on.
+ */
+function backfillLegacyReportDigests(): void {
+	for (const id of takeLegacyDigestBackfillIds()) {
+		try {
+			const workflow = getWorkflow(id);
+			if (!workflow) continue;
+			const metaDigest = JSON.stringify({
+				name: workflow.name,
+				agent_name: workflow.agentName,
+				...workflowRuntimeMeta(workflow.hookUrl),
+			});
+			const planDigest = JSON.stringify({
+				name: workflow.name,
+				status: workflow.status,
+				status_manual: workflow.statusManual === true,
+				steps: listSteps(workflow.id).map(planStep),
+			});
+			setReportedDigests(id, { meta: metaDigest, plan: planDigest });
+		} catch {
+			// Best-effort: a workflow that can't be read/serialized just stays
+			// NULL and gets picked up by the normal announce path instead.
+		}
+	}
+}
+
+/**
  * Re-announce every known workflow's metadata (name, agent, sandbox) and plan
  * as `workflow.updated` / `workflow.plan`, but only for a workflow whose
  * CONTENT has actually changed since the last one that was successfully
@@ -1319,12 +1362,18 @@ function workflowRuntimeMeta(hookUrl: string): { agent: string | null; sandbox: 
  * goes out. The plan half of this gets the same treatment inside `reportPlan`
  * itself, since that's the one function with authority over `lastPlanDigest`.
  *
+ * `backfillLegacyReportDigests` runs first: workflows that predate the digest
+ * columns altogether are marked as already announced without ever being
+ * sent, so even the first post-upgrade announce doesn't flood the report
+ * server with the operator's entire history.
+ *
  * No-op entirely when reporting is disabled: emit() would no-op anyway, but
  * skipping the loop also means the persisted digests are left untouched, so
  * turning reporting on later still sees every workflow as unannounced rather
  * than silently inheriting stale digests from a prior enabled period.
  */
 export function announceWorkflows(): void {
+	backfillLegacyReportDigests();
 	const rc = loadEffectiveReportConfig();
 	if (!rc.enabled) return;
 	for (const workflow of listWorkflows()) {

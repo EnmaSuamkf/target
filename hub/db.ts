@@ -461,6 +461,13 @@ export class TemplateStoreError extends Error {
 let db: DatabaseSync | null = null;
 
 /**
+ * Settings key for the one-time list of workflow ids captured by `open()`'s
+ * migration the moment `reported_meta_digest`/`reported_plan_digest` are
+ * added — see `takeLegacyDigestBackfillIds` and its caller in workflow.ts.
+ */
+const REPORT_LEGACY_DIGEST_BACKFILL_KEY = "report:legacy_digest_backfill_ids";
+
+/**
  * Exported for `account.ts`, which owns the auth/sessions tables the same way
  * this module owns workflows/steps/templates. Nothing else should reach for it.
  */
@@ -710,11 +717,32 @@ export function open(): DatabaseSync {
 	}
 	// Digests of the last `workflow.updated` metadata and plan successfully
 	// queued for this workflow (see reportEmit/reportPlan in workflow.ts).
-	// Nullable with no default: an existing DB upgrades to "never announced",
-	// which makes the next reporter tick announce every workflow exactly once
-	// and then fall silent again until its reported content actually changes.
+	// Nullable with no default: a workflow that reaches the normal announce
+	// path with a NULL digest reads as "never announced" and gets sent once,
+	// then falls silent again until its reported content actually changes.
+	const isFirstDigestMigration = !existingWorkflowColumns.has("reported_meta_digest");
 	addWorkflowColumn("reported_meta_digest", "reported_meta_digest TEXT");
 	addWorkflowColumn("reported_plan_digest", "reported_plan_digest TEXT");
+	if (isFirstDigestMigration) {
+		// Every workflow that exists at this exact moment predates these
+		// columns — capture their ids so workflow.ts can mark them as already
+		// announced (persisting their current digest directly, without ever
+		// calling reportEmit) instead of re-sending the operator's entire
+		// workflow history to the report server once more on the first
+		// post-upgrade restart. A workflow created after this point is
+		// correctly excluded: it never lands in this list, so it goes through
+		// the normal announce path and gets sent for real. Empty on a brand
+		// new install, since `workflows` has no rows yet at this point.
+		const legacyIds = (database.prepare("SELECT id FROM workflows").all() as { id: string }[]).map((r) => r.id);
+		if (legacyIds.length > 0) {
+			database
+				.prepare(
+					`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+					 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+				)
+				.run(REPORT_LEGACY_DIGEST_BACKFILL_KEY, JSON.stringify(legacyIds), new Date().toISOString());
+		}
+	}
 	// The scheduler tick looks up armed instances by state on every tick, and
 	// series views list instances by series.
 	database.exec("CREATE INDEX IF NOT EXISTS idx_workflows_schedule_state ON workflows(schedule_state);");
@@ -1441,6 +1469,29 @@ export function setReportedDigests(id: string, digests: { meta?: string | null; 
 	}
 	if (digests.plan !== undefined) {
 		open().prepare("UPDATE workflows SET reported_plan_digest = ? WHERE id = ?").run(digests.plan, id);
+	}
+}
+
+/**
+ * Reads and clears, in one step, the list of workflow ids that predate
+ * `reported_meta_digest`/`reported_plan_digest` (captured once by `open()`'s
+ * migration). Consumed exactly once — normally by the first
+ * `announceWorkflows()` after the upgrade, which uses it to mark those
+ * workflows as already announced without ever sending them. Returns an empty
+ * array once consumed, and on every DB that never had a backfill list (any
+ * install created after this feature shipped).
+ */
+export function takeLegacyDigestBackfillIds(): string[] {
+	const row = open().prepare("SELECT value FROM settings WHERE key = ?").get(REPORT_LEGACY_DIGEST_BACKFILL_KEY) as
+		| { value: string }
+		| undefined;
+	if (!row?.value) return [];
+	open().prepare("DELETE FROM settings WHERE key = ?").run(REPORT_LEGACY_DIGEST_BACKFILL_KEY);
+	try {
+		const parsed = JSON.parse(row.value) as unknown;
+		return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
+	} catch {
+		return [];
 	}
 }
 

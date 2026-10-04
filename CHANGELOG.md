@@ -266,6 +266,16 @@ The current version is reported by every instance to the central server (see
   queued, so a restart only re-announces a workflow whose metadata or plan
   actually changed since — or one that was never announced at all, which
   upgrades exactly once rather than forever.
+  - **Pre-existing workflows are never sent even once.** The naive version of
+    the fix above still sent the operator's entire workflow history to the
+    report server one last time on the first post-upgrade restart (every
+    pre-existing row starts with a NULL digest, which reads as "never
+    announced"). The migration that adds the digest columns now also captures
+    the ids of every workflow that existed at that exact moment; the first
+    `announceWorkflows()` afterwards persists their current digest directly,
+    without ever calling `reportEmit`, so they are marked as already
+    announced and silently skipped. A workflow created after the upgrade was
+    never on that list, so it is still announced for real the first time.
 
 - **Claude Code now actually loads the `target` MCP server.** `sync-mcp` wrote
   it to `~/.claude/settings.json`, which Claude Code ignores for `mcpServers`,
