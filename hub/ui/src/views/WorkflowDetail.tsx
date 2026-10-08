@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type {
 	AttachmentField,
 	OverridableStepStatus,
@@ -277,10 +277,17 @@ export function WorkflowDetail({
 		// A rename dialog left open belongs to the workflow it was opened from —
 		// carrying it into another one would offer that name for this workflow.
 		setRenaming(false);
-		setDockerMounts(workflow.dockerMounts);
 		seenStatuses.current = new Map();
 		knownStepIds.current = new Set();
-	}, [workflow.id, workflow.dockerMounts]);
+	}, [workflow.id]);
+
+	// The draft follows the saved value, not the array identity: every poll hands
+	// back a fresh `workflow.dockerMounts`, and keying on it wiped a path the
+	// operator had just picked (and re-ran the reset above) a few seconds later.
+	const savedDockerMounts = JSON.stringify(workflow.dockerMounts);
+	useEffect(() => {
+		setDockerMounts(JSON.parse(savedDockerMounts) as string[]);
+	}, [workflow.id, savedDockerMounts]);
 
 	// Seed from the server once per workflow open/reload, when steps first land.
 	// On a refresh the detail fetch completes after mount, so seeding only in the
@@ -1009,6 +1016,32 @@ export function WorkflowDetail({
  * how many steps were added — always the template's full list, since appending
  * the same template twice is a legitimate way to queue a second round.
  */
+// Memoised on purpose: the 2s poll re-renders the whole detail pane, and React
+// re-applies a controlled <select>'s value (option.selected) on every commit.
+// Chrome dismisses an open native dropdown when that happens, so the list
+// closed itself before a template could be picked. With stable props (templates
+// only change through the UI) the commit never reaches the element.
+const TemplatePicker = memo(function TemplatePicker({
+	templates,
+	value,
+	onChange,
+}: {
+	templates: Template[];
+	value: string;
+	onChange: (templateId: string) => void;
+}): React.JSX.Element {
+	return (
+		<select id="add-from-template" className="select" value={value} onChange={(ev) => onChange(ev.target.value)}>
+			<option value="">Choose a template…</option>
+			{templates.map((template) => (
+				<option key={template.id} value={template.id} disabled={!isUsableCopy(template)}>
+					{templateOptionLabel(template)}
+				</option>
+			))}
+		</select>
+	);
+});
+
 function AddStepForm({
 	templates,
 	onAdd,
@@ -1229,19 +1262,7 @@ function AddStepForm({
 						Or append a template's steps
 					</label>
 					<div className={styles.templateControls}>
-						<select
-							id="add-from-template"
-							className="select"
-							value={templateId}
-							onChange={(ev) => setTemplateId(ev.target.value)}
-						>
-							<option value="">Choose a template…</option>
-							{templates.map((template) => (
-								<option key={template.id} value={template.id} disabled={!isUsableCopy(template)}>
-									{templateOptionLabel(template)}
-								</option>
-							))}
-						</select>
+						<TemplatePicker templates={templates} value={templateId} onChange={setTemplateId} />
 						<button
 							type="button"
 							className="btn btn--sm"
