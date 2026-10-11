@@ -326,13 +326,16 @@ const HARNESS_RESUME_ENV: Record<string, Record<string, string>> = {
 /**
  * Variables (by NAME) a docker hook of each runner needs. Copilot CLI inside a
  * container cannot use the host's keyring login (spike, section 1), so
- * `COPILOT_GITHUB_TOKEN` is the only way it authenticates. The hub resolves
- * the token itself (copilot-token.ts) and writes `NAME=value` into the hook's
- * sandbox env, which awb's broker re-reads on every request; awb then hands the
- * value to the docker client through its own environment, never the command line.
+ * The hub resolves a GitHub token itself (copilot-token.ts) and writes
+ * `NAME=value` into the hook's sandbox env. Awb re-reads it on every request
+ * and hands the value to the Docker client through its environment, never the
+ * command line.
  */
 export const SANDBOX_TOKEN_ENV: Partial<Record<PublishableRunner, string[]>> = {
-	copilot: ["COPILOT_GITHUB_TOKEN"],
+	claude: ["GH_TOKEN"],
+	"free-code": ["GH_TOKEN"],
+	cursor: ["GH_TOKEN"],
+	copilot: ["COPILOT_GITHUB_TOKEN", "GH_TOKEN"],
 };
 
 /** The token variables `runner` needs in a docker sandbox ([] for the runners that authenticate through mounts). */
@@ -361,7 +364,8 @@ export function sandboxTokenProblem(
 	runner: string | null | undefined,
 	sandbox: string | null | undefined,
 ): SandboxTokenProblem | null {
-	if (sandbox !== "docker" || sandboxTokenEnv(runner ?? null).length === 0) return null;
+	// Only copilot cannot run without a token; the others just lose authenticated GitHub access.
+	if (sandbox !== "docker" || runner !== "copilot") return null;
 	const status = copilotTokenStatus();
 	if (status.usable) return null;
 	const fix =
@@ -384,7 +388,7 @@ export function missingSandboxToken(runner: string | null | undefined, sandbox: 
  */
 function sandboxEnvEntries(runner: string): string[] {
 	const resolved = resolveCopilotToken();
-	const usable = resolved !== null && classifyToken(resolved.token) !== "classic";
+	const usable = resolved !== null && (runner !== "copilot" || classifyToken(resolved.token) !== "classic");
 	return sandboxTokenEnv(runner).map((name) => (usable ? `${name}=${resolved.token}` : name));
 }
 
@@ -408,6 +412,29 @@ export function harnessResumeSecretEnv(harness: string | null, sandbox: HookSand
 	return Object.fromEntries(names.map((name) => [name, token]));
 }
 
+function dockerSocketGroupIds(mounts: string[]): number[] {
+	const groups = new Set<number>();
+	for (const mount of mounts) {
+		try {
+			const stat = fs.statSync(mount);
+			if (stat.isSocket()) groups.add(stat.gid);
+		} catch {
+			// Invalid mounts are reported by Docker when the resume command runs.
+		}
+	}
+	if (mounts.some((mount) => path.basename(mount) === "docker.sock")) {
+		const configured = Number.parseInt(process.env.DOCKER_SOCKET_GID ?? "", 10);
+		if (Number.isInteger(configured) && configured >= 0) groups.add(configured);
+	}
+	return [...groups];
+}
+
+// Docker resumes run as the host UID but their synthetic HOME directory is
+// not writable. Keep Git's credential-helper configuration inside the
+// container so `gh auth setup-git` can configure HTTPS pushes without
+// modifying the host user's ~/.gitconfig.
+const DOCKER_GIT_CONFIG_GLOBAL = "/tmp/target-gitconfig";
+
 /**
  * `docker run …` up to and including the image, for an interactive resume in
  * a real terminal (hence `-it`, which the broker's own headless runs don't
@@ -421,14 +448,24 @@ function dockerResumePrefix(
 	forwardEnv: string[] = [],
 ): string {
 	const mounts = [workdir, ...harnessStateMounts(), ...existingPaths(sandbox.mounts ?? [])];
+	const socketGroups = dockerSocketGroupIds(mounts);
 	const parts = [
 		"docker run --rm -it",
 		`--user ${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`,
 		`--memory ${SANDBOX_LIMITS.memory}`,
 		`--cpus ${SANDBOX_LIMITS.cpus}`,
 		`--pids-limit ${SANDBOX_LIMITS.pidsLimit}`,
+		"--add-host host.docker.internal:host-gateway",
+		...socketGroups.map((gid) => `--group-add ${gid}`),
 		...mounts.map((m) => `-v ${shellQuote(`${m}:${m}`)}`),
 		`-e ${shellQuote(`HOME=${os.homedir()}`)}`,
+		`-e ${shellQuote(`GIT_CONFIG_GLOBAL=${DOCKER_GIT_CONFIG_GLOBAL}`)}`,
+		// Git reads this helper from its environment, so HTTPS push/pull works
+		// even when the synthetic HOME cannot create a .gitconfig. The helper
+		// obtains the token from GH_TOKEN without putting the token in argv.
+		"-e GIT_CONFIG_COUNT=1",
+		"-e GIT_CONFIG_KEY_0=credential.helper",
+		"-e 'GIT_CONFIG_VALUE_0=!gh auth git-credential'",
 		...Object.entries(env).map(([k, v]) => `-e ${shellQuote(`${k}=${v}`)}`),
 		// By name only (no `=value`): docker reads it from the terminal shell's
 		// environment, so the secret never lands on a command line.
@@ -1005,20 +1042,20 @@ export function ensureHookMounts(hookUrl: string, mounts: string[]): boolean {
 }
 
 /**
- * Makes sure a copilot docker hook carries the token the hub resolves RIGHT NOW
- * (see `ensureHookTokenEnv`). Called before every dispatch of such a step and
- * once at startup. `ok: false` carries the actionable message (no token inside)
- * when none resolves; hooks that aren't copilot+docker are `ok: true` untouched.
+ * Makes sure a GitHub-authenticated Docker hook carries the token the hub
+ * resolves RIGHT NOW (see `ensureHookTokenEnv`). Called before every dispatch
+ * and once at startup. Copilot still fails clearly when no usable token exists;
+ * other runners continue without a token so public repositories still work.
  */
-export function refreshCopilotHookToken(hookUrl: string): { ok: true; changed: boolean } | { ok: false; message: string } {
+export function refreshDockerGitHubToken(hookUrl: string): { ok: true; changed: boolean } | { ok: false; message: string } {
 	const runtime = hookRuntime(hookUrl);
-	if (runtime.harness !== "copilot" || !runtime.sandbox) return { ok: true, changed: false };
-	const problem = sandboxTokenProblem("copilot", "docker");
+	if (!runtime.sandbox || sandboxTokenEnv(runtime.harness).length === 0) return { ok: true, changed: false };
+	const problem = runtime.harness === "copilot" ? sandboxTokenProblem("copilot", "docker") : null;
 	if (problem) return { ok: false, message: problem.message };
 	const resolved = resolveCopilotToken();
-	if (!resolved) return { ok: false, message: sandboxTokenProblem("copilot", "docker")?.message ?? "no GitHub token available" };
+	if (!resolved) return { ok: true, changed: false };
 	let changed = false;
-	for (const name of sandboxTokenEnv("copilot")) changed = ensureHookTokenEnv(hookUrl, name, resolved.token) || changed;
+	for (const name of sandboxTokenEnv(runtime.harness)) changed = ensureHookTokenEnv(hookUrl, name, resolved.token) || changed;
 	return { ok: true, changed };
 }
 
@@ -1057,13 +1094,12 @@ function writeAwbConfig(cfg: AwbConfig): boolean {
 }
 
 /**
- * Sets `name=value` in a copilot docker hook's sandbox env, so the broker
+ * Sets `name=value` in a Docker hook's sandbox env, so the broker
  * (which re-reads hooks.json per request) hands the CURRENT token to the
  * container: a rotated token, a fresh `gh auth login` or one pasted in Settings
  * later needs no restart. Replaces any entry for `name` (bare or valued), keeps
- * the others, and rewrites hooks.json only when the entry changed. Only docker
- * hooks of copilot are touched. Best-effort, never throws; returns whether it
- * rewrote the file.
+ * the others, and rewrites hooks.json only when the entry changed. Best-effort,
+ * never throws; returns whether it rewrote the file.
  */
 export function ensureHookTokenEnv(hookUrl: string, name: string, value: string): boolean {
 	try {
@@ -1074,7 +1110,11 @@ export function ensureHookTokenEnv(hookUrl: string, name: string, value: string)
 		const hook = cfg.hooks[info.name];
 		const sandbox = hook?.sandbox as { kind?: unknown; env?: unknown } | undefined;
 		if (!hook || !sandbox || sandbox.kind !== "docker") return false;
-		if (!(Array.isArray(hook.consumers) && (hook.consumers as unknown[]).includes("spawn:copilot"))) return false;
+		if (
+			!(Array.isArray(hook.consumers) &&
+				(hook.consumers as unknown[]).some((consumer) => typeof consumer === "string" && consumer.startsWith("spawn:")))
+		)
+			return false;
 		const current = Array.isArray(sandbox.env) ? (sandbox.env as unknown[]).filter((e): e is string => typeof e === "string") : [];
 		const entry = `${name}=${value}`;
 		const isName = (e: string) => e === name || e.startsWith(`${name}=`);

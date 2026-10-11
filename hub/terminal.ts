@@ -62,9 +62,8 @@ function posixEnvPrefix(env: Record<string, string>): string {
 
 /**
  * One-line hint printed by the terminal's own shell when a secret variable did
- * not arrive (nothing resolved, or the launcher doesn't pass the environment
- * on: macOS `open -a Terminal` starts the app through LaunchServices). The
- * resume then continues and fails visibly at the harness rather than silently.
+ * not arrive. GitHub token variables are loaded from the host's `gh` login
+ * first; this is the fallback message when that is unavailable too.
  */
 function secretHintMessage(name: string): string {
 	return `note: ${name} is not set in this terminal, so the container cannot authenticate; export it here (e.g. ${name}=$(gh auth token)) and re-run the command below`;
@@ -72,7 +71,13 @@ function secretHintMessage(name: string): string {
 
 function posixSecretHints(secretEnv: Record<string, string>): string {
 	return Object.keys(secretEnv)
-		.map((k) => `{ [ -n "\${${k}:-}" ] || echo ${shellQuote(secretHintMessage(k))} >&2; } && `)
+		.map((k) => {
+			const githubToken = k === "GH_TOKEN" || k === "GITHUB_TOKEN" || k === "COPILOT_GITHUB_TOKEN";
+			const loadFromGh = githubToken
+				? `if [ -z "\${${k}:-}" ] && command -v gh >/dev/null 2>&1; then ${k}="$(gh auth token --hostname github.com 2>/dev/null)" && export ${k}; fi; `
+				: "";
+			return `{ ${loadFromGh}[ -n "\${${k}:-}" ] || echo ${shellQuote(secretHintMessage(k))} >&2; } && `;
+		})
 		.join("");
 }
 

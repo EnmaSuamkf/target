@@ -51,7 +51,12 @@ export function DockerMountEditor({
 				<DirectoryBrowser
 					initialPath=""
 					selectLabel="Bind this directory"
+					fileFilter={() => true}
 					onSelect={(path) => {
+						if (!mounts.includes(path)) onChange([...mounts, path]);
+						setBrowsing(false);
+					}}
+					onSelectFile={(path) => {
 						if (!mounts.includes(path)) onChange([...mounts, path]);
 						setBrowsing(false);
 					}}

@@ -2671,7 +2671,8 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// admin-gated like every other route that touches the operator's machine.
 	// `~` expands to the hub user's home; an empty/missing path starts there.
 	//
-	// `?files=1` adds the directory's regular files. Off by default because the
+	// `?files=1` adds the directory's regular files and Unix sockets. Off by
+	// default because the
 	// workdir picker only ever wants directories, and a node_modules listing
 	// would be thousands of names it has no use for; RCI's resource picker asks
 	// for them because a SKILL.md is one of the things it can import.
@@ -2729,7 +2730,15 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		};
 		if (url.searchParams.get("files") === "1") {
 			body.files = entries
-				.filter((entry) => entry.isFile())
+				.filter((entry) => {
+					if (entry.isFile() || entry.isSocket()) return true;
+					if (!entry.isSymbolicLink()) return false;
+					try {
+						return fs.statSync(path.join(resolved, entry.name)).isSocket();
+					} catch {
+						return false;
+					}
+				})
 				.map((entry) => entry.name)
 				.sort((a, b) => {
 					const aHidden = a.startsWith(".");
