@@ -66,7 +66,7 @@ test("Docker hooks get the appropriate GitHub token env; host hooks have no env"
 	dockerHook("flow-copilot");
 	dockerHook("flow-claude", "claude");
 	createAwbHook("flow-host", path.join(tmpHome, "wd-flow-host"), "{{payload}}", { runner: "copilot" });
-	assert.deepEqual(hooksJson()["flow-copilot"]!.sandbox!.env, [`COPILOT_GITHUB_TOKEN=${TOKEN}`]);
+	assert.deepEqual(hooksJson()["flow-copilot"]!.sandbox!.env, [`COPILOT_GITHUB_TOKEN=${TOKEN}`, `GH_TOKEN=${TOKEN}`]);
 	assert.deepEqual(hooksJson()["flow-claude"]!.sandbox!.env, [`GH_TOKEN=${TOKEN}`]);
 	assert.equal("sandbox" in hooksJson()["flow-host"]!, false);
 });
@@ -106,12 +106,10 @@ test("ensureHookTokenEnv rewrites only when the value changed and keeps other en
 	assert.deepEqual(hooksJson()["flow-ensure"]!.sandbox!.env, ["OTHER=keep", `COPILOT_GITHUB_TOKEN=${TOKEN2}`]);
 });
 
-test("ensureHookTokenEnv leaves hooks that are not copilot docker alone, and never throws", (t) => {
+test("ensureHookTokenEnv leaves host hooks and bad URLs alone, and never throws", (t) => {
 	withToken(t, undefined);
-	const claude = dockerHook("flow-ensure-claude", "claude");
 	const host = createAwbHook("flow-ensure-host", path.join(tmpHome, "wd-ensure-host"), "{{payload}}", { runner: "copilot" });
 	const before = fs.readFileSync(hooksFile, "utf8");
-	assert.equal(ensureHookTokenEnv(claude.hookUrl, "COPILOT_GITHUB_TOKEN", TOKEN), false);
 	assert.equal(ensureHookTokenEnv(host.hookUrl, "COPILOT_GITHUB_TOKEN", TOKEN), false);
 	assert.equal(ensureHookTokenEnv("http://127.0.0.1:1/hook/nope", "COPILOT_GITHUB_TOKEN", TOKEN), false);
 	assert.equal(ensureHookTokenEnv("not a url", "COPILOT_GITHUB_TOKEN", TOKEN), false);
@@ -209,7 +207,7 @@ test("dispatch refreshes the hook token BEFORE posting to the hook", async (t) =
 	}) as typeof fetch;
 	t.after(() => void (globalThis.fetch = realFetch));
 	await dispatchStep(step, wf, cfg, silent);
-	assert.deepEqual(envAtPost, [`COPILOT_GITHUB_TOKEN=${TOKEN2}`]);
+	assert.deepEqual(envAtPost, [`COPILOT_GITHUB_TOKEN=${TOKEN2}`, `GH_TOKEN=${TOKEN2}`]);
 	assert.equal(getStep(step.id)!.status, "queued");
 });
 
@@ -248,9 +246,9 @@ test("a docker resume forwards the token by NAME; the value travels in the termi
 	const command = harnessResumeCommand("copilot", "11111111-2222-3333-4444-555555555555", sandbox, "/home/u/repo") ?? "";
 	assert.match(command, / -e COPILOT_GITHUB_TOKEN /);
 	assert.equal(command.includes(TOKEN), false);
-	assert.deepEqual(harnessResumeSecretEnv("copilot", sandbox), { COPILOT_GITHUB_TOKEN: TOKEN });
+	assert.deepEqual(harnessResumeSecretEnv("copilot", sandbox), { COPILOT_GITHUB_TOKEN: TOKEN, GH_TOKEN: TOKEN });
 	assert.deepEqual(harnessResumeSecretEnv("copilot", null), {});
-	assert.deepEqual(harnessResumeSecretEnv("claude", sandbox), {});
+	assert.deepEqual(harnessResumeSecretEnv("claude", sandbox), { GH_TOKEN: TOKEN });
 
 	const realSpawn = terminalImpl.spawn;
 	const realPlatform = terminalImpl.platform;

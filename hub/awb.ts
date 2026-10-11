@@ -364,7 +364,8 @@ export function sandboxTokenProblem(
 	runner: string | null | undefined,
 	sandbox: string | null | undefined,
 ): SandboxTokenProblem | null {
-	if (sandbox !== "docker" || sandboxTokenEnv(runner ?? null).length === 0) return null;
+	// Only copilot cannot run without a token; the others just lose authenticated GitHub access.
+	if (sandbox !== "docker" || runner !== "copilot") return null;
 	const status = copilotTokenStatus();
 	if (status.usable) return null;
 	const fix =

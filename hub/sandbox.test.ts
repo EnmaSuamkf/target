@@ -72,10 +72,22 @@ test('sandbox: "host" is the explicit form of the same thing — still no block'
 	assert.equal(hookRuntime(hookUrl).sandbox, null);
 });
 
+// Docker hooks of every runner forward GH_TOKEN, as NAME or NAME=value depending on whether a token
+// resolves on the machine running the tests, so compare the sandbox block without its env.
+type SandboxBlock = { kind?: string; image?: string; env?: string[] };
+function withoutEnv(sandbox: unknown): Omit<SandboxBlock, "env"> {
+	const { env: _env, ...rest } = sandbox as SandboxBlock;
+	return rest;
+}
+function envNames(sandbox: unknown): string[] {
+	return ((sandbox as SandboxBlock).env ?? []).map((e) => e.split("=")[0]!);
+}
+
 test("createAwbHook with sandbox docker writes the block, defaulting the image", () => {
 	const { hookUrl } = createAwbHook("docker-hook", path.join(tmpHome, "wd-docker"), "{{payload}}", { sandbox: "docker" });
-	assert.deepEqual(hooksJson()["docker-hook"].sandbox, { kind: "docker", image: DEFAULT_SANDBOX_IMAGE });
-	assert.deepEqual(hookRuntime(hookUrl).sandbox, { kind: "docker", image: DEFAULT_SANDBOX_IMAGE, mounts: [] });
+	assert.deepEqual(withoutEnv(hooksJson()["docker-hook"].sandbox), { kind: "docker", image: DEFAULT_SANDBOX_IMAGE });
+	assert.deepEqual(envNames(hooksJson()["docker-hook"].sandbox), ["GH_TOKEN"]);
+	assert.deepEqual(hookRuntime(hookUrl).sandbox, { kind: "docker", image: DEFAULT_SANDBOX_IMAGE, mounts: [], env: ["GH_TOKEN"] });
 });
 
 // The regression that produced `exit 127` in the field: the broker passes the
@@ -91,8 +103,8 @@ test("the default docker image follows the runner — free-code gets the image t
 	});
 	const image = DEFAULT_SANDBOX_IMAGES["free-code"];
 	assert.notEqual(image, DEFAULT_SANDBOX_IMAGES.claude, "free-code must not fall back to the claude-only image");
-	assert.deepEqual(hooksJson()["docker-freecode-default"].sandbox, { kind: "docker", image });
-	assert.deepEqual(hookRuntime(hookUrl).sandbox, { kind: "docker", image, mounts: [] });
+	assert.deepEqual(withoutEnv(hooksJson()["docker-freecode-default"].sandbox), { kind: "docker", image });
+	assert.deepEqual(hookRuntime(hookUrl).sandbox, { kind: "docker", image, mounts: [], env: ["GH_TOKEN"] });
 });
 
 test("defaultSandboxImage maps every publishable runner to a distinct image, claude when unspecified", () => {
@@ -109,7 +121,7 @@ test("createAwbHook honours a per-workflow image, and leaves the runner alone", 
 		runner: "free-code",
 	});
 	const hook = hooksJson()["docker-img-hook"];
-	assert.deepEqual(hook.sandbox, { kind: "docker", image: "my-python-repo:3.12" });
+	assert.deepEqual(withoutEnv(hook.sandbox), { kind: "docker", image: "my-python-repo:3.12" });
 	// Sandbox and runner are independent axes: the consumer is untouched.
 	assert.deepEqual(hook.consumers, ["spawn:free-code"]);
 	const runtime = hookRuntime(hookUrl);
@@ -276,7 +288,7 @@ test("POST /api/workflows with sandbox docker creates a contained workflow and w
 	const { workflow } = (await res.json()) as { workflow: { id: string; agentName: string; sandbox: string; image: string | null } };
 	assert.equal(workflow.sandbox, "docker");
 	assert.equal(workflow.image, "target-agent:latest");
-	assert.deepEqual(hooksJson()[workflow.agentName].sandbox, { kind: "docker", image: "target-agent:latest" });
+	assert.deepEqual(withoutEnv(hooksJson()[workflow.agentName].sandbox), { kind: "docker", image: "target-agent:latest" });
 });
 
 test("POST /api/workflows with runner free-code + sandbox docker and NO image picks the free-code image", async () => {
@@ -294,7 +306,7 @@ test("POST /api/workflows with runner free-code + sandbox docker and NO image pi
 	assert.equal(workflow.image, "target-agent-freecode:latest");
 	const hook = hooksJson()[workflow.agentName];
 	assert.deepEqual(hook.consumers, ["spawn:free-code"]);
-	assert.deepEqual(hook.sandbox, { kind: "docker", image: "target-agent-freecode:latest" });
+	assert.deepEqual(withoutEnv(hook.sandbox), { kind: "docker", image: "target-agent-freecode:latest" });
 });
 
 test("an explicit image still wins over the runner default", async () => {
@@ -306,7 +318,7 @@ test("an explicit image still wins over the runner default", async () => {
 	assert.equal(res.status, 200);
 	const { workflow } = (await res.json()) as { workflow: { agentName: string; image: string | null } };
 	assert.equal(workflow.image, "my-freecode:dev");
-	assert.deepEqual(hooksJson()[workflow.agentName].sandbox, { kind: "docker", image: "my-freecode:dev" });
+	assert.deepEqual(withoutEnv(hooksJson()[workflow.agentName].sandbox), { kind: "docker", image: "my-freecode:dev" });
 });
 
 test("POST /api/workflows without a sandbox stays on the host (unchanged default)", async () => {
@@ -390,7 +402,8 @@ test("POST /api/workflows/:id/open-terminal on a docker workflow runs the resume
 	const workdir = path.join(tmpHome, "sandboxes", workflow.agentName);
 	// cd'd to the workdir on the HOST (that's where the terminal opens), then
 	// into the container at that same path.
-	assert.ok(shellCmd.startsWith(`cd '${workdir}' && docker run --rm -it `), shellCmd);
+	assert.ok(shellCmd.startsWith(`cd '${workdir}' && `), shellCmd);
+	assert.ok(shellCmd.includes(" && docker run --rm -it "), shellCmd);
 	assert.ok(shellCmd.includes(`-v '${workdir}:${workdir}'`), shellCmd);
 	assert.ok(shellCmd.includes(`-w '${workdir}'`), shellCmd);
 	assert.ok(shellCmd.endsWith(`'target-agent:latest' claude --resume 'sess-docker-1'; exec bash`), shellCmd);
@@ -438,22 +451,22 @@ test("a copilot docker hook writes the image and COPILOT_GITHUB_TOKEN=<value>; h
 	assert.deepEqual(hooksJson()["docker-copilot-hook"].sandbox, {
 		kind: "docker",
 		image: "target-agent-copilot:latest",
-		env: [`COPILOT_GITHUB_TOKEN=${DUMMY_TOKEN}`],
+		env: [`COPILOT_GITHUB_TOKEN=${DUMMY_TOKEN}`, `GH_TOKEN=${DUMMY_TOKEN}`],
 	});
 	const runtime = hookRuntime(hookUrl);
 	assert.ok(!JSON.stringify(runtime).includes(DUMMY_TOKEN), "the value never comes back through hookRuntime");
 	assert.equal(runtime.harness, "copilot");
-	assert.deepEqual(runtime.sandbox?.env, ["COPILOT_GITHUB_TOKEN"]);
+	assert.deepEqual(runtime.sandbox?.env, ["COPILOT_GITHUB_TOKEN", "GH_TOKEN"]);
 });
 
-test("claude, cursor and free-code docker hooks carry no env", () => {
+test("claude, cursor and free-code docker hooks forward only GH_TOKEN", () => {
 	for (const runner of ["claude", "cursor", "free-code"] as const) {
 		const { hookUrl } = createAwbHook(`docker-noenv-${runner}`, path.join(tmpHome, `wd-noenv-${runner}`), "{{payload}}", {
 			sandbox: "docker",
 			runner,
 		});
-		assert.ok(!("env" in (hooksJson()[`docker-noenv-${runner}`].sandbox as object)), runner);
-		assert.equal(hookRuntime(hookUrl).sandbox?.env, undefined, runner);
+		assert.deepEqual(envNames(hooksJson()[`docker-noenv-${runner}`].sandbox), ["GH_TOKEN"], runner);
+		assert.deepEqual(hookRuntime(hookUrl).sandbox?.env, ["GH_TOKEN"], runner);
 	}
 });
 
@@ -503,7 +516,7 @@ test("POST /api/workflows {runner: copilot, sandbox: docker} without an image la
 	assert.equal(workflow.image, "target-agent-copilot:latest");
 	const hook = hooksJson()[workflow.agentName];
 	assert.deepEqual(hook.consumers, ["spawn:copilot"]);
-	assert.deepEqual(hook.sandbox, { kind: "docker", image: "target-agent-copilot:latest", env: [`COPILOT_GITHUB_TOKEN=${DUMMY_TOKEN}`] });
+	assert.deepEqual(hook.sandbox, { kind: "docker", image: "target-agent-copilot:latest", env: [`COPILOT_GITHUB_TOKEN=${DUMMY_TOKEN}`, `GH_TOKEN=${DUMMY_TOKEN}`] });
 	assert.ok(!JSON.stringify(workflow).includes(DUMMY_TOKEN), "the response never carries the token");
 });
 
