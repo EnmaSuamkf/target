@@ -38,7 +38,10 @@ ARG CLAUDE_CODE_VERSION=latest
 ARG AGENT_UID=1000
 ARG AGENT_GID=1000
 
-# git: the agent works in real checkouts. curl: HTTP/API calls from steps.
+# git: the agent works in real checkouts. openssh-client: SSH-based Git
+# remotes such as git@github.com. docker.io: Docker CLI for MCPs that launch
+# sibling containers when the Docker socket is explicitly mounted. curl:
+# HTTP/API calls from steps.
 # ripgrep: Claude Code's search tool. openjdk-17-jdk + maven: Java builds.
 # ca-certificates: the model API is the one network call a step makes.
 # The rest is the small change that makes a shell inside the container usable.
@@ -46,14 +49,18 @@ RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
 		ca-certificates \
 		curl \
+		docker.io \
+		gh \
 		git \
 		jq \
 		less \
 		maven \
 		openjdk-17-jdk \
+		openssh-client \
 		procps \
 		ripgrep \
 	&& rm -rf /var/lib/apt/lists/* \
+	&& ln -s /usr/bin/docker /usr/local/bin/docker \
 	&& ln -sfn "$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")" /usr/lib/jvm/default-java
 
 ENV JAVA_HOME=/usr/lib/jvm/default-java

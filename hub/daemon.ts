@@ -6,7 +6,7 @@
  */
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { refreshCopilotHookToken } from "./awb.ts";
+import { refreshDockerGitHubToken } from "./awb.ts";
 import { ensureBundledCatalog } from "./bundled-bootstrap.ts";
 import { isInsecureReportUrl, loadConfig } from "./config.ts";
 import { listWorkflows } from "./db.ts";
@@ -45,7 +45,7 @@ export function startHub(): void {
 	// Existing copilot docker workflows pick up the token the hub resolves now
 	// (best effort; every dispatch refreshes it again).
 	try {
-		for (const workflow of listWorkflows()) refreshCopilotHookToken(workflow.hookUrl);
+		for (const workflow of listWorkflows()) refreshDockerGitHubToken(workflow.hookUrl);
 	} catch (err) {
 		log(`copilot token refresh at startup failed: ${String(err)}`, "warning");
 	}

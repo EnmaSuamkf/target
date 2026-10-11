@@ -33,7 +33,7 @@
  * never allow again short of a full restart.
  */
 import { attachmentSection, listFieldAttachments } from "./attachments.ts";
-import { ensureSandboxImage, hookRuntime, refreshCopilotHookToken } from "./awb.ts";
+import { ensureSandboxImage, hookRuntime, refreshDockerGitHubToken } from "./awb.ts";
 import { markContextReinjected, needsContextReinjection, observeCompaction } from "./compaction.ts";
 import type { HubConfig } from "./config.ts";
 import type { Attachment, Step, Workflow } from "./db.ts";
@@ -525,7 +525,7 @@ export async function dispatchStep(
 	// pasted in Settings is picked up with no restart. No token = fail now with
 	// the fix, not an auth error from inside the container.
 	if (sandbox) {
-		const token = refreshCopilotHookToken(workflow.hookUrl);
+		const token = refreshDockerGitHubToken(workflow.hookUrl);
 		if (!token.ok) {
 			completeStep(step.id, { ok: false, error: token.message });
 			log(`step ${step.id} (workflow ${workflow.id}) has no GitHub token for its copilot docker run`, "error");

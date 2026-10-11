@@ -61,13 +61,13 @@ function dockerHook(name: string, runner: "copilot" | "claude" = "copilot") {
 	return createAwbHook(name, path.join(tmpHome, `wd-${name}`), "{{payload}}", { sandbox: "docker", runner });
 }
 
-test("a copilot docker hook gets COPILOT_GITHUB_TOKEN=<value>; claude docker and copilot host hooks have no env", (t) => {
+test("Docker hooks get the appropriate GitHub token env; host hooks have no env", (t) => {
 	withToken(t, TOKEN);
 	dockerHook("flow-copilot");
 	dockerHook("flow-claude", "claude");
 	createAwbHook("flow-host", path.join(tmpHome, "wd-flow-host"), "{{payload}}", { runner: "copilot" });
 	assert.deepEqual(hooksJson()["flow-copilot"]!.sandbox!.env, [`COPILOT_GITHUB_TOKEN=${TOKEN}`]);
-	assert.equal("env" in hooksJson()["flow-claude"]!.sandbox!, false);
+	assert.deepEqual(hooksJson()["flow-claude"]!.sandbox!.env, [`GH_TOKEN=${TOKEN}`]);
 	assert.equal("sandbox" in hooksJson()["flow-host"]!, false);
 });
 
@@ -269,6 +269,7 @@ test("a docker resume forwards the token by NAME; the value travels in the termi
 	await openResumeTerminal("/home/u/repo", command, {}, harnessResumeSecretEnv("copilot", sandbox));
 	assert.equal(seen!.env?.COPILOT_GITHUB_TOKEN, TOKEN, "in the launcher's environment");
 	assert.equal(seen!.args.join(" ").includes(TOKEN), false, "never on its command line");
+	assert.match(seen!.args.join(" "), /gh auth token --hostname github\.com/);
 
 	// Nothing resolved: no env value, and the shell prints a hint instead of failing silently.
 	await openResumeTerminal("/home/u/repo", command, {}, { COPILOT_GITHUB_TOKEN: "" });

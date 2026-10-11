@@ -152,6 +152,9 @@ test("harnessResumeCommand for a docker workflow enters the same container, with
 	const claudeHome = path.join(os.homedir(), ".claude");
 	if (fs.existsSync(claudeHome)) assert.ok(command.includes(`-v '${claudeHome}:${claudeHome}'`));
 	assert.ok(command.includes(`-e 'HOME=${os.homedir()}'`));
+	assert.ok(command.includes("-e GIT_CONFIG_COUNT=1"));
+	assert.ok(command.includes("-e GIT_CONFIG_KEY_0=credential.helper"));
+	assert.ok(command.includes("-e 'GIT_CONFIG_VALUE_0=!gh auth git-credential'"));
 	// …and the agent command itself is the last thing on the line.
 	assert.ok(command.endsWith(" 'target-agent:latest' claude --resume 'sess-1'"), command);
 });
