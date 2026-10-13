@@ -1,0 +1,45 @@
+/* Inline-block so the parent's ellipsis still applies to the text, while the
+   span stays focusable and measurable. */
+.trigger {
+	display: inline-block;
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	vertical-align: bottom;
+	border-radius: var(--radius-sm);
+	cursor: default;
+}
+.trigger:focus-visible {
+	outline: 2px solid var(--accent-500);
+	outline-offset: 2px;
+}
+
+.tooltip {
+	position: fixed;
+	z-index: 150;
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: var(--space-2);
+	max-width: min(32rem, calc(100vw - var(--space-8)));
+	padding: var(--space-2) var(--space-3);
+	background: var(--surface);
+	color: var(--text);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
+	box-shadow: var(--shadow-md);
+	font-size: var(--text-sm);
+}
+
+.value {
+	margin: 0;
+	white-space: normal;
+	word-break: break-all;
+	overflow-wrap: anywhere;
+	text-align: left;
+}
+
+.copy {
+	min-height: 0;
+}
