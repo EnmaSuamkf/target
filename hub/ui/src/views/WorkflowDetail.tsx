@@ -21,6 +21,7 @@ import { ArchivedBadge, Badge, ScheduleBadge } from "../components/Badge.tsx";
 import { MissedOnceActions } from "../components/MissedOnceActions.tsx";
 import { CollapsibleSection } from "../components/CollapsibleSection.tsx";
 import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
+import { CopyTooltip } from "../components/CopyTooltip.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
@@ -371,6 +372,8 @@ export function WorkflowDetail({
 	const canExecute = can("client.workflows.execute");
 	const canPause = can("client.workflows.execute", "client.workflows.manage");
 	const canManage = can("client.workflows.manage");
+	const sandboxText =
+		workflow.sandbox === "docker" ? `docker · ${workflow.image ?? "default image"}` : "this machine";
 	const canCreate = can("client.workflows.create");
 	// Scheduling is running work unattended AND managing the workflow (D22), so
 	// both are required — `can` answers "any of", hence two calls.
@@ -531,24 +534,34 @@ export function WorkflowDetail({
 				<dl className={styles.facts}>
 					<div className={styles.fact}>
 						<dt>Agent</dt>
-						<dd className="mono">{workflow.agentName}</dd>
+						<dd className="mono">
+							<CopyTooltip value={workflow.agentName} label="Agent">
+								{workflow.agentName}
+							</CopyTooltip>
+						</dd>
 					</div>
 					<div className={styles.fact}>
 						<dt>Workdir</dt>
-						<dd className="mono" title={workflow.workdir ?? undefined}>
-							{prettyPath(workflow.workdir) || "(unknown)"}
+						<dd className="mono">
+							<CopyTooltip value={workflow.workdir} label="Workdir">
+								{prettyPath(workflow.workdir) || "(unknown)"}
+							</CopyTooltip>
 						</dd>
 					</div>
 					<div className={styles.fact}>
 						<dt>Sandbox</dt>
-						<dd title={workflow.image ?? undefined}>
-							{workflow.sandbox === "docker" ? `docker · ${workflow.image ?? "default image"}` : "this machine"}
+						<dd>
+							<CopyTooltip value={sandboxText} label="Sandbox">
+								{sandboxText}
+							</CopyTooltip>
 						</dd>
 					</div>
 					<div className={styles.fact}>
 						<dt>Status file</dt>
-						<dd className="mono" title={workflow.mdPath}>
-							{prettyPath(workflow.mdPath)}
+						<dd className="mono">
+							<CopyTooltip value={workflow.mdPath} label="Status file">
+								{prettyPath(workflow.mdPath)}
+							</CopyTooltip>
 						</dd>
 					</div>
 					<div className={styles.fact}>
