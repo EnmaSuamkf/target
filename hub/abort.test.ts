@@ -31,7 +31,7 @@ process.env.TARGET_HOME = tmpHome;
 // server.test.ts for the full rationale.
 process.env.AWB_HOME = tmpHome;
 
-const { insertStep, insertWorkflow, getWorkflow, getStep, listSteps, listStepNotes } = await import("./db.ts");
+const { insertStep, insertWorkflow, getWorkflow, getStep, listSteps, listStepNotes, saveSyncStepMap, setWorkflowRemoteMeta } = await import("./db.ts");
 const { createServer } = await import("./server.ts");
 const { loadConfig } = await import("./config.ts");
 const { startWorkflow, abortStep, runStep, onStepResult } = await import("./workflow.ts");
@@ -296,4 +296,206 @@ test("POST .../abort on an unknown step returns 400", async () => {
 	assert.equal(res.status, 400);
 	const body = (await res.json()) as { error: string };
 	assert.equal(body.error, "unknown step");
+});
+
+// --- Confirmed abort: what the broker answered ---------------------------
+//
+// The cases above run against a hook the hub does not recognise as local, so the
+// kill is skipped (`not_local`). These register the fake broker in the (throwaway)
+// AWB_HOME hooks.json — the same way inspectLocalHook finds the real one — so
+// `abortAwbRun` really POSTs `/abort` and has to read the answer.
+
+const hooksFile = path.join(tmpHome, "hooks.json");
+
+interface FakeBroker {
+	url: string;
+	abortCalls: { jobId: string; secret: string | undefined }[];
+	close: () => void;
+}
+
+/**
+ * A fake awb broker registered as the local one: accepts dispatches, and answers
+ * `/abort` with `reply` (a status + JSON body), recording what it was asked.
+ */
+async function startFakeBroker(reply: { status?: number; body: unknown }): Promise<FakeBroker> {
+	const abortCalls: FakeBroker["abortCalls"] = [];
+	const server = http.createServer((req, res) => {
+		const chunks: Buffer[] = [];
+		req.on("data", (c: Buffer) => chunks.push(c));
+		req.on("end", () => {
+			res.setHeader("content-type", "application/json");
+			if (req.url?.endsWith("/abort")) {
+				const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { jobId: string };
+				abortCalls.push({ jobId: parsed.jobId, secret: req.headers["x-webhook-secret"] as string | undefined });
+				res.writeHead(reply.status ?? 200);
+				res.end(JSON.stringify(reply.body));
+				return;
+			}
+			res.writeHead(200);
+			res.end(JSON.stringify({ ok: true }));
+		});
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const addr = server.address();
+	if (!addr || typeof addr === "string") throw new Error("fake broker did not bind");
+	fs.writeFileSync(hooksFile, JSON.stringify({ port: addr.port, hooks: { agent: {} } }));
+	return {
+		url: `http://127.0.0.1:${addr.port}/hook/agent`,
+		abortCalls,
+		close: () => {
+			server.close();
+			fs.rmSync(hooksFile, { force: true });
+		},
+	};
+}
+
+/** Starts a one-step workflow against `url` and aborts it through the real API route. */
+async function abortViaApi(url: string) {
+	const { workflow, steps } = makeWorkflow(1, url);
+	await startWorkflow(workflow.id, cfg, silent, [steps[0].id]);
+	assert.equal(getStep(steps[0].id)?.status, "queued");
+	const res = await fetch(`${apiBase}/api/workflows/${workflow.id}/steps/${steps[0].id}/abort`, {
+		method: "POST",
+		headers: adminHeaders(),
+	});
+	const body = (await res.json()) as { workflow: { id: string; status: string }; abort: { result: string; confirmed: boolean } };
+	return { res, body, workflow, stepId: steps[0].id };
+}
+
+const BROKER_OUTCOMES = [
+	{
+		name: "killed",
+		reply: { result: "killed", killed: true, signal: "SIGINT", exited: true },
+		expect: { result: "killed", confirmed: true },
+		note: "Abort: agent process stopped (SIGINT)",
+	},
+	{
+		name: "cancelled_queued",
+		reply: { result: "cancelled_queued", killed: true, signal: null, exited: false },
+		expect: { result: "cancelled_queued", confirmed: true },
+		note: "Abort: cancelled before it started",
+	},
+	{
+		name: "not_running",
+		reply: { result: "not_running", killed: false, signal: null, exited: false },
+		expect: { result: "not_running", confirmed: false },
+		note: "Abort: nothing was running",
+	},
+	{
+		name: "kill_failed",
+		reply: { result: "kill_failed", killed: false, signal: "SIGKILL", exited: false },
+		expect: { result: "kill_failed", confirmed: false },
+		note: "Abort: COULD NOT confirm the agent stopped (kill_failed) — it may still be running; check the workdir",
+	},
+] as const;
+
+for (const outcome of BROKER_OUTCOMES) {
+	test(`broker answers ${outcome.name}: step still fails as aborted, note + abort{result,confirmed} reported`, async () => {
+		const broker = await startFakeBroker({ body: outcome.reply });
+		test.after(() => broker.close());
+		const { res, body, workflow, stepId } = await abortViaApi(broker.url);
+
+		assert.equal(res.status, 200);
+		assert.equal(body.workflow.status, "failed"); // pre-existing field untouched
+		assert.deepEqual(body.abort, outcome.expect);
+		// The broker was asked for exactly this step, with the hook's secret.
+		assert.deepEqual(broker.abortCalls, [{ jobId: stepId, secret: "s3cret" }]);
+		// Settled regardless of the verdict — even kill_failed must not strand the step.
+		assert.equal(getStep(stepId)?.status, "failed");
+		assert.equal(getStep(stepId)?.error, "aborted");
+		assert.equal(getWorkflow(workflow.id)?.status, "failed");
+		assert.deepEqual(
+			listStepNotes(stepId).map((n) => n.content),
+			[outcome.note],
+		);
+	});
+}
+
+test("OLD broker { killed: true } → killed but unverified (confirmed false)", async () => {
+	const broker = await startFakeBroker({ body: { killed: true } });
+	test.after(() => broker.close());
+	const { body, stepId } = await abortViaApi(broker.url);
+	assert.deepEqual(body.abort, { result: "killed", confirmed: false });
+	assert.equal(getStep(stepId)?.status, "failed");
+	assert.equal(getStep(stepId)?.error, "aborted");
+	// Unverified kills must not claim the agent stopped.
+	assert.equal(listStepNotes(stepId).length, 1);
+	assert.equal(listStepNotes(stepId)[0].theme, "warning");
+});
+
+test("OLD broker { killed: false } → not_running, unconfirmed", async () => {
+	const broker = await startFakeBroker({ body: { killed: false } });
+	test.after(() => broker.close());
+	const { body, stepId } = await abortViaApi(broker.url);
+	assert.deepEqual(body.abort, { result: "not_running", confirmed: false });
+	assert.equal(getStep(stepId)?.status, "failed");
+	assert.equal(listStepNotes(stepId)[0].content, "Abort: nothing was running");
+});
+
+test("broker answering non-2xx → unreachable, unconfirmed, abort still settles", async () => {
+	const broker = await startFakeBroker({ status: 500, body: { error: "boom" } });
+	test.after(() => broker.close());
+	const { res, body, stepId } = await abortViaApi(broker.url);
+	assert.equal(res.status, 200);
+	assert.deepEqual(body.abort, { result: "unreachable", confirmed: false });
+	assert.equal(getStep(stepId)?.status, "failed");
+	assert.equal(getStep(stepId)?.error, "aborted");
+	assert.match(listStepNotes(stepId)[0].content, /^Abort: COULD NOT confirm the agent stopped \(unreachable\)/);
+});
+
+test("broker down → unreachable, unconfirmed, abort still settles", async () => {
+	// Dispatch needs a live hook; the broker then goes away before the abort.
+	const broker = await startFakeBroker({ body: { result: "killed", killed: true, signal: "SIGINT", exited: true } });
+	const { workflow, steps } = makeWorkflow(1, broker.url);
+	await startWorkflow(workflow.id, cfg, silent, [steps[0].id]);
+	assert.equal(getStep(steps[0].id)?.status, "queued");
+	// Keep hooks.json pointing at the port, but stop answering on it.
+	const registered = fs.readFileSync(hooksFile, "utf8");
+	broker.close();
+	fs.writeFileSync(hooksFile, registered);
+	test.after(() => fs.rmSync(hooksFile, { force: true }));
+
+	const res = await fetch(`${apiBase}/api/workflows/${workflow.id}/steps/${steps[0].id}/abort`, {
+		method: "POST",
+		headers: adminHeaders(),
+	});
+	assert.equal(res.status, 200);
+	const body = (await res.json()) as { abort: { result: string; confirmed: boolean } };
+	assert.deepEqual(body.abort, { result: "unreachable", confirmed: false });
+	assert.equal(getStep(steps[0].id)?.status, "failed");
+	assert.equal(getStep(steps[0].id)?.error, "aborted");
+});
+
+test("hook not on the local broker → not_local, unconfirmed, abort still settles", async () => {
+	fs.rmSync(hooksFile, { force: true });
+	const { server, url } = await startFakeHook();
+	test.after(() => server.close());
+	const { body, stepId } = await abortViaApi(url);
+	assert.deepEqual(body.abort, { result: "not_local", confirmed: false });
+	assert.equal(getStep(stepId)?.status, "failed");
+	assert.match(listStepNotes(stepId)[0].content, /\(not_local\)/);
+});
+
+test("the sync command step.abort carries abort { result, confirmed } next to localId", async () => {
+	const broker = await startFakeBroker({ body: { result: "killed", killed: true, signal: "SIGTERM", exited: true } });
+	test.after(() => broker.close());
+	const { workflow, steps } = makeWorkflow(1, broker.url);
+	// The sync handler resolves the workflow by remote id and the step by key.
+	const remoteId = `remote-${workflow.id}`;
+	setWorkflowRemoteMeta(workflow.id, { remoteId });
+	saveSyncStepMap(remoteId, { first: steps[0].id });
+	await startWorkflow(workflow.id, cfg, silent, [steps[0].id]);
+	const { executeSyncCommand } = await import("./sync.ts");
+	const result = await executeSyncCommand(
+		{
+			id: `cmd-${workflow.id}`,
+			type: "step.abort",
+			remote_id: remoteId,
+			payload: { step_key: "first" },
+		} as never,
+		cfg,
+	);
+	assert.equal(result.localId, workflow.id);
+	assert.deepEqual(result.abort, { result: "killed", confirmed: true });
+	assert.equal(getStep(steps[0].id)?.status, "failed");
 });
