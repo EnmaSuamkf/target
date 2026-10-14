@@ -13,6 +13,7 @@
  *   injected", "no_session_yet") instead of a bare status code.
  */
 import type {
+	AbortOutcome,
 	Account,
 	Adoptability,
 	ArchivedFilter,
@@ -624,12 +625,17 @@ export function openStepTerminal(workflowId: string, stepId: string): Promise<un
  * the step fails and the workflow stops with it. Same route either way; the
  * server decides from the step's status.
  */
-export async function abortStep(workflowId: string, stepId: string): Promise<Workflow> {
-	const data = await request<{ workflow: Workflow }>(`/api/workflows/${workflowId}/steps/${stepId}/abort`, {
-		method: "POST",
-		admin: true,
-	});
-	return data.workflow;
+export async function abortStep(
+	workflowId: string,
+	stepId: string,
+): Promise<{ workflow: Workflow; abort: AbortOutcome | null }> {
+	// `abort` is absent when a step held at its manual-review gate is rejected
+	// (nothing was running to stop) and null-safe for an older hub.
+	const data = await request<{ workflow: Workflow; abort?: AbortOutcome | null }>(
+		`/api/workflows/${workflowId}/steps/${stepId}/abort`,
+		{ method: "POST", admin: true },
+	);
+	return { workflow: data.workflow, abort: data.abort ?? null };
 }
 
 /** Appends all of a template's steps, whether or not the workflow already has steps worded the same way. */

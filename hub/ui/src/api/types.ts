@@ -188,6 +188,25 @@ export interface Attachment {
 	createdAt: string;
 }
 
+/** What the broker reported when an Abort tried to stop the step's agent. */
+export type AbortResultKind =
+	| "killed"
+	| "cancelled_queued"
+	| "not_running"
+	| "kill_failed"
+	| "unreachable"
+	| "not_local";
+
+/**
+ * The `abort` object next to the workflow in the abort response. `confirmed` is
+ * true only when the agent was verified stopped (`killed`) or a queued job was
+ * cancelled before it started (`cancelled_queued`).
+ */
+export interface AbortOutcome {
+	result: AbortResultKind;
+	confirmed: boolean;
+}
+
 export interface Workflow {
 	id: string;
 	name: string;
