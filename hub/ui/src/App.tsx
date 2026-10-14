@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "./api/client.ts";
 import { ApiError } from "./api/client.ts";
 import type {
+	AbortOutcome,
 	Account,
 	AttachmentField,
 	CloneWorkflowInput,
@@ -259,6 +260,9 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	// rather than by object so the note in that dialog keeps up with the poll.
 	const [cloneSourceId, setCloneSourceId] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
+	// The step whose Abort is in flight: the broker can take ~15s to confirm the
+	// kill, so that step's button reads "Aborting…" meanwhile.
+	const [abortingStepId, setAbortingStepId] = useState<string | null>(null);
 	// Unacknowledged schedule notices (the banner under the header), and the
 	// missed `once` whose Reschedule was pressed in that banner.
 	const [notices, setNotices] = useState<ScheduleNotice[]>([]);
@@ -1044,14 +1048,36 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 			danger: true,
 		});
 		if (!confirmed) return;
-		await act(
-			held ? "Could not abort the workflow" : "Could not abort the step",
-			async () => {
-				await api.abortStep(selectedId, stepId);
-				if (held) toast.success("Step rejected — the workflow stopped.");
-			},
-			refreshCurrent,
-		);
+		setAbortingStepId(stepId);
+		try {
+			await act(
+				held ? "Could not abort the workflow" : "Could not abort the step",
+				async () => {
+					const { abort } = await api.abortStep(selectedId, stepId);
+					if (held) {
+						toast.success("Step rejected — the workflow stopped.");
+					} else if (abort) {
+						reportAbortOutcome(abort);
+					}
+				},
+				refreshCurrent,
+			);
+		} finally {
+			setAbortingStepId(null);
+		}
+	};
+
+	/** One toast per broker verdict; an unconfirmed kill is an error toast, which stays until dismissed. */
+	const reportAbortOutcome = (abort: AbortOutcome): void => {
+		if (abort.confirmed) {
+			toast.success(abort.result === "cancelled_queued" ? "Cancelled before it started." : "Agent stopped.");
+		} else if (abort.result === "not_running") {
+			toast.success("Nothing was running.");
+		} else {
+			toast.error(
+				`Step aborted, but the agent could not be confirmed stopped (${abort.result}). It may still be running — check the workdir.`,
+			);
+		}
 	};
 
 	// Same action as the header's "Open conversation", pointed at one step's own
@@ -1679,6 +1705,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								onSaveStep={handleSaveStep}
 								onRemoveStep={(id) => void handleRemoveStep(id)}
 								onAbortStep={(id) => void handleAbortStep(id)}
+								abortingStepId={abortingStepId}
 								onRunStep={(id) => void handleRunStep(id)}
 								onContinueStep={(id) => void handleContinueStep(id)}
 								onOpenStepConversation={(id) => void handleOpenStepConversation(id)}

@@ -21,6 +21,7 @@ import {
 	createAwbHook,
 	deleteAwbHook,
 	abortAwbRun,
+	type AbortOutcome,
 	ensureHookMounts,
 	defaultSandboxImage,
 	hookRuntime,
@@ -106,6 +107,7 @@ import {
 	type TimeoutReason,
 	type Workflow,
 	type WorkflowStatus,
+	insertStepNote,
 } from "./db.ts";
 import {
 	formatInZone,
@@ -2873,6 +2875,15 @@ export async function onStepResult(
 	// `markStepJudging` both accept `queued`, so we settle it directly rather
 	// than dropping it — losing the start is not a reason to lose the result.
 	if (step.status !== "running" && step.status !== "queued") return;
+	// An Abort is waiting on the broker for this very step. Killing the agent makes
+	// the broker report the run as failed, and that callback can land before
+	// `abortStep` gets its verdict: settling it here would fail the step as "run
+	// failed" (or spend a retry re-dispatching what the operator just killed) and
+	// leave the abort with nothing to settle. `abortStep` owns the outcome.
+	if (abortingSteps.has(stepId)) {
+		log(`step ${stepId} result ignored: its abort is in progress`);
+		return;
+	}
 
 	// On-demand ▶ run: outside the sequential engine, but still judged if the
 	// step carries acceptance criteria.
@@ -3327,6 +3338,9 @@ export async function runStep(workflowId: string, stepId: string, cfg: HubConfig
 	writeStatusMd(workflowId);
 }
 
+/** Steps whose Abort is waiting on the broker; `onStepResult` ignores their callbacks meanwhile. */
+const abortingSteps = new Set<string>();
+
 /**
  * Aborts a step stuck `running` or `queued` (a dispatch whose awb callback
  * never came back — e.g. a hung judge, or a run still queued on the workdir
@@ -3343,10 +3357,13 @@ export async function runStep(workflowId: string, stepId: string, cfg: HubConfig
  * bug: the step showed `failed` but the orphaned agent kept running for hours,
  * holding the workdir `flock` and blocking every other workflow on that repo).
  * `abortAwbRun` POSTs the hook's `/abort` endpoint with `{ jobId }`; the broker
- * SIGTERM/SIGKILLs the whole process group. Best-effort: a broker that's down
- * or a run that already finished just log a warning — the DB settling must not
- * be blocked by the kill, since the operator wants the step failed now either
- * way. Async because the kill is a network call.
+ * SIGINT/SIGTERM/SIGKILLs the whole process group and reports whether it exited.
+ * The call is awaited BEFORE settling so the outcome (`abort_result`,
+ * `abort_confirmed`) lands in the report event and an automatic step note, but
+ * the settling never depends on it: a broker that's down or a kill that failed
+ * still fails the step, since the operator must always be able to unstick it.
+ * Returns `{ workflow, abort }`; `abort` is null for the manual-review branch
+ * (nothing is running there, so nothing is killed).
  *
  * A step held at its manual-review gate is the second thing this answers for,
  * and it's a different job under the same word: nothing is stuck there, the run
@@ -3354,7 +3371,7 @@ export async function runStep(workflowId: string, stepId: string, cfg: HubConfig
  * wrong. Abort on a `waiting` step therefore means "no, and stop" — see the
  * branch below. Every other status still throws.
  */
-export async function abortStep(workflowId: string, stepId: string, log?: Logger): Promise<Workflow> {
+export async function abortStep(workflowId: string, stepId: string, log?: Logger): Promise<{ workflow: Workflow; abort: AbortSummary | null }> {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	const step = getStep(stepId);
@@ -3391,17 +3408,33 @@ export async function abortStep(workflowId: string, stepId: string, log?: Logger
 		log?.(`step ${stepId} rejected at its manual review — workflow ${workflowId} stopped`, "warning");
 		const stopped = getWorkflow(workflowId);
 		if (!stopped) throw new WorkflowError("workflow disappeared");
-		return stopped;
+		return { workflow: stopped, abort: null };
 	}
 	if (step.status !== "running" && step.status !== "queued") throw new WorkflowError("only a running step can be aborted");
+	// Kill on the broker FIRST and wait for its verdict, so the operator's report
+	// says whether the agent really stopped. The step is settled below whatever
+	// the outcome — a stuck step must always be failable, even on `kill_failed`
+	// or an unreachable broker. `abortAwbRun` never throws.
+	abortingSteps.add(stepId);
+	let outcome: AbortOutcome;
+	try {
+		outcome = await abortAwbRun(workflow.hookUrl, workflow.secret, stepId, log ?? (() => {}));
+	} finally {
+		abortingSteps.delete(stepId);
+	}
+	// The step may have finished (or been aborted by someone else) while we waited.
 	if (!failRunningStep(stepId, "aborted")) throw new WorkflowError("only a running step can be aborted");
 	setWorkflowStatus(workflowId, "failed");
+	const abort: AbortSummary = { result: outcome.result, confirmed: outcome.confirmed };
 	{
 		const aborted = getStep(stepId) ?? step;
 		reportStepEvent(aborted, "step.failed", {
 			phase: aborted.phase,
 			manual_run: aborted.manualRun === true,
 			aborted: true,
+			abort_result: outcome.result,
+			abort_confirmed: outcome.confirmed,
+			abort_signal: outcome.signal,
 			duration_ms: stepDurationMs(aborted),
 			retry_count: aborted.retryCount,
 			max_retries: aborted.maxRetries,
@@ -3409,12 +3442,29 @@ export async function abortStep(workflowId: string, stepId: string, log?: Logger
 		});
 		reportUsageSnapshot(workflow, aborted);
 	}
+	try {
+		insertStepNote(stepId, workflowId, abortNoteText(outcome), outcome.confirmed ? "success" : "warning");
+	} catch (err) {
+		// A note is a courtesy; it must never undo a settled abort.
+		log?.(`step ${stepId} abort note not saved: ${String((err as Error).message ?? err)}`, "warning");
+	}
 	writeStatusMd(workflowId);
-	// Kill the spawned process on the broker so it stops holding the workdir
-	// `flock`. Fire after the DB is settled so the operator sees `failed` first;
-	// never let a broker error undo the abort (best-effort).
-	if (log) await abortAwbRun(workflow.hookUrl, workflow.secret, stepId, log);
 	const updated = getWorkflow(workflowId);
 	if (!updated) throw new WorkflowError("workflow disappeared");
-	return updated;
+	return { workflow: updated, abort };
+}
+
+/** What `abortStep` tells its callers about the broker kill. */
+export interface AbortSummary {
+	result: AbortOutcome["result"];
+	confirmed: boolean;
+}
+
+function abortNoteText(outcome: AbortOutcome): string {
+	if (outcome.result === "killed" && outcome.confirmed) {
+		return `Abort: agent process stopped${outcome.signal ? ` (${outcome.signal})` : ""}`;
+	}
+	if (outcome.result === "cancelled_queued") return "Abort: cancelled before it started";
+	if (outcome.result === "not_running") return "Abort: nothing was running";
+	return `Abort: COULD NOT confirm the agent stopped (${outcome.result}) — it may still be running; check the workdir`;
 }

@@ -83,7 +83,8 @@ instead of only discovering the truth at the deadline.
    - `beginRetry` puts the step back to `pending`, bumps `retryCount` and clears
      the progress clock, so the next attempt starts fresh.
    - The hung run is best-effort killed on the broker (`abortAwbRun`), freeing
-     the workdir `flock`.
+     the workdir `flock`. The helper now returns a typed outcome (see
+     [Abort](abort.md)); the retry path ignores it and proceeds either way.
    - The step's `retryIntervalSeconds` is honored before the re-run.
    - The re-dispatch resumes the shared session with a note that the previous
      attempt timed out, so the agent continues from partial progress.

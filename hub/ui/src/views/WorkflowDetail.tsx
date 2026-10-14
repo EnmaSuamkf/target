@@ -148,6 +148,7 @@ export function WorkflowDetail({
 	onSaveStep,
 	onRemoveStep,
 	onAbortStep,
+	abortingStepId,
 	onRunStep,
 	onContinueStep,
 	onOpenStepConversation,
@@ -209,6 +210,8 @@ export function WorkflowDetail({
 	onSaveStep: (id: string, input: StepConfigInput) => Promise<void>;
 	onRemoveStep: (id: string) => void;
 	onAbortStep: (id: string) => void;
+	/** The step whose Abort request is in flight, if any (its button reads "Aborting…"). */
+	abortingStepId?: string | null;
 	/** Re-runs one step now (POST .../run) — e.g. after Abort cleared a stuck queue. */
 	onRunStep: (id: string) => void;
 	onContinueStep: (id: string) => void;
@@ -919,6 +922,7 @@ export function WorkflowDetail({
 									onSave={onSaveStep}
 									onRemove={onRemoveStep}
 									onAbort={onAbortStep}
+									aborting={abortingStepId === contextStep.id}
 									onRunStep={onRunStep}
 									onContinue={onContinueStep}
 									onOpenConversation={onOpenStepConversation}
@@ -959,6 +963,7 @@ export function WorkflowDetail({
 										onSave={onSaveStep}
 										onRemove={onRemoveStep}
 										onAbort={onAbortStep}
+									aborting={abortingStepId === step.id}
 										onRunStep={onRunStep}
 										onContinue={onContinueStep}
 										onOpenConversation={onOpenStepConversation}

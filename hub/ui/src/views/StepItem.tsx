@@ -91,6 +91,7 @@ export function StepItem({
 	onSave,
 	onRemove,
 	onAbort,
+	aborting = false,
 	onRunStep,
 	onContinue,
 	onOpenConversation,
@@ -115,6 +116,8 @@ export function StepItem({
 	onSave: (id: string, input: StepConfigInput) => Promise<void>;
 	onRemove: (id: string) => void;
 	onAbort: (id: string) => void;
+	/** This step's Abort request is in flight (the broker may take ~15s to confirm the kill). */
+	aborting?: boolean;
 	/** Re-runs this step now (POST .../run) — offered after Abort leaves it failed. */
 	onRunStep: (id: string) => void;
 	onContinue: (id: string) => void;
@@ -493,10 +496,10 @@ export function StepItem({
 						type="button"
 						className="btn btn--sm btn--danger"
 						onClick={() => onAbort(step.id)}
-						disabled={busy || !canExecute}
+						disabled={busy || aborting || !canExecute}
 						title={canExecute ? QUEUED_RECOVERY_TOOLTIP : requires("client.workflows.execute")}
 					>
-						Abort
+						{aborting ? "Aborting…" : "Abort"}
 					</button>
 				</div>
 			)}
@@ -607,7 +610,7 @@ export function StepItem({
 						type="button"
 						className="btn btn--sm btn--danger"
 						onClick={() => onAbort(step.id)}
-						disabled={busy || !canExecute}
+						disabled={busy || aborting || !canExecute}
 						title={
 							!canExecute
 								? requires("client.workflows.execute")
@@ -616,7 +619,7 @@ export function StepItem({
 									: "Force-fail this stuck step so it can be re-run, without restarting the whole workflow. Also kills the spawned agent process on the broker, freeing the workdir lock. Its session is preserved."
 						}
 					>
-						Abort
+						{aborting ? "Aborting…" : "Abort"}
 					</button>
 				)}
 				{!isContext && (

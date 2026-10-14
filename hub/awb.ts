@@ -1146,6 +1146,12 @@ export function deleteAwbHook(name: string): boolean {
 	}
 }
 
+export interface AbortOutcome {
+	result: "killed" | "cancelled_queued" | "not_running" | "kill_failed" | "unreachable" | "not_local";
+	confirmed: boolean;
+	signal: string | null;
+}
+
 /**
  * Best-effort abort of an in-flight run on the local awb broker: POSTs the
  * hook's `/abort` endpoint with `{ jobId }`, authenticated with the hook's
@@ -1162,15 +1168,17 @@ export function deleteAwbHook(name: string): boolean {
  * Never throws — a broker that's down, a hook that's gone, or a run that
  * already finished on its own all resolve to a logged warning, since none of
  * them should block the abort from settling the step in the DB. Returns
- * whether the broker acknowledged the kill (true = a live run was signalled,
- * false = nothing to kill / broker unreachable). `cfg` is only used for the
+ * a typed `AbortOutcome`; `confirmed` is true only when the broker verified
+ * the process exited (`killed`) or cancelled a queued job (`cancelled_queued`).
+ * Old brokers that only answer `{ killed }` map to killed/not_running with
+ * `confirmed: false` (unverified). `cfg` is only used for the
  * `AWB_HOME` directory lookup in `inspectLocalHook`, not for any secret.
  */
-export async function abortAwbRun(hookUrl: string, secret: string, jobId: string, log: (msg: string, type?: "info" | "warning" | "error") => void): Promise<boolean> {
+export async function abortAwbRun(hookUrl: string, secret: string, jobId: string, log: (msg: string, type?: "info" | "warning" | "error") => void): Promise<AbortOutcome> {
 	const info = inspectLocalHook(hookUrl);
 	if (!info.local || !info.found || !info.name) {
 		log(`abort: hook not local/found, skipping broker kill`, "warning");
-		return false;
+		return { result: "not_local", confirmed: false, signal: null };
 	}
 	// Build the /abort URL from the hook URL: same origin + /hook/<name>/abort.
 	const abortUrl = new URL(hookUrl);
@@ -1180,17 +1188,29 @@ export async function abortAwbRun(hookUrl: string, secret: string, jobId: string
 			method: "POST",
 			headers: { "content-type": "application/json", "x-webhook-secret": secret },
 			body: JSON.stringify({ jobId }),
-			signal: AbortSignal.timeout(5_000),
+			// Worst case on the broker is ~9s (SIGINT → SIGTERM → SIGKILL waits).
+			signal: AbortSignal.timeout(15_000),
 		});
 		if (!res.ok) {
 			log(`abort: broker /abort answered ${res.status}`, "warning");
-			return false;
+			return { result: "unreachable", confirmed: false, signal: null };
 		}
-		const body = (await res.json()) as { killed?: boolean };
-		log(`abort: broker killed=${body.killed === true}`);
-		return body.killed === true;
+		const body = (await res.json()) as { result?: unknown; killed?: boolean; signal?: unknown };
+		const signal = typeof body.signal === "string" ? body.signal : null;
+		let result: AbortOutcome["result"];
+		let confirmed: boolean;
+		if (body.result === "killed" || body.result === "cancelled_queued" || body.result === "not_running" || body.result === "kill_failed") {
+			result = body.result;
+			confirmed = result === "killed" || result === "cancelled_queued";
+		} else {
+			// Old broker: only `{ killed }`, no exit verification → never confirmed.
+			result = body.killed === true ? "killed" : "not_running";
+			confirmed = false;
+		}
+		log(`abort: broker result=${result} confirmed=${confirmed} signal=${signal ?? "none"}`);
+		return { result, confirmed, signal };
 	} catch (err) {
 		log(`abort: broker /abort unreachable: ${String(err)}`, "warning");
-		return false;
+		return { result: "unreachable", confirmed: false, signal: null };
 	}
 }

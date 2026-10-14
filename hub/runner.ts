@@ -37,7 +37,7 @@ import { ensureSandboxImage, hookRuntime, refreshDockerGitHubToken } from "./awb
 import { markContextReinjected, needsContextReinjection, observeCompaction } from "./compaction.ts";
 import type { HubConfig } from "./config.ts";
 import type { Attachment, Step, Workflow } from "./db.ts";
-import { completeStep, getContextStep, listSteps, markStepQueued } from "./db.ts";
+import { completeStep, getContextStep, listSteps, markStepQueued, takeStepInterrupted } from "./db.ts";
 import { listWorkflowTcpSelections } from "./tcp-store.ts";
 import { listWorkflowResourceSelections } from "./rci-store.ts";
 import { tcpCatalogPreamble } from "./tcp-catalog.ts";
@@ -116,6 +116,15 @@ function retryNote(reason: string): string {
  */
 const TIMEOUT_NOTE =
 	"\n\nNote: the previous attempt at this step timed out before finishing. Continue from any partial progress already made and complete the step.";
+
+/**
+ * Note appended to the next attempt of a step the operator aborted. The abort
+ * kills the process mid-flight, so the workdir may hold half-done edits; the
+ * agent resumes the session (or starts fresh after a Restart) knowing nothing
+ * of the interruption. Only `abortStep` arms it (see `takeStepInterrupted`).
+ */
+const ABORT_NOTE =
+	"\n\nNote: the previous attempt at this step was interrupted by the operator before it finished. Inspect the current state of the working directory and continue; do not assume earlier edits were completed or reverted.";
 
 /**
  * Appends the acceptance criterion to the exec input so the agent aims for it
@@ -282,6 +291,8 @@ export function composeStepInput(
 		afterCompaction?: boolean;
 		retryReason?: string;
 		timedOut?: boolean;
+		/** The previous attempt was aborted by the operator — append ABORT_NOTE (ignored on timeout/judge-reject retries, which keep their own notes). */
+		interrupted?: boolean;
 		/**
 		 * Where the agent POSTs to run an attached TCP tool, token included — built
 		 * by `dispatchStep`, which is the only caller that knows both the hub's
@@ -343,7 +354,9 @@ export function composeStepInput(
 		// After the delegate/inline instruction, because it only qualifies THAT: it
 		// tells an agent already told to delegate what it has to take along.
 		subagentAttachmentsInstruction(delegated, tcpBlock !== "" || resourcesBlock !== "")
-	}${options.retryReason ? retryNote(options.retryReason) : ""}${options.timedOut ? TIMEOUT_NOTE : ""}`;
+	}${options.retryReason ? retryNote(options.retryReason) : ""}${options.timedOut ? TIMEOUT_NOTE : ""}${
+		options.interrupted && !options.timedOut && !options.retryReason ? ABORT_NOTE : ""
+	}`;
 }
 
 /**
@@ -494,6 +507,9 @@ export async function dispatchStep(
 	// and nothing else — and deliberately NOT the admin token: scoped this way the
 	// worst a leaked prompt can do is run tools this workflow already attached.
 	const tcpExecuteUrl = `${agentHubOrigin}/api/tcps/execute?stepId=${step.id}&token=${step.callbackToken}`;
+	// Consumed on every exec dispatch so the marker never outlives the attempt
+	// that was meant to carry the note.
+	const interrupted = mode === "exec" && takeStepInterrupted(step.id);
 	const input = composeStepInput(step, observed, {
 		mode,
 		// Two independent reasons to inject: this is the conversation's first
@@ -509,6 +525,7 @@ export async function dispatchStep(
 		afterCompaction,
 		retryReason: options.retryReason,
 		timedOut: options.timedOut,
+		interrupted,
 		tcpExecuteUrl,
 	});
 	// A contained workflow can only run if its image exists on this machine. The

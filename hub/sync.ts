@@ -152,15 +152,19 @@ export type SyncCommandType = (typeof SYNC_COMMAND_TYPES)[number];
 
 export interface CommandApplyResult {
 	localId?: string;
+	/** `step.abort` only: the broker kill verdict. */
+	abort?: { result: string; confirmed: boolean };
 	/** True when this command_id was already applied — handler was not re-run. */
 	noop: boolean;
 }
+
+type HandlerResult = { localId?: string; abort?: { result: string; confirmed: boolean } };
 
 type CommandHandler = (
 	command: SyncCommand,
 	hubConfig: HubConfig,
 	log: SyncTickOptions["log"],
-) => Promise<{ localId?: string }> | { localId?: string };
+) => Promise<HandlerResult> | HandlerResult;
 
 interface SyncOutboundEvent {
 	id: string;
@@ -1146,8 +1150,8 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 		const remoteId = command.remote_id;
 		const workflow = resolveLocalWorkflow(remoteId);
 		const stepId = resolveStepId(remoteId, String(command.payload.step_key ?? ""));
-		const updated = await abortStep(workflow.id, stepId, (m) => logMessage(log, m));
-		return { localId: updated.id };
+		const { workflow: updated, abort } = await abortStep(workflow.id, stepId, (m) => logMessage(log, m));
+		return { localId: updated.id, abort: abort ?? undefined };
 	},
 	"step.continue": async (command, hubConfig, log) => {
 		const remoteId = command.remote_id;
@@ -1266,7 +1270,7 @@ async function dispatchCommand(
 	command: SyncCommand,
 	hubConfig: HubConfig,
 	log: SyncTickOptions["log"],
-): Promise<{ localId?: string }> {
+): Promise<HandlerResult> {
 	const handler = COMMAND_HANDLERS[command.type as SyncCommandType];
 	if (!handler) throw new WorkflowError(`unsupported command type '${command.type}'`);
 	return handler(command, hubConfig, log);

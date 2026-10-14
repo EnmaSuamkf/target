@@ -11,6 +11,18 @@ The current version is reported by every instance to the central server (see
 
 ### Added
 
+- **Abort is confirmed and tells the agent on the next attempt.** Aborting a
+  running or queued step now waits for the awb broker's verdict before settling
+  (`killed`, `cancelled_queued`, `not_running`, `kill_failed`, plus `unreachable`
+  and `not_local` from the hub), still failing the step as `aborted` whatever the
+  outcome. The verdict lands in the `step.failed` report event, in an automatic
+  step note, and in `abort: { result, confirmed }` on the abort route and the
+  `step.abort` sync result. The Abort button reads "Aborting…" while pending and a
+  toast says whether the agent stopped or to check the workdir. The next attempt of
+  an aborted step (▶ re-run, restart, retry) carries a note that the previous one
+  was interrupted. Older brokers (`{ killed }` only) keep working, unverified. Needs
+  the matching awb broker change. See `docs/abort.md`.
+
 - **GitHub Copilot CLI as a fourth runner (`copilot`).**
   - **Runner.** `--runner <claude|free-code|cursor|copilot>` (CLI, MCP tools
     and the New-workflow form) writes `spawn:copilot` into the hook. Steps run
