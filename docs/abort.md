@@ -11,6 +11,9 @@ killed and the response carries no `abort` outcome.
 1. `abortStep` (`hub/workflow.ts`) calls `abortAwbRun` (`hub/awb.ts`), which
    POSTs `/hook/<name>/abort` `{ jobId: <stepId> }` to the local broker and
    **waits** for the verdict (fetch timeout 15s; the broker's worst case is ~9s).
+   While it waits, the broker's own "run failed" callback for the killed agent is
+   ignored for that step (`abortingSteps` in `hub/workflow.ts`); otherwise it would
+   fail the step as `run failed` or spend a retry re-dispatching it.
 2. Whatever the verdict, the step is then settled exactly as before: `failed`
    with error `"aborted"`, workflow `failed`. Abort never refuses and there is no
    extra persisted status, so a stuck step can always be failed.

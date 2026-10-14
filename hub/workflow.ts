@@ -2875,6 +2875,15 @@ export async function onStepResult(
 	// `markStepJudging` both accept `queued`, so we settle it directly rather
 	// than dropping it — losing the start is not a reason to lose the result.
 	if (step.status !== "running" && step.status !== "queued") return;
+	// An Abort is waiting on the broker for this very step. Killing the agent makes
+	// the broker report the run as failed, and that callback can land before
+	// `abortStep` gets its verdict: settling it here would fail the step as "run
+	// failed" (or spend a retry re-dispatching what the operator just killed) and
+	// leave the abort with nothing to settle. `abortStep` owns the outcome.
+	if (abortingSteps.has(stepId)) {
+		log(`step ${stepId} result ignored: its abort is in progress`);
+		return;
+	}
 
 	// On-demand ▶ run: outside the sequential engine, but still judged if the
 	// step carries acceptance criteria.
@@ -3329,6 +3338,9 @@ export async function runStep(workflowId: string, stepId: string, cfg: HubConfig
 	writeStatusMd(workflowId);
 }
 
+/** Steps whose Abort is waiting on the broker; `onStepResult` ignores their callbacks meanwhile. */
+const abortingSteps = new Set<string>();
+
 /**
  * Aborts a step stuck `running` or `queued` (a dispatch whose awb callback
  * never came back — e.g. a hung judge, or a run still queued on the workdir
@@ -3403,7 +3415,13 @@ export async function abortStep(workflowId: string, stepId: string, log?: Logger
 	// says whether the agent really stopped. The step is settled below whatever
 	// the outcome — a stuck step must always be failable, even on `kill_failed`
 	// or an unreachable broker. `abortAwbRun` never throws.
-	const outcome = await abortAwbRun(workflow.hookUrl, workflow.secret, stepId, log ?? (() => {}));
+	abortingSteps.add(stepId);
+	let outcome: AbortOutcome;
+	try {
+		outcome = await abortAwbRun(workflow.hookUrl, workflow.secret, stepId, log ?? (() => {}));
+	} finally {
+		abortingSteps.delete(stepId);
+	}
 	// The step may have finished (or been aborted by someone else) while we waited.
 	if (!failRunningStep(stepId, "aborted")) throw new WorkflowError("only a running step can be aborted");
 	setWorkflowStatus(workflowId, "failed");

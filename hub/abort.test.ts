@@ -499,3 +499,49 @@ test("the sync command step.abort carries abort { result, confirmed } next to lo
 	assert.deepEqual(result.abort, { result: "killed", confirmed: true });
 	assert.equal(getStep(steps[0].id)?.status, "failed");
 });
+
+test("a failure callback that lands while the broker kill is pending does not pre-empt the abort", async () => {
+	// A real broker reports the killed run as failed; that callback can reach the
+	// hub BEFORE the /abort answer does. It must neither fail the step as "run
+	// failed" nor spend a retry — the abort settles it as "aborted".
+	let release!: () => void;
+	const gate = new Promise<void>((r) => (release = r));
+	let stepId = "";
+	const server = http.createServer((req, res) => {
+		const chunks: Buffer[] = [];
+		req.on("data", (c: Buffer) => chunks.push(c));
+		req.on("end", async () => {
+			res.setHeader("content-type", "application/json");
+			if (req.url?.endsWith("/abort")) {
+				// The kill's side effect arrives first…
+				await onStepResult(stepId, { ok: false, error: "run failed" }, cfg, silent);
+				await gate;
+				res.writeHead(200);
+				res.end(JSON.stringify({ result: "killed", killed: true, signal: "SIGINT", exited: true }));
+				return;
+			}
+			res.writeHead(200);
+			res.end(JSON.stringify({ ok: true }));
+		});
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	test.after(() => {
+		server.close();
+		fs.rmSync(hooksFile, { force: true });
+	});
+	const addr = server.address();
+	if (!addr || typeof addr === "string") throw new Error("no port");
+	fs.writeFileSync(hooksFile, JSON.stringify({ port: addr.port, hooks: { agent: {} } }));
+	const { workflow, steps } = makeWorkflow(1, `http://127.0.0.1:${addr.port}/hook/agent`);
+	stepId = steps[0].id;
+	await startWorkflow(workflow.id, cfg, silent, [stepId]);
+
+	const pending = abortStep(workflow.id, stepId, silent);
+	await new Promise((r) => setTimeout(r, 100));
+	assert.equal(getStep(stepId)?.status, "queued", "callback ignored while the abort is pending");
+	release();
+	const { abort } = await pending;
+	assert.deepEqual(abort, { result: "killed", confirmed: true });
+	assert.equal(getStep(stepId)?.status, "failed");
+	assert.equal(getStep(stepId)?.error, "aborted");
+});
