@@ -3861,9 +3861,9 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 		(async () => {
 			try {
-				const workflow = await abortStep(workflowId, parts[4], log);
+				const { workflow, abort } = await abortStep(workflowId, parts[4], log);
 				log(`workflow ${workflowId} step ${parts[4]} aborted`);
-				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
+				sendJson(res, 200, { workflow: publicWorkflow(workflow), abort });
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
 			}

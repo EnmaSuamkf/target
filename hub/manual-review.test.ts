@@ -379,7 +379,8 @@ test("aborting a held step refuses the result and stops the workflow", async (t)
 	await onStepResult(steps[0].id, { ok: true, result: "not what I asked for", sessionId: "sess-held" }, cfg, silent);
 	assert.equal(getStep(steps[0].id)?.status, "waiting");
 
-	const stopped = await abortStep(workflow.id, steps[0].id, silent);
+	const { workflow: stopped, abort } = await abortStep(workflow.id, steps[0].id, silent);
+	assert.equal(abort, null); // nothing is killed at a manual-review gate
 
 	assert.equal(stopped.status, "failed");
 	const held = getStep(steps[0].id);

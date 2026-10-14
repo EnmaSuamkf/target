@@ -31,7 +31,7 @@ process.env.TARGET_HOME = tmpHome;
 // server.test.ts for the full rationale.
 process.env.AWB_HOME = tmpHome;
 
-const { insertStep, insertWorkflow, getWorkflow, getStep, listSteps } = await import("./db.ts");
+const { insertStep, insertWorkflow, getWorkflow, getStep, listSteps, listStepNotes } = await import("./db.ts");
 const { createServer } = await import("./server.ts");
 const { loadConfig } = await import("./config.ts");
 const { startWorkflow, abortStep, runStep, onStepResult } = await import("./workflow.ts");
@@ -93,8 +93,13 @@ test("abort force-fails a stuck running step (exec hang: no session yet) and fai
 	assert.equal(getStep(steps[0].id)?.status, "queued");
 	assert.equal(getStep(steps[0].id)?.sessionId, null);
 
-	const updated = await abortStep(workflow.id, steps[0].id, silent);
+	const { workflow: updated, abort } = await abortStep(workflow.id, steps[0].id, silent);
 	assert.equal(updated.status, "failed");
+	// The fake hook is not a registered local awb hook → the kill is not attempted.
+	assert.deepEqual(abort, { result: "not_local", confirmed: false });
+	const notes = listStepNotes(steps[0].id);
+	assert.equal(notes.length, 1);
+	assert.match(notes[0].content, /^Abort: COULD NOT confirm the agent stopped \(not_local\)/);
 	const step = getStep(steps[0].id);
 	assert.equal(step?.status, "failed");
 	assert.equal(step?.error, "aborted");
@@ -244,8 +249,9 @@ test("POST /api/workflows/:id/steps/:stepId/abort aborts a queued step", async (
 		headers: adminHeaders(),
 	});
 	assert.equal(res.status, 200);
-	const body = (await res.json()) as { workflow: { status: string } };
+	const body = (await res.json()) as { workflow: { status: string }; abort: { result: string; confirmed: boolean } };
 	assert.equal(body.workflow.status, "failed");
+	assert.deepEqual(body.abort, { result: "not_local", confirmed: false });
 	assert.equal(getStep(steps[0].id)?.status, "failed");
 	assert.equal(getStep(steps[0].id)?.error, "aborted");
 });
