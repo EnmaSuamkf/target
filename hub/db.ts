@@ -648,6 +648,11 @@ export function open(): DatabaseSync {
 	addColumn("last_progress_token", "last_progress_token TEXT");
 	addColumn("status_manual", "status_manual INTEGER NOT NULL DEFAULT 0");
 	addColumn("status_manual_at", "status_manual_at TEXT");
+	// Set when the operator aborts a running/queued step (`failRunningStep` with
+	// "aborted"), consumed by the next exec dispatch (`takeStepInterrupted`).
+	// A column rather than `error === "aborted"` because Restart's `resetSteps`
+	// clears `error` before the step is re-dispatched, and the note must survive that.
+	addColumn("interrupted", "interrupted INTEGER NOT NULL DEFAULT 0");
 	// DEFAULT 'task': every step that exists is one the operator wrote, so an
 	// upgraded row has to keep saying exactly that. This is a pure ADD COLUMN with
 	// a non-null default — no row is rewritten, no table is recreated, and a
@@ -2256,11 +2261,24 @@ export function failRunningStep(stepId: string, error: string): boolean {
 	return (
 		open()
 			.prepare(
-				`UPDATE steps SET status = 'failed', error = ?, finished_at = ?
+				`UPDATE steps SET status = 'failed', error = ?, finished_at = ?, interrupted = ?
 				 WHERE id = ? AND status IN ('running', 'queued')`,
 			)
-			.run(redactSecrets(error), new Date().toISOString(), stepId).changes > 0
+			.run(redactSecrets(error), new Date().toISOString(), error === "aborted" ? 1 : 0, stepId).changes > 0
 	);
+}
+
+/**
+ * Reads and clears the "interrupted by the operator" marker set by
+ * `failRunningStep(..., "aborted")`. Called once per exec dispatch, so the
+ * ABORT_NOTE reaches exactly the first attempt after an abort — whether that is
+ * a ▶ re-run, a Restart or a retry — and never a later one.
+ */
+export function takeStepInterrupted(stepId: string): boolean {
+	const row = open().prepare("SELECT interrupted FROM steps WHERE id = ?").get(stepId) as { interrupted?: number } | undefined;
+	if (!row || Number(row.interrupted ?? 0) !== 1) return false;
+	open().prepare("UPDATE steps SET interrupted = 0 WHERE id = ?").run(stepId);
+	return true;
 }
 
 /**
