@@ -126,6 +126,8 @@ interface WorkflowJson {
 	sandbox: string;
 	/** Image backing a "docker" sandbox; null on the host. */
 	image: string | null;
+	/** Model the hook spawns with; null = the CLI's default. */
+	model?: string | null;
 }
 
 interface StepJson {
@@ -209,13 +211,15 @@ async function main(): Promise<void> {
 		const workdir = flagValue(rest, "--workdir");
 		const permissionMode = flagValue(rest, "--permission-mode");
 		const runner = flagValue(rest, "--runner");
+		const model = flagValue(rest, "--model");
 		const sandbox = flagValue(rest, "--sandbox");
 		const image = flagValue(rest, "--image");
 		const force = rest.includes("--force");
 		if (!name) {
 			console.error(
 				"Usage: target create <name> [--workdir <dir>] [--permission-mode <mode>] [--runner <claude|free-code|cursor|copilot>]\n" +
-					"                        [--sandbox <host|docker>] [--image <name>] [--yes-bypass-risk] [--force]\n" +
+					"                        [--model <id>] [--sandbox <host|docker>] [--image <name>] [--yes-bypass-risk] [--force]\n" +
+					"  --model must be enabled for the runner in Settings > Agent models (omit for the CLI default)\n" +
 					"  modes: acceptEdits, auto, manual, dontAsk, plan, bypassPermissions (needs --yes-bypass-risk)\n" +
 					"  --sandbox docker runs every step inside a container (default host = directly on this machine);\n" +
 					"  --image names the image to use, defaulting to the one built from this repo's Dockerfile",
@@ -240,6 +244,7 @@ async function main(): Promise<void> {
 				...(workdir ? { workdir } : {}),
 				...(permissionMode ? { permissionMode } : {}),
 				...(runner ? { runner } : {}),
+				...(model ? { model } : {}),
 				...(sandbox ? { sandbox } : {}),
 				...(image ? { image } : {}),
 				...(rest.includes("--yes-bypass-risk") ? { acceptBypassRisk: true } : {}),
@@ -249,6 +254,7 @@ async function main(): Promise<void> {
 		const { workflow } = (await res.json()) as { workflow: WorkflowJson };
 		console.log(`Workflow '${workflow.name}' created (${workflow.id}), agent '${workflow.agentName}'.`);
 		console.log(`Sandbox: ${workflow.sandbox}${workflow.image ? ` (${workflow.image})` : ""}`);
+		if (workflow.model) console.log(`Model: ${workflow.model}`);
 		console.log(`Status file: ${workflow.mdPath}`);
 		console.log(`Add steps with: target add-step ${workflow.id} <description...>`);
 		return;
@@ -293,13 +299,14 @@ async function main(): Promise<void> {
 		const workdir = flagValue(rest, "--workdir");
 		const permissionMode = flagValue(rest, "--permission-mode");
 		const runner = flagValue(rest, "--runner");
+		const model = flagValue(rest, "--model");
 		const sandbox = flagValue(rest, "--sandbox");
 		const image = flagValue(rest, "--image");
 		const force = rest.includes("--force");
 		if (!templateId || !name) {
 			console.error(
 				"Usage: target create-from-template <templateId> <workflowName> [--workdir <dir>] [--permission-mode <mode>]\n" +
-					"                                     [--runner <claude|free-code|cursor|copilot>] [--sandbox <host|docker>] [--image <name>] [--force]",
+					"                                     [--runner <claude|free-code|cursor|copilot>] [--model <id>] [--sandbox <host|docker>] [--image <name>] [--force]",
 			);
 			process.exitCode = 1;
 			return;
@@ -319,6 +326,7 @@ async function main(): Promise<void> {
 				...(workdir ? { workdir } : {}),
 				...(permissionMode ? { permissionMode } : {}),
 				...(runner ? { runner } : {}),
+				...(model ? { model } : {}),
 				...(sandbox ? { sandbox } : {}),
 				...(image ? { image } : {}),
 			}),
@@ -327,6 +335,7 @@ async function main(): Promise<void> {
 		const { workflow } = (await createRes.json()) as { workflow: WorkflowJson };
 		console.log(`Workflow '${workflow.name}' created from template '${templateId}' (${workflow.id}), agent '${workflow.agentName}'.`);
 		console.log(`Sandbox: ${workflow.sandbox}${workflow.image ? ` (${workflow.image})` : ""}`);
+		if (workflow.model) console.log(`Model: ${workflow.model}`);
 		console.log(`Status file: ${workflow.mdPath}`);
 		return;
 	}

@@ -3663,6 +3663,52 @@ export function saveDockerMountSettings(mounts: string[]): DockerMountSettings {
 	return settings;
 }
 
+// --- Agent model allowlist (Settings) -------------------------------------
+//
+// Per runner: which model ids a workflow may pick, plus operator-added custom
+// ids. No row (or no `enabled` list for a runner) means "never saved": every
+// seeded/live id reads as enabled, so first-run pickers are not empty. The
+// catalog itself lives in model-catalog.ts; this only persists the choice.
+
+const MODEL_ALLOWLIST_SETTINGS_KEY = "agent_models";
+
+export interface AgentModelSettings {
+	runners: Record<string, { enabled: string[] | null; custom: string[] }>;
+	updatedAt: string | null;
+}
+
+function stringList(value: unknown): string[] {
+	return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string" && v !== "") : [];
+}
+
+export function getAgentModelSettings(): AgentModelSettings {
+	const row = open().prepare("SELECT * FROM settings WHERE key = ?").get(MODEL_ALLOWLIST_SETTINGS_KEY) as
+		| Record<string, unknown>
+		| undefined;
+	if (!row) return { runners: {}, updatedAt: null };
+	try {
+		const parsed = JSON.parse(String(row.value)) as { runners?: Record<string, { enabled?: unknown; custom?: unknown }> };
+		const runners: AgentModelSettings["runners"] = {};
+		for (const [runner, entry] of Object.entries(parsed.runners ?? {})) {
+			runners[runner] = { enabled: Array.isArray(entry?.enabled) ? stringList(entry.enabled) : null, custom: stringList(entry?.custom) };
+		}
+		return { runners, updatedAt: row.updated_at == null ? null : String(row.updated_at) };
+	} catch {
+		return { runners: {}, updatedAt: null };
+	}
+}
+
+export function saveAgentModelSettings(runners: AgentModelSettings["runners"]): AgentModelSettings {
+	const settings: AgentModelSettings = { runners, updatedAt: new Date().toISOString() };
+	open()
+		.prepare(
+			`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		)
+		.run(MODEL_ALLOWLIST_SETTINGS_KEY, JSON.stringify({ runners }), settings.updatedAt);
+	return settings;
+}
+
 // --- Workflow auto-archive (Settings) -------------------------------------
 //
 // `archive_after_days`: completed/failed workflows idle for longer than this

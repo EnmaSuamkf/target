@@ -30,6 +30,8 @@ import type {
 	CreateWorkflowInput,
 	DockerMountSettings,
 	DockerMountSettingsInput,
+	ModelSettings,
+	ModelSettingsInput,
 	DeviceLinkOutcome,
 	DeviceLinkStatus,
 	DockerFriendlySettings,
@@ -1193,6 +1195,30 @@ export async function saveDockerMountSettings(input: DockerMountSettingsInput): 
 		body: json(input),
 	});
 	return data.settings;
+}
+
+export async function getModelSettings(): Promise<ModelSettings> {
+	const data = await request<{ settings: ModelSettings }>("/api/settings/models");
+	return data.settings;
+}
+
+export async function saveModelSettings(input: ModelSettingsInput): Promise<ModelSettings> {
+	const data = await request<{ settings: ModelSettings }>("/api/settings/models", {
+		method: "PUT",
+		admin: true,
+		body: json(input),
+	});
+	return data.settings;
+}
+
+/** Sets a workflow's model (empty string = CLI default). Applies from its next spawn. */
+export async function updateWorkflowModel(workflowId: string, model: string): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${workflowId}/model`, {
+		method: "PATCH",
+		admin: true,
+		body: json({ model }),
+	});
+	return data.workflow;
 }
 
 export async function updateWorkflowDockerMounts(workflowId: string, mounts: string[]): Promise<Workflow> {

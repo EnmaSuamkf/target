@@ -1609,6 +1609,15 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		await Promise.all([refreshTemplates(), refreshTcps(), refreshResourceSets(), refreshPermissions()]);
 	};
 
+	const handleSaveWorkflowModel = async (model: string): Promise<boolean> => {
+		if (!selectedWorkflow) return false;
+		return await act("Could not save the model", async () => {
+			const workflow = await api.updateWorkflowModel(selectedWorkflow.id, model);
+			setWorkflows((current) => current.map((w) => (w.id === workflow.id ? workflow : w)));
+			toast.success(model === "" ? "Model set to the CLI default." : "Model saved.");
+		});
+	};
+
 	const handleSaveWorkflowDockerMounts = async (mounts: string[]): Promise<boolean> => {
 		if (!selectedWorkflow) return false;
 		return await act("Could not save docker bind mounts", async () => {
@@ -1698,6 +1707,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								onSaveTcps={handleSaveTcps}
 								onSaveResources={handleSaveResources}
 								onSaveDockerMounts={handleSaveWorkflowDockerMounts}
+								onSaveModel={handleSaveWorkflowModel}
 								onAttachImages={handleAttachImages}
 								onRemoveAttachment={(id) => void handleRemoveAttachment(id)}
 								onOpenTerminal={handleOpenTerminal}

@@ -11,6 +11,21 @@ The current version is reported by every instance to the central server (see
 
 ### Added
 
+- **Per-workflow model selection.** Settings > Agent models is an allowlist of
+  models per installed agent (seeded from the hub's tables, Cursor's
+  `cli-config.json`, free-code's `models.json`, Claude aliases and your own custom
+  ids; stored in the `settings` table, `GET`/`PUT /api/settings/models`, MCP
+  `get_model_settings`/`save_model_settings`). A workflow picks one enabled id or
+  CLI default (nothing written on the hook): `model` on `POST /api/workflows` and
+  clone (400 when not enabled for the agent), `--model` on `target create`, `model`
+  on MCP `create_workflow`, and a Model field under Agent runtime. `GET
+  /api/runners` carries each agent's enabled `models[]`, and workflows expose
+  `model`. It can be changed after create with `PATCH /api/workflows/:id/model` or the
+  Model control on the workflow page (next spawn only; refused while a step runs;
+  warns when a session exists; an id Settings later disables stays on the workflow).
+  The id is written as `model` on the AWB hook; awb's spawn adapters pass it as
+  `--model`. See `docs/runners.md`.
+
 - **Abort is confirmed and tells the agent on the next attempt.** Aborting a
   running or queued step now waits for the awb broker's verdict before settling
   (`killed`, `cancelled_queued`, `not_running`, `kill_failed`, plus `unreachable`

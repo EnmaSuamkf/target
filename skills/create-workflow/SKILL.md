@@ -7,7 +7,7 @@ description: >-
   self-contained conversation context and complete steps (acceptance criteria,
   at least 2 retries). Use when the user asks to create a new Target workflow,
   start a new workflow, or open the new-workflow form.
-TARGET_SKILL_VERSION: "5"
+TARGET_SKILL_VERSION: "6"
 managedBy: target
 ---
 
@@ -25,10 +25,12 @@ Call `hub_health`. If the hub is unreachable, tell the operator to run `npm star
 
 Call these in parallel:
 
-- `list_runners` — agents and sandboxes this host can actually run
+- `list_runners` — agents and sandboxes this host can actually run; each runner also carries `models[]`, the models Settings has enabled for it (`id`, `label`, `source`)
 - `list_templates` — templates that can seed steps
 
 Offer **only** runners with `installed: true` and sandboxes with `available: true`. If no runner is installed, stop.
+
+Models: for the agent the operator picks, offer **CLI default** plus that runner's `models[]` from `list_runners`, using each `id` (show `label` when it differs). Never invent or guess a model id — if `models[]` is empty, only CLI default is possible (tell the operator they can enable or add ids under Settings > Agent models). An id belongs to one agent, so re-offer the list if the agent changes.
 
 Display names:
 
@@ -65,11 +67,12 @@ Resolve this conversation's working directory first (workspace root / `pwd`). Sh
 Then ask the following (use `AskQuestion` when that tool is available; otherwise ask conversationally). Options must be the live lists from step 2:
 
 1. Which agent do you want for the workflow?
-2. Which sandbox?
-3. Working directory: this conversation's directory (`<absolute path>`), or a different one?
-4. Should steps run with a subagent? (`Yes` / `No`)
-5. What permissions should the agent have?
-6. Add steps from a template? (`None` or one of the templates)
+2. Which model? (`CLI default` or one of that agent's `models[]` — ask this right after the agent, using the list for the agent they chose)
+3. Which sandbox?
+4. Working directory: this conversation's directory (`<absolute path>`), or a different one?
+5. Should steps run with a subagent? (`Yes` / `No`)
+6. What permissions should the agent have?
+7. Add steps from a template? (`None` or one of the templates)
 
 If they already answered a question in the original request, do not re-ask it. If only one agent or sandbox is available, still show it unless they already chose it.
 
@@ -99,6 +102,7 @@ Call `create_workflow`:
   "name": "...",
   "workdir": "/absolute/path",
   "runner": "claude",
+  "model": "sonnet",
   "sandbox": "host",
   "permissionMode": "acceptEdits",
   "acceptBypassRisk": true,
@@ -106,7 +110,8 @@ Call `create_workflow`:
 }
 ```
 
-- Always send `workdir` as the absolute path from question 3.
+- Always send `workdir` as the absolute path from question 4.
+- Omit `model` for CLI default; otherwise send an `id` taken from that runner's `models[]`. The hub answers 400 for an id that is not enabled for the agent. The model can be changed later without recreating the workflow (Model on the workflow page, or `PATCH /api/workflows/:id/model`).
 - Omit `permissionMode` for Read-only.
 - Omit `templateId` when they chose None.
 - Set `acceptBypassRisk: true` only after they confirmed `bypassPermissions`.
@@ -122,7 +127,7 @@ Write it so a stranger agent can start immediately. Include:
 - Working directory / repo / files / URLs the executing agent must use
 - Constraints (do not push, stay on a branch, languages, tools, out of bounds)
 - How steps relate (order, dependencies, what later steps inherit)
-- Operator decisions already made (runner, sandbox, workdir, permissions, subagent)
+- Operator decisions already made (runner, model, sandbox, workdir, permissions, subagent)
 - Anything said in this conversation that the executing agent would otherwise lose
 
 Forbidden in context (and in step text): "as we discussed", "see above", "the user said", "continue from this chat", or any pointer that only this conversation can resolve.

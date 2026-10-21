@@ -25,6 +25,7 @@ import {
 	ensureHookMounts,
 	defaultSandboxImage,
 	hookRuntime,
+	setHookModel,
 	PUBLISHABLE_RUNNERS,
 	type HookOptions,
 	type PublishablePermissionMode,
@@ -1227,6 +1228,7 @@ export function createWorkflow(
 	options: {
 		workdir?: string;
 		permissionMode?: HookOptions["permissionMode"];
+		model?: HookOptions["model"];
 		runner?: HookOptions["runner"];
 		sandbox?: HookOptions["sandbox"];
 		image?: HookOptions["image"];
@@ -1246,6 +1248,7 @@ export function createWorkflow(
 	const promptTemplate = `You are the agent of a workflow in The Target Project named "${trimmed}". This session is reused in order for every step of the workflow. Current step:\n\n{{payload}}\n\nCarry out the step and respond with the final result of that step.`;
 	const hook = createAwbHook(agentName, workdir, promptTemplate, {
 		permissionMode: options.permissionMode,
+		model: options.model,
 		runner: options.runner,
 		sandbox: options.sandbox,
 		image: options.image,
@@ -1276,6 +1279,26 @@ export function createWorkflow(
 }
 
 /** Replaces a workflow's docker-only bind mounts and rewrites its awb hook. */
+/**
+ * Changes the model a workflow's hook spawns with (null = the CLI's default).
+ * The runner never changes after create, only this does, and only from the next
+ * spawn on — so a step that is running or about to be dispatched blocks it
+ * rather than racing it. The id is validated by the caller (the route), which
+ * knows about Settings; this only guards the state.
+ */
+export function updateWorkflowModel(workflowId: string, model: string | null): Workflow {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	if (listSteps(workflowId).some((step) => step.status === "running" || step.status === "queued")) {
+		throw new WorkflowError("a step is running — change the model once it finishes");
+	}
+	if (!hookRuntime(workflow.hookUrl).harness) throw new WorkflowError("this workflow's hook is not on this machine");
+	setHookModel(workflow.hookUrl, model);
+	if (hookRuntime(workflow.hookUrl).model !== model) throw new WorkflowError("could not write the model onto the hook");
+	writeStatusMd(workflowId);
+	return getWorkflow(workflowId) ?? workflow;
+}
+
 export function updateWorkflowDockerMounts(workflowId: string, mounts: string[]): Workflow {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
@@ -1540,6 +1563,8 @@ export interface CloneOverrides {
 	name?: string;
 	workdir?: string | null;
 	permissionMode?: PublishablePermissionMode | null;
+	/** Absent inherits the source's model (only while the runner is unchanged); empty/null = CLI default. */
+	model?: string | null;
 	runner?: PublishableRunner | null;
 	sandbox?: PublishableSandbox | null;
 	image?: string | null;
@@ -1622,6 +1647,9 @@ export function cloneWorkflow(workflowId: string, overrides: CloneOverrides = {}
 	const runner = pick(overrides.runner, sourceRunner);
 	const permissionMode = pick(overrides.permissionMode, runtime.permissionMode ?? undefined);
 	const sandbox = pick(overrides.sandbox, runtime.sandbox ? ("docker" as const) : undefined);
+	// A model id belongs to one runner: a clone moved to another runner must not
+	// carry the source's id into a CLI that has never heard of it.
+	const model = pick(overrides.model, runner === (sourceRunner ?? "claude") ? (runtime.model ?? undefined) : undefined);
 	// The image only means anything to a docker sandbox: a clone moved onto the
 	// host must not carry the original's image into a hook that won't use it.
 	// A default image belongs to the runner it was derived for: moving the clone to
@@ -1639,6 +1667,7 @@ export function cloneWorkflow(workflowId: string, overrides: CloneOverrides = {}
 		...(workdir ? { workdir } : {}),
 		...(runner ? { runner } : {}),
 		...(permissionMode ? { permissionMode } : {}),
+		...(model ? { model } : {}),
 		...(sandbox ? { sandbox } : {}),
 		...(image ? { image } : {}),
 		...(sandbox === "docker" ? { dockerMounts } : {}),

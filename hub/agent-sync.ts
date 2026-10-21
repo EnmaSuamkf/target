@@ -15,7 +15,7 @@ import { loadConfig, targetDir, type HubConfig } from "./config.ts";
 import { expandUserPath, readJsonFile, repoRoot, writeJsonFile } from "./repo-paths.ts";
 import { TARGET_VERSION } from "./version.ts";
 
-export const TARGET_SKILL_VERSION = "5";
+export const TARGET_SKILL_VERSION = "6";
 export const TARGET_MCP_MANAGED_STAMP = "managedBy";
 export const TARGET_MCP_MANAGED_VALUE = "target";
 

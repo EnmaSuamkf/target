@@ -76,6 +76,38 @@ export type Runner = (typeof RUNNERS)[number];
 export interface RunnerAvailability {
 	id: Runner;
 	installed: boolean;
+	/** Enabled models for this agent (Settings > Agent models); what a workflow's Model picker may offer. */
+	models?: RunnerModel[];
+}
+
+/** Where a model id came from: the hub's seed tables, a CLI's own config file, or the operator. */
+export type ModelSource = "seed" | "live" | "custom";
+
+export interface RunnerModel {
+	id: string;
+	label: string;
+	source: ModelSource;
+}
+
+/** One catalog entry in the Settings allowlist, with whether it is enabled. */
+export interface ModelSettingsEntry extends RunnerModel {
+	enabled: boolean;
+}
+
+export interface RunnerModelSettings {
+	models: ModelSettingsEntry[];
+	custom: string[];
+}
+
+/** `GET /api/settings/models`: the allowlist per agent. */
+export interface ModelSettings {
+	runners: Partial<Record<Runner, RunnerModelSettings>>;
+	updatedAt: string | null;
+}
+
+/** `PUT /api/settings/models` body: enabled catalog ids and custom ids per agent. */
+export interface ModelSettingsInput {
+	runners: Partial<Record<Runner, { enabled: string[]; custom: string[] }>>;
 }
 
 /**
@@ -241,6 +273,8 @@ export interface Workflow {
 	effectiveDockerMounts: string[];
 	/** Permission mode its hook spawns with; null means awb's own default (read-only). */
 	permissionMode: string | null;
+	/** Model its hook spawns with; null means the CLI's own default. */
+	model: string | null;
 	progress: Progress;
 	conversationContext: string | null;
 	contextInjected: boolean;
@@ -1012,6 +1046,8 @@ export interface CreateWorkflowInput {
 	name: string;
 	workdir?: string;
 	permissionMode?: PermissionMode;
+	/** Model id enabled for the runner (Settings > Agent models); omitted means the CLI default. */
+	model?: string;
 	/** Which CLI the workflow's hook spawns; the server defaults to "claude". */
 	runner?: Runner;
 	/** Where that CLI runs; the server defaults to "host" (and writes no sandbox block at all). */
@@ -1056,6 +1092,8 @@ export interface CloneWorkflowInput {
 	/** Empty means "give the clone its own sandbox" rather than the source's directory. */
 	workdir: string;
 	runner: Runner;
+	/** Omitted keeps the source's model (same runner only); empty means the CLI default. */
+	model?: string;
 	sandbox: Sandbox;
 	/** Empty means the runner's default image. Only read for a docker sandbox. */
 	image: string;

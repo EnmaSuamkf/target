@@ -7,7 +7,7 @@ description: >-
   workflow, use the create-workflow skill. Requires the Target hub running
   (npm start) and auth via TARGET MCP tools or curl with the admin token from
   ~/.target/config.json.
-TARGET_SKILL_VERSION: "5";
+TARGET_SKILL_VERSION: "6";
 managedBy: target
 ---
 

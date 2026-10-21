@@ -19,6 +19,7 @@
  *   DELETE /api/workflows/:id                          → remove: deletes its awb hook + .md file + DB rows (admin token)
  *   POST   /api/workflows/:id/clone                    → copy it (steps included) into a new "Clone - <name>" workflow with its own agent (admin token)
  *   PATCH  /api/workflows/:id/name                     → rename it (admin token)
+ *   PATCH  /api/workflows/:id/model                    → set (or clear with "") the model this workflow's hook spawns with (admin token)
  *   PATCH  /api/workflows/:id/docker-mounts            → replace this workflow's extra docker bind mounts (admin token)
  *   PATCH  /api/workflows/:id/context                  → set the conversation context preamble (admin token)
  *   POST   /api/workflows/:id/steps                    → add a step (admin token); optional afterStepId inserts it right after that step
@@ -77,6 +78,8 @@
  *   PUT    /api/settings/report                           → replace the activity-reporting preferences (admin token)
  *   GET    /api/settings/docker-mounts                    → default docker bind-mount paths (applied to every docker workflow)
  *   PUT    /api/settings/docker-mounts                    → replace the default docker bind-mount paths (admin token)
+ *   GET    /api/settings/models                           → per-agent model allowlist (catalog with enabled flags + custom ids)
+ *   PUT    /api/settings/models                           → replace the allowlist (admin token)
  *   GET    /api/settings/docker-friendly                  → docker-friendly hub networking toggle (0.0.0.0 bind; restart required)
  *   PUT    /api/settings/docker-friendly                  → replace docker-friendly hub networking toggle (admin token; restart required)
  *   GET    /api/settings/ui                               → UI catalog visibility (TCP / RCI top-level nav)
@@ -153,6 +156,7 @@ import {
 	deleteTemplate,
 	ARCHIVED_FILTERS,
 	getArchiveSettings,
+	getAgentModelSettings,
 	getDockerMountSettings,
 	getDockerFriendlySettings,
 	getNotificationSettings,
@@ -174,6 +178,7 @@ import {
 	OVERRIDABLE_WORKFLOW_STATUSES,
 	parseTemplateBundle,
 	saveArchiveSettings,
+	saveAgentModelSettings,
 	saveDockerMountSettings,
 	saveDockerFriendlySettings,
 	saveNotificationSettings,
@@ -201,6 +206,7 @@ import {
 	type Template,
 	type Workflow,
 } from "./db.ts";
+import { ModelSettingsError, enabledModels, modelSettingsView, parseModelAllowlist, validModelId } from "./model-catalog.ts";
 import { DockerMountError, effectiveDockerMounts, parseDockerMountsInput, resyncAllDockerWorkflowMounts } from "./docker-mounts.ts";
 import { executeTcpTool } from "./tcp-executor.ts";
 import { findTcpTool } from "./tcp-catalog.ts";
@@ -280,6 +286,7 @@ import {
 	startWorkflow,
 	unarchiveWorkflow,
 	updateWorkflowDockerMounts,
+	updateWorkflowModel,
 	WorkflowArchivedError,
 	WorkflowScheduledArmedError,
 	cancelSchedule,
@@ -624,6 +631,8 @@ function publicWorkflow(workflow: Workflow): Record<string, unknown> {
 		// Lives in the hook rather than on the row, and is read back so the clone
 		// dialog can open showing the permissions this workflow actually runs with.
 		permissionMode: runtime.permissionMode,
+		// The model this workflow's hook spawns with; null = the CLI's default.
+		model: runtime.model,
 		// "host" rather than null when there's no sandbox block: the UI shows a
 		// containment badge, and "unknown" would read as a warning where the
 		// honest answer is "the default, on this machine".
@@ -940,6 +949,16 @@ function readJsonBody(
 }
 
 /**
+ * Why `model` can't be used for `runner`, or null when it can. Only ids Settings
+ * has enabled for that runner are accepted (so an id is never invented), which
+ * is also why a picker can't offer something this refuses.
+ */
+function modelRejection(runner: string, model: string): string | null {
+	if (enabledModels(runner, getAgentModelSettings().runners).some((m) => m.id === model)) return null;
+	return `model '${model}' is not enabled for ${runner} (enable it in Settings > Agent models, or add it as a custom id)`;
+}
+
+/**
  * Reads the runtime fields of a clone body into `CloneOverrides`, answering the
  * request itself and returning null when one of them is refused.
  *
@@ -994,6 +1013,21 @@ function parseCloneOverrides(body: Record<string, unknown>, res: http.ServerResp
 			return null;
 		}
 		overrides.runner = raw === "" ? null : (raw as PublishableRunner);
+	}
+	// Empty = "CLI default"; absent = inherit the source's model (when the runner
+	// is unchanged). Whether the id is enabled is checked by the route, which
+	// knows the source's runner.
+	if ("model" in body) {
+		if (body.model !== null && typeof body.model !== "string") {
+			sendJson(res, 400, { error: "invalid model (expected a model id string, or empty for the CLI default)" });
+			return null;
+		}
+		const raw = typeof body.model === "string" ? body.model.trim() : "";
+		if (raw !== "" && !validModelId(raw)) {
+			sendJson(res, 400, { error: "invalid model id" });
+			return null;
+		}
+		overrides.model = raw === "" ? null : raw;
 	}
 	if ("sandbox" in body) {
 		const raw = typeof body.sandbox === "string" ? body.sandbox : "";
@@ -2535,6 +2569,42 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 
+	// --- /api/settings/models ---
+	//
+	// The per-agent model allowlist. Workflows pick ONE enabled model for their
+	// agent (or the CLI default); this is only what they may pick from. Never
+	// saved = every seeded/live id enabled.
+
+	if (parts[1] === "settings" && parts[2] === "models" && !parts[3]) {
+		const modelSettingsPayload = () => {
+			const saved = getAgentModelSettings();
+			return { settings: { runners: modelSettingsView(saved.runners), updatedAt: saved.updatedAt } };
+		};
+		if (req.method === "GET") {
+			sendJson(res, 200, modelSettingsPayload());
+			return;
+		}
+		if (req.method === "PUT") {
+			if (!isAdmin(cfg, req.headers)) {
+				sendJson(res, 401, { error: "unauthorized" });
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				try {
+					saveAgentModelSettings(parseModelAllowlist(body));
+					log("agent model allowlist updated");
+					sendJson(res, 200, modelSettingsPayload());
+				} catch (err) {
+					if (err instanceof ModelSettingsError) sendJson(res, 400, { error: err.code, message: err.message });
+					else throw err;
+				}
+			});
+			return;
+		}
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
 	// --- /api/settings/docker-friendly ---
 	//
 	// Toggle docker-friendly hub networking (0.0.0.0 bind + sandboxHost for docker
@@ -2762,7 +2832,11 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// and the form needs both before it can render — one round trip, one
 	// "couldn't reach the hub" failure mode to handle instead of two.
 	if (parts[1] === "runners" && !parts[2] && req.method === "GET") {
-		sendJson(res, 200, { runners: availableRunners(), sandboxes: availableSandboxes() });
+		// `models` = the enabled allowlist for that agent (id, label, source), what
+		// the create form's Model picker offers next to "CLI default".
+		const allowlist = getAgentModelSettings().runners;
+		const runners = availableRunners().map((runner) => ({ ...runner, models: enabledModels(runner.id, allowlist) }));
+		sendJson(res, 200, { runners, sandboxes: availableSandboxes() });
 		return;
 	}
 
@@ -3002,6 +3076,22 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					}
 					runner = body.runner as PublishableRunner;
 				}
+				// Optional: the model this workflow's agent runs. Omitted or empty means
+				// the CLI's own default (nothing is written on the hook). Whether it is
+				// enabled for the final runner is checked just before creation, once an
+				// adopted conversation has had its say about the runner.
+				let model: string | undefined;
+				if (body.model !== undefined && body.model !== null && typeof body.model !== "string") {
+					sendJson(res, 400, { error: "invalid model (expected a model id string)" });
+					return;
+				}
+				if (typeof body.model === "string" && body.model.trim() !== "") {
+					model = body.model.trim();
+					if (!validModelId(model)) {
+						sendJson(res, 400, { error: "invalid model id" });
+						return;
+					}
+				}
 				// Optional: create the workflow to RUN ON an existing conversation of
 				// the operator's. The named transcript is resolved here and its session
 				// id becomes the workflow's `adoptedSessionId`, which seeds
@@ -3156,10 +3246,18 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						return;
 					}
 				}
+				if (model) {
+					const rejection = modelRejection(runner ?? "claude", model);
+					if (rejection) {
+						sendJson(res, 400, { error: rejection });
+						return;
+					}
+				}
 				try {
 					const workflow = createWorkflow(name, {
 						workdir,
 						permissionMode,
+						...(model ? { model } : {}),
 						runner,
 						sandbox,
 						image,
@@ -3247,6 +3345,18 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
 			const overrides = parseCloneOverrides(body, res);
 			if (!overrides) return; // already answered with the reason
+			// An explicit model must be enabled for the runner the clone will have.
+			// An inherited one is not re-checked: Settings may have disabled it since,
+			// and the source already runs with it.
+			if (overrides.model) {
+				const sourceHarness = hookRuntime(getWorkflow(workflowId)!.hookUrl).harness;
+				const sourceRunner = PUBLISHABLE_RUNNERS.includes(sourceHarness as PublishableRunner) ? sourceHarness : "claude";
+				const rejection = modelRejection(overrides.runner ?? sourceRunner ?? "claude", overrides.model);
+				if (rejection) {
+					sendJson(res, 400, { error: rejection });
+					return;
+				}
+			}
 			try {
 				const clone = cloneWorkflow(workflowId, overrides);
 				log(`workflow ${workflowId} cloned as '${clone.name}' (${clone.id}) — agent '${clone.agentName}'`);
@@ -3280,6 +3390,52 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			try {
 				const workflow = renameWorkflow(workflowId, name);
 				log(`workflow ${workflowId} renamed to '${workflow.name}'`);
+				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
+			} catch (err) {
+				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			}
+		});
+		return;
+	}
+
+	// --- /api/workflows/:id/model ---
+	//
+	// Changes the model on an existing workflow's hook; the runner stays fixed.
+	// Applies from the next spawn. The id must be enabled for the workflow's
+	// runner, EXCEPT the one it already has: Settings disabling an id never
+	// strips it from a workflow, and re-saving it must not fail.
+
+	if (workflowId && parts[3] === "model" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
+			return;
+		}
+		const existing = getWorkflow(workflowId);
+		if (!existing) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			if (body.model !== undefined && body.model !== null && typeof body.model !== "string") {
+				sendJson(res, 400, { error: "invalid model (expected a model id string, or empty for the CLI default)" });
+				return;
+			}
+			const model = typeof body.model === "string" ? body.model.trim() : "";
+			const runtime = hookRuntime(existing.hookUrl);
+			if (model !== "") {
+				if (!validModelId(model)) {
+					sendJson(res, 400, { error: "invalid model id" });
+					return;
+				}
+				const runner = PUBLISHABLE_RUNNERS.includes(runtime.harness as PublishableRunner) ? (runtime.harness as string) : "claude";
+				const rejection = model === runtime.model ? null : modelRejection(runner, model);
+				if (rejection) {
+					sendJson(res, 400, { error: rejection });
+					return;
+				}
+			}
+			try {
+				const workflow = updateWorkflowModel(workflowId, model === "" ? null : model);
+				log(`workflow ${workflowId} model set to ${model === "" ? "CLI default" : model}`);
 				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
