@@ -774,8 +774,10 @@ node hub/cli.ts create "release-notes" --runner copilot --permission-mode accept
   | `auto`, `dontAsk` | `--allow-all-tools` | all tools, paths limited to the workdir and `/tmp` |
   | `bypassPermissions` | `--allow-all` | everything: tools, any path, any URL |
 
-- **Model.** The hub passes no `--model`; the CLI's own default (or its
-  `COPILOT_MODEL` variable) decides. The model that ran is read back from the
+- **Model.** Chosen per workflow (see [Choosing the model](#choosing-the-model));
+  CLI default leaves it to the CLI (or its `COPILOT_MODEL` variable). Copilot's
+  models can't be listed without spending requests, so add the ids your account
+  has under Settings > Agent models. The model that ran is read back from the
   session.
 - **Token usage** is read from `session.shutdown` in the session's
   `events.jsonl`. Copilot's `inputTokens` already **includes** the cache
@@ -783,6 +785,31 @@ node hub/cli.ts create "release-notes" --runner copilot --permission-mode accept
   adding them a second time. Occupancy is exact (`currentTokens`). See
   [`docs/runners.md`](docs/runners.md) and
   [`docs/context-meter.md`](docs/context-meter.md).
+
+### Choosing the model
+
+Settings > **Agent models** lists, for each installed agent, the models a
+workflow may use: the hub's built-in ids, the ones the CLI keeps on this machine
+(Cursor's `cli-config.json`, free-code's `models.json`, Claude's aliases) and
+any ids you add yourself (needed for Copilot). It is an allowlist only; it does
+not pick a workflow's model, and until you save it every known id is enabled.
+
+Each workflow then holds one model, or **CLI default** (the CLI decides and
+nothing is written on the hook). Pick it under *Agent runtime* on the New
+workflow / Clone form, with `--model`, or via MCP:
+
+```bash
+node hub/cli.ts create "release-notes" --runner cursor --model composer-2.5
+```
+
+The id is stored as `model` on the workflow's hook and passed to the CLI as
+`--model <id>` by awb's spawn adapters. A model that isn't enabled for the
+agent is refused with a 400. You can change it later without cloning (the
+**Model** control on the workflow page, or `PATCH /api/workflows/:id/model`;
+`""` clears it): it applies from the next spawn, can't change while a step is
+running, and warns if the workflow already has a session because some CLIs keep
+the original model on resume. Disabling an id in Settings never strips it from a
+workflow that already uses it. See [`docs/runners.md`](docs/runners.md#choosing-the-model).
 
 ### Containing the agent (`--sandbox`)
 

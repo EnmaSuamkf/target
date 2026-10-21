@@ -83,6 +83,38 @@ that assumed Claude's session/transcript conventions.
   rejected at creation (server and CLI both), while a docker workflow is not —
   the image ships its own binary.
 
+## Choosing the model
+
+Every runner has the same two layers:
+
+- **Settings > Agent models** is an *allowlist* per installed agent: the ids a
+  workflow may pick. It does not choose a workflow's model. The catalog behind
+  it merges the hub's built-in ids (`hub/models.ts`, including the Copilot
+  table), what the CLIs keep on this machine (Cursor's
+  `~/.cursor/cli-config.json`, free-code's `~/.free-code/agent/models.json`;
+  Claude contributes only its aliases) and ids you add yourself. Until you save
+  the section, every known id counts as enabled, so the pickers are not empty.
+  Nothing is probed over the network and no Copilot request is spent.
+- **A workflow** holds one model for the whole run (not per step): **CLI
+  default**, or one of the enabled ids for its agent. CLI default writes no
+  `model` on the hook, so the CLI decides; a chosen id is stored as `model` on
+  the hook (next to `permissionMode`) and awb's spawn adapters pass it to the
+  CLI as `--model <id>`. Pick it on the New workflow form (or `--model <id>` on
+  `target create`, `model` on the MCP `create_workflow`); a clone starts from the
+  source's model while the agent stays the same.
+
+**Changing it after create.** The runner is fixed at creation, but the model is
+not: use the Model control on the workflow page, or
+`PATCH /api/workflows/:id/model` with `{ "model": "<id>" }` (`""` returns to the
+CLI default). It applies from the next spawn, is refused while a step is
+running, and warns when the workflow already has a session, because some CLIs
+keep the session's original model when they resume. The model that actually
+ran is still shown in the Session panel, read from the transcript.
+
+**Disabling an id in Settings never strips it** from a workflow that already
+uses it: that workflow keeps running on it and can re-save it, but a new pick
+must be an enabled id (the API answers 400 otherwise).
+
 ## GitHub Copilot CLI (runner `copilot`)
 
 `--runner copilot` spawns `copilot -p` per step through awb's `spawn:copilot`
@@ -130,11 +162,15 @@ adapter. What differs from the other runners:
 - **Compaction** is detected from a successful `session.compaction_complete`
   record in the same `events.jsonl`; see
   [`compaction-resilience.md`](compaction-resilience.md).
-- **Model**: the hub passes no `--model`, so the CLI's own default applies
-  (the CLI's own `COPILOT_MODEL` variable is the lever: it worked in the docker
-  end-to-end run once added to the hook's `sandbox.env`, which does not forward
-  it by default; not separately verified on the host); the model that ran is
-  read back from the session.
+- **Model**: chosen per workflow like any other runner (see
+  [Choosing the model](#choosing-the-model)). With CLI default nothing is
+  written on the hook and the CLI's own default applies (its `COPILOT_MODEL`
+  variable is still a lever: it worked in the docker end-to-end run once added
+  to the hook's `sandbox.env`, which does not forward it by default; not
+  separately verified on the host). The hub cannot list Copilot's models
+  without spending requests, so beyond its built-in ids you add the ones your
+  account has under Settings > Agent models. The model that ran is read back
+  from the session.
 - **Docker** needs a token inside the container (the host keyring login is
   not reachable). The hub finds it itself: environment (`COPILOT_GITHUB_TOKEN`,
   `GH_TOKEN`, `GITHUB_TOKEN`), then a token pasted in Settings, then

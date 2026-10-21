@@ -207,6 +207,9 @@ export function CreateWorkflowModal({
 	const [name, setName] = useState("");
 	const [workdir, setWorkdir] = useState("");
 	const [runner, setRunner] = useState<Runner>("claude");
+	// "" = CLI default. Always an id from the selected agent's enabled list (or the
+	// clone source's own grandfathered one).
+	const [model, setModel] = useState("");
 	const [sandbox, setSandbox] = useState<Sandbox>("host");
 	const [image, setImage] = useState("");
 	const [permissionMode, setPermissionMode] = useState<"" | PermissionMode>("");
@@ -316,7 +319,9 @@ export function CreateWorkflowModal({
 			// binary falls back to what can actually run, since offering it would
 			// only buy a workflow that dies at its first step.
 			const inherited = avail.find((r) => r.id === source?.harness && r.installed)?.id;
-			setRunner(inherited ?? avail.find((r) => r.installed)?.id ?? "claude");
+			const chosen = inherited ?? avail.find((r) => r.installed)?.id ?? "claude";
+			setRunner(chosen);
+			setModel(modelFor(chosen));
 		})();
 		return () => {
 			cancelled = true;
@@ -327,6 +332,14 @@ export function CreateWorkflowModal({
 		// whatever was being typed into it.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open, source?.id]);
+
+	// The model a runner starts on: the clone source's, only while the runner is
+	// the one the source used (an id belongs to one CLI); otherwise CLI default.
+	const modelFor = (next: Runner): string => (source?.model && source.harness === next ? source.model : "");
+	const changeRunner = (next: Runner): void => {
+		setRunner(next);
+		setModel(modelFor(next));
+	};
 
 	// The conversation list is per runtime — that IS the agent filter — so it is
 	// refetched whenever the selected runtime changes, and any conversation
@@ -460,6 +473,12 @@ export function CreateWorkflowModal({
 		.map((r) => RUNNER_OPTIONS.find((o) => o.value === r.id))
 		.filter((o): o is { value: Runner; label: string; description: string } => o !== undefined);
 	const probeDone = !loadingRunners && !probeFailed;
+	// CLI default + the models Settings has enabled for the selected agent. A clone
+	// whose source already uses an id Settings has since disabled keeps it as an
+	// extra option (grandfathered) rather than silently switching models.
+	const enabledModels = runners.find((r) => r.id === runner)?.models ?? [];
+	const grandfathered =
+		source?.model && source.harness === runner && !enabledModels.some((m) => m.id === source.model) ? source.model : null;
 	const noInstalled = probeDone && installedOptions.length === 0;
 	// Same rule as the runners above, for the same reason: a sandbox this host
 	// can't run is not offered at all. Without docker the selector is left with
@@ -513,6 +532,10 @@ export function CreateWorkflowModal({
 					name: name.trim(),
 					workdir: workdir.trim(),
 					runner,
+					// Left out while it is still the source's own model on the same
+					// runner, so a model Settings has since disabled is inherited
+					// instead of re-validated; otherwise sent, empty = CLI default.
+					...(model === modelFor(runner) && source.harness === runner ? {} : { model }),
 					sandbox,
 					image: sandbox === "docker" ? image.trim() : "",
 					...(sandbox === "docker" ? { dockerMounts } : {}),
@@ -533,6 +556,7 @@ export function CreateWorkflowModal({
 			if (sandbox === "docker" && image.trim()) input.image = image.trim();
 			if (sandbox === "docker" && dockerMounts.length > 0) input.dockerMounts = dockerMounts;
 			if (permissionMode) input.permissionMode = permissionMode;
+			if (model) input.model = model;
 			if (templateId) input.templateId = templateId;
 			if (conversation) {
 				input.conversation = { runner: conversation.runner, sessionId: conversation.sessionId };
@@ -664,7 +688,7 @@ export function CreateWorkflowModal({
 							className="select"
 							value={runnerDisabled ? "" : runner}
 							disabled={runnerDisabled}
-							onChange={(ev) => setRunner(ev.target.value as Runner)}
+							onChange={(ev) => changeRunner(ev.target.value as Runner)}
 						>
 							{loadingRunners ? (
 								<option value="" disabled>
@@ -685,6 +709,35 @@ export function CreateWorkflowModal({
 									</option>
 								))
 							)}
+						</select>
+					)}
+				</Field>
+
+				<Field
+					label="Model"
+					hint={
+						model === ""
+							? "The agent's own CLI picks the model. Enable more models in Settings > Agent models."
+							: cloning && model === source?.model
+								? "Copied from the original workflow."
+								: "Applies from the next step this workflow runs."
+					}
+				>
+					{(props) => (
+						<select
+							{...props}
+							className="select"
+							value={model}
+							disabled={runnerDisabled}
+							onChange={(ev) => setModel(ev.target.value)}
+						>
+							<option value="">CLI default</option>
+							{grandfathered && <option value={grandfathered}>{grandfathered} (not enabled in Settings)</option>}
+							{enabledModels.map((m) => (
+								<option key={m.id} value={m.id}>
+									{m.label === m.id ? m.id : `${m.label} (${m.id})`}
+								</option>
+							))}
 						</select>
 					)}
 				</Field>

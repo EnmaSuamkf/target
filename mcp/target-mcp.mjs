@@ -132,6 +132,8 @@ function createWorkflowBody(a) {
 	if (workdir) body.workdir = workdir;
 	const runner = pickString(a, "runner");
 	if (runner) body.runner = runner;
+	const model = pickString(a, "model");
+	if (model) body.model = model;
 	const sandbox = pickString(a, "sandbox");
 	if (sandbox) body.sandbox = sandbox;
 	const image = pickString(a, "image");
@@ -159,6 +161,7 @@ function cloneWorkflowBody(a) {
 		runner: pickString(a, "runner", true),
 		sandbox: pickString(a, "sandbox", true),
 		image: a.image !== undefined ? String(a.image) : undefined,
+		model: a.model !== undefined ? String(a.model) : undefined,
 		permissionMode: a.permissionMode !== undefined ? String(a.permissionMode) : undefined,
 		acceptBypassRisk: a.acceptBypassRisk === true ? true : undefined,
 	});
@@ -185,7 +188,7 @@ const TOOLS = [
 	},
 	{
 		name: "list_runners",
-		description: "List installed agent runtimes and available sandboxes (GET /api/runners)",
+		description: "List installed agent runtimes (each with its enabled models[]: id, label, source) and available sandboxes (GET /api/runners)",
 		inputSchema: { type: "object", properties: {}, additionalProperties: false },
 		run: async () => hubJson("GET", "/api/runners"),
 	},
@@ -229,6 +232,10 @@ const TOOLS = [
 				name: { type: "string" },
 				workdir: { type: "string" },
 				runner: { type: "string", enum: RUNNERS },
+				model: {
+					type: "string",
+					description: "Model id enabled for the runner (see list_runners models[]); omit for the CLI default",
+				},
 				sandbox: { type: "string", enum: SANDBOXES },
 				image: { type: "string" },
 				templateId: { type: "string" },
@@ -259,6 +266,10 @@ const TOOLS = [
 				name: { type: "string" },
 				workdir: { type: "string" },
 				runner: { type: "string", enum: RUNNERS },
+				model: {
+					type: "string",
+					description: "Model id enabled for the clone's runner; empty = CLI default; omit to inherit the source's (same runner only)",
+				},
 				sandbox: { type: "string", enum: SANDBOXES },
 				image: { type: "string" },
 				permissionMode: { type: "string", enum: [...PERMISSION_MODES, ""] },
@@ -1219,6 +1230,37 @@ const TOOLS = [
 			additionalProperties: false,
 		},
 		run: async (a) => hubJson("POST", "/api/resourcesets/scan", { path: String(a.path) }),
+	},
+	{
+		name: "get_model_settings",
+		description:
+			"Read the per-agent model allowlist (GET /api/settings/models): every known model id per agent with whether it is enabled, plus operator custom ids",
+		inputSchema: { type: "object", properties: {}, additionalProperties: false },
+		run: async () => hubJson("GET", "/api/settings/models"),
+	},
+	{
+		name: "save_model_settings",
+		description:
+			"Replace the per-agent model allowlist (PUT /api/settings/models). runners is keyed by agent (claude, free-code, cursor, copilot); each entry has enabled (ids to allow) and custom (operator-added ids, always enabled; required for Copilot ids the hub does not know). An agent left out resets to the default (all known ids enabled).",
+		inputSchema: {
+			type: "object",
+			properties: {
+				runners: {
+					type: "object",
+					additionalProperties: {
+						type: "object",
+						properties: {
+							enabled: { type: "array", items: { type: "string" } },
+							custom: { type: "array", items: { type: "string" } },
+						},
+						additionalProperties: false,
+					},
+				},
+			},
+			required: ["runners"],
+			additionalProperties: false,
+		},
+		run: async (a) => hubJson("PUT", "/api/settings/models", { runners: a.runners }),
 	},
 	{
 		name: "get_notification_settings",

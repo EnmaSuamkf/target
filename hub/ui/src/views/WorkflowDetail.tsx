@@ -20,6 +20,7 @@ import { OVERRIDABLE_WORKFLOW_STATUSES, startActionFor } from "../api/types.ts";
 import { ArchivedBadge, Badge, ScheduleBadge } from "../components/Badge.tsx";
 import { MissedOnceActions } from "../components/MissedOnceActions.tsx";
 import { CollapsibleSection } from "../components/CollapsibleSection.tsx";
+import { WorkflowModelFact } from "../components/WorkflowModelFact.tsx";
 import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { CopyTooltip } from "../components/CopyTooltip.tsx";
 import { useToast } from "../components/Toast.tsx";
@@ -141,6 +142,7 @@ export function WorkflowDetail({
 	onSaveTcps,
 	onSaveResources,
 	onSaveDockerMounts,
+	onSaveModel,
 	onAttachImages,
 	onRemoveAttachment,
 	onOpenTerminal,
@@ -199,6 +201,8 @@ export function WorkflowDetail({
 	onSaveTcps: (tcpSelections: TcpSelection[]) => Promise<boolean>;
 	onSaveResources: (resourceSelections: ResourceSelection[]) => Promise<boolean>;
 	onSaveDockerMounts: (mounts: string[]) => Promise<boolean>;
+	/** Resolves true when the server stored the model (empty = CLI default). */
+	onSaveModel: (model: string) => Promise<boolean>;
 	/**
 	 * Pins images to one of this workflow's text inputs. `stepId` is null for the
 	 * conversation context and the step's id for its description / criteria.
@@ -572,6 +576,15 @@ export function WorkflowDetail({
 						<dd>{relativeTime(workflow.updatedAt)}</dd>
 					</div>
 				</dl>
+
+				<WorkflowModelFact
+					className={styles.modelBlock}
+					workflow={workflow}
+					locked={steps.some((step) => step.status === "running" || step.status === "queued")}
+					disabled={busy || !canManage}
+					disabledTitle={canManage ? undefined : requires("client.workflows.manage")}
+					onSave={onSaveModel}
+				/>
 
 				{workflow.sandbox === "docker" && (
 					<CollapsibleSection

@@ -25,6 +25,7 @@ import * as api from "../api/client.ts";
 import { ApiError } from "../api/client.ts";
 import type { CatalogSyncDomainResult, CatalogSyncResult } from "../api/types.ts";
 import { CollapsibleSection } from "../components/CollapsibleSection.tsx";
+import { AgentModelsSection } from "../components/AgentModelsSection.tsx";
 import { CopilotTokenPanel } from "../components/CopilotTokenPanel.tsx";
 import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { Field } from "../components/Field.tsx";
@@ -1147,6 +1148,8 @@ export function SettingsView({
 					)}
 				</div>
 			</form>
+
+			<AgentModelsSection disabled={busy} />
 
 			{/* Copilot in Docker: the GitHub token the hub hands to copilot workflows
 			    that run in a container. Acts immediately (no Save): every button
