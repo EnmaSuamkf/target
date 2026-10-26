@@ -684,6 +684,35 @@ export function availableRunners(): { id: PublishableRunner; installed: boolean 
 	return PUBLISHABLE_RUNNERS.map((id) => ({ id, installed: false }));
 }
 
+/** The create-time probes in flight, one per runner, so two creates racing on the same CLI share a probe. */
+const runnerChecks = new Map<PublishableRunner, Promise<boolean>>();
+
+/**
+ * Whether `runner` can run on this host, for the create route's host check.
+ * The cache answers when it says installed. Otherwise (no entry, or not
+ * installed) that one CLI is probed now, so an install since the last refresh
+ * is accepted without waiting a minute, and the other runners are never
+ * probed. The answer also replaces that runner's entry in the cache, so the
+ * create form stops offering it as missing.
+ */
+export function runnerInstalledNow(runner: PublishableRunner): Promise<boolean> {
+	if (runnerProbe?.runners.find((r) => r.id === runner)?.installed) return Promise.resolve(true);
+	const running = runnerChecks.get(runner);
+	if (running) return running;
+	const check = (async () => {
+		if (!_impl.adapterExists(runner)) return false;
+		const installed = await probeCommand(runnerBinary(runner), ["--version"], RUNNER_PROBE_TIMEOUT_MS);
+		if (runnerProbe) {
+			runnerProbe.runners = runnerProbe.runners.map((r) => (r.id === runner ? { id: runner, installed } : r));
+		}
+		return installed;
+	})().finally(() => {
+		runnerChecks.delete(runner);
+	});
+	runnerChecks.set(runner, check);
+	return check;
+}
+
 /**
  * Where a workflow's agent runs. Deliberately orthogonal to the runner: the
  * runner picks WHICH CLI a step spawns, the sandbox picks WHERE it spawns, so
@@ -799,6 +828,17 @@ export function dockerAvailable(): boolean {
  */
 export function probeCachedAt(): { runners: number | null; docker: number | null } {
 	return { runners: runnerProbe?.at ?? null, docker: dockerProbe?.at ?? null };
+}
+
+/**
+ * Whether docker can run a `sandbox: "docker"` workflow, for the create route's
+ * docker check. Trusts the cache only when it says available; otherwise asks
+ * docker now (single-flight, through `refreshDockerAvailable`), so a daemon
+ * started since the last refresh is accepted without waiting a minute.
+ */
+export function dockerAvailableNow(): Promise<boolean> {
+	if (dockerProbe?.available) return Promise.resolve(true);
+	return refreshDockerAvailable(true);
 }
 
 /**

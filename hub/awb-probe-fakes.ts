@@ -43,3 +43,10 @@ export function hangingChild(): cp.ChildProcess {
 		setImmediate(() => self.emit("close", null, "SIGTERM"));
 	});
 }
+
+/** A CLI that answers `code`, but only after `ms` — a probe still running while a request comes in. */
+export function slowExit(ms: number, code: number): cp.ChildProcess {
+	const child = fakeChild();
+	setTimeout(() => (child as unknown as EventEmitter).emit("close", code, null), ms);
+	return child;
+}
