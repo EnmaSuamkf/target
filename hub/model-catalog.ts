@@ -212,6 +212,18 @@ export function enabledModels(runner: string, allowlist: ModelAllowlist, home: s
 }
 
 /**
+ * Enabled models for every runner from one catalog build. `GET /api/runners?models=1`
+ * uses this so a single "List models" click does not rebuild the catalog once per agent.
+ */
+export function enabledModelsByRunner(allowlist: ModelAllowlist, home: string = os.homedir()): Record<string, CatalogModel[]> {
+	const out: Record<string, CatalogModel[]> = {};
+	for (const [runner, entry] of Object.entries(modelSettingsView(allowlist, home))) {
+		out[runner] = entry.models.filter((m) => m.enabled).map(({ id, label, source }) => ({ id, label, source }));
+	}
+	return out;
+}
+
+/**
  * Validates a PUT body: `{ runners: { <runner>: { enabled: string[], custom: string[] } } }`.
  * A runner left out falls back to the default (everything known enabled). An
  * `enabled` id that is not in that runner's catalog is rejected rather than

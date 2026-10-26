@@ -188,9 +188,9 @@ const TOOLS = [
 	},
 	{
 		name: "list_runners",
-		description: "List installed agent runtimes (each with its enabled models[]: id, label, source) and available sandboxes (GET /api/runners)",
+		description: "List installed agent runtimes (each with its enabled models[]: id, label, source) and available sandboxes (GET /api/runners?models=1)",
 		inputSchema: { type: "object", properties: {}, additionalProperties: false },
-		run: async () => hubJson("GET", "/api/runners"),
+		run: async () => hubJson("GET", "/api/runners?models=1"),
 	},
 	{
 		name: "list_workflows",

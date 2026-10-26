@@ -85,11 +85,11 @@ test("GET /api/runners answers from the cache while a probe is still running", a
 	assert.ok(elapsed < 100, `answered in ${elapsed.toFixed(0)} ms while the probe was still running`);
 
 	const body = (await res.json()) as {
-		runners: { id: string; installed: boolean; models: unknown[] }[];
+		runners: { id: string; installed: boolean; models?: unknown[] }[];
 		sandboxes: { id: string; available: boolean }[];
 	};
 	assert.ok(body.runners.length > 0, "the runner half is unchanged");
-	assert.ok(body.runners.every((r) => Array.isArray(r.models)), "models still come from enabledModels() per request");
+	assert.ok(body.runners.every((r) => !("models" in r)), "models stay off this route unless ?models=1");
 	assert.ok(body.sandboxes.some((s) => s.id === "docker"));
 	await refreshing;
 });

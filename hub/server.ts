@@ -11,7 +11,7 @@
  *   POST   /api/auth/password/reset                   → recovery-token password reset (open, per-IP throttled)
  *   GET    /api/permissions                           → owner-role mode for the UI (admin token; no permission required)
  *   GET    /api/workflows                             → list (with progress %); ?archived=exclude|include|only (default exclude; else 400)
- *   GET    /api/runners                               → which agent CLIs (claude/free-code/cursor/copilot) are installed on this host, for the create form
+ *   GET    /api/runners                               → which agent CLIs (claude/free-code/cursor/copilot) are installed on this host, for the create form; ?models=1 also attaches each agent's enabled models[]
  *   POST   /api/workflows                             → create (admin token) — makes the awb hook too; optional templateId seeds its steps
  *   GET    /api/workflows/:id                          → detail + steps
  *   GET    /api/workflows/:id/session-info                → harness + session id + token usage of the current/last session
@@ -208,7 +208,7 @@ import {
 	type Template,
 	type Workflow,
 } from "./db.ts";
-import { ModelSettingsError, enabledModels, modelSettingsView, parseModelAllowlist, validModelId } from "./model-catalog.ts";
+import { ModelSettingsError, enabledModels, enabledModelsByRunner, modelSettingsView, parseModelAllowlist, validModelId } from "./model-catalog.ts";
 import { DockerMountError, effectiveDockerMounts, parseDockerMountsInput, resyncAllDockerWorkflowMounts } from "./docker-mounts.ts";
 import { executeTcpTool } from "./tcp-executor.ts";
 import { findTcpTool } from "./tcp-catalog.ts";
@@ -2835,11 +2835,18 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// it answers the same question about the same machine for the same form,
 	// and the form needs both before it can render — one round trip, one
 	// "couldn't reach the hub" failure mode to handle instead of two.
+	//
+	// `models` stays off unless `?models=1`. Building the catalog reads each
+	// CLI's config on the event loop (Cursor's cli-config.json in particular),
+	// and the workflow page and the create form used to do that on every open
+	// just to learn which agents and sandboxes exist. The Model picker's
+	// "List models" button is what asks for it.
 	if (parts[1] === "runners" && !parts[2] && req.method === "GET") {
-		// `models` = the enabled allowlist for that agent (id, label, source), what
-		// the create form's Model picker offers next to "CLI default".
-		const allowlist = getAgentModelSettings().runners;
-		const runners = availableRunners().map((runner) => ({ ...runner, models: enabledModels(runner.id, allowlist) }));
+		const includeModels = url.searchParams.get("models") === "1";
+		const modelsByRunner = includeModels ? enabledModelsByRunner(getAgentModelSettings().runners) : null;
+		const runners = availableRunners().map((runner) =>
+			modelsByRunner ? { ...runner, models: modelsByRunner[runner.id] ?? [] } : runner,
+		);
 		sendJson(res, 200, { runners, sandboxes: availableSandboxes() });
 		return;
 	}

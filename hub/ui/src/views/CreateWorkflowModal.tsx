@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
 	ApiError,
 	getDockerMountSettings,
@@ -17,6 +17,7 @@ import {
 	type PermissionMode,
 	type Runner,
 	type RunnerAvailability,
+	type RunnerModel,
 	type Sandbox,
 	type SandboxAvailability,
 	type Template,
@@ -50,7 +51,10 @@ import styles from "./CreateWorkflowModal.module.css";
  * reports it can actually run (`GET /api/runners`), never from the static
  * option lists below: an agent CLI that isn't installed, or a docker whose
  * daemon isn't reachable, is not offered at all rather than offered and left
- * to fail at the workflow's first step.
+ * to fail at the workflow's first step. That probe does not include models.
+ * The Model field stays on CLI default until "List models" (`?models=1`),
+ * because building the catalog reads each CLI's config and used to stall the
+ * hub every time this dialog opened.
  *
  * The conversation picker under the runtime is the "run this workflow on a
  * conversation you're already having" path. It reads the chosen runtime's
@@ -220,6 +224,12 @@ export function CreateWorkflowModal({
 	const [runners, setRunners] = useState<RunnerAvailability[]>([]);
 	const [sandboxes, setSandboxes] = useState<SandboxAvailability[]>([]);
 	const [loadingRunners, setLoadingRunners] = useState(true);
+	// Null until "List models". Kept apart from `runners` so the install probe
+	// (which does not carry models) cannot wipe a list that already arrived.
+	const [modelOptions, setModelOptions] = useState<Partial<Record<Runner, RunnerModel[]>> | null>(null);
+	const [loadingModels, setLoadingModels] = useState(false);
+	const [modelsError, setModelsError] = useState<string | null>(null);
+	const modelsRequest = useRef(0);
 	// True when the GET /api/runners probe threw (hub down / network blip).
 	// Distinct from "probe returned no installed runners": a failed probe must
 	// NOT silently degrade to offering both, so it surfaces an explicit error
@@ -285,6 +295,10 @@ export function CreateWorkflowModal({
 		setBrowsing(false);
 		setLoadingRunners(true);
 		setProbeFailed(false);
+		modelsRequest.current += 1;
+		setModelOptions(null);
+		setLoadingModels(false);
+		setModelsError(null);
 		setConversations([]);
 		setConversationTotal(0);
 		setConversationId("");
@@ -336,6 +350,27 @@ export function CreateWorkflowModal({
 	// The model a runner starts on: the clone source's, only while the runner is
 	// the one the source used (an id belongs to one CLI); otherwise CLI default.
 	const modelFor = (next: Runner): string => (source?.model && source.harness === next ? source.model : "");
+
+	const listModels = (): void => {
+		const request = ++modelsRequest.current;
+		setLoadingModels(true);
+		setModelsError(null);
+		void listHostCapabilities({ models: true })
+			.then((caps) => {
+				if (modelsRequest.current !== request) return;
+				const next: Partial<Record<Runner, RunnerModel[]>> = {};
+				for (const entry of caps.runners) next[entry.id] = entry.models ?? [];
+				setModelOptions(next);
+			})
+			.catch(() => {
+				if (modelsRequest.current !== request) return;
+				setModelsError("Couldn't load models. The workflow can still use the CLI default.");
+			})
+			.finally(() => {
+				if (modelsRequest.current === request) setLoadingModels(false);
+			});
+	};
+
 	const changeRunner = (next: Runner): void => {
 		setRunner(next);
 		setModel(modelFor(next));
@@ -473,12 +508,18 @@ export function CreateWorkflowModal({
 		.map((r) => RUNNER_OPTIONS.find((o) => o.value === r.id))
 		.filter((o): o is { value: Runner; label: string; description: string } => o !== undefined);
 	const probeDone = !loadingRunners && !probeFailed;
-	// CLI default + the models Settings has enabled for the selected agent. A clone
-	// whose source already uses an id Settings has since disabled keeps it as an
-	// extra option (grandfathered) rather than silently switching models.
-	const enabledModels = runners.find((r) => r.id === runner)?.models ?? [];
+	// CLI default until "List models". After that, the models Settings has enabled
+	// for the selected agent. A clone whose source already uses an id Settings has
+	// since disabled keeps it as an extra option (grandfathered) rather than
+	// silently switching models. Before the list lands the source id is shown
+	// plainly, so the select still has an option for the value it holds.
+	const modelsLoaded = modelOptions !== null;
+	const enabledModels = modelOptions?.[runner] ?? [];
 	const grandfathered =
-		source?.model && source.harness === runner && !enabledModels.some((m) => m.id === source.model) ? source.model : null;
+		modelsLoaded && source?.model && source.harness === runner && !enabledModels.some((m) => m.id === source.model)
+			? source.model
+			: null;
+	const unloadedModel = !modelsLoaded && model !== "" ? model : null;
 	const noInstalled = probeDone && installedOptions.length === 0;
 	// Same rule as the runners above, for the same reason: a sandbox this host
 	// can't run is not offered at all. Without docker the selector is left with
@@ -716,29 +757,47 @@ export function CreateWorkflowModal({
 				<Field
 					label="Model"
 					hint={
-						model === ""
-							? "The agent's own CLI picks the model. Enable more models in Settings > Agent models."
-							: cloning && model === source?.model
-								? "Copied from the original workflow."
-								: "Applies from the next step this workflow runs."
+						!modelsLoaded
+							? model === ""
+								? "CLI default until you list models. List models loads the ones enabled in Settings for this agent."
+								: "List models to see the other models enabled in Settings for this agent."
+							: model === ""
+								? "The agent's own CLI picks the model. Enable more models in Settings > Agent models."
+								: cloning && model === source?.model
+									? "Copied from the original workflow."
+									: "Applies from the next step this workflow runs."
 					}
+					{...(modelsError ? { error: modelsError } : {})}
 				>
 					{(props) => (
-						<select
-							{...props}
-							className="select"
-							value={model}
-							disabled={runnerDisabled}
-							onChange={(ev) => setModel(ev.target.value)}
-						>
-							<option value="">CLI default</option>
-							{grandfathered && <option value={grandfathered}>{grandfathered} (not enabled in Settings)</option>}
-							{enabledModels.map((m) => (
-								<option key={m.id} value={m.id}>
-									{m.label === m.id ? m.id : `${m.label} (${m.id})`}
-								</option>
-							))}
-						</select>
+						<div className={styles.modelRow}>
+							<select
+								{...props}
+								className="select"
+								value={model}
+								disabled={runnerDisabled}
+								onChange={(ev) => setModel(ev.target.value)}
+							>
+								<option value="">CLI default</option>
+								{unloadedModel && <option value={unloadedModel}>{unloadedModel}</option>}
+								{grandfathered && <option value={grandfathered}>{grandfathered} (not enabled in Settings)</option>}
+								{enabledModels.map((m) => (
+									<option key={m.id} value={m.id}>
+										{m.label === m.id ? m.id : `${m.label} (${m.id})`}
+									</option>
+								))}
+							</select>
+							<button
+								type="button"
+								className={`btn btn--sm${loadingModels ? " btn--busy" : ""}`}
+								disabled={loadingModels}
+								aria-busy={loadingModels}
+								aria-label={loadingModels ? "Loading models" : undefined}
+								onClick={listModels}
+							>
+								{loadingModels ? <span className="spinner" aria-hidden="true" /> : "List models"}
+							</button>
+						</div>
 					)}
 				</Field>
 
