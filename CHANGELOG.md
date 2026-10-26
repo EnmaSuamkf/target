@@ -281,6 +281,17 @@ The current version is reported by every instance to the central server (see
 
 ### Fixed
 
+- **The hub's HTTP latency no longer blocks on availability probes.** The
+  agent-CLI and docker probes ran `spawnSync` on the event loop, so every
+  `GET /api/runners`, sync heartbeat and workflow create stalled the whole hub
+  for up to a second (about 900 ms of timer lag on the dev box, more with Docker
+  Desktop), and `GET /health` waited behind them. The probes are asynchronous now,
+  with the same timeouts and the same "can't answer means not installed" rules.
+  Their answers are cached and refreshed at startup and every 60 s. `GET
+  /api/runners` and the sync payload read the cache, and the create route probes
+  only the runner or docker it selected, and only when the cache doesn't already
+  say it is available. The 400 answers are unchanged.
+
 - **The hub no longer re-announces every workflow to the report server on each
   restart.** `announceWorkflows()` ran once per daemon start and
   unconditionally re-sent every known workflow's `workflow.updated` and
