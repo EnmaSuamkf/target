@@ -23,7 +23,16 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-test-runner-"));
 process.env.TARGET_HOME = tmpHome;
 process.env.AWB_HOME = tmpHome;
 
-const { _impl: awbImpl, availableRunners, createAwbHook, harnessResumeCommand, harnessResumeEnv, hookRuntime, runnerAdapterExists } = await import("./awb.ts");
+const {
+	_impl: awbImpl,
+	availableRunners,
+	createAwbHook,
+	harnessResumeCommand,
+	harnessResumeEnv,
+	hookRuntime,
+	refreshAvailableRunners,
+	runnerAdapterExists,
+} = await import("./awb.ts");
 const { readTokenUsage } = await import("./transcript.ts");
 const { loadConfig } = await import("./config.ts");
 const { createServer } = await import("./server.ts");
@@ -154,7 +163,7 @@ test("a copilot docker resume always forwards the token variable by NAME only (t
 	assert.ok(!claude.includes("COPILOT_GITHUB_TOKEN"), claude);
 });
 
-test("availableRunners reads a runner as not installed when its awb adapter file is missing", (t) => {
+test("availableRunners reads a runner as not installed when its awb adapter file is missing", async (t) => {
 	// The suite's setup stubs the adapter probe to true; put the real one back
 	// for this test and point AWB_DIR at a checkout we control.
 	const awbDir = fs.mkdtempSync(path.join(os.tmpdir(), "target-awb-adapters-"));
@@ -162,17 +171,22 @@ test("availableRunners reads a runner as not installed when its awb adapter file
 	const originalProbe = awbImpl.adapterExists;
 	process.env.AWB_DIR = awbDir;
 	awbImpl.adapterExists = runnerAdapterExists;
-	t.after(() => {
+	t.after(async () => {
 		process.env.AWB_DIR = originalDir;
 		if (originalDir === undefined) delete process.env.AWB_DIR;
 		awbImpl.adapterExists = originalProbe;
 		fs.rmSync(awbDir, { recursive: true, force: true });
+		await refreshAvailableRunners();
 	});
-	const copilot = () => availableRunners().find((r) => r.id === "copilot")?.installed;
-	assert.equal(copilot(), false, "no adapter file: the broker would hang the step");
+	// The adapter check runs inside the refresh, so each answer is read after one.
+	const copilot = async () => {
+		await refreshAvailableRunners();
+		return availableRunners().find((r) => r.id === "copilot")?.installed;
+	};
+	assert.equal(await copilot(), false, "no adapter file: the broker would hang the step");
 	fs.mkdirSync(path.join(awbDir, "adapters", "spawn-runner"), { recursive: true });
 	fs.writeFileSync(path.join(awbDir, "adapters", "spawn-runner", "copilot.ts"), "");
-	assert.equal(copilot(), true);
+	assert.equal(await copilot(), true);
 	assert.equal(availableRunners().find((r) => r.id === "cursor")?.installed, false, "still missing cursor.ts");
 });
 

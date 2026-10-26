@@ -565,11 +565,13 @@ export function runnerBinary(runner: PublishableRunner): string {
  * run, instead of offering both unconditionally.
  *
  * Probed with `<binary> --version`, which both CLIs ship and which exits 0
- * with no side effects; `spawnSync` keeps it local and synchronous so the
- * route handler can call it inline. A missing binary surfaces as an `ENOENT`
- * error with `status === null`, and a hung one is killed after the timeout
- * (also `status === null`) — both read as "not installed", the safe default
- * for something that can't answer `--version`.
+ * with no side effects. The probe is asynchronous (`spawn`), and its answer is
+ * cached: `availableRunners()` only reads the last answer and never shells
+ * out, so a slow CLI can't stall the event loop under an HTTP request or a
+ * sync heartbeat. `refreshAvailableRunners()` is what asks the CLIs again.
+ * A missing binary surfaces as an `error` event, and a hung one is killed at
+ * the timeout — both read as "not installed", the safe default for something
+ * that can't answer `--version`.
  */
 // Indirection so tests can force a runner to read as uninstalled without
 // uninstalling a real CLI — both are installed on the dev/CI box, so the
@@ -577,10 +579,11 @@ export function runnerBinary(runner: PublishableRunner): string {
 // can only be exercised against an uninstalled runner by swapping this. Same
 // seam shape terminal.ts uses for its spawn.
 //
-// `spawn` is the same seam for the one long-running command in here: the
-// on-demand `docker build` of a missing sandbox image (`ensureSandboxImage`),
-// which is async precisely because it takes minutes and must not block the
-// hub's event loop the way the synchronous probes can afford to.
+// `spawn` is the seam for every async command in here: the availability probes
+// (`refreshAvailableRunners`, `refreshDockerAvailable`) and the on-demand
+// `docker build` of a missing sandbox image (`ensureSandboxImage`), which takes
+// minutes and must not block the hub's event loop. `spawnSync` is left only for
+// `sandboxImageExists`, the one synchronous `docker` call in this file.
 //
 // `adapterExists` is the seam for the adapter-file guard in `availableRunners`
 // (the test setup stubs it to true so the suite doesn't depend on the vendored
@@ -600,18 +603,85 @@ export function runnerAdapterExists(runner: PublishableRunner): boolean {
 	return fs.existsSync(path.join(awbCheckoutDir(), "adapters", "spawn-runner", `${runner}.ts`));
 }
 
-export function availableRunners(): { id: PublishableRunner; installed: boolean }[] {
-	return PUBLISHABLE_RUNNERS.map((id) => {
-		// A broker without the adapter doesn't reject `spawn:<runner>`: it stores
-		// the event and the step hangs until its timeout. An outdated awb checkout
-		// must therefore read as "not installed" even when the CLI is on PATH.
-		if (!_impl.adapterExists(id)) return { id, installed: false };
-		const result = _impl.spawnSync(runnerBinary(id), ["--version"], {
-			stdio: ["ignore", "pipe", "pipe"],
-			timeout: 5000,
-		});
-		return { id, installed: result.status === 0 };
+/** How long one agent CLI gets to answer `--version` before it reads as not installed. */
+const RUNNER_PROBE_TIMEOUT_MS = 5000;
+
+/** The last `refreshAvailableRunners()` answer, and when it was taken. `null` until the first one lands. */
+let runnerProbe: { runners: { id: PublishableRunner; installed: boolean }[]; at: number } | null = null;
+let runnerRefresh: Promise<{ id: PublishableRunner; installed: boolean }[]> | null = null;
+
+/**
+ * Runs `<bin> <args>` and resolves whether it exited 0 within `timeoutMs`.
+ * Never rejects: a missing binary (an `error` event, ENOENT), a non-zero exit,
+ * and a hung process killed at the timeout all resolve `false`, the same
+ * "can't answer → unavailable" default the synchronous probes had.
+ */
+function probeCommand(bin: string, args: string[], timeoutMs: number): Promise<boolean> {
+	return new Promise((resolve) => {
+		let settled = false;
+		let timer: NodeJS.Timeout | undefined;
+		const finish = (ok: boolean) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve(ok);
+		};
+		let child: cp.ChildProcess;
+		try {
+			child = _impl.spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+		} catch {
+			finish(false);
+			return;
+		}
+		timer = setTimeout(() => {
+			child.kill();
+			finish(false);
+		}, timeoutMs);
+		// The output is never read, but draining it keeps a chatty CLI from
+		// blocking on a full pipe until the timeout fires.
+		child.stdout?.resume();
+		child.stderr?.resume();
+		child.on("error", () => finish(false));
+		child.on("close", (code) => finish(code === 0));
 	});
+}
+
+/**
+ * Asks each agent CLI whether it's installed and stores the answer. A second
+ * caller while a refresh is still running gets that same in-flight promise
+ * back (single-flight), so overlapping requests and the refresh timer never
+ * start a second set of probes.
+ */
+export function refreshAvailableRunners(): Promise<{ id: PublishableRunner; installed: boolean }[]> {
+	if (runnerRefresh) return runnerRefresh;
+	runnerRefresh = (async () => {
+		const runners = await Promise.all(
+			PUBLISHABLE_RUNNERS.map(async (id) => {
+				// A broker without the adapter doesn't reject `spawn:<runner>`: it stores
+				// the event and the step hangs until its timeout. An outdated awb checkout
+				// must therefore read as "not installed" even when the CLI is on PATH.
+				if (!_impl.adapterExists(id)) return { id, installed: false };
+				const installed = await probeCommand(runnerBinary(id), ["--version"], RUNNER_PROBE_TIMEOUT_MS);
+				return { id, installed };
+			}),
+		);
+		runnerProbe = { runners, at: Date.now() };
+		return runners;
+	})().finally(() => {
+		runnerRefresh = null;
+	});
+	return runnerRefresh;
+}
+
+/**
+ * Which runners the last refresh found installed. Synchronous and cache-only:
+ * it never spawns, so the route handler and the sync payload can call it
+ * inline. Before the first refresh every runner reads as not installed — the
+ * same default an unanswered probe gets.
+ */
+export function availableRunners(): { id: PublishableRunner; installed: boolean }[] {
+	if (runnerProbe) return runnerProbe.runners.map((runner) => ({ ...runner }));
+	return PUBLISHABLE_RUNNERS.map((id) => ({ id, installed: false }));
 }
 
 /**
@@ -662,25 +732,30 @@ export function defaultSandboxImage(runner: PublishableRunner = "claude"): strin
  * How long a docker probe answer is reused. Docker availability is not static
  * — the operator can start Docker Desktop, or the daemon can die, while the
  * hub keeps running — so the answer expires instead of being resolved once at
- * boot. A minute is long enough that the create form and the create route
- * don't shell out per request, and short enough that starting the daemon shows
- * up without restarting the hub.
+ * boot. A minute is long enough that the image path and the refresh timer
+ * don't run `docker info` on every call, and short enough that starting the
+ * daemon shows up without restarting the hub.
  */
 const DOCKER_PROBE_TTL_MS = 60_000;
+/** How long `docker info` gets. Longer than the runners': it talks to the daemon over its socket, and on a cold Docker Desktop that round-trip is not instant. */
+const DOCKER_PROBE_TIMEOUT_MS = 10_000;
 
 let dockerProbe: { available: boolean; at: number } | null = null;
+let dockerRefresh: Promise<boolean> | null = null;
 
 /**
- * Forgets the cached probe, so the next `dockerAvailable()` asks docker again.
- * Exported for the tests that swap `_impl.spawnSync` — a cached answer from an
- * earlier test would otherwise outlive the seam it was measured through.
+ * Forgets the cached probe, so `dockerAvailable()` reads unavailable until the
+ * next `refreshDockerAvailable()`. Exported for the tests that swap the spawn
+ * seam — a cached answer from an earlier test would otherwise outlive the seam
+ * it was measured through.
  */
 export function clearDockerProbe(): void {
 	dockerProbe = null;
 }
 
 /**
- * Whether this host can actually run a `sandbox: "docker"` workflow.
+ * Asks docker whether this host can actually run a `sandbox: "docker"` workflow,
+ * and stores the answer.
  *
  * Probed with `docker info`, not `docker --version`: the binary being on PATH
  * proves nothing, since a `docker run` against a stopped daemon fails just as
@@ -688,22 +763,42 @@ export function clearDockerProbe(): void {
  * the cheapest command that only succeeds when the CLI can reach a daemon, so
  * it answers the question the create form is really asking.
  *
- * Same `spawnSync` seam and same "can't answer → unavailable" default as
- * `availableRunners` above: a missing binary surfaces as `status === null`,
- * and so does a daemon that hangs past the timeout. The timeout is longer than
- * the runners' because `info` talks to the daemon over its socket, and on a
- * cold Docker Desktop that round-trip is not instant.
+ * An answer younger than `DOCKER_PROBE_TTL_MS` is reused unless `force` is set,
+ * so callers can ask on every request without re-running `docker info`. Like the
+ * runner refresh, a call during an in-flight probe gets that same promise.
+ */
+export function refreshDockerAvailable(force = false): Promise<boolean> {
+	if (dockerRefresh) return dockerRefresh;
+	if (!force && dockerProbe && Date.now() - dockerProbe.at < DOCKER_PROBE_TTL_MS) {
+		return Promise.resolve(dockerProbe.available);
+	}
+	dockerRefresh = probeCommand("docker", ["info", "--format", "{{.ServerVersion}}"], DOCKER_PROBE_TIMEOUT_MS)
+		.then((available) => {
+			dockerProbe = { available, at: Date.now() };
+			return available;
+		})
+		.finally(() => {
+			dockerRefresh = null;
+		});
+	return dockerRefresh;
+}
+
+/**
+ * Whether docker answered `info` at the last refresh. Synchronous and cache-only
+ * (see `availableRunners`). Before the first answer it reads unavailable — the
+ * "can't answer → unavailable" default.
  */
 export function dockerAvailable(): boolean {
-	const now = Date.now();
-	if (dockerProbe && now - dockerProbe.at < DOCKER_PROBE_TTL_MS) return dockerProbe.available;
-	const result = _impl.spawnSync("docker", ["info", "--format", "{{.ServerVersion}}"], {
-		stdio: ["ignore", "pipe", "pipe"],
-		timeout: 10_000,
-	});
-	const available = result.status === 0;
-	dockerProbe = { available, at: now };
-	return available;
+	return dockerProbe?.available ?? false;
+}
+
+/**
+ * When each cached answer was taken (epoch ms), or `null` before its first
+ * refresh. Lets the operator-facing state show how stale the create form's
+ * data is.
+ */
+export function probeCachedAt(): { runners: number | null; docker: number | null } {
+	return { runners: runnerProbe?.at ?? null, docker: dockerProbe?.at ?? null };
 }
 
 /**
@@ -713,7 +808,7 @@ export function dockerAvailable(): boolean {
  * offered rather than being offered and failing at the first step's spawn.
  *
  * `host` is unconditionally available — it is the hub running as itself, which
- * is what asked the question.
+ * is what asked the question. Cache-only, like `availableRunners`.
  */
 export function availableSandboxes(): { id: PublishableSandbox; available: boolean }[] {
 	return PUBLISHABLE_SANDBOXES.map((id) => ({ id, available: id === "docker" ? dockerAvailable() : true }));
@@ -792,7 +887,7 @@ export function imageBuildCommand(spec: BuildableImage): { cmd: string; args: st
 	};
 }
 
-/** Whether the docker daemon already has `image`. Same `spawnSync` seam (and same "can't answer → no" default) as the probes above. */
+/** Whether the docker daemon already has `image`. Still synchronous (`spawnSync`), and called only from the image path, never from the availability probes. Same "can't answer → no" default. */
 export function sandboxImageExists(image: string): boolean {
 	const result = _impl.spawnSync("docker", ["image", "inspect", image], {
 		stdio: ["ignore", "pipe", "pipe"],
@@ -871,7 +966,7 @@ export async function ensureSandboxImage(image: string, log: BuildLogger = () =>
 		// to the Docker daemon") would be buried under a paragraph about
 		// Dockerfiles. The workflow was created when docker WAS available; it can
 		// be again, and the step can be retried.
-		if (!dockerAvailable()) {
+		if (!(await refreshDockerAvailable())) {
 			return {
 				ok: false,
 				error: `docker is not available on this host (no docker on PATH, or the daemon isn't running), so this workflow's containerised step can't run. Start Docker and retry the step, or recreate the workflow on the host sandbox.`,

@@ -6,7 +6,7 @@
  */
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { refreshDockerGitHubToken } from "./awb.ts";
+import { refreshAvailableRunners, refreshDockerAvailable, refreshDockerGitHubToken } from "./awb.ts";
 import { ensureBundledCatalog } from "./bundled-bootstrap.ts";
 import { isInsecureReportUrl, loadConfig } from "./config.ts";
 import { listWorkflows } from "./db.ts";
@@ -33,6 +33,8 @@ function log(message: string, type: "info" | "warning" | "error" = "info"): void
  */
 const SWEEP_INTERVAL_MS = 60_000;
 const REMOTE_CLEANUP_RETRY_INTERVAL_MS = 30_000;
+// How often the agent-CLI and docker availability caches are refreshed in the background.
+const AVAILABILITY_REFRESH_INTERVAL_MS = 60_000;
 
 export function startHub(): void {
 	const cfg = loadConfig();
@@ -76,6 +78,18 @@ export function startHub(): void {
 		}
 	}, SWEEP_INTERVAL_MS);
 	sweep.unref();
+
+	// Availability (agent CLIs, docker) is answered from a cache that the create
+	// form and the sync payload read synchronously. Fill it now, so the first
+	// requests have an answer, and keep it fresh on a timer; the probes are
+	// asynchronous, so a slow CLI never holds up the event loop.
+	const refreshAvailability = () => {
+		void refreshAvailableRunners().catch((err) => log(`availability refresh failed: ${String(err)}`, "warning"));
+		void refreshDockerAvailable(true).catch((err) => log(`docker availability refresh failed: ${String(err)}`, "warning"));
+	};
+	refreshAvailability();
+	const availabilityRefresh = setInterval(refreshAvailability, AVAILABILITY_REFRESH_INTERVAL_MS);
+	availabilityRefresh.unref();
 
 	// Scheduled workflows: one tick now (boot) and one every 30s. Boot matters:
 	// a run that came due while the hub was down is reported missed (or fired,
