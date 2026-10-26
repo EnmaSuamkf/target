@@ -92,6 +92,11 @@ export interface RunnerModel {
 /** One catalog entry in the Settings allowlist, with whether it is enabled. */
 export interface ModelSettingsEntry extends RunnerModel {
 	enabled: boolean;
+	/** Context window (tokens) in effect: the operator's value, else `defaultWindow`. */
+	contextWindow: number;
+	/** What the hub uses when the operator sets nothing. */
+	defaultWindow: number;
+	windowOverridden: boolean;
 }
 
 export interface RunnerModelSettings {
@@ -107,7 +112,7 @@ export interface ModelSettings {
 
 /** `PUT /api/settings/models` body: enabled catalog ids and custom ids per agent. */
 export interface ModelSettingsInput {
-	runners: Partial<Record<Runner, { enabled: string[]; custom: string[] }>>;
+	runners: Partial<Record<Runner, { enabled: string[]; custom: string[]; windows: Record<string, number> }>>;
 }
 
 /**

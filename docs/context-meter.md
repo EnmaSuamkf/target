@@ -140,6 +140,12 @@ If no source names the model, the window is the fallback.
 
 `contextWindowForModel(model, stated)` in `hub/models.ts`, in this order:
 
+0. **Settings > Agent models.** Each model of each agent has a *Context window*
+   field. Empty uses the default shown as its placeholder (steps 1-4 below);
+   type `200k`, `1m` or `272000` and the meter divides by that instead. It is per
+   agent because the window depends on the plan the company has with the
+   provider, and the same model id can differ between harnesses. A dated id
+   follows its base model's value.
 1. **Your override.** `modelContextWindows[<model id>]` in
    `~/.target/config.json` (the id is matched case-insensitively).
 2. **The window the run stated.** This only exists for Cursor: the

@@ -22,7 +22,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { COPILOT_MODEL_CONTEXT_WINDOWS, MODEL_CONTEXT_WINDOWS } from "./models.ts";
+import { cursorConfiguredContext } from "./transcript.ts";
+import { COPILOT_MODEL_CONTEXT_WINDOWS, MODEL_CONTEXT_WINDOWS, defaultContextWindow } from "./models.ts";
 
 export type ModelSource = "seed" | "live" | "custom";
 
@@ -32,12 +33,28 @@ export interface CatalogModel {
 	source: ModelSource;
 }
 
+/** A catalog model as Settings shows it: with the window the hub uses today and the one it would use by default. */
+export interface ModelWindowView {
+	/** Window in effect: the operator's value when set, else `defaultWindow`. */
+	contextWindow: number;
+	/** What the hub would use with no override (table, else the fallback). */
+	defaultWindow: number;
+	/** True when `contextWindow` is the operator's own value. */
+	windowOverridden: boolean;
+}
+
 /** What Settings stores for one runner. */
 export interface RunnerModelAllowlist {
 	/** Enabled catalog ids; `null` = never saved, so every seed/live id counts as enabled. */
 	enabled: string[] | null;
 	/** Operator-added ids. Always enabled: adding one is the act of enabling it. */
 	custom: string[];
+	/**
+	 * Context window (tokens) the operator set for a model of this runner. Only
+	 * overrides are stored: a model without an entry uses `defaultContextWindow`.
+	 * It depends on the provider plan the company has, so it is per runner.
+	 */
+	windows: Record<string, number>;
 }
 
 export type ModelAllowlist = Record<string, RunnerModelAllowlist>;
@@ -46,6 +63,9 @@ export const MODEL_RUNNERS = ["claude", "free-code", "cursor", "copilot"] as con
 
 const CLAUDE_ALIASES = ["opus", "sonnet", "haiku", "fable"];
 const MAX_MODEL_ID_LENGTH = 200;
+/** Sanity bounds for an operator-set window: below 1k or above 100M is a typo, not a model. */
+const MIN_CONTEXT_WINDOW = 1_000;
+const MAX_CONTEXT_WINDOW = 100_000_000;
 
 export class ModelSettingsError extends Error {
 	code: string;
@@ -154,7 +174,7 @@ export function runnerCatalog(runner: string, custom: string[] = [], home: strin
 
 export interface RunnerModelView {
 	/** Every known id, with whether it is currently enabled. */
-	models: (CatalogModel & { enabled: boolean })[];
+	models: (CatalogModel & ModelWindowView & { enabled: boolean })[];
 	custom: string[];
 }
 
@@ -162,11 +182,23 @@ export interface RunnerModelView {
 export function modelSettingsView(allowlist: ModelAllowlist, home: string = os.homedir()): Record<string, RunnerModelView> {
 	const view: Record<string, RunnerModelView> = {};
 	for (const runner of MODEL_RUNNERS) {
-		const entry = allowlist[runner] ?? { enabled: null, custom: [] };
+		const entry = allowlist[runner] ?? { enabled: null, custom: [], windows: {} };
 		const enabled = entry.enabled ? new Set(entry.enabled) : null;
 		const catalog = runnerCatalog(runner, entry.custom, home);
 		view[runner] = {
-			models: catalog.map((m) => ({ ...m, enabled: m.source === "custom" || enabled === null || enabled.has(m.id) })),
+			models: catalog.map((m) => {
+				// Cursor offers one id at several sizes and its CLI config says which one this
+				// machine runs; the meter prefers that over the table, so the default shown must too.
+				const defaultWindow = (runner === "cursor" ? cursorConfiguredContext(m.id) : null) ?? defaultContextWindow(m.id, runner);
+				const override = entry.windows[m.id];
+				return {
+					...m,
+					enabled: m.source === "custom" || enabled === null || enabled.has(m.id),
+					contextWindow: override ?? defaultWindow,
+					defaultWindow,
+					windowOverridden: override !== undefined,
+				};
+			}),
 			custom: [...entry.custom],
 		};
 	}
@@ -195,7 +227,7 @@ export function parseModelAllowlist(body: unknown, home: string = os.homedir()):
 		if (!(MODEL_RUNNERS as readonly string[]).includes(runner)) {
 			throw new ModelSettingsError("invalid_runner", `unknown runner: ${runner}`);
 		}
-		const entry = (raw ?? {}) as { enabled?: unknown; custom?: unknown };
+		const entry = (raw ?? {}) as { enabled?: unknown; custom?: unknown; windows?: unknown };
 		const list = (value: unknown, field: string): string[] => {
 			if (value === undefined) return [];
 			if (!Array.isArray(value)) throw new ModelSettingsError("invalid_models", `${runner}.${field} must be an array of model ids`);
@@ -213,7 +245,20 @@ export function parseModelAllowlist(body: unknown, home: string = os.homedir()):
 		for (const id of enabled ?? []) {
 			if (!known.has(id)) throw new ModelSettingsError("unknown_model", `${id} is not a known ${runner} model; add it as a custom id first`);
 		}
-		out[runner] = { enabled, custom };
+		const windows: Record<string, number> = {};
+		if (entry.windows !== undefined && entry.windows !== null) {
+			if (typeof entry.windows !== "object" || Array.isArray(entry.windows)) {
+				throw new ModelSettingsError("invalid_window", `${runner}.windows must be an object of model id → tokens`);
+			}
+			for (const [id, tokens] of Object.entries(entry.windows as Record<string, unknown>)) {
+				if (!known.has(id)) throw new ModelSettingsError("unknown_model", `${id} is not a known ${runner} model; add it as a custom id first`);
+				if (typeof tokens !== "number" || !Number.isInteger(tokens) || tokens < MIN_CONTEXT_WINDOW || tokens > MAX_CONTEXT_WINDOW) {
+					throw new ModelSettingsError("invalid_window", `${runner}.windows.${id} must be a whole number of tokens between ${MIN_CONTEXT_WINDOW} and ${MAX_CONTEXT_WINDOW}`);
+				}
+				windows[id] = tokens;
+			}
+		}
+		out[runner] = { enabled, custom, windows };
 	}
 	return out;
 }

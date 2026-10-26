@@ -22,6 +22,17 @@
 	gap: var(--space-2);
 }
 
+.row {
+	display: flex;
+	align-items: center;
+	gap: var(--space-3);
+}
+
+.row .option {
+	flex: 1;
+	min-width: 0;
+}
+
 .option {
 	display: flex;
 	align-items: flex-start;
@@ -32,6 +43,7 @@
 
 .customRow {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
 	justify-content: space-between;
 	gap: var(--space-3);
@@ -47,4 +59,16 @@
 .addRow :global(.input) {
 	flex: 1;
 	min-width: 0;
+}
+
+.window {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	margin-left: auto;
+	flex-shrink: 0;
+}
+
+.window :global(.input) {
+	width: 7rem;
 }
