@@ -210,9 +210,14 @@ export async function listWorkflows(options: { archived?: ArchivedFilter } = {})
  * What this host can actually run — which agent CLIs are installed, and which
  * sandboxes are usable — so the create form offers only those. One request for
  * both: the form needs them together and neither is useful on its own.
+ *
+ * Models are left out unless `models` is set. Listing them reads each CLI's
+ * config and is what the "List models" button asks for; opening a workflow or
+ * the create form must not pay for it.
  */
-export async function listHostCapabilities(): Promise<HostCapabilities> {
-	return await request<HostCapabilities>("/api/runners");
+export async function listHostCapabilities(options?: { models?: boolean }): Promise<HostCapabilities> {
+	const query = options?.models ? "?models=1" : "";
+	return await request<HostCapabilities>(`/api/runners${query}`);
 }
 
 // --- conversations (the source a workflow can be created from) ---

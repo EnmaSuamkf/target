@@ -109,6 +109,36 @@ kbd,
 	box-shadow: none;
 }
 
+/* A request in flight: the label is replaced by `.spinner`, and the faded
+   disabled look would hide the only sign that something is happening. */
+.btn--busy:disabled {
+	opacity: 1;
+	cursor: progress;
+}
+
+.spinner {
+	width: 0.9em;
+	height: 0.9em;
+	border: 2px solid currentColor;
+	border-right-color: transparent;
+	border-radius: 50%;
+	display: inline-block;
+	flex: none;
+	animation: spinner-rotate 0.7s linear infinite;
+}
+
+@keyframes spinner-rotate {
+	to {
+		transform: rotate(1turn);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.spinner {
+		animation: none;
+	}
+}
+
 .btn--primary {
 	background: var(--accent-600);
 	border-color: var(--accent-600);

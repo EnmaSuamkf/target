@@ -76,7 +76,7 @@ export type Runner = (typeof RUNNERS)[number];
 export interface RunnerAvailability {
 	id: Runner;
 	installed: boolean;
-	/** Enabled models for this agent (Settings > Agent models); what a workflow's Model picker may offer. */
+	/** Enabled models for this agent, present only when the caller asked with `?models=1`. */
 	models?: RunnerModel[];
 }
 

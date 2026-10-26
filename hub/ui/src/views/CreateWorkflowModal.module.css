@@ -18,6 +18,22 @@
 	flex: none;
 }
 
+/* Model select + the List models button. Same shape as the directory row. */
+.modelRow {
+	display: flex;
+	gap: var(--space-2);
+}
+
+.modelRow select {
+	flex: 1;
+	min-width: 0;
+}
+
+.modelRow button {
+	flex: none;
+	white-space: nowrap;
+}
+
 /* Conversation picker: a search row over a select row, each shaped like
    .workdirRow above — a control that takes all the room, a fixed action beside
    it. Tighter than the gap between fields, because the two rows are one control. */

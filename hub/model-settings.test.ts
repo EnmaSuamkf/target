@@ -1,6 +1,6 @@
 /**
  * Per-agent model allowlist: seeded enabled, replaced by PUT, custom ids, and
- * GET /api/runners filtering `models[]` to the enabled ids.
+ * GET /api/runners?models=1 filtering `models[]` to the enabled ids.
  */
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -51,9 +51,19 @@ interface RunnersBody {
 }
 
 async function runnerModels(id: string) {
-	const body = (await (await fetch(`${baseUrl}/api/runners`, { headers })).json()) as RunnersBody;
+	const body = (await (await fetch(`${baseUrl}/api/runners?models=1`, { headers })).json()) as RunnersBody;
 	return body.runners.find((r) => r.id === id)!.models;
 }
+
+test("GET /api/runners leaves models out unless models=1", async () => {
+	const plain = (await (await fetch(`${baseUrl}/api/runners`, { headers })).json()) as {
+		runners: { id: string; models?: unknown }[];
+	};
+	assert.ok(plain.runners.length > 0);
+	assert.ok(plain.runners.every((r) => !("models" in r)));
+	const asked = (await (await fetch(`${baseUrl}/api/runners?models=1`, { headers })).json()) as RunnersBody;
+	assert.ok(asked.runners.every((r) => Array.isArray(r.models)));
+});
 
 test("first use: every seeded and live id is enabled, merged from all sources", async () => {
 	const body = (await (await fetch(`${baseUrl}/api/settings/models`, { headers })).json()) as View;
