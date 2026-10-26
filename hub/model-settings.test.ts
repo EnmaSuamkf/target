@@ -110,3 +110,44 @@ test("PUT rejects unknown enabled ids, bad ids and unknown runners, and needs th
 	assert.equal((await put({ runners: { nope: {} } })).status, 400);
 	assert.equal((await put({ runners: {} }, { "content-type": "application/json" })).status, 401);
 });
+
+test("context window: default shown, operator value saved, validated and used by the meter", async () => {
+	const { contextWindowForModel } = await import("./models.ts");
+	const put = (body: unknown) => fetch(`${baseUrl}/api/settings/models`, { method: "PUT", headers, body: JSON.stringify(body) });
+	const view = async () => ((await (await fetch(`${baseUrl}/api/settings/models`, { headers })).json()) as any).settings.runners;
+
+	const before = (await view()).claude.models.find((m: any) => m.id === "claude-sonnet-5");
+	assert.equal(before.defaultWindow, 1_000_000);
+	assert.equal(before.contextWindow, 1_000_000);
+	assert.equal(before.windowOverridden, false);
+
+	assert.equal((await put({ runners: { claude: { windows: { "claude-sonnet-5": 200_000 } } } })).status, 200);
+	const after = (await view()).claude.models.find((m: any) => m.id === "claude-sonnet-5");
+	assert.equal(after.contextWindow, 200_000);
+	assert.equal(after.defaultWindow, 1_000_000);
+	assert.equal(after.windowOverridden, true);
+
+	// Per agent, and a dated id follows its base model.
+	assert.equal(contextWindowForModel("claude-sonnet-5", null, "claude"), 200_000);
+	assert.equal(contextWindowForModel("claude-sonnet-5-20260101", null, "claude"), 200_000);
+	assert.equal(contextWindowForModel("claude-sonnet-5", null, "cursor"), 1_000_000);
+
+	assert.equal((await put({ runners: { claude: { windows: { "claude-sonnet-5": 5 } } } })).status, 400);
+	assert.equal((await put({ runners: { claude: { windows: { "claude-sonnet-5": "200k" } } } })).status, 400);
+	assert.equal((await put({ runners: { claude: { windows: { nope: 200_000 } } } })).status, 400);
+
+	// Saving without windows resets to the default.
+	assert.equal((await put({ runners: { claude: {} } })).status, 200);
+	assert.equal(contextWindowForModel("claude-sonnet-5", null, "claude"), 1_000_000);
+});
+
+test("cursor: the default window shown is the size the Cursor CLI is configured for", async () => {
+	fs.writeFileSync(
+		path.join(tmpHome, ".cursor", "cli-config.json"),
+		JSON.stringify({ modelParameters: { "gpt-5.6-sol": [{ id: "context", value: "272k" }] } }),
+	);
+	const view = ((await (await fetch(`${baseUrl}/api/settings/models`, { headers })).json()) as any).settings.runners;
+	const sol = view.cursor.models.find((m: any) => m.id === "gpt-5.6-sol");
+	assert.equal(sol.defaultWindow, 272_000);
+	assert.equal(sol.contextWindow, 272_000);
+});

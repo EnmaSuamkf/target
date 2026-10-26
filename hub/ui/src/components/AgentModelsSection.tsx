@@ -17,6 +17,23 @@ const RUNNER_NAMES: Record<Runner, string> = {
 interface Draft {
 	enabled: string[];
 	custom: string[];
+	/** Context window text per model id, as typed ("" = use the default). */
+	windows: Record<string, string>;
+}
+
+/** "200k" / "1m" / "272000" → tokens, or null when it isn't a window. */
+function parseWindow(text: string): number | null {
+	const match = /^(\d+(?:\.\d+)?)\s*([km]?)$/i.exec(text.trim());
+	if (!match) return null;
+	const unit = match[2]!.toLowerCase();
+	const tokens = Math.round(Number(match[1]) * (unit === "m" ? 1_000_000 : unit === "k" ? 1_000 : 1));
+	return tokens >= 1_000 && tokens <= 100_000_000 ? tokens : null;
+}
+
+function formatWindow(tokens: number): string {
+	if (tokens >= 1_000_000 && tokens % 1_000_000 === 0) return `${tokens / 1_000_000}m`;
+	if (tokens >= 1_000 && tokens % 1_000 === 0) return `${tokens / 1_000}k`;
+	return String(tokens);
 }
 
 function draftsFrom(settings: ModelSettings): Partial<Record<Runner, Draft>> {
@@ -25,6 +42,7 @@ function draftsFrom(settings: ModelSettings): Partial<Record<Runner, Draft>> {
 		drafts[runner] = {
 			enabled: entry.models.filter((m) => m.source !== "custom" && m.enabled).map((m) => m.id),
 			custom: [...entry.custom],
+			windows: Object.fromEntries(entry.models.filter((m) => m.windowOverridden).map((m) => [m.id, formatWindow(m.contextWindow)])),
 		};
 	}
 	return drafts;
@@ -65,7 +83,7 @@ export function AgentModelsSection({ disabled = false }: { disabled?: boolean })
 	}, []);
 
 	const update = (runner: Runner, change: (draft: Draft) => Draft): void => {
-		setDrafts((prev) => ({ ...prev, [runner]: change(prev[runner] ?? { enabled: [], custom: [] }) }));
+		setDrafts((prev) => ({ ...prev, [runner]: change(prev[runner] ?? { enabled: [], custom: [], windows: {} }) }));
 		if (error) setError(null);
 	};
 
@@ -80,6 +98,21 @@ export function AgentModelsSection({ disabled = false }: { disabled?: boolean })
 		setNewCustom((prev) => ({ ...prev, [runner]: "" }));
 	};
 
+	const windowInput = (runner: Runner, id: string, defaultWindow: number): React.JSX.Element => (
+		<label className={modelStyles.window}>
+			<span className="hint">Context window</span>
+			<input
+				type="text"
+				className="input"
+				inputMode="text"
+				aria-label={`Context window for ${id}`}
+				placeholder={formatWindow(defaultWindow)}
+				value={drafts[runner]?.windows[id] ?? ""}
+				onChange={(ev) => update(runner, (d) => ({ ...d, windows: { ...d.windows, [id]: ev.target.value } }))}
+			/>
+		</label>
+	);
+
 	const submit = async (ev: React.FormEvent): Promise<void> => {
 		ev.preventDefault();
 		if (saving || !settings) return;
@@ -88,8 +121,21 @@ export function AgentModelsSection({ disabled = false }: { disabled?: boolean })
 		try {
 			// PUT replaces the whole allowlist, so agents not shown here (not
 			// installed) are sent back exactly as they were loaded.
-			const runners: Record<string, Draft> = {};
-			for (const [runner, draft] of Object.entries(drafts)) runners[runner] = draft;
+			const runners: Record<string, { enabled: string[]; custom: string[]; windows: Record<string, number> }> = {};
+			for (const [runner, draft] of Object.entries(drafts)) {
+				const windows: Record<string, number> = {};
+				for (const [id, text] of Object.entries(draft.windows)) {
+					if (text.trim() === "") continue;
+					const tokens = parseWindow(text);
+					if (tokens === null) {
+						setError(`Context window for ${id} must be a number of tokens like 200k, 1m or 272000.`);
+						setSaving(false);
+						return;
+					}
+					windows[id] = tokens;
+				}
+				runners[runner] = { enabled: draft.enabled, custom: draft.custom, windows };
+			}
 			const saved = await saveModelSettings({ runners });
 			setSettings(saved);
 			setDrafts(draftsFrom(saved));
@@ -110,7 +156,9 @@ export function AgentModelsSection({ disabled = false }: { disabled?: boolean })
 				Choose which models each installed agent may use. This list only controls what the Model picker offers
 				on a workflow; it does not pick a workflow&rsquo;s model, and a workflow that already uses a model you
 				untick keeps it. Leave a workflow on <strong>CLI default</strong> to let the agent&rsquo;s own CLI
-				decide. GitHub Copilot has no model list the hub can read without spending requests, so add its ids
+				decide. <strong>Context window</strong> is how many tokens the model&rsquo;s window holds on your provider plan;
+				it is what the context meter divides by. Leave it empty to use the default shown, or type a value
+				like <code>200k</code> or <code>1m</code> if your company&rsquo;s setup differs. GitHub Copilot has no model list the hub can read without spending requests, so add its ids
 				yourself.
 			</p>
 			{!settings && !error && <p className="hint">Loading…</p>}
@@ -118,7 +166,7 @@ export function AgentModelsSection({ disabled = false }: { disabled?: boolean })
 			{settings &&
 				installed.map((runner) => {
 					const entry = settings.runners[runner];
-					const draft = drafts[runner] ?? { enabled: [], custom: [] };
+					const draft = drafts[runner] ?? { enabled: [], custom: [], windows: {} };
 					const catalog = (entry?.models ?? []).filter((m) => m.source !== "custom");
 					return (
 						<fieldset key={runner} className={modelStyles.agent} disabled={disabled || saving}>
@@ -128,7 +176,7 @@ export function AgentModelsSection({ disabled = false }: { disabled?: boolean })
 							)}
 							<ul className={modelStyles.list}>
 								{catalog.map((model) => (
-									<li key={model.id}>
+									<li key={model.id} className={modelStyles.row}>
 										<label className={modelStyles.option}>
 											<input
 												type="checkbox"
@@ -148,6 +196,7 @@ export function AgentModelsSection({ disabled = false }: { disabled?: boolean })
 												{model.source === "live" && <span className="hint"> · found on this machine</span>}
 											</span>
 										</label>
+										{windowInput(runner, model.id, model.defaultWindow)}
 									</li>
 								))}
 								{draft.custom.map((id) => (
@@ -156,6 +205,7 @@ export function AgentModelsSection({ disabled = false }: { disabled?: boolean })
 											<code>{id}</code>
 											<span className="hint"> · custom</span>
 										</span>
+										{windowInput(runner, id, entry?.models.find((m) => m.id === id)?.defaultWindow ?? 200_000)}
 										<button
 											type="button"
 											className="btn btn--sm btn--ghost"

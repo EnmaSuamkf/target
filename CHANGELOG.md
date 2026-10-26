@@ -11,6 +11,13 @@ The current version is reported by every instance to the central server (see
 
 ### Added
 
+- **Context window per agent and model.** Settings > Agent models has a
+  *Context window* field on every model. Empty keeps the hub's default (shown as
+  the placeholder); a value such as `200k` or `1m` replaces it for that agent's
+  context meter, for companies whose provider plan differs from the published
+  window. Stored with the allowlist (`windows`), validated on `PUT
+  /api/settings/models`, and checked first by `contextWindowForModel`.
+
 - **Per-workflow model selection.** Settings > Agent models is an allowlist of
   models per installed agent (seeded from the hub's tables, Cursor's
   `cli-config.json`, free-code's `models.json`, Claude aliases and your own custom

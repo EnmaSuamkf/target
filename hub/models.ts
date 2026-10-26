@@ -13,8 +13,11 @@
  * So the window is derived from the model that actually produced the turns
  * (transcript.ts reads the model id per harness: `message.model` on claude's
  * assistant lines, the `model_change` record's `modelId` on free-code's), and
- * looked up here. Three layers, in order:
+ * looked up here. Four layers, in order:
  *
+ *   0. the window set in Settings > Agent models for that agent and model (it
+ *      depends on the plan the company has with the provider, so it is per
+ *      agent; unset = the layers below are the default),
  *   1. the operator's `modelContextWindows` override in ~/.target/config.json,
  *   2. this table (exact id, then longest matching id prefix, so a dated
  *      variant like `claude-sonnet-5-20260101` resolves to `claude-sonnet-5`),
@@ -27,6 +30,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { targetDir } from "./config.ts";
+import { getAgentModelSettings } from "./db.ts";
 
 /**
  * The window assumed for a model that is in neither the override map nor the
@@ -273,7 +277,7 @@ function matchesAtBoundary(id: string, key: string): boolean {
  * documented fallback, never a throw: a missing model id is a transcript that
  * hasn't got an assistant turn yet, which is normal, not an error.
  *
- * Lookup order is override → `stated` → exact table entry → longest matching
+ * Lookup order is Settings window (needs `harness`) → config override → `stated` → exact table entry → longest matching
  * table prefix → fallback. The prefix step is what keeps dated model ids
  * (`claude-sonnet-5-20260101`) working without an entry each.
  *
@@ -289,10 +293,54 @@ function matchesAtBoundary(id: string, key: string): boolean {
  * ids the main table lacks.
  */
 export function contextWindowForModel(model: string | null | undefined, stated?: number | null, harness?: string | null): number {
-	const { windows, fallback } = configuredWindows();
 	const id = model ? model.trim().toLowerCase() : "";
+	const set = harness && id ? settingsWindow(harness, id) : null;
+	if (set !== null) return set;
+	const { windows } = configuredWindows();
 	if (id && windows[id] !== undefined) return windows[id];
 	if (typeof stated === "number" && Number.isFinite(stated) && stated > 0) return stated;
+	return tableWindow(id, harness);
+}
+
+/**
+ * What the hub uses for `model` on `runner` with no Settings value: the config
+ * override, else the table, else the fallback. Settings shows it as the default
+ * the operator can change.
+ */
+export function defaultContextWindow(model: string, runner?: string | null): number {
+	const id = model.trim().toLowerCase();
+	const { windows } = configuredWindows();
+	return windows[id] ?? tableWindow(id, runner);
+}
+
+/**
+ * The window the operator set in Settings > Agent models for this runner's
+ * model: exact id, then longest id prefix at a version boundary (so a dated id
+ * follows its base model's setting). Null when none is set.
+ */
+function settingsWindow(runner: string, id: string): number | null {
+	let windows: Record<string, number> | undefined;
+	try {
+		windows = getAgentModelSettings().runners[runner]?.windows;
+	} catch {
+		// An unreadable settings row must never stop the meter.
+		return null;
+	}
+	if (!windows) return null;
+	let best: number | null = null;
+	let bestLength = 0;
+	for (const [key, value] of Object.entries(windows)) {
+		const k = key.toLowerCase();
+		if (matchesAtBoundary(id, k) && k.length > bestLength) {
+			best = value;
+			bestLength = k.length;
+		}
+	}
+	return best;
+}
+
+function tableWindow(id: string, harness?: string | null): number {
+	const { windows, fallback } = configuredWindows();
 	if (!id || id === "<synthetic>") return fallback;
 	const table: Record<string, number> =
 		harness === "copilot"

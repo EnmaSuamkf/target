@@ -3673,8 +3673,18 @@ export function saveDockerMountSettings(mounts: string[]): DockerMountSettings {
 const MODEL_ALLOWLIST_SETTINGS_KEY = "agent_models";
 
 export interface AgentModelSettings {
-	runners: Record<string, { enabled: string[] | null; custom: string[] }>;
+	runners: Record<string, { enabled: string[] | null; custom: string[]; windows: Record<string, number> }>;
 	updatedAt: string | null;
+}
+
+/** Operator-set context windows keyed by model id; anything but a positive finite number is dropped. */
+function windowMap(value: unknown): Record<string, number> {
+	const out: Record<string, number> = {};
+	if (!value || typeof value !== "object" || Array.isArray(value)) return out;
+	for (const [id, tokens] of Object.entries(value as Record<string, unknown>)) {
+		if (typeof tokens === "number" && Number.isFinite(tokens) && tokens > 0) out[id] = Math.round(tokens);
+	}
+	return out;
 }
 
 function stringList(value: unknown): string[] {
@@ -3687,10 +3697,10 @@ export function getAgentModelSettings(): AgentModelSettings {
 		| undefined;
 	if (!row) return { runners: {}, updatedAt: null };
 	try {
-		const parsed = JSON.parse(String(row.value)) as { runners?: Record<string, { enabled?: unknown; custom?: unknown }> };
+		const parsed = JSON.parse(String(row.value)) as { runners?: Record<string, { enabled?: unknown; custom?: unknown; windows?: unknown }> };
 		const runners: AgentModelSettings["runners"] = {};
 		for (const [runner, entry] of Object.entries(parsed.runners ?? {})) {
-			runners[runner] = { enabled: Array.isArray(entry?.enabled) ? stringList(entry.enabled) : null, custom: stringList(entry?.custom) };
+			runners[runner] = { enabled: Array.isArray(entry?.enabled) ? stringList(entry.enabled) : null, custom: stringList(entry?.custom), windows: windowMap(entry?.windows) };
 		}
 		return { runners, updatedAt: row.updated_at == null ? null : String(row.updated_at) };
 	} catch {
