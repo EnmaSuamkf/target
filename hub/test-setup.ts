@@ -10,9 +10,10 @@
  * get a 400 ("runner not installed") and the suite would be red on CI.
  * Workflow-CRUD tests don't care whether the CLIs are actually installed —
  * they test the hub, not CLI execution — so the probe is stubbed to report
- * every runner installed, WITHOUT spawning (it returns status 0 for any
- * command, including a nonexistent one, and the adapter-file check answers
- * true), so the result is independent of what's on PATH or in vendor/.
+ * every runner installed, WITHOUT running anything (the probe's spawn seam
+ * answers exit 0 for any command, including a nonexistent one, and the
+ * adapter-file check answers true), so the result is independent of what's on
+ * PATH or in vendor/.
  *
  * The same stub answers the docker probes (`dockerAvailable`, which gates
  * `sandbox: "docker"` creation, and `sandboxImageExists`, which decides whether
@@ -27,9 +28,16 @@
  * there, and docker-sandbox.test.ts does the same for docker (clearing the
  * probe cache around itself, since that answer is cached).
  */
-import { _impl } from "./awb.ts";
+import { _impl, refreshAvailableRunners, refreshDockerAvailable } from "./awb.ts";
+import { exitingWith } from "./awb-probe-fakes.ts";
 
 _impl.spawnSync = (() => ({ status: 0 })) as unknown as typeof _impl.spawnSync;
+// The availability probes are asynchronous: every command answers exit 0, and
+// the cache is filled once here so the synchronous readers (availableRunners,
+// availableSandboxes) report "installed" from the first test on.
+_impl.spawn = (() => exitingWith(0)) as unknown as typeof _impl.spawn;
 // Same for the adapter-file guard: whether `adapters/spawn-runner/<runner>.ts`
 // exists depends on the vendored awb checkout, not on what these tests cover.
 _impl.adapterExists = () => true;
+await refreshAvailableRunners();
+await refreshDockerAvailable(true);

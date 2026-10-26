@@ -430,7 +430,11 @@ function moveStepToIndex(workflowId: string, stepId: string, targetIndex: number
 	}
 }
 
-/** Runner inventory the server uses to populate the remote-workflow agent picker. */
+/**
+ * Runner inventory the server uses to populate the remote-workflow agent picker.
+ * Read from the availability cache (`availableRunners` never probes), so a
+ * register or heartbeat can't stall the sync loop on a slow CLI.
+ */
 function syncRunnerCapabilities(): { runners: ReturnType<typeof availableRunners> } {
 	return { runners: availableRunners() };
 }

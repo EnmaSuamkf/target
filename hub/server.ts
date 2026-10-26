@@ -111,6 +111,8 @@ import {
 import {
 	availableRunners,
 	availableSandboxes,
+	dockerAvailableNow,
+	runnerInstalledNow,
 	explainRunError,
 	harnessResumeCommand,
 	harnessResumeEnv,
@@ -917,7 +919,7 @@ function readJsonBody(
 	req: http.IncomingMessage,
 	res: http.ServerResponse,
 	maxBytes: number,
-	onBody: (body: Record<string, unknown>) => void,
+	onBody: (body: Record<string, unknown>) => void | Promise<void>,
 ): void {
 	const chunks: Buffer[] = [];
 	let size = 0;
@@ -938,7 +940,9 @@ function readJsonBody(
 		try {
 			const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
 			if (typeof body !== "object" || body === null) throw new Error("not an object");
-			onBody(body as Record<string, unknown>);
+			const handled = onBody(body as Record<string, unknown>);
+			// An async handler (one that waits on a probe) fails the same way a sync throw does.
+			if (handled) handled.catch(() => sendJson(res, 400, { error: "invalid_json" }));
 		} catch {
 			sendJson(res, 400, { error: "invalid_json" });
 		}
@@ -970,7 +974,7 @@ function modelRejection(runner: string, model: string): string | null {
  * default". A clone moved off `bypassPermissions` back to read-only has to be
  * able to say so, and it can only say it by sending the key empty.
  */
-function parseCloneOverrides(body: Record<string, unknown>, res: http.ServerResponse): CloneOverrides | null {
+async function parseCloneOverrides(body: Record<string, unknown>, res: http.ServerResponse): Promise<CloneOverrides | null> {
 	const overrides: CloneOverrides = {};
 	// Empty string = "no directory of my own", i.e. give the clone its own
 	// per-agent sandbox rather than the source's checkout.
@@ -1054,7 +1058,7 @@ function parseCloneOverrides(body: Record<string, unknown>, res: http.ServerResp
 	// container has no daemon, or whose CLI isn't installed here, is a workflow
 	// that dies at its first step. Only checked when the field was actually sent —
 	// an inherited runtime already exists on this machine.
-	if (overrides.sandbox === "docker" && !availableSandboxes().find((s) => s.id === "docker")?.available) {
+	if (overrides.sandbox === "docker" && !(await dockerAvailableNow())) {
 		sendJson(res, 400, {
 			error:
 				"docker is not available on this host (no docker on PATH, or the daemon isn't running), so a docker workflow's steps could not run. Start Docker and retry, or clone this workflow onto the host sandbox.",
@@ -1070,7 +1074,7 @@ function parseCloneOverrides(body: Record<string, unknown>, res: http.ServerResp
 	}
 	if (overrides.sandbox === "host" && overrides.runner !== undefined) {
 		const runner = overrides.runner ?? "claude";
-		if (!(availableRunners().find((r) => r.id === runner)?.installed ?? false)) {
+		if (!(await runnerInstalledNow(runner))) {
 			sendJson(res, 400, {
 				error: `runner '${runner}' is not installed on this host (install it or use sandbox: docker with an image that ships it)`,
 			});
@@ -3037,7 +3041,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			if (!requirePermission(cfg, req, res, "client.workflows.create")) {
 				return;
 			}
-			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			readJsonBody(req, res, cfg.maxInputBytes, async (body) => {
 				const name = typeof body.name === "string" ? body.name : "";
 				// `let`: adopting a conversation replaces this with that conversation's
 				// own directory, which is not a preference but a requirement (see the
@@ -3178,7 +3182,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				// alternative to failing now is failing at the first step's spawn
 				// with docker's own text — which, for the default images, is a
 				// registry-login error for something that is only ever built locally.
-				if (sandbox === "docker" && !availableSandboxes().find((s) => s.id === "docker")?.available) {
+				if (sandbox === "docker" && !(await dockerAvailableNow())) {
 					sendJson(res, 400, {
 						error:
 							"docker is not available on this host (no docker on PATH, or the daemon isn't running), so a docker workflow's steps could not run. Start Docker and retry, or create this workflow on the host sandbox.",
@@ -3204,7 +3208,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				// claude otherwise (the default the form would have selected).
 				const effectiveRunner: PublishableRunner = runner ?? "claude";
 				if ((sandbox ?? "host") !== "docker") {
-					const installed = availableRunners().find((r) => r.id === effectiveRunner)?.installed ?? false;
+					const installed = await runnerInstalledNow(effectiveRunner);
 					if (!installed) {
 						sendJson(res, 400, {
 							error: `runner '${effectiveRunner}' is not installed on this host (install it or use sandbox: docker with an image that ships it)`,
@@ -3342,8 +3346,8 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			sendJson(res, 404, { error: "unknown_workflow" });
 			return;
 		}
-		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
-			const overrides = parseCloneOverrides(body, res);
+		readJsonBody(req, res, cfg.maxInputBytes, async (body) => {
+			const overrides = await parseCloneOverrides(body, res);
 			if (!overrides) return; // already answered with the reason
 			// An explicit model must be enabled for the runner the clone will have.
 			// An inherited one is not re-checked: Settings may have disabled it since,

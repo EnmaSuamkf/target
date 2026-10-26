@@ -5,10 +5,10 @@
  * so the host PATH is not the source of truth there).
  *
  * The runner CLIs (`claude`, `free-code`, `agent`, `copilot`) are installed on the dev/CI box, so the
- * uninstalled path can only be exercised by swapping awb's `_impl.spawnSync`
+ * uninstalled path can only be exercised by swapping awb's `_impl.spawn`
  * — the same indirection terminal.ts exposes for its spawn — to make a chosen
  * runner answer `--version` with a missing status. The server's host check
- * calls `availableRunners()`, which reads that seam, so the 400 is driven
+ * calls `availableRunners()`, which reads the cache that seam fills, so the 400 is driven
  * through the real server wiring, not a stub of the route.
  *
  * Same throwaway-TARGET_HOME/AWB_HOME convention as the other suites.
@@ -23,7 +23,8 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-test-runner-instal
 process.env.TARGET_HOME = tmpHome;
 process.env.AWB_HOME = tmpHome;
 
-const { _impl: awbImpl, availableRunners } = await import("./awb.ts");
+const { _impl: awbImpl, availableRunners, refreshAvailableRunners } = await import("./awb.ts");
+const { exitingWith, missingBinary } = await import("./awb-probe-fakes.ts");
 const { loadConfig } = await import("./config.ts");
 const { createServer } = await import("./server.ts");
 
@@ -44,29 +45,31 @@ function adminHeaders() {
 }
 
 /**
- * Swaps awb's spawnSync seam so `uninstalled` reads as not on PATH (a missing
- * binary surfaces as `status === null`) and every other runner as installed.
- * Restored when the test ends, so the real probe is back for the next one.
+ * Swaps awb's spawn seam so `uninstalled` reads as not on PATH (a missing
+ * binary surfaces as an `error` event) and every other runner as installed,
+ * then refreshes the cache so the synchronous readers see that answer. Restored
+ * when the test ends, and the cache is refreshed back to the real answers.
  */
-function forceUninstalled(t: TestContext, uninstalled: string): void {
-	const original = awbImpl.spawnSync;
-	t.after(() => {
-		awbImpl.spawnSync = original;
+async function forceUninstalled(t: TestContext, uninstalled: string): Promise<void> {
+	const original = awbImpl.spawn;
+	t.after(async () => {
+		awbImpl.spawn = original;
+		await refreshAvailableRunners();
 	});
-	awbImpl.spawnSync = ((command: string) => ({
-		status: command === uninstalled ? null : 0,
-	})) as unknown as typeof awbImpl.spawnSync;
+	awbImpl.spawn = ((command: string) =>
+		command === uninstalled ? missingBinary() : exitingWith(0)) as unknown as typeof awbImpl.spawn;
+	await refreshAvailableRunners();
 }
 
 test("availableRunners reports a runner as not installed when its --version probe fails (the seam the host check relies on)", async (t) => {
-	forceUninstalled(t, "free-code");
+	await forceUninstalled(t, "free-code");
 	const runners = availableRunners();
 	assert.equal(runners.find((r) => r.id === "free-code")?.installed, false);
 	assert.equal(runners.find((r) => r.id === "claude")?.installed, true);
 });
 
 test("GET /api/runners reflects the host probe — the create form's source of truth for which agents are selectable", async (t) => {
-	forceUninstalled(t, "free-code");
+	await forceUninstalled(t, "free-code");
 	const res = await fetch(`${baseUrl}/api/runners`, { headers: adminHeaders() });
 	assert.equal(res.status, 200);
 	const body = (await res.json()) as { runners: { id: string; installed: boolean }[] };
@@ -75,7 +78,7 @@ test("GET /api/runners reflects the host probe — the create form's source of t
 });
 
 test("POST /api/workflows with a host sandbox and an uninstalled runner returns 400 with the install error", async (t) => {
-	forceUninstalled(t, "free-code");
+	await forceUninstalled(t, "free-code");
 
 	const res = await fetch(`${baseUrl}/api/workflows`, {
 		method: "POST",
@@ -95,7 +98,7 @@ test("POST /api/workflows with a host sandbox and an uninstalled runner returns 
 });
 
 test("POST /api/workflows with the default runner (claude) on host is refused when claude is uninstalled", async (t) => {
-	forceUninstalled(t, "claude");
+	await forceUninstalled(t, "claude");
 
 	const res = await fetch(`${baseUrl}/api/workflows`, {
 		method: "POST",
@@ -107,7 +110,7 @@ test("POST /api/workflows with the default runner (claude) on host is refused wh
 });
 
 test("POST /api/workflows with sandbox docker is NOT rejected for a runner uninstalled on the host", async (t) => {
-	forceUninstalled(t, "free-code");
+	await forceUninstalled(t, "free-code");
 
 	const res = await fetch(`${baseUrl}/api/workflows`, {
 		method: "POST",
@@ -121,7 +124,7 @@ test("POST /api/workflows with sandbox docker is NOT rejected for a runner unins
 
 test("POST /api/workflows on host with an installed runner is still accepted (control)", async (t) => {
 	// "__none__" never matches a real runner id, so both read as installed.
-	forceUninstalled(t, "__none__");
+	await forceUninstalled(t, "__none__");
 
 	const res = await fetch(`${baseUrl}/api/workflows`, {
 		method: "POST",
@@ -132,7 +135,7 @@ test("POST /api/workflows on host with an installed runner is still accepted (co
 });
 
 test("POST /api/workflows on host with copilot uninstalled is refused", async (t) => {
-	forceUninstalled(t, "copilot");
+	await forceUninstalled(t, "copilot");
 
 	const res = await fetch(`${baseUrl}/api/workflows`, {
 		method: "POST",

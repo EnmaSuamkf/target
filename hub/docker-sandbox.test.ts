@@ -25,10 +25,10 @@
  * step's stored error.
  *
  * Docker is installed on the dev box and absent on CI, so neither answer can
- * be taken from the real machine: every test drives awb's `_impl.spawnSync`
- * seam — the same one runner-install.test.ts uses — and clears the probe cache
- * around itself, since a cached answer would otherwise outlive the seam it was
- * measured through.
+ * be taken from the real machine: every test drives awb's `_impl.spawn`
+ * seam — the same one runner-install.test.ts uses — and refreshes the probe
+ * cache around itself, since a cached answer would otherwise outlive the seam
+ * it was measured through.
  *
  * Same throwaway-TARGET_HOME/AWB_HOME convention as the other suites.
  */
@@ -53,9 +53,11 @@ const {
 	ensureSandboxImage,
 	explainRunError,
 	imageBuildCommand,
+	refreshDockerAvailable,
 } = await import("./awb.ts");
 const { getStep, getWorkflow, insertStep, insertWorkflow, listSteps, markStepRunning } = await import("./db.ts");
 const { loadConfig } = await import("./config.ts");
+const { exitingWith, missingBinary } = await import("./awb-probe-fakes.ts");
 const { dispatchStep } = await import("./runner.ts");
 const { createServer } = await import("./server.ts");
 
@@ -77,22 +79,23 @@ function adminHeaders() {
 
 /**
  * Makes the docker probe answer `available`, and records what it was asked.
- * A missing binary and an unreachable daemon both surface as a non-zero /
- * null status, which is the whole point of probing with `info`.
+ * A missing binary and an unreachable daemon both surface as a missing-binary
+ * `error` (or a non-zero exit), which is the whole point of probing with `info`.
+ * The answer is read through a refresh, so the synchronous readers see it.
  */
-function forceDocker(t: TestContext, available: boolean): { calls: { cmd: string; args: string[] }[] } {
-	const original = awbImpl.spawnSync;
+async function forceDocker(t: TestContext, available: boolean): Promise<{ calls: { cmd: string; args: string[] }[] }> {
+	const original = awbImpl.spawn;
 	const calls: { cmd: string; args: string[] }[] = [];
-	clearDockerProbe();
-	t.after(() => {
-		awbImpl.spawnSync = original;
-		clearDockerProbe();
+	t.after(async () => {
+		awbImpl.spawn = original;
+		await refreshDockerAvailable(true);
 	});
-	awbImpl.spawnSync = ((cmd: string, args: string[]) => {
+	awbImpl.spawn = ((cmd: string, args: string[]) => {
 		calls.push({ cmd, args });
-		if (cmd !== "docker") return { status: 0 };
-		return { status: available ? 0 : null };
-	}) as unknown as typeof awbImpl.spawnSync;
+		if (cmd !== "docker") return exitingWith(0);
+		return available ? exitingWith(0) : missingBinary();
+	}) as unknown as typeof awbImpl.spawn;
+	await refreshDockerAvailable(true);
 	return { calls };
 }
 
@@ -117,8 +120,8 @@ function makeRunningStep() {
 
 // --- 1. the probe ----------------------------------------------------------
 
-test("dockerAvailable probes `docker info`, not `docker --version` — a binary with no daemon behind it is not availability", (t) => {
-	const { calls } = forceDocker(t, true);
+test("dockerAvailable probes `docker info`, not `docker --version` — a binary with no daemon behind it is not availability", async (t) => {
+	const { calls } = await forceDocker(t, true);
 	assert.equal(dockerAvailable(), true);
 	const probe = calls.find((c) => c.cmd === "docker");
 	assert.ok(probe, "it actually asked docker");
@@ -126,31 +129,35 @@ test("dockerAvailable probes `docker info`, not `docker --version` — a binary 
 	assert.ok(!probe.args.includes("--version"), "`--version` would answer a different, useless question");
 });
 
-test("dockerAvailable is false when the probe can't answer (no binary, or a daemon that never replies)", (t) => {
-	forceDocker(t, false);
+test("dockerAvailable is false when the probe can't answer (no binary, or a daemon that never replies)", async (t) => {
+	await forceDocker(t, false);
 	assert.equal(dockerAvailable(), false);
 });
 
-test("the probe answer is cached — the create form and the create route must not shell out per request", (t) => {
-	const { calls } = forceDocker(t, true);
+test("the probe answer is cached — the create form and the create route must not shell out per request", async (t) => {
+	const { calls } = await forceDocker(t, true);
+	assert.equal(await refreshDockerAvailable(), true);
 	assert.equal(dockerAvailable(), true);
+	assert.equal(await refreshDockerAvailable(), true);
 	assert.equal(dockerAvailable(), true);
+	assert.equal(await refreshDockerAvailable(), true);
 	assert.equal(dockerAvailable(), true);
-	assert.equal(calls.filter((c) => c.cmd === "docker").length, 1, "three questions, one probe");
+	assert.equal(calls.filter((c) => c.cmd === "docker").length, 1, "three questions after the forced probe, still one probe");
 });
 
-test("clearDockerProbe forgets the cached answer, so starting the daemon can be noticed without restarting the hub", (t) => {
-	forceDocker(t, false);
+test("clearDockerProbe forgets the cached answer, so starting the daemon can be noticed without restarting the hub", async (t) => {
+	await forceDocker(t, false);
 	assert.equal(dockerAvailable(), false);
 	// The operator starts Docker; the next probe after expiry has to see it.
-	awbImpl.spawnSync = (() => ({ status: 0 })) as unknown as typeof awbImpl.spawnSync;
-	assert.equal(dockerAvailable(), false, "still the cached answer");
+	awbImpl.spawn = (() => exitingWith(0)) as unknown as typeof awbImpl.spawn;
+	assert.equal(await refreshDockerAvailable(), false, "still the cached answer");
 	clearDockerProbe();
+	assert.equal(await refreshDockerAvailable(), true);
 	assert.equal(dockerAvailable(), true);
 });
 
-test("availableSandboxes always offers the host, and gates only docker", (t) => {
-	forceDocker(t, false);
+test("availableSandboxes always offers the host, and gates only docker", async (t) => {
+	await forceDocker(t, false);
 	const boxes = availableSandboxes();
 	assert.equal(boxes.find((s) => s.id === "host")?.available, true, "the host is the hub itself — always available");
 	assert.equal(boxes.find((s) => s.id === "docker")?.available, false);
@@ -159,7 +166,7 @@ test("availableSandboxes always offers the host, and gates only docker", (t) => 
 // --- 2. what the create form is told ---------------------------------------
 
 test("GET /api/runners reports sandboxes alongside runners — one round trip for the whole create form", async (t) => {
-	forceDocker(t, true);
+	await forceDocker(t, true);
 	const res = await fetch(`${baseUrl}/api/runners`, { headers: adminHeaders() });
 	assert.equal(res.status, 200);
 	const body = (await res.json()) as {
@@ -172,7 +179,7 @@ test("GET /api/runners reports sandboxes alongside runners — one round trip fo
 });
 
 test("GET /api/runners reports docker as unavailable when it is — this is what stops the UI offering it", async (t) => {
-	forceDocker(t, false);
+	await forceDocker(t, false);
 	const res = await fetch(`${baseUrl}/api/runners`, { headers: adminHeaders() });
 	const body = (await res.json()) as { sandboxes: { id: string; available: boolean }[] };
 	assert.equal(body.sandboxes.find((s) => s.id === "docker")?.available, false);
@@ -182,7 +189,7 @@ test("GET /api/runners reports docker as unavailable when it is — this is what
 // --- 3. the server refuses what it can't run -------------------------------
 
 test("POST /api/workflows with sandbox docker is refused with a clear 400 when docker is unavailable", async (t) => {
-	forceDocker(t, false);
+	await forceDocker(t, false);
 
 	const res = await fetch(`${baseUrl}/api/workflows`, {
 		method: "POST",
@@ -204,7 +211,7 @@ test("POST /api/workflows with sandbox docker is refused with a clear 400 when d
 });
 
 test("POST /api/workflows on the host sandbox is unaffected by a machine with no docker", async (t) => {
-	forceDocker(t, false);
+	await forceDocker(t, false);
 
 	const res = await fetch(`${baseUrl}/api/workflows`, {
 		method: "POST",
@@ -217,7 +224,7 @@ test("POST /api/workflows on the host sandbox is unaffected by a machine with no
 });
 
 test("POST /api/workflows with sandbox docker is still accepted when docker is available (control)", async (t) => {
-	forceDocker(t, true);
+	await forceDocker(t, true);
 
 	const res = await fetch(`${baseUrl}/api/workflows`, {
 		method: "POST",
@@ -230,7 +237,7 @@ test("POST /api/workflows with sandbox docker is still accepted when docker is a
 });
 
 test("POST /api/workflows with runner copilot + sandbox docker is refused (structured 400) when no token resolves, and accepted when one does", async (t) => {
-	forceDocker(t, true);
+	await forceDocker(t, true);
 	const saved = { ...process.env };
 	t.after(() => {
 		for (const k of ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]) {
@@ -332,18 +339,18 @@ test("a step that failed on a missing image stores the advice, not just docker's
  * is the plumbing that runs in production rather than a stub of it. Nothing
  * here ever shells out to docker.
  */
-function forceImages(
+async function forceImages(
 	t: TestContext,
 	options: { missing: string[]; buildExitCode?: number; buildOutput?: string },
-): { builds: string[][] } {
+): Promise<{ builds: string[][] }> {
 	const originalSpawnSync = awbImpl.spawnSync;
 	const originalSpawn = awbImpl.spawn;
 	const builds: string[][] = [];
 	clearDockerProbe();
-	t.after(() => {
+	t.after(async () => {
 		awbImpl.spawnSync = originalSpawnSync;
 		awbImpl.spawn = originalSpawn;
-		clearDockerProbe();
+		await refreshDockerAvailable(true);
 	});
 	awbImpl.spawnSync = ((cmd: string, args: string[]) => {
 		if (cmd === "docker" && args[0] === "image" && args[1] === "inspect") {
@@ -352,15 +359,18 @@ function forceImages(
 		return { status: 0 };
 	}) as unknown as typeof awbImpl.spawnSync;
 	awbImpl.spawn = ((cmd: string, args: string[]) => {
+		// The docker probe asks `docker info` through the same seam; only builds are recorded.
+		if (args[0] === "info") return exitingWith(0);
 		builds.push([cmd, ...args]);
 		const script = `process.stderr.write(${JSON.stringify(options.buildOutput ?? "")}); process.exit(${options.buildExitCode ?? 0});`;
 		return cp.spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "pipe"] });
 	}) as unknown as typeof awbImpl.spawn;
+	await refreshDockerAvailable(true);
 	return { builds };
 }
 
 test("a missing default image is BUILT from this repo's Dockerfile — never pulled", async (t) => {
-	const { builds } = forceImages(t, { missing: [DEFAULT_SANDBOX_IMAGES.claude] });
+	const { builds } = await forceImages(t, { missing: [DEFAULT_SANDBOX_IMAGES.claude] });
 
 	const result = await ensureSandboxImage(DEFAULT_SANDBOX_IMAGES.claude);
 	assert.deepEqual(result, { ok: true, built: true });
@@ -377,21 +387,21 @@ test("a missing default image is BUILT from this repo's Dockerfile — never pul
 });
 
 test("an image already on the machine is left alone — no build on every dispatch", async (t) => {
-	const { builds } = forceImages(t, { missing: [] });
+	const { builds } = await forceImages(t, { missing: [] });
 
 	assert.deepEqual(await ensureSandboxImage(DEFAULT_SANDBOX_IMAGES.claude), { ok: true, built: false });
 	assert.equal(builds.length, 0);
 });
 
 test("an image the repo doesn't own is left to docker — it may legitimately live in a registry", async (t) => {
-	const { builds } = forceImages(t, { missing: ["my-python-repo:3.12"] });
+	const { builds } = await forceImages(t, { missing: ["my-python-repo:3.12"] });
 
 	assert.deepEqual(await ensureSandboxImage("my-python-repo:3.12"), { ok: true, built: false });
 	assert.equal(builds.length, 0, "there is no Dockerfile for someone else's image, and pulling it is correct");
 });
 
 test("the free-code image builds its base first — `FROM target-agent:latest` can't be pulled either", async (t) => {
-	const { builds } = forceImages(t, {
+	const { builds } = await forceImages(t, {
 		missing: [DEFAULT_SANDBOX_IMAGES.claude, DEFAULT_SANDBOX_IMAGES["free-code"]],
 	});
 
@@ -402,7 +412,7 @@ test("the free-code image builds its base first — `FROM target-agent:latest` c
 });
 
 test("the copilot image builds its base first, then Dockerfile.copilot", async (t) => {
-	const { builds } = forceImages(t, {
+	const { builds } = await forceImages(t, {
 		missing: [DEFAULT_SANDBOX_IMAGES.claude, DEFAULT_SANDBOX_IMAGES.copilot],
 	});
 
@@ -414,7 +424,7 @@ test("the copilot image builds its base first, then Dockerfile.copilot", async (
 });
 
 test("with the base already present only the copilot image is built", async (t) => {
-	const { builds } = forceImages(t, { missing: [DEFAULT_SANDBOX_IMAGES.copilot] });
+	const { builds } = await forceImages(t, { missing: [DEFAULT_SANDBOX_IMAGES.copilot] });
 
 	assert.deepEqual(await ensureSandboxImage(DEFAULT_SANDBOX_IMAGES.copilot), { ok: true, built: true });
 	assert.equal(builds.length, 1);
@@ -433,7 +443,7 @@ test("BUILDABLE_SANDBOX_IMAGES lists copilot after its base, with a Dockerfile t
 });
 
 test("two dispatches racing for the same missing image share one build", async (t) => {
-	const { builds } = forceImages(t, { missing: [DEFAULT_SANDBOX_IMAGES.claude] });
+	const { builds } = await forceImages(t, { missing: [DEFAULT_SANDBOX_IMAGES.claude] });
 
 	const [a, b] = await Promise.all([
 		ensureSandboxImage(DEFAULT_SANDBOX_IMAGES.claude),
@@ -445,14 +455,14 @@ test("two dispatches racing for the same missing image share one build", async (
 });
 
 test("a step whose daemon died since creation says THAT, not that the build failed", async (t) => {
-	const { builds } = forceImages(t, { missing: [DEFAULT_SANDBOX_IMAGES.claude] });
+	const { builds } = await forceImages(t, { missing: [DEFAULT_SANDBOX_IMAGES.claude] });
 	// The daemon stops: `docker info` fails, and so does `image inspect` — which
 	// on its own is indistinguishable from an image that was never built.
-	const inspectOnly = awbImpl.spawnSync;
-	awbImpl.spawnSync = ((cmd: string, args: string[]) => {
-		if (cmd === "docker" && args[0] === "info") return { status: null };
-		return (inspectOnly as unknown as (c: string, a: string[]) => { status: number | null })(cmd, args);
-	}) as unknown as typeof awbImpl.spawnSync;
+	const buildSpawn = awbImpl.spawn;
+	awbImpl.spawn = ((cmd: string, args: string[]) => {
+		if (cmd === "docker" && args[0] === "info") return missingBinary();
+		return (buildSpawn as unknown as (c: string, a: string[]) => cp.ChildProcess)(cmd, args);
+	}) as unknown as typeof awbImpl.spawn;
 	clearDockerProbe();
 
 	const result = await ensureSandboxImage(DEFAULT_SANDBOX_IMAGES.claude);
@@ -462,7 +472,7 @@ test("a step whose daemon died since creation says THAT, not that the build fail
 });
 
 test("a failed build reports docker's own words and the command that reproduces it", async (t) => {
-	forceImages(t, {
+	await forceImages(t, {
 		missing: [DEFAULT_SANDBOX_IMAGES.claude],
 		buildExitCode: 1,
 		buildOutput: "#8 ERROR: failed to solve: process \"/bin/sh -c npm install -g ...\" did not complete successfully\n",
@@ -477,7 +487,7 @@ test("a failed build reports docker's own words and the command that reproduces 
 });
 
 test("a docker step whose image can't be built fails with that, and is never dispatched", async (t) => {
-	forceImages(t, {
+	await forceImages(t, {
 		missing: [DEFAULT_SANDBOX_IMAGES.claude],
 		buildExitCode: 1,
 		buildOutput: "#8 ERROR: failed to solve: apt-get update exited 100\n",
@@ -506,7 +516,7 @@ test("a docker step whose image can't be built fails with that, and is never dis
 });
 
 test("a docker step whose image is present dispatches as it always did", async (t) => {
-	const { builds } = forceImages(t, { missing: [] });
+	const { builds } = await forceImages(t, { missing: [] });
 
 	const created = await fetch(`${baseUrl}/api/workflows`, {
 		method: "POST",
