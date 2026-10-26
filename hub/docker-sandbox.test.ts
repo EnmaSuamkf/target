@@ -134,13 +134,15 @@ test("dockerAvailable is false when the probe can't answer (no binary, or a daem
 	assert.equal(dockerAvailable(), false);
 });
 
-test("the probe answer is cached — the image path and the refresh timer must not run docker info per call", async (t) => {
+test("the probe answer is cached — the create form and the create route must not shell out per request", async (t) => {
 	const { calls } = await forceDocker(t, true);
-	calls.length = 0;
 	assert.equal(await refreshDockerAvailable(), true);
+	assert.equal(dockerAvailable(), true);
 	assert.equal(await refreshDockerAvailable(), true);
+	assert.equal(dockerAvailable(), true);
 	assert.equal(await refreshDockerAvailable(), true);
-	assert.equal(calls.filter((c) => c.cmd === "docker").length, 0, "three questions inside the TTL, no probe");
+	assert.equal(dockerAvailable(), true);
+	assert.equal(calls.filter((c) => c.cmd === "docker").length, 1, "three questions after the forced probe, still one probe");
 });
 
 test("clearDockerProbe forgets the cached answer, so starting the daemon can be noticed without restarting the hub", async (t) => {
