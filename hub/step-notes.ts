@@ -11,6 +11,7 @@ import {
 	listStepNotes,
 	normalizeStepNoteTheme,
 	type StepNote,
+	type StepNoteSource,
 	type StepNoteTheme,
 	type TemplateStepNote,
 	updateStepNote as updateStepNoteRow,
@@ -50,14 +51,15 @@ export function addStepNote(
 	stepId: string,
 	content: string,
 	theme: StepNoteTheme = "neutral",
+	source: StepNoteSource = "operator",
 ): StepNote {
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new StepNoteError("unknown step");
 	refuseContextStep(step);
 	const trimmed = content.trim();
 	if (trimmed === "") throw new StepNoteError("note content is required");
-	const note = insertStepNote(stepId, workflowId, trimmed, normalizeStepNoteTheme(theme));
-	reportNoteEvent("step.note.added", note);
+	const note = insertStepNote(stepId, workflowId, trimmed, normalizeStepNoteTheme(theme), source);
+	reportNoteEvent("step.note.added", note, { source: note.source });
 	return note;
 }
 
@@ -77,7 +79,7 @@ export function editStepNote(
 	if (trimmed === "") throw new StepNoteError("note content is required");
 	const updated = updateStepNoteRow(noteId, trimmed, theme);
 	if (!updated) throw new StepNoteError("unknown note");
-	reportNoteEvent("step.note.modified", updated);
+	reportNoteEvent("step.note.modified", updated, { source: updated.source });
 	return updated;
 }
 

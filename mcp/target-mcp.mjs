@@ -4,6 +4,8 @@
  * Env: TARGET_HUB_URL (default http://127.0.0.1:8893), TARGET_ADMIN_TOKEN.
  */
 import * as readline from "node:readline";
+import * as fs from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const HUB = (process.env.TARGET_HUB_URL ?? "http://127.0.0.1:8893").replace(/\/+$/, "");
 const TOKEN = process.env.TARGET_ADMIN_TOKEN ?? "";
@@ -16,6 +18,24 @@ const PERMISSION_MODES = ["acceptEdits", "auto", "manual", "dontAsk", "plan", "b
 const WORKFLOW_STATUSES = ["draft", "paused", "completed", "failed"];
 const ARCHIVED_FILTERS = ["exclude", "include", "only"];
 const STEP_STATUSES = ["pending", "done", "failed"];
+
+/**
+ * The hub request `add_step_note` makes. Every note added through this tool is
+ * recorded as an agent note (`source: "agent"`); the tool deliberately has no
+ * `source` parameter, so the agent cannot choose it.
+ */
+export function buildStepNoteRequest(args) {
+	const a = argsObj(args);
+	return {
+		method: "POST",
+		path: `/api/workflows/${enc(a.workflowId)}/steps/${enc(a.stepId)}/notes`,
+		body: {
+			content: String(a.content),
+			...(a.theme ? { theme: String(a.theme) } : {}),
+			source: "agent",
+		},
+	};
+}
 
 function send(msg) {
 	process.stdout.write(`${JSON.stringify(msg)}\n`);
@@ -754,7 +774,7 @@ const TOOLS = [
 	},
 	{
 		name: "add_step_note",
-		description: "Add a sticky note on a step",
+		description: "Add a sticky note on a step. The note is recorded as an agent note.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -766,11 +786,10 @@ const TOOLS = [
 			required: ["workflowId", "stepId", "content"],
 			additionalProperties: false,
 		},
-		run: async (a) =>
-			hubJson("POST", `/api/workflows/${enc(a.workflowId)}/steps/${enc(a.stepId)}/notes`, {
-				content: String(a.content),
-				...(a.theme ? { theme: String(a.theme) } : {}),
-			}),
+		run: async (a) => {
+			const req = buildStepNoteRequest(a);
+			return hubJson(req.method, req.path, req.body);
+		},
 	},
 	{
 		name: "edit_step_note",
@@ -1364,15 +1383,20 @@ async function handle(msg) {
 	}
 }
 
-const rl = readline.createInterface({ input: process.stdin, terminal: false });
-rl.on("line", (line) => {
-	const trimmed = line.trim();
-	if (!trimmed) return;
-	let msg;
-	try {
-		msg = JSON.parse(trimmed);
-	} catch {
-		return;
-	}
-	void handle(msg);
-});
+// Serve stdio only when this file is the program being run, so a test can import
+// `buildStepNoteRequest` without starting the server.
+const isEntrypoint = process.argv[1] !== undefined && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isEntrypoint) {
+	const rl = readline.createInterface({ input: process.stdin, terminal: false });
+	rl.on("line", (line) => {
+		const trimmed = line.trim();
+		if (!trimmed) return;
+		let msg;
+		try {
+			msg = JSON.parse(trimmed);
+		} catch {
+			return;
+		}
+		void handle(msg);
+	});
+}

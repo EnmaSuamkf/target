@@ -303,6 +303,16 @@ test("readTokenUsage reads cursor usage from awb run logs when the session id is
 	const logsDir = path.join(tmpHome, "logs");
 	fs.mkdirSync(logsDir, { recursive: true });
 	t.after(() => fs.rmSync(logsDir, { recursive: true, force: true }));
+	// Cursor's model comes from ~/.cursor/ai-tracking on this machine, so point HOME
+	// at an empty directory: the window must come from the logs alone, not from
+	// whatever model the developer's real Cursor history recorded.
+	const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-cursor-home-"));
+	const originalHome = process.env.HOME;
+	process.env.HOME = fakeHome;
+	t.after(() => {
+		process.env.HOME = originalHome;
+		fs.rmSync(fakeHome, { recursive: true, force: true });
+	});
 	const lines = [
 		JSON.stringify({
 			type: "result",

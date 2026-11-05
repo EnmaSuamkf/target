@@ -24,7 +24,7 @@ process.env.TARGET_HOME = tmpHome;
 process.env.AWB_HOME = tmpHome;
 
 const { _impl: awbImpl, refreshAvailableRunners, refreshDockerAvailable, runnerBinary } = await import("./awb.ts");
-const { exitingWith, missingBinary, slowExit } = await import("./awb-probe-fakes.ts");
+const { exitingWith, gatedExit, missingBinary } = await import("./awb-probe-fakes.ts");
 const { loadConfig } = await import("./config.ts");
 const { createServer } = await import("./server.ts");
 
@@ -74,15 +74,21 @@ function fakeMachine(
 const freeCodeBinary = runnerBinary("free-code");
 
 test("GET /api/runners answers from the cache while a probe is still running", async (t) => {
-	const machine = fakeMachine(t, () => slowExit(1500, 0));
-	const refreshing = refreshAvailableRunners();
-	assert.ok(machine.calls.length > 0, "the slow probe is running");
+	// The probe stays running until the test opens the gate, so the request is
+	// answered while it is still in flight by construction, not by a timing margin.
+	let openGate!: () => void;
+	const gate = new Promise<void>((resolve) => (openGate = resolve));
+	const machine = fakeMachine(t, () => gatedExit(gate, 0));
+	let probeSettled = false;
+	const refreshing = refreshAvailableRunners().then(() => {
+		probeSettled = true;
+	});
+	assert.ok(machine.calls.length > 0, "the gated probe is running");
 
-	const started = performance.now();
 	const res = await fetch(`${baseUrl}/api/runners`, { headers: adminHeaders() });
-	const elapsed = performance.now() - started;
 	assert.equal(res.status, 200);
-	assert.ok(elapsed < 100, `answered in ${elapsed.toFixed(0)} ms while the probe was still running`);
+	assert.equal(probeSettled, false, "the response arrived while the probe was still running");
+	openGate();
 
 	const body = (await res.json()) as {
 		runners: { id: string; installed: boolean; models?: unknown[] }[];
