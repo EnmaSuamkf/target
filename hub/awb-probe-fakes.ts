@@ -44,9 +44,12 @@ export function hangingChild(): cp.ChildProcess {
 	});
 }
 
-/** A CLI that answers `code`, but only after `ms` — a probe still running while a request comes in. */
-export function slowExit(ms: number, code: number): cp.ChildProcess {
+/**
+ * A CLI that answers `code` only once `gate` resolves — a probe that is still
+ * running for as long as the test holds the gate shut, with no wall-clock wait.
+ */
+export function gatedExit(gate: Promise<void>, code: number): cp.ChildProcess {
 	const child = fakeChild();
-	setTimeout(() => (child as unknown as EventEmitter).emit("close", code, null), ms);
+	void gate.then(() => (child as unknown as EventEmitter).emit("close", code, null));
 	return child;
 }

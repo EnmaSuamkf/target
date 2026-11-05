@@ -25,7 +25,7 @@
  *   POST   /api/workflows/:id/steps                    → add a step (admin token); optional afterStepId inserts it right after that step
  *   POST   /api/workflows/:id/steps/from-template       → append a template's steps (admin token)
  *   PATCH  /api/workflows/:id/steps/:stepId             → edit a step's description (admin token)
- *   POST   /api/workflows/:id/steps/:stepId/notes        → add a sticky note (admin token)
+ *   POST   /api/workflows/:id/steps/:stepId/notes        → add a sticky note (admin token; optional source operator|agent, default operator)
  *   PATCH  /api/workflows/:id/steps/:stepId/notes/:noteId → edit a sticky note (admin token)
  *   DELETE /api/workflows/:id/steps/:stepId/notes/:noteId → remove a sticky note (admin token)
  *   DELETE /api/workflows/:id/steps/:stepId             → remove a pending step (admin token)
@@ -300,7 +300,14 @@ import {
 	WorkflowNotArchivableError,
 	type CloneOverrides,
 } from "./workflow.ts";
-import { getStep, listStepNotes, normalizeStepNoteTheme, type ArchivedFilter, type StepNoteTheme } from "./db.ts";
+import {
+	getStep,
+	listStepNotes,
+	normalizeStepNoteSource,
+	normalizeStepNoteTheme,
+	type ArchivedFilter,
+	type StepNoteTheme,
+} from "./db.ts";
 import {
 	acknowledgeNotice,
 	listNotices,
@@ -750,6 +757,7 @@ function publicStep(step: Step, cfg: HubConfig): Record<string, unknown> {
 			id: n.id,
 			content: n.content,
 			theme: n.theme,
+			source: n.source,
 			createdAt: n.createdAt,
 			updatedAt: n.updatedAt,
 		})),
@@ -3920,8 +3928,14 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
 			const content = typeof body.content === "string" ? body.content : "";
 			const theme = normalizeStepNoteTheme(body.theme);
+			// Missing means operator; anything that is not one of the two sources is refused.
+			const source = normalizeStepNoteSource(body.source === undefined ? "operator" : body.source);
+			if (source === null) {
+				sendJson(res, 400, { error: "invalid_source" });
+				return;
+			}
 			try {
-				const note = addStepNote(workflowId, stepId, content, theme);
+				const note = addStepNote(workflowId, stepId, content, theme, source);
 				sendJson(res, 200, { note });
 			} catch (err) {
 				sendJson(res, err instanceof StepNoteError ? 400 : 500, { error: String((err as Error).message ?? err) });

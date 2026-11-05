@@ -348,6 +348,10 @@ export interface Step {
 export const STEP_NOTE_THEMES = ["warning", "success", "neutral"] as const;
 export type StepNoteTheme = (typeof STEP_NOTE_THEMES)[number];
 
+/** Who wrote a step note: the operator in the UI, or an agent through `add_step_note`. */
+export const STEP_NOTE_SOURCES = ["operator", "agent"] as const;
+export type StepNoteSource = (typeof STEP_NOTE_SOURCES)[number];
+
 /** A sticky note attached to a workflow step, persisted in `step_notes`. */
 export interface StepNote {
 	id: string;
@@ -355,6 +359,7 @@ export interface StepNote {
 	workflowId: string;
 	content: string;
 	theme: StepNoteTheme;
+	source: StepNoteSource;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -614,6 +619,7 @@ export function open(): DatabaseSync {
 			workflow_id TEXT NOT NULL,
 			content TEXT NOT NULL,
 			theme TEXT NOT NULL DEFAULT 'neutral',
+			source TEXT NOT NULL DEFAULT 'operator',
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
@@ -660,6 +666,16 @@ export function open(): DatabaseSync {
 	// process still reading this DB sees `SELECT *` gain a column it ignores, and
 	// its INSERTs name their columns explicitly, so the default fills this one in.
 	addColumn("kind", "kind TEXT NOT NULL DEFAULT 'task'");
+	// `step_notes` existed before `source` did, and the CREATE TABLE above skips an
+	// existing table. DEFAULT 'operator': every note written before agents could add
+	// one was written by the operator, so an upgraded row keeps saying that and keeps
+	// its created_at/rowid order (which `listStepNotes` sorts by).
+	const existingStepNoteColumns = new Set(
+		(database.prepare("PRAGMA table_info(step_notes)").all() as Record<string, unknown>[]).map((c) => String(c.name)),
+	);
+	if (!existingStepNoteColumns.has("source")) {
+		database.exec("ALTER TABLE step_notes ADD COLUMN source TEXT NOT NULL DEFAULT 'operator';");
+	}
 	// Same upgrade safety for the `workflows` table: `conversation_context` and
 	// `context_injected` were added after launch, so an older DB won't have them.
 	const existingWorkflowColumns = new Set(
@@ -1854,6 +1870,7 @@ function rowToStepNote(row: Record<string, unknown>): StepNote {
 		workflowId: String(row.workflow_id),
 		content: String(row.content),
 		theme: normalizeStepNoteTheme(row.theme),
+		source: normalizeStepNoteSource(row.source) ?? "operator",
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
 	};
@@ -1861,6 +1878,11 @@ function rowToStepNote(row: Record<string, unknown>): StepNote {
 
 export function normalizeStepNoteTheme(value: unknown): StepNoteTheme {
 	return STEP_NOTE_THEMES.includes(value as StepNoteTheme) ? (value as StepNoteTheme) : "neutral";
+}
+
+/** The note's author, or null for anything that is not one of the two known sources. */
+export function normalizeStepNoteSource(value: unknown): StepNoteSource | null {
+	return STEP_NOTE_SOURCES.includes(value as StepNoteSource) ? (value as StepNoteSource) : null;
 }
 
 export function normalizeTemplateStepNotes(notes: unknown): TemplateStepNote[] {
@@ -1893,6 +1915,7 @@ export function insertStepNote(
 	workflowId: string,
 	content: string,
 	theme: StepNoteTheme = "neutral",
+	source: StepNoteSource = "operator",
 ): StepNote {
 	const trimmed = content.trim();
 	if (trimmed === "") throw new Error("note content is required");
@@ -1903,14 +1926,24 @@ export function insertStepNote(
 		workflowId,
 		content: trimmed,
 		theme: normalizeStepNoteTheme(theme),
+		source: normalizeStepNoteSource(source) ?? "operator",
 		createdAt: now,
 		updatedAt: now,
 	};
 	open()
 		.prepare(
-			"INSERT INTO step_notes (id, step_id, workflow_id, content, theme, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			"INSERT INTO step_notes (id, step_id, workflow_id, content, theme, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 		)
-		.run(note.id, note.stepId, note.workflowId, note.content, note.theme, note.createdAt, note.updatedAt);
+		.run(
+			note.id,
+			note.stepId,
+			note.workflowId,
+			note.content,
+			note.theme,
+			note.source,
+			note.createdAt,
+			note.updatedAt,
+		);
 	return note;
 }
 

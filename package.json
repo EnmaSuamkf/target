@@ -11,7 +11,7 @@
     "target:install": "node scripts/bootstrap.mjs",
     "target:install-and-build": "node scripts/bootstrap.mjs --rebuild-images",
     "start": "node scripts/start.ts",
-    "test": "npm --prefix hub test",
+    "test": "npm --prefix hub test && node --test mcp/target-mcp.test.mjs",
     "test:sync": "npm --prefix hub run test:sync",
     "typecheck": "npm --prefix hub run typecheck && npm --prefix hub/ui run typecheck",
     "ui:dev": "npm --prefix hub/ui run dev",

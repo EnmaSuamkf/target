@@ -423,10 +423,14 @@ export type StepKind = "task" | "context";
 export const STEP_NOTE_THEMES = ["warning", "success", "neutral"] as const;
 export type StepNoteTheme = (typeof STEP_NOTE_THEMES)[number];
 
+/** Who wrote a step note: the operator in the UI, or an agent through the MCP `add_step_note` tool. */
+export type StepNoteSource = "operator" | "agent";
+
 export interface StepNote {
 	id: string;
 	content: string;
 	theme: StepNoteTheme;
+	source: StepNoteSource;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -484,10 +488,14 @@ export interface Step {
 	queueBlocker?: QueueBlocker;
 }
 
-/** Input for creating or editing a step note. */
+/**
+ * Input for creating or editing a step note. `source` is read by the add route
+ * only (missing means operator); the edit route never changes a note's source.
+ */
 export interface StepNoteInput {
 	content: string;
 	theme?: StepNoteTheme;
+	source?: StepNoteSource;
 }
 
 /** Where the hub saw the agent's last sign of life (see the hub's progress.ts). */

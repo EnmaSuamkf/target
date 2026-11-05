@@ -11,6 +11,17 @@ The current version is reported by every instance to the central server (see
 
 ### Added
 
+- **Step notes timeline and note source.** A step's notes are shown as a
+  timeline, oldest first, with each note's position, time, author (Agent or
+  Operator), an Edited marker when it changed after creation, the full text and
+  its theme colour. Each note has a `source`: notes added through the MCP tool
+  `add_step_note` are `agent`, notes added in the UI are `operator`, and existing
+  notes migrate to `operator`. `POST .../notes` accepts an optional `source` and
+  returns 400 `invalid_source` for any other value; PATCH never changes it; the
+  step payload and the `step.note.added` / `step.note.modified` event data carry
+  it. Operators can still edit and delete agent notes. Template steps keep the
+  sticky-note list. See `docs/step-notes-timeline.md`.
+
 - **Context window per agent and model.** Settings > Agent models has a
   *Context window* field on every model. Empty keeps the hub's default (shown as
   the placeholder); a value such as `200k` or `1m` replaces it for that agent's

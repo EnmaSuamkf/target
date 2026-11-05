@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { StepNote, StepNoteTheme, TemplateStepNote } from "../api/types.ts";
 import { STEP_NOTE_THEMES } from "../api/types.ts";
+import { StepTimeline } from "./StepTimeline.tsx";
 import styles from "./StepNotes.module.css";
 
 const THEME_LABELS: Record<StepNoteTheme, string> = {
@@ -29,7 +30,16 @@ function themeBtnClass(theme: StepNoteTheme, active: boolean): string {
 
 type WorkflowNote = StepNote | TemplateStepNote;
 
-/** Sticky notes on a step — workflow mode persists via API; template mode is local state. */
+/** Workflow notes carry timestamps; template notes (copied onto a template step) do not. */
+function isWorkflowNote(note: WorkflowNote): note is StepNote {
+	return "createdAt" in note;
+}
+
+/**
+ * Sticky notes on a step. Workflow notes are shown as a timeline with the same
+ * Edit and Delete controls; template notes keep the sticky-note list. Workflow
+ * mode persists via API; template mode is local state.
+ */
 export function StepNotes({
 	notes,
 	busy = false,
@@ -83,6 +93,44 @@ export function StepNotes({
 	const canMutate = !!(onAdd || onEdit || onRemove);
 	const locked = disabled || busy;
 
+	const renderNoteActions = (note: WorkflowNote): React.JSX.Element => (
+		<div className={styles.noteActions}>
+			<button
+				type="button"
+				className={styles.noteBtn}
+				onClick={() => startEdit(note)}
+				disabled={locked || saving}
+				title={disabled ? disabledTitle : undefined}
+			>
+				Edit
+			</button>
+			{onRemove && (
+				<button
+					type="button"
+					className={styles.noteBtn}
+					onClick={async () => {
+						if (saving || disabled) return;
+						setSaving(true);
+						try {
+							await onRemove(note.id);
+							if (editingId === note.id) resetComposer();
+						} finally {
+							setSaving(false);
+						}
+					}}
+					disabled={locked || saving}
+					title={disabled ? disabledTitle : undefined}
+					data-remove-note
+				>
+					Delete
+				</button>
+			)}
+		</div>
+	);
+
+	const workflowNotes = notes.filter(isWorkflowNote);
+	const templateNotes = notes.filter((note) => !isWorkflowNote(note));
+
 	return (
 		<div className={styles.stepNotes} data-step-notes>
 			<div className={styles.head}>
@@ -101,45 +149,16 @@ export function StepNotes({
 				)}
 			</div>
 
-			{notes.length > 0 && (
+			{workflowNotes.length > 0 && (
+				<StepTimeline notes={workflowNotes} renderActions={canMutate ? renderNoteActions : undefined} />
+			)}
+
+			{templateNotes.length > 0 && (
 				<div className={styles.list}>
-					{notes.map((note) => (
+					{templateNotes.map((note) => (
 						<div key={note.id} className={`${styles.note} ${noteClass(note.theme)}`} data-note-theme={note.theme}>
 							{note.content}
-							{canMutate && (
-								<div className={styles.noteActions}>
-									<button
-										type="button"
-										className={styles.noteBtn}
-										onClick={() => startEdit(note)}
-										disabled={locked || saving}
-										title={disabled ? disabledTitle : undefined}
-									>
-										Edit
-									</button>
-									{onRemove && (
-										<button
-											type="button"
-											className={styles.noteBtn}
-											onClick={async () => {
-												if (saving || disabled) return;
-												setSaving(true);
-												try {
-													await onRemove(note.id);
-													if (editingId === note.id) resetComposer();
-												} finally {
-													setSaving(false);
-												}
-											}}
-											disabled={locked || saving}
-											title={disabled ? disabledTitle : undefined}
-											data-remove-note
-										>
-											Delete
-										</button>
-									)}
-								</div>
-							)}
+							{canMutate && renderNoteActions(note)}
 						</div>
 					))}
 				</div>
