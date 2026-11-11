@@ -60,7 +60,7 @@ export type StepPhase = "exec" | "judge";
  * (`stepProgress`, the completion notification, the on-disk `<NN>-<slug>.md`
  * files): a context step is plumbing, not work, and must not show up as either.
  */
-export type StepKind = "task" | "context";
+export type StepKind = "task" | "context" | "command";
 
 /**
  * Where the hub-owned context step sits: BEFORE the first operator step, at a
@@ -253,6 +253,23 @@ export interface Step {
 	 * predates this column changes meaning.
 	 */
 	kind: StepKind;
+	/**
+	 * For a `command` step: the pipeline it runs (see `pipeline-store.ts`). Null
+	 * for every other kind. Kept as a plain id, not a foreign key, because a
+	 * pipeline is only ever deleted when nothing references it (see `deletePipeline`).
+	 */
+	pipelineId: string | null;
+	/** For a `command` step: the input values, keyed by the pipeline's input names. Null otherwise. */
+	pipelineInputs: Record<string, string> | null;
+	/**
+	 * The summary of the last command-step run, waiting to be prepended to the
+	 * NEXT agent step's prompt. Cleared (set to null) only once an agent dispatch
+	 * has carried it — a failed dispatch leaves it pending, so a retry carries it
+	 * again (docs/pipelines.md, "What the agent receives").
+	 */
+	pendingReport: string | null;
+	/** True once an agent dispatch has carried `pendingReport`. Meaningful only while `pendingReport` is set. */
+	pendingReportDelivered: boolean;
 	orderIndex: number;
 	description: string;
 	status: StepStatus;
@@ -384,6 +401,12 @@ export interface TemplateStepNote {
  */
 export interface TemplateStep {
 	description: string;
+	/** `command` seeds a command step (see `StepKind`); absent or `task` reads as an agent step, as every template before this existed. */
+	kind: StepKind;
+	/** Seeds `Step.pipelineId` for a command step. Null for every other kind. */
+	pipelineId: string | null;
+	/** Seeds `Step.pipelineInputs` for a command step. Null for every other kind. */
+	pipelineInputs: Record<string, string> | null;
 	acceptanceCriteria: string | null;
 	/** Seeds `Step.manualReview` — a template that encodes "a human signs this step off" would be useless if the flag were dropped on use. */
 	manualReview: boolean;
@@ -536,9 +559,60 @@ export function open(): DatabaseSync {
 			last_progress_kind TEXT,
 			last_progress_token TEXT,
 			status_manual INTEGER NOT NULL DEFAULT 0,
-			status_manual_at TEXT
+			status_manual_at TEXT,
+			pipeline_id TEXT,
+			pipeline_inputs TEXT,
+			pending_report TEXT,
+			pending_report_delivered INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE INDEX IF NOT EXISTS idx_steps_workflow ON steps(workflow_id, order_index);
+		CREATE TABLE IF NOT EXISTS pipelines (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			tags TEXT NOT NULL DEFAULT '[]',
+			source TEXT NOT NULL,
+			source_hash TEXT NOT NULL,
+			trusted_hash TEXT,
+			origin TEXT NOT NULL DEFAULT 'local',
+			sync_source TEXT,
+			synced_at TEXT,
+			revoked INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS pipeline_runs (
+			id TEXT PRIMARY KEY,
+			step_id TEXT NOT NULL,
+			workflow_id TEXT NOT NULL,
+			attempt INTEGER NOT NULL,
+			pipeline_id TEXT NOT NULL,
+			source_hash TEXT NOT NULL,
+			conclusion TEXT,
+			cancelled INTEGER NOT NULL DEFAULT 0,
+			error TEXT,
+			started_at TEXT NOT NULL,
+			finished_at TEXT,
+			log_path TEXT
+		);
+		CREATE INDEX IF NOT EXISTS idx_pipeline_runs_step ON pipeline_runs(step_id, attempt);
+		CREATE INDEX IF NOT EXISTS idx_pipeline_runs_workflow ON pipeline_runs(workflow_id);
+		CREATE TABLE IF NOT EXISTS pipeline_run_steps (
+			run_id TEXT NOT NULL,
+			idx INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			exit_code INTEGER,
+			started_at TEXT,
+			finished_at TEXT,
+			log_offset INTEGER NOT NULL DEFAULT 0,
+			log_length INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (run_id, idx)
+		);
+		CREATE TABLE IF NOT EXISTS pipeline_secrets (
+			name TEXT PRIMARY KEY,
+			value TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
 		CREATE TABLE IF NOT EXISTS templates (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
@@ -666,6 +740,13 @@ export function open(): DatabaseSync {
 	// process still reading this DB sees `SELECT *` gain a column it ignores, and
 	// its INSERTs name their columns explicitly, so the default fills this one in.
 	addColumn("kind", "kind TEXT NOT NULL DEFAULT 'task'");
+	// Command steps (docs/pipelines.md, "Data model"). All four are nullable or
+	// default to "nothing pending", so an upgraded row is an agent step exactly as
+	// before: no pipeline, no inputs, no report waiting for the agent.
+	addColumn("pipeline_id", "pipeline_id TEXT");
+	addColumn("pipeline_inputs", "pipeline_inputs TEXT");
+	addColumn("pending_report", "pending_report TEXT");
+	addColumn("pending_report_delivered", "pending_report_delivered INTEGER NOT NULL DEFAULT 0");
 	// `step_notes` existed before `source` did, and the CREATE TABLE above skips an
 	// existing table. DEFAULT 'operator': every note written before agents could add
 	// one was written by the operator, so an upgraded row keeps saying that and keeps
@@ -1612,6 +1693,23 @@ export function deleteWorkflow(id: string): boolean {
 	return database.prepare("DELETE FROM workflows WHERE id = ?").run(id).changes > 0;
 }
 
+/**
+ * Reads the `pipeline_inputs` JSON column. A malformed or non-object value reads
+ * as null rather than throwing: the column is written only by this module, so
+ * damage here means a hand-edited DB, and a null input map makes the step fail
+ * visibly at run time instead of taking every workflow read down with it.
+ */
+function parseStoredInputs(value: unknown): Record<string, string> | null {
+	if (value == null) return null;
+	try {
+		const parsed: unknown = JSON.parse(String(value));
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+		return Object.fromEntries(Object.entries(parsed as Record<string, unknown>).map(([k, v]) => [k, String(v ?? "")]));
+	} catch {
+		return null;
+	}
+}
+
 function rowToStep(row: Record<string, unknown>): Step {
 	return {
 		id: String(row.id),
@@ -1619,6 +1717,10 @@ function rowToStep(row: Record<string, unknown>): Step {
 		// Absent column / NULL (a row written before the kind existed) is a task —
 		// which is what every row written before this feature actually was.
 		kind: (row.kind as StepKind) ?? "task",
+		pipelineId: row.pipeline_id == null ? null : String(row.pipeline_id),
+		pipelineInputs: parseStoredInputs(row.pipeline_inputs),
+		pendingReport: row.pending_report == null ? null : String(row.pending_report),
+		pendingReportDelivered: Number(row.pending_report_delivered ?? 0) === 1,
 		orderIndex: Number(row.order_index),
 		description: String(row.description),
 		status: row.status as StepStatus,
@@ -1668,6 +1770,10 @@ export function insertStep(
 		afterOrderIndex?: number | null;
 		/** What the row IS (see `StepKind`). Omitted = `task`, the only kind an operator can author. */
 		kind?: StepKind;
+		/** Required for a `command` step: the pipeline it runs. Ignored for other kinds. */
+		pipelineId?: string | null;
+		/** The command step's input values. Ignored for other kinds. */
+		pipelineInputs?: Record<string, string> | null;
 		/**
 		 * Writes this exact `order_index` instead of computing one. The escape
 		 * hatch for the hub-owned context step, which has to land at
@@ -1706,17 +1812,29 @@ export function insertStep(
 			.prepare("UPDATE steps SET order_index = order_index + 1 WHERE workflow_id = ? AND order_index >= ?")
 			.run(workflowId, orderIndex);
 	}
-	const acceptanceCriteria = options.acceptanceCriteria?.trim() || null;
+	const kind: StepKind = options.kind ?? "task";
+	// A command step has no agent, so the two agent-only settings are forced to
+	// the values the server's canvas reads as "no subagent, no judge" (see
+	// docs/pipelines.md, "Compatibility with an unchanged server"). Storing them
+	// here, not only in the API, keeps every writer honest.
+	const isCommand = kind === "command";
+	const acceptanceCriteria = isCommand ? null : options.acceptanceCriteria?.trim() || null;
 	// The gate is opt-in: a step nobody configured never holds the workflow.
 	const manualReview = options.manualReview === true;
 	// The subagent is opt-OUT: only an explicit `false` runs the step inline.
-	const useSubagent = options.useSubagent !== false;
+	const useSubagent = isCommand ? false : options.useSubagent !== false;
 	const maxRetries = Math.max(0, Math.floor(options.maxRetries ?? 0));
 	const retryIntervalSeconds = Math.max(0, Math.floor(options.retryIntervalSeconds ?? 0));
+	const pipelineId = isCommand ? (options.pipelineId ?? null) : null;
+	const pipelineInputs = isCommand ? (options.pipelineInputs ?? {}) : null;
 	const step: Step = {
 		id: crypto.randomUUID(),
 		workflowId,
-		kind: options.kind ?? "task",
+		kind,
+		pipelineId,
+		pipelineInputs,
+		pendingReport: null,
+		pendingReportDelivered: false,
 		orderIndex,
 		description,
 		status: "pending",
@@ -1745,8 +1863,8 @@ export function insertStep(
 	};
 	database
 		.prepare(
-			`INSERT INTO steps (id, workflow_id, kind, order_index, description, status, callback_token, created_at, acceptance_criteria, manual_review, use_subagent, max_retries, retry_interval_seconds, selected)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO steps (id, workflow_id, kind, order_index, description, status, callback_token, created_at, acceptance_criteria, manual_review, use_subagent, max_retries, retry_interval_seconds, selected, pipeline_id, pipeline_inputs)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			step.id,
@@ -1763,6 +1881,8 @@ export function insertStep(
 			step.maxRetries,
 			step.retryIntervalSeconds,
 			step.selected ? 1 : 0,
+			step.pipelineId,
+			step.pipelineInputs == null ? null : JSON.stringify(step.pipelineInputs),
 		);
 	return step;
 }
@@ -1803,6 +1923,36 @@ export function listRunningSteps(): Step[] {
 	return (rows as Record<string, unknown>[]).map(rowToStep);
 }
 
+/**
+ * Stores a command step's report for the agent and marks it undelivered. A new
+ * attempt's report replaces the previous one: the agent is told about the
+ * latest run, and the step-results file is rewritten to match.
+ */
+export function setPendingReport(stepId: string, report: string): void {
+	open().prepare("UPDATE steps SET pending_report = ?, pending_report_delivered = 0 WHERE id = ?").run(report, stepId);
+}
+
+/**
+ * Reports no agent turn has carried yet, in workflow order. Several command
+ * steps can settle in a row, and the agent gets all of them in one prompt.
+ */
+export function listUndeliveredReports(workflowId: string): { stepId: string; report: string }[] {
+	const rows = open()
+		.prepare(
+			`SELECT id, pending_report FROM steps
+			 WHERE workflow_id = ? AND pending_report IS NOT NULL AND pending_report_delivered = 0
+			 ORDER BY order_index`,
+		)
+		.all(workflowId) as Record<string, unknown>[];
+	return rows.map((row) => ({ stepId: String(row.id), report: String(row.pending_report) }));
+}
+
+/** Called only after the hook accepted the prompt that carried these reports. */
+export function markReportsDelivered(stepIds: readonly string[]): void {
+	const statement = open().prepare("UPDATE steps SET pending_report_delivered = 1 WHERE id = ?");
+	for (const id of stepIds) statement.run(id);
+}
+
 export function nextPendingStep(workflowId: string): Step | null {
 	const row = open()
 		.prepare("SELECT * FROM steps WHERE workflow_id = ? AND status = 'pending' AND selected = 1 ORDER BY order_index LIMIT 1")
@@ -1830,6 +1980,21 @@ export function latestStepSession(workflowId: string): string | null {
 
 export function updateStepDescription(id: string, description: string): void {
 	open().prepare("UPDATE steps SET description = ? WHERE id = ?").run(description, id);
+}
+
+/**
+ * Writes a step's kind and its command fields together. A task clears them
+ * (both null), so a row can never be a task that still names a pipeline.
+ */
+export function updateStepKind(
+	id: string,
+	kind: StepKind,
+	pipelineId: string | null,
+	pipelineInputs: Record<string, string> | null,
+): void {
+	open()
+		.prepare("UPDATE steps SET kind = ?, pipeline_id = ?, pipeline_inputs = ? WHERE id = ?")
+		.run(kind, kind === "command" ? pipelineId : null, kind === "command" && pipelineInputs != null ? JSON.stringify(pipelineInputs) : null, id);
 }
 
 /** Updates a step's run config (acceptance criteria + manual-review gate + subagent toggle + retry budget + retry wait). Editing a step is the only place these change after creation. */
@@ -2535,6 +2700,18 @@ export function resetSteps(workflowId: string): void {
 		.run(workflowId);
 }
 
+/**
+ * A restart runs every command step again, so the reports of the previous run
+ * no longer describe anything that will happen. Cleared for the whole workflow,
+ * not only the selected steps: an unselected command step that still carries an
+ * old report would otherwise hand the agent a result from before the restart.
+ */
+export function clearCommandReports(workflowId: string): void {
+	open()
+		.prepare("UPDATE steps SET pending_report = NULL, pending_report_delivered = 0 WHERE workflow_id = ? AND kind = 'command'")
+		.run(workflowId);
+}
+
 export interface Progress {
 	total: number;
 	done: number;
@@ -2543,7 +2720,8 @@ export interface Progress {
 }
 
 /**
- * Progress over the workflow's REAL work only — `kind = 'task'`. The hub-owned
+ * Progress over the workflow's REAL work only — every step but the context one
+ * (`kind != 'context'`, so a command step counts as the operator's work). The hub-owned
  * context step is plumbing, not a step the operator asked for: counting it would
  * make a 2-step workflow read "0/3", stall the bar at 66% when everything the
  * operator wrote is finished, and put a third step in the completion DM.
@@ -2554,7 +2732,7 @@ export function stepProgress(workflowId: string): Progress {
 			`SELECT COUNT(*) AS total,
 			        SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS done,
 			        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
-			 FROM steps WHERE workflow_id = ? AND kind = 'task'`,
+			 FROM steps WHERE workflow_id = ? AND kind != 'context'`,
 		)
 		.get(workflowId) as Record<string, unknown>;
 	const total = Number(row.total ?? 0);
@@ -2576,6 +2754,12 @@ function normalizeTemplateTags(tags: unknown): string[] {
 	return tags.map((t) => String(t).trim()).filter((t) => t !== "");
 }
 
+/** Command-step inputs as stored: a plain object of strings. Anything else is an empty map, never an error here — the step's inputs are checked against the pipeline when the step is added (see `addStep`). */
+function normalizeStepInputs(value: unknown): Record<string, string> {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return {};
+	return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, String(v ?? "")]));
+}
+
 function normalizeTemplateSteps(steps: unknown): TemplateStep[] {
 	if (!Array.isArray(steps)) return [];
 	return steps
@@ -2595,17 +2779,35 @@ function normalizeTemplateSteps(steps: unknown): TemplateStep[] {
 			const maxRetries = Math.max(0, Math.floor(Number(obj.maxRetries ?? 0)) || 0);
 			const retryIntervalSeconds = Math.max(0, Math.floor(Number(obj.retryIntervalSeconds ?? 0)) || 0);
 			const notes = normalizeTemplateStepNotes(obj.notes);
+			// A template step is an agent step unless it says `command`. Only a
+			// command step keeps a pipeline and inputs; for any other kind they are
+			// dropped so a stale field can never seed a step that does not use it.
+			const kind: StepKind = obj.kind === "command" ? "command" : "task";
+			// A command step has no agent, so it never carries the agent defaults
+			// (see insertStep): the template stores the shape the step will have.
+			const pipelineId =
+				kind === "command" && typeof obj.pipelineId === "string" && obj.pipelineId.trim() !== ""
+					? obj.pipelineId.trim()
+					: null;
+			const pipelineInputs =
+				kind === "command" && pipelineId !== null ? normalizeStepInputs(obj.pipelineInputs) : null;
 			return {
 				description,
-				acceptanceCriteria,
+				kind,
+				pipelineId,
+				pipelineInputs,
+				acceptanceCriteria: kind === "command" ? null : acceptanceCriteria,
 				manualReview,
-				useSubagent,
+				useSubagent: kind === "command" ? false : useSubagent,
 				maxRetries,
 				retryIntervalSeconds,
 				...(notes.length > 0 ? { notes } : {}),
 			};
 		})
-		.filter((s) => s.description !== "");
+		// A command step may leave its description empty: the step gets a generated
+		// one when it is seeded. It is kept either way, so a command step with no
+		// pipeline fails the seed with a message rather than vanishing from it.
+		.filter((s) => s.description !== "" || s.kind === "command");
 }
 
 function normalizeTemplateTcpIds(tcpIds: unknown): string[] {

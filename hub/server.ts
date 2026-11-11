@@ -205,6 +205,7 @@ import {
 	type OverridableWorkflowStatus,
 	type ShortcutAction,
 	type Step,
+	type StepKind,
 	type Template,
 	type Workflow,
 } from "./db.ts";
@@ -234,6 +235,26 @@ import {
 	type TcpSelection,
 } from "./tcp-store.ts";
 import { getTcpUsage } from "./tcp-usage.ts";
+import {
+	approvePipeline,
+	deletePipeline,
+	getPipeline,
+	importPipelines,
+	insertPipeline,
+	isTrusted,
+	listPipelines,
+	parsePipelineBundle,
+	pipelineBundle,
+	pipelineSpec,
+	pipelineUsage,
+	PipelineStoreError,
+	updatePipeline,
+	type Pipeline,
+} from "./pipeline-store.ts";
+import { deleteSecret, listSecrets, PipelineSecretError, setSecret } from "./pipeline-secrets.ts";
+import { getPipelineRun, listPipelineRunsForStep, type PipelineRun } from "./pipeline-runs.ts";
+import { parsePipeline } from "./pipeline-yaml.ts";
+import { redactSecrets } from "./redact.ts";
 import {
 	applyTemplateResourcesToWorkflow,
 	deleteResourceSet,
@@ -299,6 +320,7 @@ import {
 	WorkflowError,
 	WorkflowNotArchivableError,
 	type CloneOverrides,
+	assertTemplateCommandSteps,
 } from "./workflow.ts";
 import {
 	getStep,
@@ -515,6 +537,20 @@ function isAdmin(cfg: HubConfig, headers: http.IncomingHttpHeaders): boolean {
 }
 
 /**
+ * True when the request is authenticated by the browser session and NOT by the
+ * admin bearer token. Pipeline trust decisions use this rather than `isAdmin`:
+ * the bearer token is held by the MCP server and so by agents, and an agent must
+ * never be able to approve a pipeline that runs on the host (docs/pipelines.md,
+ * "Trust"). A request that presents the bearer token is never a session caller,
+ * even if it also carries a cookie.
+ */
+function isSessionCaller(cfg: HubConfig, headers: http.IncomingHttpHeaders): boolean {
+	const provided = bearerToken(headers);
+	if (provided.length > 0 && timingSafeEqualStr(provided, cfg.adminToken)) return false;
+	return hasSession(headers);
+}
+
+/**
  * Operator auth plus the linked owner's role. Replaces the per-route `isAdmin`
  * check on mutating (and export) paths. Unlinked hubs stay unrestricted.
  */
@@ -718,6 +754,11 @@ function publicStep(step: Step, cfg: HubConfig): Record<string, unknown> {
 		// it to pin that row, drop it from the selection maths and hide the actions
 		// the server would refuse anyway.
 		kind: step.kind,
+		// The command step's pipeline and inputs. Null for every other kind. `pipeline`
+		// is the summary the UI shows; `trusted` says whether it would run now.
+		pipelineId: step.pipelineId,
+		pipelineInputs: step.pipelineInputs,
+		pipeline: pipelineSummaryFor(step.pipelineId),
 		orderIndex: step.orderIndex,
 		description: step.description,
 		status: step.status,
@@ -814,6 +855,105 @@ function firstUnusableTemplateRef(tcpSelections: unknown, resourceSelections: un
 	return null;
 }
 
+/**
+ * A pipeline without its text: what the list and the catalog need. The source
+ * is served only by the detail route, so a list response is never a bulk dump of
+ * every script on the hub.
+ */
+function publicPipelineSummary(p: Pipeline): Record<string, unknown> {
+	// The declared inputs, so the step editor can offer one field per input without
+	// parsing YAML in the browser. Empty when the stored text does not validate.
+	const spec = pipelineSpec(p);
+	const inputs = spec
+		? Object.fromEntries(
+				Object.entries(spec.inputs).map(([name, input]) => [
+					name,
+					{ description: input.description, required: input.required, default: input.default },
+				]),
+			)
+		: {};
+	return {
+		id: p.id,
+		name: p.name,
+		tags: p.tags,
+		inputs,
+		origin: p.origin,
+		trusted: isTrusted(p),
+		revoked: p.revoked,
+		syncSource: p.syncSource,
+		syncedAt: p.syncedAt,
+		createdAt: p.createdAt,
+		updatedAt: p.updatedAt,
+	};
+}
+
+/** The full pipeline, for the detail and save responses. Never carries a secret value (pipelines do not hold any). */
+function publicPipeline(p: Pipeline): Record<string, unknown> {
+	return {
+		...publicPipelineSummary(p),
+		source: p.source,
+		sourceHash: p.sourceHash,
+		trustedHash: p.trustedHash,
+	};
+}
+
+/** A run for the API: its attempt and job steps, without the on-disk log path. */
+function publicPipelineRun(run: PipelineRun): Record<string, unknown> {
+	return {
+		id: run.id,
+		stepId: run.stepId,
+		workflowId: run.workflowId,
+		attempt: run.attempt,
+		pipelineId: run.pipelineId,
+		sourceHash: run.sourceHash,
+		conclusion: run.conclusion,
+		cancelled: run.cancelled,
+		error: run.error,
+		startedAt: run.startedAt,
+		finishedAt: run.finishedAt,
+		steps: run.steps.map((s) => ({
+			index: s.index,
+			name: s.name,
+			status: s.status,
+			exitCode: s.exitCode,
+			startedAt: s.startedAt,
+			finishedAt: s.finishedAt,
+		})),
+	};
+}
+
+/**
+ * Maps a pipeline-store or secret error onto its HTTP answer. Anything else is
+ * a bug, answered as a 500 so the request is never left without a response.
+ */
+function sendPipelineError(res: http.ServerResponse, err: unknown): void {
+	if (err instanceof PipelineStoreError) {
+		switch (err.code) {
+			case "invalid_pipeline":
+				sendJson(res, 400, { error: "invalid_pipeline", errors: err.errors });
+				return;
+			case "stale_hash":
+				sendJson(res, 409, { error: "stale_hash" });
+				return;
+			case "in_use":
+				sendJson(res, 409, { error: "in_use", references: err.references });
+				return;
+			case "server_managed":
+				sendJson(res, 409, { error: "server_managed" });
+				return;
+			case "unsupported_schema_version":
+			case "invalid_bundle":
+				sendJson(res, 400, { error: err.code });
+				return;
+		}
+	}
+	if (err instanceof PipelineSecretError) {
+		sendJson(res, err.code === "missing_secret" ? 409 : 400, { error: err.code, message: err.message });
+		return;
+	}
+	sendJson(res, 500, { error: "internal" });
+}
+
 function publicTcp(tcp: Tcp): Record<string, unknown> {
 	return {
 		id: tcp.id,
@@ -860,6 +1000,51 @@ function publicTemplate(template: Template): Record<string, unknown> {
 }
 
 /** Reads the optional run config (acceptance criteria + manual-review gate + subagent toggle + retry budget + retry wait) from a step create/edit body. */
+/**
+ * The command fields of a step create or edit body. Only the fields the client
+ * sent are returned, so an edit that omits them leaves the stored step alone.
+ * A bad shape is a WorkflowError, which the routes answer as a 400.
+ */
+function readCommandFields(body: Record<string, unknown>): {
+	kind?: StepKind;
+	pipelineId?: string | null;
+	pipelineInputs?: Record<string, string> | null;
+} {
+	const out: { kind?: StepKind; pipelineId?: string | null; pipelineInputs?: Record<string, string> | null } = {};
+	if ("kind" in body) {
+		if (body.kind !== "task" && body.kind !== "command") {
+			throw new WorkflowError("kind must be \"task\" or \"command\"");
+		}
+		out.kind = body.kind;
+	}
+	if ("pipelineId" in body) {
+		out.pipelineId = typeof body.pipelineId === "string" && body.pipelineId !== "" ? body.pipelineId : null;
+	}
+	if ("pipelineInputs" in body) {
+		const value = body.pipelineInputs;
+		if (value === null) {
+			out.pipelineInputs = null;
+		} else if (
+			typeof value !== "object" ||
+			Array.isArray(value) ||
+			Object.values(value as Record<string, unknown>).some((v) => typeof v !== "string")
+		) {
+			throw new WorkflowError("pipelineInputs must be an object whose values are strings");
+		} else {
+			out.pipelineInputs = { ...(value as Record<string, string>) };
+		}
+	}
+	return out;
+}
+
+/** The light pipeline summary a step payload carries: enough to show the name and whether it runs. */
+function pipelineSummaryFor(pipelineId: string | null): { id: string; name: string | null; trusted: boolean } | null {
+	if (!pipelineId) return null;
+	const pipeline = getPipeline(pipelineId);
+	if (!pipeline) return { id: pipelineId, name: null, trusted: false };
+	return { id: pipeline.id, name: pipeline.name, trusted: isTrusted(pipeline) };
+}
+
 function readStepConfig(body: Record<string, unknown>): {
 	acceptanceCriteria?: string | null;
 	manualReview?: boolean;
@@ -1782,6 +1967,276 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
+	// --- /api/pipelines, /api/secrets, /api/pipeline-runs (docs/pipelines.md, "HTTP API") ---
+	//
+	// Trust is decided here, by the caller, and nowhere else: a save or an approve
+	// that comes from the browser session is trusted; one that comes with the admin
+	// bearer token is not (see `isSessionCaller`). Every write below also goes
+	// through `requirePermission`, so a linked hub's owner needs the manage
+	// permission as well.
+	if (parts[1] === "pipelines") {
+		const pipelineId = parts[2];
+
+		if (!pipelineId && req.method === "GET") {
+			sendJson(res, 200, { pipelines: listPipelines().map(publicPipelineSummary) });
+			return;
+		}
+
+		if (!pipelineId && req.method === "POST") {
+			if (!requirePermission(cfg, req, res, "client.workflows.manage")) return;
+			const session = isSessionCaller(cfg, req.headers);
+			readJsonBody(req, res, catalogMaxBytes, (body) => {
+				if (typeof body.source !== "string") {
+					sendJson(res, 400, { error: "source is required" });
+					return;
+				}
+				try {
+					const pipeline = insertPipeline({ source: body.source, tags: body.tags, approve: session });
+					log(`pipeline '${pipeline.name}' (${pipeline.id}) saved${session ? " and approved" : " (untrusted until approved)"}`);
+					sendJson(res, 200, { pipeline: publicPipeline(pipeline) });
+				} catch (err) {
+					sendPipelineError(res, err);
+				}
+			});
+			return;
+		}
+
+		// Routes whose second segment is a word, not an id. Checked before the
+		// `:id` routes below so `export` is never read as a pipeline id.
+		if (pipelineId === "validate" && !parts[3] && req.method === "POST") {
+			if (!requirePermission(cfg, req, res, "client.workflows.manage")) return;
+			readJsonBody(req, res, catalogMaxBytes, (body) => {
+				if (typeof body.source !== "string") {
+					sendJson(res, 400, { error: "source is required" });
+					return;
+				}
+				// Saves nothing: the editor gets the same errors a save would, on their lines.
+				const result = parsePipeline(body.source);
+				sendJson(res, 200, { ok: result.ok, errors: result.ok ? [] : result.errors });
+			});
+			return;
+		}
+
+		if (pipelineId === "export" && !parts[3] && req.method === "GET") {
+			if (!requirePermission(cfg, req, res, "client.workflows.manage")) return;
+			sendJson(res, 200, pipelineBundle(listPipelines().filter((p) => p.origin !== "server")));
+			return;
+		}
+
+		if (pipelineId === "import" && !parts[3] && req.method === "POST") {
+			if (!requirePermission(cfg, req, res, "client.workflows.manage")) return;
+			readJsonBody(req, res, catalogMaxBytes, (body) => {
+				try {
+					const created = importPipelines(parsePipelineBundle(body));
+					log(`imported ${created.length} pipeline(s): ${created.map((p) => `'${p.name}' (${p.id})`).join(", ")}`);
+					sendJson(res, 200, { pipelines: created.map(publicPipelineSummary) });
+				} catch (err) {
+					sendPipelineError(res, err);
+				}
+			});
+			return;
+		}
+
+		if (pipelineId && parts[3] === "approve" && !parts[4] && req.method === "POST") {
+			// Session only, and checked before the permission: a bearer-only caller
+			// gets the same answer whatever the owner's permissions are.
+			if (!isSessionCaller(cfg, req.headers)) {
+				sendJson(res, 403, { error: "session_required" });
+				return;
+			}
+			if (!requirePermission(cfg, req, res, "client.workflows.manage")) return;
+			readJsonBody(req, res, catalogMaxBytes, (body) => {
+				if (typeof body.sourceHash !== "string") {
+					sendJson(res, 400, { error: "sourceHash is required" });
+					return;
+				}
+				try {
+					const pipeline = approvePipeline(pipelineId, body.sourceHash);
+					if (!pipeline) {
+						sendJson(res, 404, { error: "unknown_pipeline" });
+						return;
+					}
+					log(`pipeline '${pipeline.name}' (${pipeline.id}) approved`);
+					sendJson(res, 200, { pipeline: publicPipeline(pipeline) });
+				} catch (err) {
+					sendPipelineError(res, err);
+				}
+			});
+			return;
+		}
+
+		if (pipelineId && !parts[3] && req.method === "GET") {
+			const pipeline = getPipeline(pipelineId);
+			if (!pipeline) {
+				sendJson(res, 404, { error: "unknown_pipeline" });
+				return;
+			}
+			// The validator's view of the stored text. A valid pipeline has none.
+			const check = parsePipeline(pipeline.source);
+			sendJson(res, 200, {
+				pipeline: {
+					...publicPipeline(pipeline),
+					errors: check.ok ? [] : check.errors,
+					referencedBy: pipelineUsage(pipelineId),
+				},
+			});
+			return;
+		}
+
+		if (pipelineId && !parts[3] && (req.method === "PUT" || req.method === "PATCH")) {
+			if (!requirePermission(cfg, req, res, "client.workflows.manage")) return;
+			const existing = getPipeline(pipelineId);
+			if (!existing) {
+				sendJson(res, 404, { error: "unknown_pipeline" });
+				return;
+			}
+			if (existing.origin === "server") {
+				sendJson(res, 409, { error: "server_managed" });
+				return;
+			}
+			const session = isSessionCaller(cfg, req.headers);
+			readJsonBody(req, res, catalogMaxBytes, (body) => {
+				const sourceGiven = typeof body.source === "string";
+				if ("source" in body && !sourceGiven) {
+					sendJson(res, 400, { error: "source must be text" });
+					return;
+				}
+				try {
+					const pipeline = updatePipeline(pipelineId, {
+						source: sourceGiven ? (body.source as string) : undefined,
+						tags: "tags" in body ? body.tags : undefined,
+						// Only a save that changes the text is an approval, and only from the session.
+						approve: session && sourceGiven,
+					});
+					if (!pipeline) {
+						sendJson(res, 404, { error: "unknown_pipeline" });
+						return;
+					}
+					sendJson(res, 200, { pipeline: publicPipeline(pipeline) });
+				} catch (err) {
+					sendPipelineError(res, err);
+				}
+			});
+			return;
+		}
+
+		if (pipelineId && !parts[3] && req.method === "DELETE") {
+			if (!requirePermission(cfg, req, res, "client.workflows.manage")) return;
+			const existing = getPipeline(pipelineId);
+			if (!existing) {
+				sendJson(res, 404, { error: "unknown_pipeline" });
+				return;
+			}
+			if (existing.origin === "server") {
+				sendJson(res, 409, { error: "server_managed" });
+				return;
+			}
+			try {
+				deletePipeline(pipelineId);
+				sendJson(res, 200, { ok: true });
+			} catch (err) {
+				sendPipelineError(res, err);
+			}
+			return;
+		}
+
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
+	if (parts[1] === "secrets") {
+		const secretName = parts[2];
+
+		if (!secretName && req.method === "GET") {
+			// Names and whether each is set. The store cannot return a value from here.
+			if (!requirePermission(cfg, req, res, "client.workflows.manage")) return;
+			sendJson(res, 200, { secrets: listSecrets() });
+			return;
+		}
+
+		if (secretName && !parts[3] && req.method === "PUT") {
+			if (!isSessionCaller(cfg, req.headers)) {
+				sendJson(res, 403, { error: "session_required" });
+				return;
+			}
+			if (!requirePermission(cfg, req, res, "client.workflows.manage")) return;
+			readJsonBody(req, res, catalogMaxBytes, (body) => {
+				if (typeof body.value !== "string") {
+					sendJson(res, 400, { error: "value is required" });
+					return;
+				}
+				try {
+					const info = setSecret(secretName, body.value);
+					log(`secret '${info.name}' set`);
+					sendJson(res, 200, { secret: info });
+				} catch (err) {
+					sendPipelineError(res, err);
+				}
+			});
+			return;
+		}
+
+		if (secretName && !parts[3] && req.method === "DELETE") {
+			if (!isSessionCaller(cfg, req.headers)) {
+				sendJson(res, 403, { error: "session_required" });
+				return;
+			}
+			if (!requirePermission(cfg, req, res, "client.workflows.manage")) return;
+			try {
+				if (!deleteSecret(secretName)) {
+					sendJson(res, 404, { error: "unknown_secret" });
+					return;
+				}
+				log(`secret '${secretName}' deleted`);
+				sendJson(res, 200, { ok: true });
+			} catch (err) {
+				sendPipelineError(res, err);
+			}
+			return;
+		}
+
+		sendJson(res, 404, { error: "not_found" });
+		return;
+	}
+
+	if (parts[1] === "steps" && parts[2] && parts[3] === "pipeline-runs" && !parts[4] && req.method === "GET") {
+		if (!getStep(parts[2])) {
+			sendJson(res, 404, { error: "unknown_step" });
+			return;
+		}
+		sendJson(res, 200, { runs: listPipelineRunsForStep(parts[2]).map(publicPipelineRun) });
+		return;
+	}
+
+	if (parts[1] === "pipeline-runs" && parts[2] && parts[3] === "log" && !parts[4] && req.method === "GET") {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) return;
+		const run = getPipelineRun(parts[2]);
+		if (!run) {
+			sendJson(res, 404, { error: "unknown_run" });
+			return;
+		}
+		if (!run.logPath || !fs.existsSync(run.logPath)) {
+			sendJson(res, 404, { error: "no_log" });
+			return;
+		}
+		let bytes = fs.readFileSync(run.logPath);
+		const stepParam = url.searchParams.get("step");
+		if (stepParam !== null) {
+			// One job step's section, by the offset and length the run recorded for it.
+			const index = Number(stepParam);
+			const job = run.steps.find((s) => s.index === index);
+			if (!Number.isInteger(index) || !job) {
+				sendJson(res, 404, { error: "unknown_step" });
+				return;
+			}
+			bytes = bytes.subarray(job.logOffset, job.logOffset + job.logLength);
+		}
+		// Redacted again on the way out: a value registered after the log was written still gets masked.
+		res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+		res.end(redactSecrets(bytes.toString("utf8")));
 		return;
 	}
 
@@ -3273,6 +3728,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					}
 				}
 				try {
+					if (template) assertTemplateCommandSteps(template.steps, sandbox === "docker");
 					const workflow = createWorkflow(name, {
 						workdir,
 						permissionMode,
@@ -3293,6 +3749,9 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 								maxRetries: step.maxRetries,
 								retryIntervalSeconds: step.retryIntervalSeconds,
 								templateNotes: step.notes,
+								kind: step.kind,
+								pipelineId: step.pipelineId,
+								pipelineInputs: step.pipelineInputs,
 							});
 						}
 						if (template.tcpSelections.length > 0) applyTemplateTcpsToWorkflow(workflow.id, template.tcpSelections);
@@ -3818,7 +4277,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			// what every other caller does.
 			const afterStepId = typeof body.afterStepId === "string" && body.afterStepId !== "" ? body.afterStepId : null;
 			try {
-				const step = addStep(workflowId, description, { ...readStepConfig(body), afterStepId });
+				const step = addStep(workflowId, description, { ...readStepConfig(body), ...readCommandFields(body), afterStepId });
 				sendJson(res, 200, { step: publicStep(step, cfg) });
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
@@ -3855,6 +4314,9 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return;
 			}
 			try {
+				// Checked before the first step is added: a template whose pipeline is
+				// gone fails the seed whole, rather than part-way through it.
+				assertTemplateCommandSteps(template.steps, hookRuntime(workflow.hookUrl).sandbox?.kind === "docker");
 				// Every template step is appended, every time. Repeating a template is a
 				// normal thing to want — the same review-and-fix checklist run for a
 				// second round, a deploy template applied per environment — and a step
@@ -3869,6 +4331,9 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						maxRetries: step.maxRetries,
 						retryIntervalSeconds: step.retryIntervalSeconds,
 						templateNotes: step.notes,
+						kind: step.kind,
+						pipelineId: step.pipelineId,
+						pipelineInputs: step.pipelineInputs,
 					});
 					added++;
 				}
@@ -3951,7 +4416,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
 			const description = typeof body.description === "string" ? body.description : "";
 			try {
-				const step = editStep(workflowId, parts[4], description, readStepConfig(body));
+				const step = editStep(workflowId, parts[4], description, { ...readStepConfig(body), ...readCommandFields(body) });
 				sendJson(res, 200, { step: publicStep(step, cfg) });
 			} catch (err) {
 				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });

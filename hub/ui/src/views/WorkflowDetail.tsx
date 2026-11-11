@@ -54,6 +54,7 @@ import {
 import { ContextPanel } from "./ContextPanel.tsx";
 import { RciPanel } from "./RciPanel.tsx";
 import { TcpPanel } from "./TcpPanel.tsx";
+import { CommandStepFields } from "./CommandStepFields.tsx";
 import { RenameWorkflowModal } from "./RenameWorkflowModal.tsx";
 import { ScheduleModal, type ScheduleSaveResult } from "./ScheduleModal.tsx";
 import { SeriesPanel } from "./SeriesPanel.tsx";
@@ -999,7 +1000,12 @@ export function WorkflowDetail({
 							</ol>
 						)}
 
-						<AddStepForm templates={templates} onAdd={onAddStep} onAddFromTemplate={onAddStepsFromTemplate} />
+						<AddStepForm
+							templates={templates}
+							onAdd={onAddStep}
+							onAddFromTemplate={onAddStepsFromTemplate}
+							sandboxed={workflow.sandbox === "docker"}
+						/>
 						</>
 					)}
 
@@ -1077,10 +1083,13 @@ function AddStepForm({
 	templates,
 	onAdd,
 	onAddFromTemplate,
+	sandboxed,
 }: {
 	templates: Template[];
 	onAdd: (input: StepConfigInput, staged?: StagedStepImages) => Promise<void>;
 	onAddFromTemplate: (templateId: string) => Promise<void>;
+	/** A docker-sandboxed workflow cannot run command steps in this version (docs/pipelines.md, "Where a pipeline runs"). */
+	sandboxed: boolean;
 }): React.JSX.Element {
 	// Images picked before the step exists; uploaded by the caller once it does.
 	const staged = useStagedImages("new-step");
@@ -1094,12 +1103,22 @@ function AddStepForm({
 	const [interval, setInterval] = useState("0");
 	const [templateId, setTemplateId] = useState("");
 	const [saving, setSaving] = useState(false);
+	// Agent or command. A command step runs a pipeline on the host; it has no
+	// criteria and no subagent, so those fields are hidden while it is selected.
+	const [kind, setKind] = useState<"agent" | "command">("agent");
+	const [pipelineId, setPipelineId] = useState("");
+	const [pipelineInputs, setPipelineInputs] = useState<Record<string, string>>({});
+	const [commandReady, setCommandReady] = useState(false);
+	const isCommand = kind === "command";
 	const { can } = usePermissions();
 	const canAdd = can("client.workflows.steps.add");
 
 	const intervalEnabled = (parseInt(maxRetries, 10) || 0) > 1;
 
 	const reset = (): void => {
+		setKind("agent");
+		setPipelineId("");
+		setPipelineInputs({});
 		setDescription("");
 		setCriteria("");
 		setManualReview(false);
@@ -1112,18 +1131,39 @@ function AddStepForm({
 	const submit = async (ev: React.FormEvent): Promise<void> => {
 		ev.preventDefault();
 		const trimmed = description.trim();
-		if (!trimmed || saving) return;
+		if (saving) return;
+		if (isCommand) {
+			if (!pipelineId || !commandReady) return;
+		} else if (!trimmed) {
+			return;
+		}
 		setSaving(true);
 		try {
+			const retries = Math.max(0, parseInt(maxRetries, 10) || 0);
+			const retryInterval = intervalEnabled ? Math.max(0, parseInt(interval, 10) || 0) : 0;
 			await onAdd(
-				{
-					description: trimmed,
-					acceptanceCriteria: criteria.trim(),
-					manualReview,
-					useSubagent,
-					maxRetries: Math.max(0, parseInt(maxRetries, 10) || 0),
-					retryIntervalSeconds: intervalEnabled ? Math.max(0, parseInt(interval, 10) || 0) : 0,
-				},
+				isCommand
+					? {
+							kind: "command",
+							pipelineId,
+							// Only the inputs the operator filled in; the rest take the pipeline's defaults.
+							pipelineInputs: Object.fromEntries(Object.entries(pipelineInputs).filter(([, v]) => v !== "")),
+							// Empty means "use the pipeline's name", which the hub generates.
+							description: trimmed,
+							manualReview,
+							// A command step is never a subagent step: the hub refuses useSubagent: true.
+							useSubagent: false,
+							maxRetries: retries,
+							retryIntervalSeconds: retryInterval,
+						}
+					: {
+							description: trimmed,
+							acceptanceCriteria: criteria.trim(),
+							manualReview,
+							useSubagent,
+							maxRetries: retries,
+							retryIntervalSeconds: retryInterval,
+						},
 				staged.staged,
 			);
 			reset();
@@ -1163,22 +1203,64 @@ function AddStepForm({
 	return (
 		<div className={styles.addForm}>
 			<form onSubmit={submit} className={styles.addFormInner}>
+				<div className={styles.kindToggle} role="radiogroup" aria-label="Step kind">
+					<button
+						type="button"
+						role="radio"
+						aria-checked={!isCommand}
+						className={`${styles.kindOption} ${!isCommand ? styles.kindOptionActive : ""}`}
+						onClick={() => setKind("agent")}
+						disabled={saving}
+					>
+						Agent
+					</button>
+					<button
+						type="button"
+						role="radio"
+						aria-checked={isCommand}
+						className={`${styles.kindOption} ${isCommand ? styles.kindOptionActive : ""}`}
+						onClick={() => setKind("command")}
+						disabled={saving || sandboxed}
+						title={sandboxed ? "Command steps run on the host only. This workflow runs in a docker sandbox." : undefined}
+					>
+						Command
+					</button>
+				</div>
+				{isCommand && sandboxed && (
+					<p className="hint">
+						Command steps run on the host only, and this workflow runs in a docker sandbox. Use an agent step here.
+					</p>
+				)}
+				{isCommand && (
+					<CommandStepFields
+						pipelineId={pipelineId}
+						onPipelineId={(id) => {
+							setPipelineId(id);
+							setPipelineInputs({});
+						}}
+						inputs={pipelineInputs}
+						onInputs={setPipelineInputs}
+						onReady={setCommandReady}
+						disabled={saving}
+					/>
+				)}
 				<div className="field">
 					<label className="label" htmlFor="new-step-desc">
-						Task description
+						{isCommand ? "Step name (optional)" : "Task description"}
 					</label>
 					<ExpandableTextarea
 						id="new-step-desc"
 						value={description}
-						placeholder="What the agent should do in this step…"
+						placeholder={isCommand ? "Leave empty to use the pipeline's name" : "What the agent should do in this step…"}
 						onChange={setDescription}
 						expandTitle="Edit task description"
 						attachments={staged.attachmentsFor("description")}
-						required
-						autoFocus
+						required={!isCommand}
+						autoFocus={!isCommand}
 					/>
 				</div>
 
+				{!isCommand && (
 				<div className="field">
 					<label className="label" htmlFor="new-step-criteria">
 						Acceptance criteria
@@ -1197,6 +1279,8 @@ function AddStepForm({
 					</p>
 				</div>
 
+				)}
+
 				<div className={styles.gateRow}>
 					<div className={styles.gateText}>
 						<span className="label">Manual review</span>
@@ -1214,6 +1298,7 @@ function AddStepForm({
 					/>
 				</div>
 
+				{!isCommand && (
 				<div className={styles.gateRow}>
 					<div className={styles.gateText}>
 						<span className="label">Use subagent</span>
@@ -1230,6 +1315,8 @@ function AddStepForm({
 						disabled={saving}
 					/>
 				</div>
+
+				)}
 
 				<div className={styles.addGrid}>
 					<div className="field">
@@ -1268,7 +1355,7 @@ function AddStepForm({
 					<button
 						type="submit"
 						className="btn btn--primary btn--sm"
-						disabled={description.trim() === "" || saving || !canAdd}
+						disabled={saving || !canAdd || (isCommand ? !pipelineId || !commandReady : description.trim() === "")}
 						title={canAdd ? undefined : requires("client.workflows.steps.add")}
 					>
 						{saving ? "Adding…" : "Add step"}

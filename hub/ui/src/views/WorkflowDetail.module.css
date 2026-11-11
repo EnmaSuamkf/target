@@ -457,3 +457,37 @@
 .modelBlock {
 	margin-top: var(--space-3);
 }
+
+/* Agent / Command toggle at the top of the add-step form. */
+.kindToggle {
+	display: inline-flex;
+	max-width: 100%;
+	padding: 2px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-full, 999px);
+	background: var(--surface-sunken);
+	align-self: flex-start;
+}
+
+.kindOption {
+	min-height: var(--tap-target, 36px);
+	padding: 0 var(--space-3);
+	border: 0;
+	border-radius: var(--radius-full, 999px);
+	background: transparent;
+	color: var(--text-muted);
+	font-size: var(--text-sm);
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.kindOption:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.kindOptionActive {
+	background: var(--surface);
+	color: var(--text);
+	box-shadow: var(--shadow-xs);
+}

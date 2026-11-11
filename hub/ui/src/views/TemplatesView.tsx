@@ -11,6 +11,7 @@ import type {
 } from "../api/types.ts";
 import { CatalogCopyBadges } from "../components/Badge.tsx";
 import { StepNotes } from "../components/StepNotes.tsx";
+import { CommandStepFields } from "./CommandStepFields.tsx";
 import { ResourceSelectionEditor } from "./ResourceSelectionEditor.tsx";
 import { TcpSelectionEditor } from "./TcpSelectionEditor.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
@@ -385,6 +386,8 @@ function TemplateForm({
 	const canExport = can("client.templates.export");
 	const readOnly = isServerCopy(template ?? {});
 	const canSave = !readOnly && (template ? canEdit : canCreate);
+	// A command step cannot be saved until it names the pipeline it runs.
+	const commandIncomplete = steps.some((step) => step.kind === "command" && !step.pipelineId);
 
 	const updateStep = (index: number, patch: Partial<TemplateStep>): void => {
 		setSteps((current) => current.map((step, i) => (i === index ? { ...step, ...patch } : step)));
@@ -418,7 +421,7 @@ function TemplateForm({
 				// Drop blank rows rather than persisting empty steps.
 				steps: steps
 					.map((step) => ({ ...step, description: step.description.trim() }))
-					.filter((step) => step.description !== ""),
+					.filter((step) => step.description !== "" || step.kind === "command"),
 			});
 		} finally {
 			setSaving(false);
@@ -567,6 +570,37 @@ function TemplateForm({
 								</div>
 							</div>
 
+							<label className={styles.smallField}>
+								<span className="hint">Kind</span>
+								<select
+									className="input"
+									value={step.kind === "command" ? "command" : "task"}
+									onChange={(ev) =>
+										updateStep(
+											index,
+											ev.target.value === "command"
+												// A command step has no agent, so the agent-only settings are cleared with it.
+												? { kind: "command", acceptanceCriteria: null, useSubagent: false }
+												: { kind: "task", pipelineId: null, pipelineInputs: null },
+										)
+									}
+									disabled={readOnly}
+									aria-label={`Step ${index + 1} kind`}
+								>
+									<option value="task">Agent step</option>
+									<option value="command">Command step</option>
+								</select>
+							</label>
+							{step.kind === "command" && (
+								<CommandStepFields
+									pipelineId={step.pipelineId ?? ""}
+									onPipelineId={(id) => updateStep(index, { pipelineId: id, pipelineInputs: {} })}
+									inputs={step.pipelineInputs ?? {}}
+									onInputs={(inputs) => updateStep(index, { pipelineInputs: inputs })}
+									onReady={() => undefined}
+									disabled={readOnly}
+								/>
+							)}
 							<ExpandableTextarea
 								value={step.description}
 								placeholder="What the agent should do in this step…"
@@ -575,6 +609,7 @@ function TemplateForm({
 								aria-label={`Step ${index + 1} description`}
 								expandTitle={`Edit step ${index + 1} description`}
 							/>
+							{step.kind !== "command" && (
 							<ExpandableTextarea
 								value={step.acceptanceCriteria ?? ""}
 								placeholder="Optional acceptance criteria — empty = no judge."
@@ -583,6 +618,7 @@ function TemplateForm({
 								aria-label={`Step ${index + 1} acceptance criteria`}
 								expandTitle={`Edit step ${index + 1} acceptance criteria`}
 							/>
+							)}
 
 							<div className={styles.stepRowGrid}>
 								<label className={styles.smallField}>
@@ -630,6 +666,8 @@ function TemplateForm({
 								/>
 							</div>
 
+							{step.kind !== "command" && (
+							<>
 							{/* Carried onto every step this template creates too: whether the
 							    step is delegated to a subagent (the default) or run inline. */}
 							<div className={styles.stepRowToggle}>
@@ -641,6 +679,8 @@ function TemplateForm({
 									disabled={readOnly}
 								/>
 							</div>
+							</>
+							)}
 
 							<StepNotes
 								notes={step.notes ?? []}
@@ -691,7 +731,7 @@ function TemplateForm({
 					<button
 						type="submit"
 						className="btn btn--primary"
-						disabled={name.trim() === "" || saving || !canSave}
+						disabled={name.trim() === "" || saving || !canSave || commandIncomplete}
 						title={
 							canSave
 								? undefined

@@ -11,6 +11,19 @@ The current version is reported by every instance to the central server (see
 
 ### Added
 
+- **Pipelines and command steps (Phase 1, hub only).** A pipeline is a YAML
+  list of `run:` steps in the style of a GitHub Actions job. A workflow step with
+  `kind: "command"` runs one on the host, with no agent turn and no tokens, and
+  fails like a CI job when the pipeline fails. The run's summary and log tail
+  are handed to the next agent step's prompt, and the full redacted log is
+  written to the step-results directory. The parser and validator return every
+  error with its line. Secrets are kept in a hub store and are masked in every
+  log. A pipeline runs only after an operator approves it in the browser, and
+  the bearer token cannot approve one. The catalog UI, the step editor and the run
+  view are in place, and the MCP tools can read, save and attach pipelines. Command
+  steps are refused for docker-sandboxed workflows in this version. See
+  `docs/pipelines.md`.
+
 - **Step notes timeline and note source.** A step's notes are shown as a
   timeline, oldest first, with each note's position, time, author (Agent or
   Operator), an Edited marker when it changed after creation, the full text and

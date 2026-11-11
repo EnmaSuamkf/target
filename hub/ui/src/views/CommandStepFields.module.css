@@ -1,0 +1,23 @@
+.fields {
+	display: grid;
+	gap: var(--space-3);
+	min-width: 0;
+}
+
+.required {
+	color: var(--danger-700, #b91c1c);
+}
+
+.warn {
+	margin: 0;
+	font-size: var(--text-sm);
+	color: var(--warning-700, #b45309);
+	overflow-wrap: anywhere;
+}
+
+.error {
+	margin: 0;
+	font-size: var(--text-sm);
+	color: var(--danger-700, #b91c1c);
+	overflow-wrap: anywhere;
+}
