@@ -417,7 +417,7 @@ export interface WorkflowScheduleDetail {
  * above the list, kept out of the run selection and the progress count, and
  * every mutating action on it is refused by the server.
  */
-export type StepKind = "task" | "context";
+export type StepKind = "task" | "context" | "command";
 
 /** Theme colours for sticky notes on steps. */
 export const STEP_NOTE_THEMES = ["warning", "success", "neutral"] as const;
@@ -466,6 +466,10 @@ export interface Step {
 	acceptanceCriteria: string | null;
 	/** Images pinned to this step's two inputs; filter by `field` to split them. */
 	attachments: Attachment[];
+	/** For a command step: the pipeline it runs, its inputs, and whether that pipeline is approved. */
+	pipelineId?: string | null;
+	pipelineInputs?: Record<string, string> | null;
+	pipeline?: { id: string; name: string | null; trusted: boolean } | null;
 	maxRetries: number;
 	retryIntervalSeconds: number;
 	retryCount: number;
@@ -527,6 +531,11 @@ export interface TemplateStep {
 	retryIntervalSeconds: number;
 	/** Sticky notes copied onto workflow steps when this template is used. */
 	notes?: TemplateStepNote[];
+	/** A template step is an agent step unless this says `command` (see `StepKind`). */
+	kind?: StepKind;
+	/** Required for a command step: the pipeline it runs. */
+	pipelineId?: string | null;
+	pipelineInputs?: Record<string, string> | null;
 }
 
 export interface Template {
@@ -1132,6 +1141,10 @@ export interface StagedStepImages {
 
 /** The verification config shared by step create and step edit. */
 export interface StepConfigInput {
+	/** Absent means an agent step, as before. A command step is `"command"` with a pipeline. */
+	kind?: "task" | "command";
+	pipelineId?: string;
+	pipelineInputs?: Record<string, string>;
 	description: string;
 	acceptanceCriteria?: string;
 	/** Omitting it leaves the stored gate untouched; the forms always send it, so a toggle-off really turns it off. */
@@ -1199,4 +1212,77 @@ export interface CopilotTokenRequired {
 	message: string;
 	actions: string[];
 	status: CopilotTokenStatus;
+}
+
+
+// --- pipelines (docs/pipelines.md, "UI", "HTTP API") ---
+
+/** One declared input of a pipeline, as the summary carries it. */
+export interface PipelineInputDecl {
+	description: string;
+	required: boolean;
+	default: string | null;
+}
+
+/** A row of the pipeline list: no source, so a long list stays light. */
+export interface PipelineSummary {
+	id: string;
+	name: string;
+	tags: string[];
+	origin: "local" | "server";
+	/** True only when the operator approved exactly the current text. */
+	trusted: boolean;
+	revoked: boolean;
+	inputs: Record<string, PipelineInputDecl>;
+	syncSource: string | null;
+	syncedAt: string | null;
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface PipelineValidationError {
+	line: number | null;
+	path: string;
+	message: string;
+}
+
+/** One pipeline with its text, for the editor. */
+export interface PipelineDetail extends PipelineSummary {
+	source: string;
+	sourceHash: string;
+	trustedHash: string | null;
+	/** The validator's view of the stored text. Empty for a valid pipeline. */
+	errors: PipelineValidationError[];
+	referencedBy: { steps: string[]; templates: string[] };
+}
+
+export interface SecretSummary {
+	name: string;
+	isSet: true;
+	updatedAt: string;
+}
+
+export interface PipelineRunJobStep {
+	index: number;
+	name: string;
+	status: "pending" | "running" | "success" | "failed" | "skipped";
+	exitCode: number | null;
+	startedAt: string | null;
+	finishedAt: string | null;
+}
+
+/** One attempt of a command step. The log is fetched separately, per job step. */
+export interface PipelineRun {
+	id: string;
+	stepId: string;
+	workflowId: string;
+	attempt: number;
+	pipelineId: string;
+	sourceHash: string;
+	conclusion: "success" | "failure" | null;
+	cancelled: boolean;
+	error: string | null;
+	startedAt: string;
+	finishedAt: string | null;
+	steps: PipelineRunJobStep[];
 }

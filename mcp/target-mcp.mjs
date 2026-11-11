@@ -85,7 +85,11 @@ async function hubFetch(method, path, body) {
 }
 
 async function hubJson(method, path, body) {
-	const r = await hubFetch(method, path, body);
+	return resultFromFetch(await hubFetch(method, path, body));
+}
+
+/** Turns a hub response into a tool result: the parsed JSON, or the hub's error. */
+function resultFromFetch(r) {
 	if (!r.ok) {
 		let parsed;
 		try {
@@ -143,6 +147,12 @@ function stepConfigBody(a, { requireDescription = false } = {}) {
 	const retryIntervalSeconds = pickInt(a, "retryIntervalSeconds");
 	if (retryIntervalSeconds !== undefined) body.retryIntervalSeconds = retryIntervalSeconds;
 	if (a.afterStepId) body.afterStepId = String(a.afterStepId);
+	// Command steps. Passed through as given: the hub validates them (an unknown
+	// pipeline, a missing input, or acceptanceCriteria/useSubagent on a command
+	// step is refused there with a message that names the problem).
+	if ("kind" in a) body.kind = a.kind;
+	if ("pipelineId" in a) body.pipelineId = a.pipelineId == null ? null : String(a.pipelineId);
+	if ("pipelineInputs" in a) body.pipelineInputs = a.pipelineInputs == null ? null : a.pipelineInputs;
 	return body;
 }
 
@@ -188,7 +198,22 @@ function cloneWorkflowBody(a) {
 }
 
 const STEP_CONFIG_SCHEMA = {
-	acceptanceCriteria: { type: "string", description: "Acceptance criterion judged after the step" },
+	kind: {
+		type: "string",
+		enum: ["task", "command"],
+		description:
+			'"task" (default) is an agent step. "command" runs a pipeline on the host through the hub: no agent turn, no tokens. A command step is not judged, so acceptanceCriteria and useSubagent do not apply to it (the hub refuses them on a command step).',
+	},
+	pipelineId: {
+		type: "string",
+		description: 'Required for kind "command": the id of the pipeline to run. It must be approved in the hub UI before the step can run.',
+	},
+	pipelineInputs: {
+		type: "object",
+		additionalProperties: { type: "string" },
+		description: 'For kind "command": values for the pipeline\'s declared inputs, as strings.',
+	},
+	acceptanceCriteria: { type: "string", description: "Acceptance criterion judged after the step (agent steps only)" },
 	manualReview: { type: "boolean", description: "Pause workflow for operator review when step completes" },
 	useSubagent: { type: "boolean", description: "Run step in a subagent (default true if omitted on create)" },
 	maxRetries: { type: "integer", minimum: 0 },
@@ -956,7 +981,8 @@ const TOOLS = [
 	},
 	{
 		name: "create_template",
-		description: "Create a workflow template",
+		description:
+			"Create a workflow template. Its steps may be agent steps or command steps (kind \"command\", pipelineId, pipelineInputs; see add_step).",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -974,7 +1000,8 @@ const TOOLS = [
 	},
 	{
 		name: "update_template",
-		description: "Update a workflow template",
+		description:
+			"Update a workflow template. Its steps may be agent steps or command steps (kind \"command\", pipelineId, pipelineInputs; see add_step).",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -1032,6 +1059,72 @@ const TOOLS = [
 			additionalProperties: false,
 		},
 		run: async (a) => hubJson("POST", "/api/templates/import", a.bundle),
+	},
+	{
+		name: "list_pipelines",
+		description:
+			"List command pipelines (name, tags, whether an operator has approved them). Optional q filters by name or tag. A pipeline runs only after an operator approves it in the hub UI.",
+		inputSchema: {
+			type: "object",
+			properties: { q: { type: "string", description: "Filter by name or tag (case-insensitive)" } },
+			additionalProperties: false,
+		},
+		run: async (a) => {
+			const r = await hubFetch("GET", "/api/pipelines");
+			if (!r.ok) return resultFromFetch(r);
+			const body = JSON.parse(r.body || "{}");
+			const q = typeof a.q === "string" ? a.q.trim().toLowerCase() : "";
+			const pipelines = (body.pipelines ?? []).filter(
+				(p) => !q || String(p.name ?? "").toLowerCase().includes(q) || (p.tags ?? []).some((t) => String(t).toLowerCase().includes(q)),
+			);
+			return textResult({ pipelines });
+		},
+	},
+	{
+		name: "get_pipeline",
+		description:
+			"Get one pipeline by id: its YAML source, whether it is approved, and its validation errors (if any).",
+		inputSchema: {
+			type: "object",
+			properties: { pipelineId: { type: "string" } },
+			required: ["pipelineId"],
+			additionalProperties: false,
+		},
+		run: async (a) => hubJson("GET", `/api/pipelines/${enc(a.pipelineId)}`),
+	},
+	{
+		name: "create_pipeline",
+		description:
+			"Save a pipeline from YAML text. A pipeline saved through MCP stays UNTRUSTED: it will not run until an operator approves it in the hub UI (Catalog → Pipelines). No tool here can approve it.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				source: { type: "string", description: "The pipeline's YAML text (a subset of a GitHub Actions job)" },
+				tags: { type: "array", items: { type: "string" } },
+			},
+			required: ["source"],
+			additionalProperties: false,
+		},
+		run: async (a) => hubJson("POST", "/api/pipelines", a),
+	},
+	{
+		name: "update_pipeline",
+		description:
+			"Update a pipeline's YAML text or tags. Changing the text drops its approval: it stays UNTRUSTED and will not run until an operator approves the new text in the hub UI. No tool here can approve it.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				pipelineId: { type: "string" },
+				source: { type: "string", description: "The new YAML text" },
+				tags: { type: "array", items: { type: "string" } },
+			},
+			required: ["pipelineId"],
+			additionalProperties: false,
+		},
+		run: async (a) => {
+			const { pipelineId, ...body } = a;
+			return hubJson("PUT", `/api/pipelines/${enc(pipelineId)}`, body);
+		},
 	},
 	{
 		name: "list_tcps",

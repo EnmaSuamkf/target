@@ -406,7 +406,7 @@ async function announceNotice(notice: ScheduleNotice, log: Logger): Promise<void
 function announceFailedRuns(now: Date, log: Logger): void {
 	for (const wf of listUnannouncedFailedRuns()) {
 		if (!claimFailedRunNotice(wf.id)) continue;
-		const tasks = listSteps(wf.id).filter((s) => s.kind === "task");
+		const tasks = listSteps(wf.id).filter((s) => s.kind !== "context");
 		const index = tasks.findIndex((s) => s.status === "failed");
 		const step = index >= 0 ? tasks[index] : null;
 		recordScheduleNotice(log, {
@@ -520,7 +520,7 @@ async function launchInstance(instanceId: string, cfg: HubConfig, log: Logger, n
 	}
 	attachPreviousRun(instanceId);
 	const steps = listSteps(instanceId);
-	const taskIds = steps.filter((s) => s.kind === "task").map((s) => s.id);
+	const taskIds = steps.filter((s) => s.kind !== "context").map((s) => s.id);
 	if (taskIds.length === 0) {
 		recordScheduleNotice(log, {
 			workflowId: instanceId,

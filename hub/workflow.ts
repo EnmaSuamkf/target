@@ -42,6 +42,7 @@ import { listWorkflowTcpSelections, setWorkflowTcpSelections } from "./tcp-store
 import { readTokenUsage, transcriptPath, usageSnapshot } from "./transcript.ts";
 import {
 	beginRetry,
+	clearCommandReports,
 	claimWorkflowCompletionNotice,
 	clearCompactionMarkers,
 	CLONE_NAME_PREFIX,
@@ -98,18 +99,34 @@ import {
 	takeStatusBeforeReview,
 	updateStepConfig,
 	updateStepDescription,
+	updateStepKind,
 	updateWorkflowSchedule,
 	type Attachment,
 	type OverridableStepStatus,
 	type OverridableWorkflowStatus,
 	type Step,
+	type StepKind,
 	type StepPhase,
+	type TemplateStep,
 	type TemplateStepNote,
 	type TimeoutReason,
 	type Workflow,
 	type WorkflowStatus,
 	insertStepNote,
 } from "./db.ts";
+import {
+	deletePipelineRunsForWorkflow,
+	finishPipelineRun,
+	insertPipelineRun,
+	listPipelineRunsForStep,
+	updatePipelineRunStep,
+} from "./pipeline-runs.ts";
+import { runPipeline, type JobStepState, type PipelineRunResult } from "./pipeline-runner.ts";
+import { resolveSecrets } from "./pipeline-secrets.ts";
+import { buildPipelineReport, commandLogPath, jobStepSummaries } from "./command-report.ts";
+import type { PipelineSpec } from "./pipeline-yaml.ts";
+import { markStepRunning, promoteQueuedToRunning, setPendingReport } from "./db.ts";
+import { getPipeline, isTrusted, pipelineInputProblems, pipelineSpec, type Pipeline } from "./pipeline-store.ts";
 import {
 	formatInZone,
 	nextOccurrence,
@@ -204,6 +221,8 @@ function refreshProgress(cfg: HubConfig): void {
 	// daemon has ever run.
 	pruneProbes(new Set(running.map((step) => step.id)));
 	for (const step of running) {
+		// A command step has no harness writing artifacts; its run has its own timeout.
+		if (step.kind === "command") continue;
 		const workflow = getWorkflow(step.workflowId);
 		if (workflow) recordFreshSignal(step, workflow, cfg);
 	}
@@ -273,6 +292,8 @@ export function expireStale(cfg: HubConfig, log: Logger): void {
 		const workflow = getWorkflow(workflowId);
 		let step = getStep(stepId);
 		if (!step || !workflow) continue;
+		// Its run carries `timeout-minutes`; the agent's idle sweep must not fail it or re-dispatch it as an agent step.
+		if (step.kind === "command") continue;
 
 		// Phase 2: an idle candidate gets one last, unthrottled look at the
 		// harness's artifacts before we believe it's hung.
@@ -1111,7 +1132,7 @@ export function writeStatusMd(workflowId: string): void {
 	// than numbered into it: `orderIndex + 1` would print it as "0." and it isn't
 	// one of the N steps the operator wrote.
 	const contextStep = allSteps.find((s) => s.kind === "context") ?? null;
-	const steps = allSteps.filter((s) => s.kind === "task");
+	const steps = allSteps.filter((s) => s.kind !== "context");
 	const progress = stepProgress(workflowId);
 	const lines: string[] = [
 		`# Workflow: ${workflow.name}`,
@@ -1158,6 +1179,10 @@ export function writeStatusMd(workflowId: string): void {
 	for (const step of steps) {
 		const phaseNote = step.status === "running" && step.phase === "judge" ? " _(judging)_" : "";
 		lines.push(`${step.orderIndex + 1}. [${statusMark(step.status)}] ${step.description} — **${step.status}**${phaseNote}`);
+		if (step.kind === "command") {
+			const pipeline = step.pipelineId ? getPipeline(step.pipelineId) : null;
+			lines.push(`   - Command step: runs the pipeline "${pipeline?.name ?? step.pipelineId ?? "(none)"}" on the host, no agent turn`);
+		}
 		if (step.acceptanceCriteria) {
 			lines.push(`   - Acceptance criterion: ${step.acceptanceCriteria}`);
 			lines.push(`   - Retries: ${step.retryCount}/${step.maxRetries}`);
@@ -1699,6 +1724,9 @@ export function cloneWorkflow(workflowId: string, overrides: CloneOverrides = {}
 			useSubagent: step.useSubagent,
 			maxRetries: step.maxRetries,
 			retryIntervalSeconds: step.retryIntervalSeconds,
+			kind: step.kind,
+			pipelineId: step.pipelineId,
+			pipelineInputs: step.pipelineInputs,
 		});
 		for (const attachment of listStepAttachments(step.id)) copyAttachment(attachment, clone.id, copy.id);
 	}
@@ -1910,6 +1938,10 @@ export function removeWorkflow(workflowId: string): void {
 	// Its attached images live in ~/.target/attachments/<id>/ — delete the rows
 	// and the directory, or a removed workflow would leak both forever.
 	removeWorkflowAttachments(workflowId);
+	// Command-step run records and their log files go with the workflow, the same
+	// way its attachments do. Done before the workflow row so a crash in between
+	// leaves a workflow to retry, not orphaned logs nobody can find.
+	deletePipelineRunsForWorkflow(workflowId);
 	deleteWorkflow(workflowId);
 	// Declared in the contract from the start and never emitted, which left
 	// deleted workflows on the dashboard forever with no way to tell a removed
@@ -1942,6 +1974,66 @@ export function removeWorkflow(workflowId: string): void {
  * (`setStepSelection`), so the historical selected-by-default is kept there for
  * the workflows that never open the selection.
  */
+/**
+ * The one set of rules a command step must pass, whether it is added, edited,
+ * or seeded from a template (docs/pipelines.md, "Where a pipeline runs" and
+ * "Loading a pipeline"). Trust is deliberately NOT checked here: an untrusted
+ * pipeline may be referenced, and it fails at dispatch instead.
+ */
+function checkCommandStep(sandboxed: boolean, pipelineId: string | null, inputs: Record<string, string>): Pipeline {
+	if (sandboxed) {
+		throw new WorkflowError(
+			"command steps run on the host only in this version, and this workflow runs in a docker sandbox; use an agent step here",
+		);
+	}
+	if (!pipelineId) throw new WorkflowError("a command step needs a pipeline");
+	const pipeline = getPipeline(pipelineId);
+	if (!pipeline) throw new WorkflowError(`unknown pipeline "${pipelineId}"`);
+	if (pipeline.revoked) throw new WorkflowError(`pipeline "${pipeline.name}" is revoked and cannot be used`);
+	const spec = pipelineSpec(pipeline);
+	if (!spec) throw new WorkflowError(`pipeline "${pipeline.name}" does not validate`);
+	const problems = pipelineInputProblems(spec, inputs);
+	if (problems.length > 0) throw new WorkflowError(`invalid inputs for pipeline "${pipeline.name}": ${problems.join("; ")}`);
+	return pipeline;
+}
+
+/** A command step's description when the operator gave none: it names the pipeline, so every list still reads. */
+function commandStepDescription(pipeline: Pipeline): string {
+	return `Run pipeline "${pipeline.name}"`;
+}
+
+/**
+ * A command step runs without an agent, so it has no subagent and no judge. An
+ * explicit request for either is refused rather than silently dropped; an
+ * omitted one is simply the command default.
+ */
+function refuseAgentOnlySettings(options: { useSubagent?: boolean; acceptanceCriteria?: string | null }): void {
+	if (options.useSubagent === true) {
+		throw new WorkflowError("a command step runs without a subagent: useSubagent must be false");
+	}
+	if (options.acceptanceCriteria != null && options.acceptanceCriteria.trim() !== "") {
+		throw new WorkflowError("a command step has no judge: acceptanceCriteria must be empty");
+	}
+}
+
+/**
+ * Checks a template's command steps before anything is created from it, so a
+ * template with a missing pipeline fails the seed as a whole, with the step
+ * named, instead of leaving a half-seeded workflow behind.
+ */
+export function assertTemplateCommandSteps(steps: TemplateStep[], sandboxed: boolean): void {
+	for (const step of steps) {
+		if (step.kind !== "command") continue;
+		try {
+			checkCommandStep(sandboxed, step.pipelineId, step.pipelineInputs ?? {});
+		} catch (err) {
+			if (!(err instanceof WorkflowError)) throw err;
+			const label = step.description.trim() || "command step";
+			throw new WorkflowError(`template step "${label}": ${err.message}`);
+		}
+	}
+}
+
 export function addStep(
 	workflowId: string,
 	description: string,
@@ -1956,12 +2048,30 @@ export function addStep(
 		afterStepId?: string | null;
 		/** Sticky notes copied from a template step when seeding. */
 		templateNotes?: TemplateStepNote[];
+		/** `command` makes a command step (see `StepKind`); omitted = an agent step. */
+		kind?: StepKind;
+		/** Required for a command step: the pipeline it runs. */
+		pipelineId?: string | null;
+		/** A command step's input values. Checked against the pipeline's declared inputs. */
+		pipelineInputs?: Record<string, string> | null;
 	} = {},
 ): Step {
-	const trimmed = description.trim();
-	if (!trimmed) throw new WorkflowError("description is required");
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
+	const kind: StepKind = options.kind ?? "task";
+	if (kind === "context") throw new WorkflowError("the context step is hub-owned");
+	let trimmed = description.trim();
+	if (kind === "command") {
+		refuseAgentOnlySettings(options);
+		const pipeline = checkCommandStep(
+			hookRuntime(workflow.hookUrl).sandbox?.kind === "docker",
+			options.pipelineId ?? null,
+			options.pipelineInputs ?? {},
+		);
+		if (!trimmed) trimmed = commandStepDescription(pipeline);
+	} else if (!trimmed) {
+		throw new WorkflowError("description is required");
+	}
 	// The anchor is resolved (and checked to belong to THIS workflow) here rather
 	// than in db.ts, which doesn't validate ownership — otherwise a step id from
 	// another workflow would silently renumber this one's steps.
@@ -1989,6 +2099,9 @@ export function addStep(
 		retryIntervalSeconds: options.retryIntervalSeconds ?? 0,
 		afterOrderIndex,
 		selected,
+		kind,
+		pipelineId: kind === "command" ? (options.pipelineId ?? null) : null,
+		pipelineInputs: kind === "command" ? (options.pipelineInputs ?? {}) : null,
 	});
 	// Report the step list itself — lifecycle events alone can't reconstruct
 	// what was PLANNED (a pending step emits nothing until it runs). Task steps
@@ -2031,10 +2144,12 @@ export function editStep(
 		useSubagent?: boolean;
 		maxRetries?: number;
 		retryIntervalSeconds?: number;
+		/** Switch the step between agent and command. Allowed only while the step is pending. */
+		kind?: StepKind;
+		pipelineId?: string | null;
+		pipelineInputs?: Record<string, string> | null;
 	} = {},
 ): Step {
-	const trimmed = description.trim();
-	if (!trimmed) throw new WorkflowError("description is required");
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
 	refuseContextStep(step);
@@ -2043,11 +2158,38 @@ export function editStep(
 	// reviewing — editing the task under them (or switching the gate off from
 	// beneath the hold) would make that review meaningless. Continue it first.
 	if (step.status === "waiting") throw new WorkflowError("cannot edit a step while it waits for its manual review");
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+
+	const nextKind: StepKind = options.kind ?? step.kind;
+	if (nextKind === "context") throw new WorkflowError("the context step is hub-owned");
+	const kindChanges = nextKind !== step.kind;
+	if (kindChanges && step.status !== "pending") {
+		throw new WorkflowError("a step can change between agent and command only while it is pending");
+	}
+	const command = nextKind === "command";
+	const pipelineId = command ? (options.pipelineId !== undefined ? options.pipelineId : step.pipelineId) : null;
+	const inputs = command ? (options.pipelineInputs !== undefined ? (options.pipelineInputs ?? {}) : (step.pipelineInputs ?? {})) : null;
+
+	let trimmed = description.trim();
+	if (command) {
+		refuseAgentOnlySettings(options);
+		const pipeline = checkCommandStep(hookRuntime(workflow.hookUrl).sandbox?.kind === "docker", pipelineId, inputs ?? {});
+		if (!trimmed) trimmed = commandStepDescription(pipeline);
+	} else if (!trimmed) {
+		throw new WorkflowError("description is required");
+	}
+
 	updateStepDescription(stepId, trimmed);
+	if (kindChanges || command) updateStepKind(stepId, nextKind, pipelineId, inputs);
+
 	// Only touch the verification config when the caller actually sent fields — a
 	// plain description edit shouldn't silently wipe an existing criterion (or
-	// clear the manual-review gate).
+	// clear the manual-review gate). A step switched back to an agent gets the
+	// agent defaults unless the caller said otherwise: a subagent, and no criterion.
+	const switchedToAgent = kindChanges && !command;
 	if (
+		kindChanges ||
 		options.acceptanceCriteria !== undefined ||
 		options.manualReview !== undefined ||
 		options.useSubagent !== undefined ||
@@ -2055,9 +2197,9 @@ export function editStep(
 		options.retryIntervalSeconds !== undefined
 	) {
 		updateStepConfig(stepId, {
-			acceptanceCriteria: options.acceptanceCriteria ?? step.acceptanceCriteria,
+			acceptanceCriteria: command ? null : (options.acceptanceCriteria ?? (switchedToAgent ? null : step.acceptanceCriteria)),
 			manualReview: options.manualReview ?? step.manualReview,
-			useSubagent: options.useSubagent ?? step.useSubagent,
+			useSubagent: command ? false : (options.useSubagent ?? (switchedToAgent ? true : step.useSubagent)),
 			maxRetries: options.maxRetries ?? step.maxRetries,
 			retryIntervalSeconds: options.retryIntervalSeconds ?? step.retryIntervalSeconds,
 		});
@@ -2181,7 +2323,7 @@ async function notifyWorkflowCompleted(workflowId: string, log?: Logger): Promis
 	// Task steps only: the hub-owned context step is not work the operator asked
 	// for, so counting it would inflate "N steps" in the DM by one. (`at(-1)` was
 	// already safe — the context step sorts to the FRONT — but the count was not.)
-	const steps = listSteps(workflowId).filter((s) => s.kind === "task");
+	const steps = listSteps(workflowId).filter((s) => s.kind !== "context");
 	// The workflow's "result" is the last step's — it's the one whose output the
 	// run ended on, and every earlier step's result is already folded into it by
 	// the shared session. A completed workflow with no steps at all (starting an
@@ -2299,6 +2441,341 @@ function reconcileStatus(workflowId: string, log?: Logger): boolean {
  * picks up where it left off". We only mark `completed` when there is truly
  * no pending work left at all (selected or not).
  */
+// --- Command steps (docs/pipelines.md, "Execution and failure") -------------
+//
+// A command step runs its pipeline in this process. It never reaches the awb
+// hook and never touches the workflow's conversation: the only thing it gives
+// the agent is the report block stored on the step, which dispatchStep carries
+// into the next agent prompt. Settling mirrors an agent step: a success advances
+// (or holds at a manual review), a failure re-runs the whole pipeline while the
+// retry budget lasts, and otherwise fails the workflow.
+
+/**
+ * The directory a pipeline runs in: the workflow's own workdir, which is the
+ * hook's `workdir` (the same value the workdir lock and the sandbox use). A hook
+ * without one is an awb sandbox created for this workflow, so it falls back to that.
+ */
+function commandWorkdir(workflow: Workflow): string {
+	return hookRuntime(workflow.hookUrl).workdir ?? path.join(targetDir(), "sandboxes", workflow.agentName);
+}
+
+/** One command run in flight, keyed by step id in `commandRuns`. */
+interface CommandRun {
+	controller: AbortController;
+	/** Set by abortStep: the run's own settle then leaves the outcome to abortStep. */
+	abortRequested: boolean;
+	/** Resolves once the run has settled and its process group is gone. */
+	done: Promise<void>;
+}
+
+/**
+ * Runs in flight. Only this process can kill them, so this map is also how an
+ * abort finds one; a command step `running` with no entry here was left by a
+ * dead hub (see failCommandStepsLeftByRestart).
+ */
+const commandRuns = new Map<string, CommandRun>();
+
+function jobStepFailure(step: JobStepState): string {
+	if (step.error) return `${step.name} ${step.error}`;
+	return step.exitCode == null ? `${step.name} failed` : `${step.name} exit ${step.exitCode}`;
+}
+
+/** The part after `pipeline failed: ` in the step's error: the first job step that failed without `continue-on-error`. */
+function commandFailureReason(result: PipelineRunResult): string {
+	const failed = result.steps.find((s) => s.status === "failed" && !s.continueOnError);
+	if (failed) return jobStepFailure(failed);
+	return result.error ?? "the run failed";
+}
+
+/**
+ * Starts a command step's run, or fails the step before anything runs. Returns
+ * once the run is in flight: the run settles the step itself, in the background,
+ * so the HTTP request that started the workflow never waits for a pipeline.
+ */
+async function startCommandStep(step: Step, workflow: Workflow, cfg: HubConfig, log: Logger): Promise<void> {
+	const pipeline = step.pipelineId ? getPipeline(step.pipelineId) : null;
+	if (!pipeline) return failCommandAttempt(step, cfg, log, "pipeline not found");
+	if (pipeline.revoked) return failCommandAttempt(step, cfg, log, "pipeline revoked");
+	// Trust is checked at dispatch, not only when the step is saved: an edit or
+	// an import can drop trust after the step was added. Nothing runs untrusted.
+	if (!isTrusted(pipeline)) return failCommandAttempt(step, cfg, log, "pipeline not trusted");
+	// Refused at creation too (checkCommandStep). A workflow can still switch its
+	// hook to a docker sandbox after the step was added, and then the pipeline
+	// would run outside the sandbox the operator chose.
+	if (hookRuntime(workflow.hookUrl).sandbox != null) {
+		return failCommandAttempt(
+			step,
+			cfg,
+			log,
+			"command steps run on the host only in this version, and this workflow runs in a docker sandbox",
+		);
+	}
+	const spec = pipelineSpec(pipeline);
+	if (!spec) return failCommandAttempt(step, cfg, log, "pipeline does not validate");
+
+	const run = insertPipelineRun({
+		stepId: step.id,
+		workflowId: workflow.id,
+		attempt: step.retryCount + 1,
+		pipelineId: pipeline.id,
+		// The hash the run executes. Trust was just checked against it, so this is
+		// the exact text the operator approved.
+		sourceHash: pipeline.sourceHash,
+		logPath: commandLogPath(workflow.agentName, step),
+		steps: spec.steps.map((s) => ({ index: s.index, name: s.name })),
+	});
+	// A ▶ run arrives `queued` (startManualRun); an engine run arrives `pending`.
+	if (step.status === "queued") promoteQueuedToRunning(step.id);
+	else markStepRunning(step.id, step.manualRun === true);
+	const started = getStep(step.id) ?? step;
+	reportStepEvent(started, "step.started", {
+		phase: "exec",
+		pipeline_id: pipeline.id,
+		manual_run: started.manualRun === true,
+		attempt: started.retryCount + 1,
+		max_retries: started.maxRetries,
+	});
+	writeStatusMd(workflow.id);
+
+	const entry: CommandRun = { controller: new AbortController(), abortRequested: false, done: Promise.resolve() };
+	commandRuns.set(step.id, entry);
+	entry.done = executeCommandRun(started, workflow, spec, pipeline, run.id, entry, cfg, log)
+		.catch((err: unknown) => failCommandAttempt(started, cfg, log, `hub error: ${String(err)}`))
+		.finally(() => {
+			commandRuns.delete(step.id);
+		});
+}
+
+/**
+ * The run itself: job steps in order, persisted as they change, then the
+ * settle. Everything after `runPipeline` returns is the engine's business, so
+ * an abort that set `abortRequested` leaves the settle to abortStep.
+ */
+async function executeCommandRun(
+	step: Step,
+	workflow: Workflow,
+	spec: PipelineSpec,
+	pipeline: Pipeline,
+	runId: string,
+	entry: CommandRun,
+	cfg: HubConfig,
+	log: Logger,
+): Promise<void> {
+	const resultsDir = stepResultsDir(workflow.agentName);
+	// A scheduled run's previous-run reference can lock this directory read-only;
+	// this run's log has to be written into it.
+	unlockStepResults(resultsDir);
+	const logPath = commandLogPath(workflow.agentName, step);
+	const result = await runPipeline({
+		spec,
+		sourceHash: pipeline.sourceHash,
+		inputs: step.pipelineInputs ?? {},
+		workflow: { id: workflow.id, name: workflow.name, workdir: commandWorkdir(workflow) },
+		resultsDir,
+		logPath,
+		resolveSecrets,
+		signal: entry.controller.signal,
+		onJobStep: (job) =>
+			updatePipelineRunStep(runId, job.idx, {
+				status: job.status,
+				exitCode: job.exitCode,
+				startedAt: job.startedAt,
+				finishedAt: job.finishedAt,
+				logOffset: job.logOffset,
+				logLength: job.logLength,
+			}),
+	});
+	finishPipelineRun(runId, { conclusion: result.conclusion, cancelled: result.cancelled, error: result.error ?? null });
+	if (entry.abortRequested) return;
+
+	const report = buildPipelineReport({
+		pipelineName: pipeline.name,
+		conclusion: result.conclusion,
+		cancelled: result.cancelled,
+		error: result.error,
+		steps: result.steps,
+		logPath,
+	});
+	// Stored before the settle, so the agent gets it on its next turn whatever happens next.
+	setPendingReport(step.id, report);
+	if (result.conclusion === "success") {
+		await settleCommandSuccess(step, result, report, cfg, log);
+		return;
+	}
+	await failCommandAttempt(step, cfg, log, `pipeline failed: ${commandFailureReason(result)}`, {
+		report,
+		jobSteps: result.steps,
+	});
+}
+
+/** A passing run: the same path an accepted agent step takes, manual review included. */
+async function settleCommandSuccess(
+	step: Step,
+	result: PipelineRunResult,
+	report: string,
+	cfg: HubConfig,
+	log: Logger,
+): Promise<void> {
+	if (step.manualReview && (await holdForManualReview(step, { result: report }, log))) return;
+	completeStep(step.id, { ok: true, result: report });
+	writeStatusMd(step.workflowId);
+	const done = getStep(step.id) ?? step;
+	reportStepEvent(done, "step.completed", {
+		phase: "exec",
+		pipeline_id: done.pipelineId,
+		conclusion: "success",
+		duration_ms: stepDurationMs(done),
+		retry_count: done.retryCount,
+		max_retries: done.maxRetries,
+		job_steps: jobStepSummaries(result.steps),
+	});
+	await advance(step.workflowId, cfg, log);
+}
+
+/**
+ * Settles one failed attempt: records the step as failed, then either re-runs
+ * the whole pipeline (retry budget left) or fails the workflow, as a failed agent
+ * step does. Used for a refusal before anything ran and for a run that failed.
+ */
+async function failCommandAttempt(
+	step: Step,
+	cfg: HubConfig,
+	log: Logger,
+	error: string,
+	outcome: { report?: string; jobSteps?: JobStepState[] } = {},
+): Promise<void> {
+	if (!getStep(step.id)) return;
+	completeStep(step.id, { ok: false, result: outcome.report, error });
+	const failed = getStep(step.id) ?? step;
+	reportStepEvent(failed, "step.failed", {
+		phase: "exec",
+		pipeline_id: failed.pipelineId,
+		conclusion: "failure",
+		duration_ms: stepDurationMs(failed),
+		retry_count: failed.retryCount,
+		max_retries: failed.maxRetries,
+		...(outcome.jobSteps ? { job_steps: jobStepSummaries(outcome.jobSteps) } : {}),
+		error: reportError(failed, "exec", "pipeline_failed", error),
+	});
+	writeStatusMd(failed.workflowId);
+	if (failed.retryCount < failed.maxRetries) {
+		log(`step ${failed.id} failed (${error}) — re-running the pipeline (${failed.retryCount + 1}/${failed.maxRetries})`, "warning");
+		beginRetry(failed.id);
+		writeStatusMd(failed.workflowId);
+		void retryCommandStep(failed.id, cfg, log).catch((err: unknown) =>
+			log(`step ${failed.id} retry failed to start: ${String(err)}`, "error"),
+		);
+		return;
+	}
+	setWorkflowStatus(failed.workflowId, "failed");
+	writeStatusMd(failed.workflowId);
+	log(`workflow ${failed.workflowId} failed at step ${failed.id}: ${error}`, "error");
+}
+
+/**
+ * Waits out the step's retry interval, then re-runs the whole pipeline. Gives up
+ * quietly when something moved in the meantime: a pause, an abort, or a restart
+ * of the step. A paused workflow resumes the step through the engine instead.
+ */
+async function retryCommandStep(stepId: string, cfg: HubConfig, log: Logger): Promise<void> {
+	const step = getStep(stepId);
+	if (!step) return;
+	if (step.retryIntervalSeconds > 0) {
+		log(`step ${stepId} waiting ${step.retryIntervalSeconds}s before the pipeline retry`);
+		await wait(step.retryIntervalSeconds);
+	}
+	const current = getStep(stepId);
+	const workflow = getWorkflow(step.workflowId);
+	if (!current || current.status !== "pending" || !workflow || workflow.status !== "running") return;
+	await startCommandStep(current, workflow, cfg, log);
+}
+
+/** The abort path for a command step: stop the run in this process, then fail the step with `aborted`. */
+async function abortCommandStep(
+	workflow: Workflow,
+	step: Step,
+	log?: Logger,
+): Promise<{ workflow: Workflow; abort: AbortSummary | null }> {
+	if (step.status !== "running" && step.status !== "queued") throw new WorkflowError("only a running step can be aborted");
+	const run = commandRuns.get(step.id);
+	if (run) {
+		run.abortRequested = true;
+		run.controller.abort();
+		// The run kills its process group before it returns; the step is failed only after that.
+		await run.done;
+	}
+	if (!failRunningStep(step.id, "aborted")) throw new WorkflowError("only a running step can be aborted");
+	for (const pipelineRun of listPipelineRunsForStep(step.id)) {
+		if (pipelineRun.conclusion === null) {
+			finishPipelineRun(pipelineRun.id, { conclusion: "failure", cancelled: true, error: "aborted" });
+		}
+	}
+	const aborted = getStep(step.id) ?? step;
+	setPendingReport(step.id, `The operator aborted the pipeline "${aborted.description}" before it finished.`);
+	setWorkflowStatus(workflow.id, "failed");
+	reportStepEvent(aborted, "step.failed", {
+		phase: "exec",
+		pipeline_id: aborted.pipelineId,
+		aborted: true,
+		duration_ms: stepDurationMs(aborted),
+		retry_count: aborted.retryCount,
+		max_retries: aborted.maxRetries,
+		error: reportError(aborted, "exec", "aborted", "aborted by the operator"),
+	});
+	try {
+		insertStepNote(step.id, workflow.id, "Abort: pipeline run stopped", "warning");
+	} catch (err) {
+		// A note is a courtesy; it must never undo a settled abort.
+		log?.(`step ${step.id} abort note not saved: ${String((err as Error).message ?? err)}`, "warning");
+	}
+	writeStatusMd(workflow.id);
+	const updated = getWorkflow(workflow.id);
+	if (!updated) throw new WorkflowError("workflow disappeared");
+	return { workflow: updated, abort: null };
+}
+
+/**
+ * Boot reconciliation for command steps. A command step `running` with no live
+ * run in this process was left by a hub that died mid-run: nothing will ever
+ * settle it, and the agent sweep does not apply to it. It fails now, with its
+ * open run rows closed. Called once, before the first sweep. Returns how many
+ * steps it failed.
+ */
+export function failCommandStepsLeftByRestart(log: Logger): number {
+	const error = "hub restarted during pipeline run";
+	let count = 0;
+	for (const step of listRunningSteps()) {
+		if (step.kind !== "command" || commandRuns.has(step.id)) continue;
+		if (!failRunningStep(step.id, error)) continue;
+		const now = new Date().toISOString();
+		for (const pipelineRun of listPipelineRunsForStep(step.id)) {
+			if (pipelineRun.conclusion !== null) continue;
+			for (const job of pipelineRun.steps) {
+				if (job.status === "running") updatePipelineRunStep(pipelineRun.id, job.index, { status: "failed", finishedAt: now });
+				else if (job.status === "pending") updatePipelineRunStep(pipelineRun.id, job.index, { status: "skipped" });
+			}
+			finishPipelineRun(pipelineRun.id, { conclusion: "failure", cancelled: false, error });
+		}
+		const failed = getStep(step.id) ?? step;
+		setPendingReport(step.id, `The hub restarted while the pipeline for this step was running, so its run was lost.`);
+		const workflow = getWorkflow(step.workflowId);
+		if (workflow?.status === "running") setWorkflowStatus(workflow.id, "failed");
+		reportStepEvent(failed, "step.failed", {
+			phase: "exec",
+			pipeline_id: failed.pipelineId,
+			conclusion: "failure",
+			duration_ms: stepDurationMs(failed),
+			retry_count: failed.retryCount,
+			max_retries: failed.maxRetries,
+			error: reportError(failed, "exec", "hub_restart", error),
+		});
+		writeStatusMd(step.workflowId);
+		log(`command step ${step.id} was left running by a restart — failed`, "error");
+		count++;
+	}
+	return count;
+}
+
 async function advance(workflowId: string, cfg: HubConfig, log: Logger): Promise<void> {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow || workflow.status !== "running") return;
@@ -2341,6 +2818,13 @@ async function advance(workflowId: string, cfg: HubConfig, log: Logger): Promise
 		// a feature. Awaited (unlike the `reconcileStatus` call) because this is
 		// already an async engine path and nothing is blocked by it.
 		if (terminal === "completed") await notifyWorkflowCompleted(workflowId, log);
+		return;
+	}
+	if (next.kind === "command") {
+		// Runs in this process and settles itself (see startCommandStep): none of the
+		// agent dispatch below applies, and the awb hook is never called.
+		await startCommandStep(next, workflow, cfg, log);
+		writeStatusMd(workflowId);
 		return;
 	}
 	reportStepEvent(next, "step.started", {
@@ -2498,6 +2982,7 @@ export async function restartWorkflow(
 	// Selection first, so resetSteps only wipes the chosen steps.
 	setStepSelection(workflowId, stepIds);
 	resetSteps(workflowId);
+	clearCommandReports(workflowId);
 	setWorkflowSessionId(workflowId, workflow.adoptedSessionId);
 	// A restart starts a brand-new conversation, so the conversation context
 	// (if any) must be injected again on the new first step — reset the guard.
@@ -2809,11 +3294,19 @@ function reportError(step: Step, phase: StepPhase, kind: string, message: string
 
 /** Emit a step lifecycle event. `step` is re-read by the caller after settling so timestamps are fresh. */
 function reportStepEvent(step: Step, kind: string, data: Record<string, unknown>): void {
-	if (step.kind !== "task") return;
+	// Command steps report too (docs/pipelines.md, "Reporting"); only the hub-owned
+	// context step stays silent, as it always has.
+	if (step.kind === "context") return;
 	reportEmit(kind, {
 		workflowId: step.workflowId,
 		sessionId: step.sessionId,
-		data: { step_id: step.id, order_index: step.orderIndex, ...data },
+		data: {
+			step_id: step.id,
+			order_index: step.orderIndex,
+			// Command steps are marked on every event, so a consumer can tell a pipeline from an agent run.
+			...(step.kind === "command" ? { kind: "command", pipeline_id: step.pipelineId } : {}),
+			...data,
+		},
 	});
 }
 
@@ -3353,6 +3846,11 @@ export async function runStep(workflowId: string, stepId: string, cfg: HubConfig
 		throw new WorkflowError("this step is waiting for its manual review — continue it instead");
 	}
 	if (!startManualRun(stepId)) throw new WorkflowError("this step is already running");
+	if (step.kind === "command") {
+		await startCommandStep(getStep(stepId) ?? step, workflow, cfg, log);
+		writeStatusMd(workflowId);
+		return;
+	}
 	// `advance` reports the engine's starts; nothing reported this one, so a ▶ run
 	// showed up on the dashboard only if and when it happened to settle.
 	reportStepEvent(getStep(stepId) ?? step, "step.started", {
@@ -3439,6 +3937,9 @@ export async function abortStep(workflowId: string, stepId: string, log?: Logger
 		if (!stopped) throw new WorkflowError("workflow disappeared");
 		return { workflow: stopped, abort: null };
 	}
+	// A command step runs in this process: there is no awb run to kill, so the
+	// abort goes to the run's own controller (no `/abort` call to the hook).
+	if (step.kind === "command") return abortCommandStep(workflow, step, log);
 	if (step.status !== "running" && step.status !== "queued") throw new WorkflowError("only a running step can be aborted");
 	// Kill on the broker FIRST and wait for its verdict, so the operator's report
 	// says whether the agent really stopped. The step is settled below whatever

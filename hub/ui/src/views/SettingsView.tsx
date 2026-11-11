@@ -25,6 +25,7 @@ import * as api from "../api/client.ts";
 import { ApiError } from "../api/client.ts";
 import type { CatalogSyncDomainResult, CatalogSyncResult } from "../api/types.ts";
 import { CollapsibleSection } from "../components/CollapsibleSection.tsx";
+import { SecretsPanel } from "./SecretsPanel.tsx";
 import { AgentModelsSection } from "../components/AgentModelsSection.tsx";
 import { CopilotTokenPanel } from "../components/CopilotTokenPanel.tsx";
 import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
@@ -1154,6 +1155,7 @@ export function SettingsView({
 			{/* Copilot in Docker: the GitHub token the hub hands to copilot workflows
 			    that run in a container. Acts immediately (no Save): every button
 			    talks to its own endpoint, and the token is never shown back. */}
+			<SecretsPanel />
 			<section className={styles.section} aria-labelledby={`${copilotTokenId}-section`}>
 				<h3 className={styles.sectionHeading} id={`${copilotTokenId}-section`}>
 					Copilot in Docker

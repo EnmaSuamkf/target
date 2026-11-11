@@ -16,7 +16,7 @@ import { startScheduler } from "./scheduler.ts";
 import { initSyncStateCache, runSyncTick } from "./sync.ts";
 import { createServer } from "./server.ts";
 import { retryRemoteDisconnect } from "./device-link-client.ts";
-import { announceWorkflows, autoArchive, expireStale } from "./workflow.ts";
+import { announceWorkflows, autoArchive, expireStale, failCommandStepsLeftByRestart } from "./workflow.ts";
 import { TARGET_VERSION } from "./version.ts";
 
 function log(message: string, type: "info" | "warning" | "error" = "info"): void {
@@ -50,6 +50,14 @@ export function startHub(): void {
 		for (const workflow of listWorkflows()) refreshDockerGitHubToken(workflow.hookUrl);
 	} catch (err) {
 		log(`copilot token refresh at startup failed: ${String(err)}`, "warning");
+	}
+	// Before the server takes requests and before the first sweep: a command step
+	// left `running` by the previous hub process has no live run to wait for.
+	try {
+		const failed = failCommandStepsLeftByRestart(log);
+		if (failed > 0) log(`failed ${failed} command step(s) left running by a restart`, "warning");
+	} catch (err) {
+		log(`command step restart check failed: ${String(err)}`, "warning");
 	}
 	const server = createServer(cfg, log);
 	server.listen(cfg.port, cfg.host, () => {

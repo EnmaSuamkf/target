@@ -37,7 +37,15 @@ import { ensureSandboxImage, hookRuntime, refreshDockerGitHubToken } from "./awb
 import { markContextReinjected, needsContextReinjection, observeCompaction } from "./compaction.ts";
 import type { HubConfig } from "./config.ts";
 import type { Attachment, Step, Workflow } from "./db.ts";
-import { completeStep, getContextStep, listSteps, markStepQueued, takeStepInterrupted } from "./db.ts";
+import {
+	completeStep,
+	getContextStep,
+	listSteps,
+	listUndeliveredReports,
+	markReportsDelivered,
+	markStepQueued,
+	takeStepInterrupted,
+} from "./db.ts";
 import { listWorkflowTcpSelections } from "./tcp-store.ts";
 import { listWorkflowResourceSelections } from "./rci-store.ts";
 import { tcpCatalogPreamble } from "./tcp-catalog.ts";
@@ -300,6 +308,15 @@ export function composeStepInput(
 		 * tools but can't offer a way to call them.
 		 */
 		tcpExecuteUrl?: string;
+		/**
+		 * Command-step reports the agent has not seen yet, already rendered, in
+		 * workflow order (docs/pipelines.md, "Prepended to the next prompt"). The
+		 * caller gathers them; this function only places them. Placed after the
+		 * catalogs and before the description, so the agent reads the pipeline
+		 * results as context for the step it is about to do, not as part of the task.
+		 * Never used by the context step or a judge, both of which return earlier.
+		 */
+		pipelineReports?: readonly string[];
 	} = {},
 ): string {
 	// The hub-owned context step: the background, and nothing else. Deliberately
@@ -336,6 +353,10 @@ export function composeStepInput(
 		: "";
 	const tcpBlock = options.injectTcp ? tcpCatalogPreamble(workflow.id, options.tcpExecuteUrl) : "";
 	const resourcesBlock = options.injectResources ? resourcesCatalogPreamble(workflow.id) : "";
+	const reportsBlock =
+		options.pipelineReports && options.pipelineReports.length > 0
+			? `The hub ran these pipelines since your last step:\n\n${options.pipelineReports.join("\n\n")}\n\n`
+			: "";
 	// Straight after the description, so "do what this screenshot shows" reads as
 	// one instruction rather than a task and an unrelated file list.
 	const descriptionImages = attachmentSection(
@@ -347,7 +368,7 @@ export function composeStepInput(
 	// hub notices a boundary the agent has already lost the history, so the
 	// pointer has to have been given while the conversation was still intact.
 	const priorResults = stepResultsNote(workflow.agentName);
-	return `${preamble}${tcpBlock}${resourcesBlock}${step.description}${descriptionImages}${criteriaNote(
+	return `${preamble}${tcpBlock}${resourcesBlock}${reportsBlock}${step.description}${descriptionImages}${criteriaNote(
 		step.acceptanceCriteria,
 		acceptanceImages,
 	)}${priorResults}${subagentInstruction(step.useSubagent)}${
@@ -510,8 +531,15 @@ export async function dispatchStep(
 	// Consumed on every exec dispatch so the marker never outlives the attempt
 	// that was meant to carry the note.
 	const interrupted = mode === "exec" && takeStepInterrupted(step.id);
+	// Command steps that settled since the agent's last turn (docs/pipelines.md,
+	// "Prepended to the next prompt"). Exec only, and never for the context step:
+	// the judge grades one result and must not be handed a pipeline log as part
+	// of the work. Marked delivered below, only once the hook accepts the prompt.
+	const reports =
+		mode === "exec" && step.kind !== "context" ? listUndeliveredReports(workflow.id) : [];
 	const input = composeStepInput(step, observed, {
 		mode,
+		pipelineReports: reports.map((r) => r.report),
 		// Two independent reasons to inject: this is the conversation's first
 		// dispatch and the guard is still open, or the conversation was compacted
 		// and what was injected at the top of it is gone. Compaction recovery is
@@ -580,6 +608,9 @@ export async function dispatchStep(
 			// `started` callback flips it to `running` and starts the timeout clock
 			// at the real run start (fair to queued steps).
 			markStepQueued(step.id, options.manual ?? false);
+			// Only now does the agent have them: a rejected or unreachable dispatch
+			// leaves the reports undelivered, so the retry carries them again.
+			if (reports.length > 0) markReportsDelivered(reports.map((r) => r.stepId));
 			// The re-injected context is only "delivered" once the broker has taken
 			// the input. A rejected or unreachable dispatch leaves the marker armed,
 			// so the retry carries the preamble instead of silently dropping it.

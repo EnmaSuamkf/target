@@ -10,6 +10,8 @@ import type {
 } from "../api/types.ts";
 import { OVERRIDABLE_STEP_STATUSES } from "../api/types.ts";
 import { Badge } from "../components/Badge.tsx";
+import { CommandRunPanel } from "./CommandRunPanel.tsx";
+import { CommandStepFields } from "./CommandStepFields.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { Markdown } from "../components/Markdown.tsx";
 import { StepNotes } from "../components/StepNotes.tsx";
@@ -297,9 +299,21 @@ export function StepItem({
 						</button>
 					</span>
 				)}
+				{step.kind === "command" && (
+					<span
+						className={styles.commandBadge}
+						title="Runs a pipeline on this machine. No agent turn, no tokens."
+					>
+						⌘ Command
+					</span>
+				)}
 				<p className={styles.description}>{step.description}</p>
 				<Badge status={step.status} label={statusLabel} manual={step.statusManual} manualAt={step.statusManualAt} />
 			</div>
+
+			{step.kind === "command" && (
+				<CommandRunPanel stepId={step.id} status={step.status} pipelineName={step.pipeline?.name ?? null} />
+			)}
 
 			{isContext && (
 				<p className="hint">
@@ -727,6 +741,14 @@ function StepEditor({
 	const [interval, setInterval] = useState(String(step.retryIntervalSeconds ?? 0));
 	const [saving, setSaving] = useState(false);
 	const [attaching, setAttaching] = useState(false);
+	// A command step is edited with the same fields the add-step form shows for
+	// one — the pipeline and its inputs — and without the agent-only ones (the
+	// acceptance criteria and the subagent toggle), which the hub refuses for a
+	// command step anyway: its verdict is the pipeline run's conclusion.
+	const isCommand = step.kind === "command";
+	const [pipelineId, setPipelineId] = useState(step.pipelineId ?? "");
+	const [pipelineInputs, setPipelineInputs] = useState<Record<string, string>>(step.pipelineInputs ?? {});
+	const [commandReady, setCommandReady] = useState(false);
 	const { can } = usePermissions();
 	const canEdit = can("client.workflows.steps.edit");
 
@@ -758,7 +780,28 @@ function StepEditor({
 	const submit = async (ev: React.FormEvent): Promise<void> => {
 		ev.preventDefault();
 		const trimmed = description.trim();
-		if (!trimmed || saving) return;
+		if (saving) return;
+		if (isCommand) {
+			if (!commandReady) return;
+			setSaving(true);
+			try {
+				// An empty name is fine: the hub names the step after its pipeline.
+				await onSave({
+					kind: "command",
+					pipelineId,
+					pipelineInputs,
+					description: trimmed,
+					manualReview,
+					useSubagent: false,
+					maxRetries: Math.max(0, parseInt(maxRetries, 10) || 0),
+					retryIntervalSeconds: intervalEnabled ? Math.max(0, parseInt(interval, 10) || 0) : 0,
+				});
+			} finally {
+				setSaving(false);
+			}
+			return;
+		}
+		if (!trimmed) return;
 		setSaving(true);
 		try {
 			await onSave({
@@ -784,18 +827,45 @@ function StepEditor({
 				<span className={styles.editorTitle}>Editing step</span>
 			</div>
 
-			<label className="label" htmlFor={`desc-${step.id}`}>
-				Task description
-			</label>
-			<ExpandableTextarea
-				id={`desc-${step.id}`}
-				value={description}
-				onChange={setDescription}
-				expandTitle="Edit task description"
-				attachments={attach("description")}
-				required
-			/>
+			{isCommand && (
+				<CommandStepFields
+					pipelineId={pipelineId}
+					onPipelineId={(id) => {
+						setPipelineId(id);
+						setPipelineInputs({});
+					}}
+					inputs={pipelineInputs}
+					onInputs={setPipelineInputs}
+					onReady={setCommandReady}
+					disabled={saving}
+				/>
+			)}
 
+			<label className="label" htmlFor={`desc-${step.id}`}>
+				{isCommand ? "Step name (optional)" : "Task description"}
+			</label>
+			{isCommand ? (
+				<input
+					id={`desc-${step.id}`}
+					className="input"
+					value={description}
+					placeholder="Leave empty to use the pipeline's name"
+					onChange={(ev) => setDescription(ev.target.value)}
+					disabled={saving}
+				/>
+			) : (
+				<ExpandableTextarea
+					id={`desc-${step.id}`}
+					value={description}
+					onChange={setDescription}
+					expandTitle="Edit task description"
+					attachments={attach("description")}
+					required
+				/>
+			)}
+
+			{!isCommand && (
+				<>
 			<label className="label" htmlFor={`criteria-${step.id}`}>
 				Acceptance criteria
 			</label>
@@ -811,6 +881,8 @@ function StepEditor({
 				If set, the agent self-evaluates its result against this after running. On a reject it re-runs the step up to
 				the retry budget before the workflow fails.
 			</p>
+				</>
+			)}
 
 			<div className={styles.gateRow}>
 				<div className={styles.gateText}>
@@ -829,6 +901,7 @@ function StepEditor({
 				/>
 			</div>
 
+			{!isCommand && (
 			<div className={styles.gateRow}>
 				<div className={styles.gateText}>
 					<span className="label">Use subagent</span>
@@ -845,6 +918,7 @@ function StepEditor({
 					disabled={saving}
 				/>
 			</div>
+			)}
 
 			<div className={styles.editorGrid}>
 				<div className="field">
@@ -874,7 +948,11 @@ function StepEditor({
 						value={intervalEnabled ? interval : "0"}
 						disabled={!intervalEnabled}
 						onChange={(ev) => setInterval(ev.target.value)}
-						title="Seconds to wait before each re-run after a judge reject. Only editable with more than one retry."
+						title={
+							isCommand
+								? "Seconds to wait before each re-run of the pipeline after a failed run. Only editable with more than one retry."
+								: "Seconds to wait before each re-run after a judge reject. Only editable with more than one retry."
+						}
 					/>
 				</div>
 			</div>
@@ -883,7 +961,7 @@ function StepEditor({
 				<button
 					type="submit"
 					className="btn btn--primary btn--sm"
-					disabled={description.trim() === "" || saving || !canEdit}
+					disabled={(isCommand ? !commandReady : description.trim() === "") || saving || !canEdit}
 					title={canEdit ? undefined : requires("client.workflows.steps.edit")}
 				>
 					{saving ? "Saving…" : "Save"}

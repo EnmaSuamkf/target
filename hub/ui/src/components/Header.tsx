@@ -14,6 +14,7 @@ const VIEW_LABELS: Record<View, string> = {
 	templates: "Templates",
 	tcps: "TCP",
 	rci: "RCI",
+	pipelines: "Pipelines",
 	settings: "Settings",
 };
 
@@ -56,6 +57,12 @@ const VIEW_ICONS: Record<View, React.ReactNode> = {
 		<>
 			<path d="M4 7h16M4 12h10M4 17h14" />
 			<circle cx="19" cy="12" r="2" />
+		</>
+	),
+	pipelines: (
+		<>
+			<path d="M4 6h10l4 4v8H4z" />
+			<path d="M8 13l2 2 4-4" />
 		</>
 	),
 	rci: (

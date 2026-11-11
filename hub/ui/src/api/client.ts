@@ -68,7 +68,12 @@ import type {
 	ResourceSelection,
 	ResourceSet,
 	ResourceSetInput,
+	PipelineDetail,
+	PipelineRun,
+	PipelineSummary,
+	PipelineValidationError,
 	ResourceSetUsage,
+	SecretSummary,
 	Tcp,
 	TcpBundle,
 	TcpInput,
@@ -1289,4 +1294,100 @@ export async function resetPassword(input: {
 		method: "POST",
 		body: json(input),
 	});
+}
+
+// --- pipelines and secrets (docs/pipelines.md, "UI", "HTTP API") ---
+//
+// Pipeline writes, approvals and secrets go WITHOUT the admin bearer token, on
+// purpose: the hub approves a pipeline only for a browser session
+// (`isSessionCaller`), so a save from this UI is trusted because the operator
+// wrote it here, and an approve answers 403 `session_required` for a bearer.
+
+export async function listPipelines(): Promise<PipelineSummary[]> {
+	const data = await request<{ pipelines: PipelineSummary[] }>("/api/pipelines");
+	return data.pipelines;
+}
+
+export async function getPipeline(id: string): Promise<PipelineDetail> {
+	const data = await request<{ pipeline: PipelineDetail }>(`/api/pipelines/${encodeURIComponent(id)}`);
+	return data.pipeline;
+}
+
+export function validatePipeline(source: string): Promise<{ ok: boolean; errors: PipelineValidationError[] }> {
+	return request<{ ok: boolean; errors: PipelineValidationError[] }>("/api/pipelines/validate", {
+		method: "POST",
+		body: json({ source }),
+	});
+}
+
+export async function createPipeline(source: string, tags: string[] = []): Promise<PipelineDetail> {
+	const data = await request<{ pipeline: PipelineDetail }>("/api/pipelines", {
+		method: "POST",
+		body: json({ source, tags }),
+	});
+	return data.pipeline;
+}
+
+export async function updatePipeline(id: string, source: string): Promise<PipelineDetail> {
+	const data = await request<{ pipeline: PipelineDetail }>(`/api/pipelines/${encodeURIComponent(id)}`, {
+		method: "PUT",
+		body: json({ source }),
+	});
+	return data.pipeline;
+}
+
+/** Approves the given source. The hub refuses it (409) when the text has changed since `sourceHash` was read. */
+export async function approvePipeline(id: string, sourceHash: string): Promise<PipelineDetail> {
+	const data = await request<{ pipeline: PipelineDetail }>(`/api/pipelines/${encodeURIComponent(id)}/approve`, {
+		method: "POST",
+		body: json({ sourceHash }),
+	});
+	return data.pipeline;
+}
+
+export function deletePipeline(id: string): Promise<{ ok: true }> {
+	return request<{ ok: true }>(`/api/pipelines/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function exportPipelines(): Promise<unknown> {
+	return request<unknown>("/api/pipelines/export");
+}
+
+export async function importPipelines(bundle: unknown): Promise<PipelineSummary[]> {
+	const data = await request<{ pipelines: PipelineSummary[] }>("/api/pipelines/import", {
+		method: "POST",
+		body: json(bundle),
+	});
+	return data.pipelines;
+}
+
+export async function listSecrets(): Promise<SecretSummary[]> {
+	const data = await request<{ secrets: SecretSummary[] }>("/api/secrets");
+	return data.secrets;
+}
+
+/** Writes or replaces a value. The value is sent once and never comes back. */
+export function setSecret(name: string, value: string): Promise<{ secret: SecretSummary }> {
+	return request<{ secret: SecretSummary }>(`/api/secrets/${encodeURIComponent(name)}`, {
+		method: "PUT",
+		body: json({ value }),
+	});
+}
+
+export function deleteSecret(name: string): Promise<{ ok: true }> {
+	return request<{ ok: true }>(`/api/secrets/${encodeURIComponent(name)}`, { method: "DELETE" });
+}
+
+export async function listStepPipelineRuns(stepId: string): Promise<PipelineRun[]> {
+	const data = await request<{ runs: PipelineRun[] }>(`/api/steps/${encodeURIComponent(stepId)}/pipeline-runs`);
+	return data.runs;
+}
+
+/** One job step's redacted log, as plain text. Lazy: only asked for when a row is opened. */
+export async function getPipelineRunLog(runId: string, jobIndex: number): Promise<string> {
+	const res = await fetch(`/api/pipeline-runs/${encodeURIComponent(runId)}/log?step=${jobIndex}`, {
+		credentials: "same-origin",
+	});
+	if (!res.ok) throw new ApiError(res.status, `request failed (${res.status})`);
+	return res.text();
 }

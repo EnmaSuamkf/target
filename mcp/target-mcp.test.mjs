@@ -123,3 +123,138 @@ test("tools/call add_step_note sends source agent to the hub and returns the hub
 		hub.close();
 	}
 });
+
+/** A stand-in hub: records each request and answers with what `respond` returns. */
+async function withHub(respond, run) {
+	const captured = [];
+	const hub = http.createServer((req, res) => {
+		let raw = "";
+		req.on("data", (chunk) => {
+			raw += chunk;
+		});
+		req.on("end", () => {
+			const body = raw ? JSON.parse(raw) : undefined;
+			captured.push({ method: req.method, url: req.url, body, auth: req.headers.authorization });
+			const { status = 200, payload } = respond({ method: req.method, url: req.url, body }) ?? {};
+			res.writeHead(status, { "content-type": "application/json" });
+			res.end(JSON.stringify(payload ?? {}));
+		});
+	});
+	await new Promise((resolve) => hub.listen(0, "127.0.0.1", resolve));
+	const { port } = hub.address();
+	const server = startServer({ TARGET_HUB_URL: `http://127.0.0.1:${port}`, TARGET_ADMIN_TOKEN: "test-admin-token" });
+	try {
+		return await run(server, captured);
+	} finally {
+		server.stop();
+		hub.close();
+	}
+}
+
+async function listTools() {
+	const server = startServer({ TARGET_HUB_URL: "http://127.0.0.1:1", TARGET_ADMIN_TOKEN: "unused" });
+	try {
+		const reply = await server.request({ jsonrpc: "2.0", id: 90, method: "tools/list" });
+		return reply.result.tools;
+	} finally {
+		server.stop();
+	}
+}
+
+test("the pipeline read tools and the writers are listed under their names", async () => {
+	const names = (await listTools()).map((t) => t.name);
+	for (const name of ["list_pipelines", "get_pipeline", "create_pipeline", "update_pipeline"]) {
+		assert.ok(names.includes(name), `${name} is listed`);
+	}
+});
+
+test("add_step and edit_step accept kind, pipelineId and pipelineInputs", async () => {
+	const tools = await listTools();
+	for (const name of ["add_step", "edit_step"]) {
+		const props = tools.find((t) => t.name === name).inputSchema.properties;
+		assert.deepEqual(props.kind.enum, ["task", "command"], `${name}.kind is task|command`);
+		assert.equal(props.pipelineId.type, "string", `${name}.pipelineId is a string`);
+		assert.equal(props.pipelineInputs.type, "object", `${name}.pipelineInputs is an object`);
+		assert.deepEqual(props.pipelineInputs.additionalProperties, { type: "string" }, `${name}.pipelineInputs values are strings`);
+	}
+});
+
+test("no tool approves a pipeline or reads or writes a secret", async () => {
+	const names = (await listTools()).map((t) => t.name);
+	const forbidden = names.filter((name) => /approv|secret/i.test(name));
+	assert.deepEqual(forbidden, [], "no approve or secret tool is listed");
+});
+
+test("create_pipeline says the saved pipeline stays untrusted until an operator approves it", async () => {
+	const tool = (await listTools()).find((t) => t.name === "create_pipeline");
+	assert.match(tool.description, /UNTRUSTED/);
+	assert.match(tool.description, /operator approves it in the hub UI/);
+});
+
+test("list_pipelines filters by name or tag on the client and calls the hub's list route", async () => {
+	const pipelines = [
+		{ id: "p1", name: "deploy-staging", tags: ["ops"] },
+		{ id: "p2", name: "verify", tags: ["ci", "Deploy-Tag"] },
+		{ id: "p3", name: "lint", tags: [] },
+	];
+	await withHub(
+		() => ({ payload: { pipelines } }),
+		async (server, captured) => {
+			const reply = await server.request({
+				jsonrpc: "2.0",
+				id: 3,
+				method: "tools/call",
+				params: { name: "list_pipelines", arguments: { q: "deploy" } },
+			});
+			assert.equal(captured[0].method, "GET");
+			assert.equal(captured[0].url, "/api/pipelines");
+			assert.equal(captured[0].auth, "Bearer test-admin-token");
+			const ids = JSON.parse(reply.result.content[0].text).pipelines.map((p) => p.id);
+			assert.deepEqual(ids, ["p1", "p2"], "matches the name in one and the tag in the other, case-insensitively");
+		},
+	);
+});
+
+test("get_pipeline reads one pipeline by id", async () => {
+	await withHub(
+		() => ({ payload: { pipeline: { id: "p 1", name: "verify" } } }),
+		async (server, captured) => {
+			await server.request({
+				jsonrpc: "2.0",
+				id: 4,
+				method: "tools/call",
+				params: { name: "get_pipeline", arguments: { pipelineId: "p 1" } },
+			});
+			assert.equal(captured[0].method, "GET");
+			assert.equal(captured[0].url, "/api/pipelines/p%201");
+		},
+	);
+});
+
+test("add_step sends the command fields to the hub unchanged", async () => {
+	await withHub(
+		() => ({ status: 200, payload: { step: { id: "s1" } } }),
+		async (server, captured) => {
+			await server.request({
+				jsonrpc: "2.0",
+				id: 5,
+				method: "tools/call",
+				params: {
+					name: "add_step",
+					arguments: {
+						workflowId: "wf-1",
+						description: "",
+						kind: "command",
+						pipelineId: "p1",
+						pipelineInputs: { branch: "main" },
+					},
+				},
+			});
+			assert.equal(captured[0].method, "POST");
+			assert.equal(captured[0].url, "/api/workflows/wf-1/steps");
+			assert.equal(captured[0].body.kind, "command");
+			assert.equal(captured[0].body.pipelineId, "p1");
+			assert.deepEqual(captured[0].body.pipelineInputs, { branch: "main" });
+		},
+	);
+});

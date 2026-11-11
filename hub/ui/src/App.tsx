@@ -80,6 +80,7 @@ import { ScheduleModal, type ScheduleSaveResult } from "./views/ScheduleModal.ts
 import { SettingsView } from "./views/SettingsView.tsx";
 import { SetupView } from "./views/SetupView.tsx";
 import { ResourceSetsView } from "./views/ResourceSetsView.tsx";
+import { PipelinesView } from "./views/PipelinesView.tsx";
 import { TcpsView } from "./views/TcpsView.tsx";
 import { TemplatesView } from "./views/TemplatesView.tsx";
 import { WorkflowDetail } from "./views/WorkflowDetail.tsx";
@@ -1778,6 +1779,8 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 						onExportAll={() => void handleExportAllTcps()}
 						onImport={(file) => void handleImportTcps(file)}
 					/>
+				) : displayView === "pipelines" ? (
+					<PipelinesView />
 				) : displayView === "rci" ? (
 					<ResourceSetsView
 						resourceSets={resourceSets}

@@ -30,7 +30,8 @@ test("filterCatalogNavViews hides RCI when showRciCatalog is false", () => {
 
 test("filterCatalogNavViews hides both catalog tabs when both flags are false", () => {
 	const tabs = filterCatalogNavViews(false, false);
-	assert.deepEqual(tabs, ["workflows", "templates", "settings"]);
+	// Pipelines is not a catalog tab, so it stays visible when both catalogs are hidden.
+	assert.deepEqual(tabs, ["workflows", "templates", "pipelines", "settings"]);
 });
 
 test("WorkflowDetail and TemplatesView hide TCP/RCI panels when catalog flags are off", () => {

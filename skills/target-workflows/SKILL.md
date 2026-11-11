@@ -29,6 +29,7 @@ Read `adminToken` from `~/.target/config.json` when using curl. Prefer **Target 
 |------|-------|
 | Templates | `list_templates`, `get_template`, `create_template`, `update_template`, `delete_template`, `export_template`, `export_all_templates`, `import_templates` |
 | TCP | `list_tcps`, `get_tcp`, `create_tcp`, `update_tcp`, `delete_tcp`, `get_tcp_usage`, `export_tcp`, `export_all_tcps`, `import_tcps`, `set_workflow_tcp_selections` |
+| Pipelines | `list_pipelines`, `get_pipeline`, `create_pipeline`, `update_pipeline` (saved pipelines stay untrusted until an operator approves them in the hub UI; no MCP tool approves or touches secrets) |
 | RCI | `list_resource_sets`, `get_resource_set`, `create_resource_set`, `update_resource_set`, `delete_resource_set`, `get_resource_set_usage`, `scan_resources`, `set_workflow_resource_selections` |
 
 ## Step create / edit (MCP)
