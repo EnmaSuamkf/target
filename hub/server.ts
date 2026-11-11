@@ -758,6 +758,9 @@ function publicStep(step: Step, cfg: HubConfig): Record<string, unknown> {
 		// is the summary the UI shows; `trusted` says whether it would run now.
 		pipelineId: step.pipelineId,
 		pipelineInputs: step.pipelineInputs,
+		// A command step's branch agents (docs/pipelines.md, "Branch agents"). Null = none.
+		onSuccessTask: step.onSuccessTask,
+		onFailureTask: step.onFailureTask,
 		pipeline: pipelineSummaryFor(step.pipelineId),
 		orderIndex: step.orderIndex,
 		description: step.description,
@@ -1009,8 +1012,24 @@ function readCommandFields(body: Record<string, unknown>): {
 	kind?: StepKind;
 	pipelineId?: string | null;
 	pipelineInputs?: Record<string, string> | null;
+	onSuccessTask?: string | null;
+	onFailureTask?: string | null;
 } {
-	const out: { kind?: StepKind; pipelineId?: string | null; pipelineInputs?: Record<string, string> | null } = {};
+	const out: {
+		kind?: StepKind;
+		pipelineId?: string | null;
+		pipelineInputs?: Record<string, string> | null;
+		onSuccessTask?: string | null;
+		onFailureTask?: string | null;
+	} = {};
+	// A command step's branch agents (docs/pipelines.md, "Branch agents"). Only
+	// sent fields are returned; null or a blank string clears the agent.
+	for (const key of ["onSuccessTask", "onFailureTask"] as const) {
+		if (!(key in body)) continue;
+		const value = body[key];
+		if (value !== null && typeof value !== "string") throw new WorkflowError(`${key} must be a string or null`);
+		out[key] = typeof value === "string" && value.trim() !== "" ? value : null;
+	}
 	if ("kind" in body) {
 		if (body.kind !== "task" && body.kind !== "command") {
 			throw new WorkflowError("kind must be \"task\" or \"command\"");
@@ -3753,6 +3772,8 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 								kind: step.kind,
 								pipelineId: step.pipelineId,
 								pipelineInputs: step.pipelineInputs,
+								onSuccessTask: step.onSuccessTask ?? null,
+								onFailureTask: step.onFailureTask ?? null,
 							});
 						}
 						if (template.tcpSelections.length > 0) applyTemplateTcpsToWorkflow(workflow.id, template.tcpSelections);
@@ -4335,6 +4356,8 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						kind: step.kind,
 						pipelineId: step.pipelineId,
 						pipelineInputs: step.pipelineInputs,
+						onSuccessTask: step.onSuccessTask ?? null,
+						onFailureTask: step.onFailureTask ?? null,
 					});
 					added++;
 				}

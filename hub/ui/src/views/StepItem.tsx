@@ -11,7 +11,7 @@ import type {
 import { OVERRIDABLE_STEP_STATUSES } from "../api/types.ts";
 import { Badge } from "../components/Badge.tsx";
 import { CommandRunPanel } from "./CommandRunPanel.tsx";
-import { CommandStepFields } from "./CommandStepFields.tsx";
+import { BranchAgentFields, CommandStepFields } from "./CommandStepFields.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { Markdown } from "../components/Markdown.tsx";
 import { StepNotes } from "../components/StepNotes.tsx";
@@ -198,7 +198,15 @@ export function StepItem({
 	// it never claims either way.
 	const delegated = !isContext && step.useSubagent !== false;
 	const removable = step.status === "pending";
-	const statusLabel = running && step.phase === "judge" ? "judging" : step.status;
+	const statusLabel = !running
+		? step.status
+		: step.phase === "judge"
+			? "judging"
+			: step.phase === "on_success"
+				? "agent: on success"
+				: step.phase === "on_failure"
+					? "agent: on failure"
+					: step.status;
 
 	if (editing) {
 		return (
@@ -313,6 +321,32 @@ export function StepItem({
 
 			{step.kind === "command" && (
 				<CommandRunPanel stepId={step.id} status={step.status} pipelineName={step.pipeline?.name ?? null} />
+			)}
+
+			{step.kind === "command" && (step.onSuccessTask || step.onFailureTask) && (
+				<ul className={styles.branchList} aria-label="Agents inside this command step">
+					{(
+						[
+							["on_success", "On success", step.onSuccessTask],
+							["on_failure", "On failure", step.onFailureTask],
+						] as const
+					).map(([phase, label, task]) =>
+						task ? (
+							<li
+								key={phase}
+								className={`${styles.branchItem} ${phase === "on_success" ? styles.branchSuccess : styles.branchFailure} ${
+									running && step.phase === phase ? styles.branchActive : ""
+								}`}
+							>
+								<span className={styles.branchLabel}>
+									Agent · {label}
+									{running && step.phase === phase ? " · running" : ""}
+								</span>
+								<span className={styles.branchTask}>{task}</span>
+							</li>
+						) : null,
+					)}
+				</ul>
 			)}
 
 			{isContext && (
@@ -749,6 +783,8 @@ function StepEditor({
 	const [pipelineId, setPipelineId] = useState(step.pipelineId ?? "");
 	const [pipelineInputs, setPipelineInputs] = useState<Record<string, string>>(step.pipelineInputs ?? {});
 	const [commandReady, setCommandReady] = useState(false);
+	const [onSuccessTask, setOnSuccessTask] = useState(step.onSuccessTask ?? "");
+	const [onFailureTask, setOnFailureTask] = useState(step.onFailureTask ?? "");
 	const { can } = usePermissions();
 	const canEdit = can("client.workflows.steps.edit");
 
@@ -790,6 +826,9 @@ function StepEditor({
 					kind: "command",
 					pipelineId,
 					pipelineInputs,
+					// Always sent: blank clears the agent for that branch.
+					onSuccessTask: onSuccessTask.trim() || null,
+					onFailureTask: onFailureTask.trim() || null,
 					description: trimmed,
 					manualReview,
 					useSubagent: false,
@@ -861,6 +900,17 @@ function StepEditor({
 					expandTitle="Edit task description"
 					attachments={attach("description")}
 					required
+				/>
+			)}
+
+			{isCommand && (
+				<BranchAgentFields
+					onSuccessTask={onSuccessTask}
+					onOnSuccessTask={setOnSuccessTask}
+					onFailureTask={onFailureTask}
+					onOnFailureTask={setOnFailureTask}
+					disabled={saving}
+					idPrefix={`branch-${step.id}`}
 				/>
 			)}
 

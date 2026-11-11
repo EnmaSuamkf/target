@@ -176,6 +176,8 @@ test("add_step and edit_step accept kind, pipelineId and pipelineInputs", async 
 		assert.equal(props.pipelineId.type, "string", `${name}.pipelineId is a string`);
 		assert.equal(props.pipelineInputs.type, "object", `${name}.pipelineInputs is an object`);
 		assert.deepEqual(props.pipelineInputs.additionalProperties, { type: "string" }, `${name}.pipelineInputs values are strings`);
+		assert.deepEqual(props.onSuccessTask.type, ["string", "null"], `${name}.onSuccessTask is a string or null`);
+		assert.deepEqual(props.onFailureTask.type, ["string", "null"], `${name}.onFailureTask is a string or null`);
 	}
 });
 
