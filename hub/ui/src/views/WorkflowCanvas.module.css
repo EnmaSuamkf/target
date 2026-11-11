@@ -385,6 +385,121 @@
 	letter-spacing: 0.02em;
 }
 
+/* --- a command step's branch agents --- */
+
+/* On the right of the command card, where a judge would sit (a command step has
+   none). Green edge: runs when the pipeline passes. Red edge: runs when it fails. */
+.branch {
+	position: absolute;
+	display: grid;
+	align-content: center;
+	gap: 2px;
+	min-width: 0;
+	padding: var(--space-1) var(--space-2);
+	border: 1px solid var(--border-strong);
+	border-left-width: 4px;
+	border-radius: var(--radius);
+	background: var(--surface);
+	box-shadow: var(--shadow-sm);
+	color: var(--text);
+	font-family: inherit;
+	text-align: left;
+	cursor: pointer;
+	transition:
+		box-shadow var(--transition),
+		border-color var(--transition);
+}
+
+.branch:hover {
+	box-shadow: var(--shadow-md);
+}
+
+.branch:focus-visible {
+	outline: none;
+	box-shadow: var(--ring), var(--shadow-md);
+}
+
+/* The state hues, re-applied over the box's own base (declared after the shared
+   state rules, so without these the box would never look in flight or failed). */
+.branch.state_running {
+	background: var(--info-50);
+}
+
+.branch.state_failed {
+	background: var(--danger-50);
+}
+
+.branchSuccess {
+	border-left-color: var(--success-500);
+}
+
+.branchFailure {
+	border-left-color: var(--danger-500);
+}
+
+.branchHead {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+}
+
+.branchMark {
+	font-weight: 700;
+	font-size: 0.75rem;
+}
+
+.branchSuccess .branchMark {
+	color: var(--success-700);
+}
+
+.branchFailure .branchMark {
+	color: var(--danger-700);
+}
+
+.branchLabel {
+	font-size: 0.6875rem;
+	font-weight: 700;
+	color: var(--text-muted);
+	white-space: nowrap;
+}
+
+.branchRetries {
+	margin-left: auto;
+	font-size: 0.6875rem;
+	color: var(--text-subtle);
+}
+
+.branchTask {
+	font-size: 0.6875rem;
+	color: var(--text-muted);
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.edgeSuccess {
+	stroke: var(--success-300, var(--gray-300));
+}
+
+.edgeFailure {
+	stroke: var(--danger-300, var(--gray-300));
+}
+
+.swatchBranchSuccess {
+	border: 1px solid var(--border-strong);
+	border-left: 3px solid var(--success-500);
+	border-radius: 2px;
+	background: var(--surface);
+}
+
+.swatchBranchFailure {
+	border: 1px solid var(--border-strong);
+	border-left: 3px solid var(--danger-500);
+	border-radius: 2px;
+	background: var(--surface);
+}
+
 /* --- the judge circle --- */
 
 .judge {

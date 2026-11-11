@@ -289,6 +289,49 @@ test("step.add with notes copies them onto the new step", async () => {
 	assert.equal(notes[0]!.theme, "warning");
 });
 
+test("step.add for a command step creates a command step, with its retries and branch agents", async () => {
+	const { insertPipeline } = await import("./pipeline-store.ts");
+	const pipeline = insertPipeline({ source: "name: remote-cmd\nsteps:\n  - run: echo ok\n", approve: true });
+	const remoteId = "rwf_command_1";
+	await executeSyncCommand(
+		command(remoteId, "cmd_wf_command", "workflow.create", { name: "Command", workdir: fs.mkdtempSync(path.join(tmpHome, "wd-")) }),
+		cfg,
+	);
+	await executeSyncCommand(
+		command(remoteId, "cmd_add_command", "step.add", {
+			step_key: "s1",
+			description: "Run it",
+			kind: "command",
+			pipeline_id: pipeline.id,
+			pipeline_inputs: {},
+			use_subagent: false,
+			max_retries: 2,
+			retry_interval_seconds: 3,
+			on_success_task: "Ship",
+			on_failure_task: "Fix",
+		}),
+		cfg,
+	);
+	const localId = resolveLocalWorkflowId(remoteId)!;
+	const step = listSteps(localId).find((s) => s.kind === "command");
+	assert.ok(step, "a command step, not an agent step");
+	assert.equal(step!.pipelineId, pipeline.id);
+	assert.equal(step!.maxRetries, 2);
+	assert.equal(step!.retryIntervalSeconds, 3);
+	assert.equal(step!.onSuccessTask, "Ship");
+	assert.equal(step!.onFailureTask, "Fix");
+	assert.equal(step!.useSubagent, false);
+	assert.equal(step!.acceptanceCriteria, null);
+
+	await executeSyncCommand(
+		command(remoteId, "cmd_edit_command", "step.edit", { step_key: "s1", on_failure_task: null }),
+		cfg,
+	);
+	const edited = listSteps(localId).find((s) => s.kind === "command")!;
+	assert.equal(edited.onFailureTask, null, "step.edit clears an agent the server removed");
+	assert.equal(edited.onSuccessTask, "Ship", "and leaves the one it did not mention");
+});
+
 test("capabilities include resources v2 and resource command types", () => {
 	const caps = syncClientCapabilities();
 	assert.deepEqual(caps.resources, { version: 2, tcp_tools: true, resource_sets: true, pipelines: true });

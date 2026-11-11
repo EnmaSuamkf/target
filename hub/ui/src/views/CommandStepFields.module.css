@@ -21,3 +21,37 @@
 	color: var(--danger-700, #b91c1c);
 	overflow-wrap: anywhere;
 }
+
+.branches {
+	display: grid;
+	gap: var(--space-3);
+	min-width: 0;
+}
+
+.branch {
+	display: grid;
+	gap: var(--space-1);
+	min-width: 0;
+	padding: var(--space-2) var(--space-3);
+	border-left: 3px solid var(--border, #d4d4d8);
+	border-radius: var(--radius-sm, 4px);
+	background: var(--surface-2, transparent);
+}
+
+.branch textarea {
+	resize: vertical;
+	min-width: 0;
+}
+
+.branchSuccess {
+	border-left-color: var(--success-600, #16a34a);
+}
+
+.branchFailure {
+	border-left-color: var(--danger-600, #dc2626);
+}
+
+.optional {
+	font-weight: normal;
+	color: var(--text-muted, #71717a);
+}

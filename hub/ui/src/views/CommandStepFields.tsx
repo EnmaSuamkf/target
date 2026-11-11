@@ -112,3 +112,59 @@ export function CommandStepFields({
 		</div>
 	);
 }
+
+/**
+ * A command step's two branch agents (docs/pipelines.md, "Branch agents"): a task
+ * for an agent when the pipeline passes, and one for when it fails. Each is only
+ * a task: no acceptance criteria, no judge, no subagent. Empty = no agent.
+ */
+export function BranchAgentFields({
+	onSuccessTask,
+	onOnSuccessTask,
+	onFailureTask,
+	onOnFailureTask,
+	disabled,
+	idPrefix = "command",
+}: {
+	onSuccessTask: string;
+	onOnSuccessTask: (task: string) => void;
+	onFailureTask: string;
+	onOnFailureTask: (task: string) => void;
+	disabled: boolean;
+	idPrefix?: string;
+}): React.JSX.Element {
+	return (
+		<div className={styles.branches}>
+			<div className={`${styles.branch} ${styles.branchSuccess}`}>
+				<label className="label" htmlFor={`${idPrefix}-on-success`}>
+					Agent on success <span className={styles.optional}>(optional)</span>
+				</label>
+				<textarea
+					id={`${idPrefix}-on-success`}
+					className="input"
+					rows={3}
+					value={onSuccessTask}
+					placeholder="What an agent does after the pipeline passes"
+					onChange={(ev) => onOnSuccessTask(ev.target.value)}
+					disabled={disabled}
+				/>
+				<p className="hint">Runs with the pipeline report. No acceptance criteria, no judge.</p>
+			</div>
+			<div className={`${styles.branch} ${styles.branchFailure}`}>
+				<label className="label" htmlFor={`${idPrefix}-on-failure`}>
+					Agent on failure <span className={styles.optional}>(optional)</span>
+				</label>
+				<textarea
+					id={`${idPrefix}-on-failure`}
+					className="input"
+					rows={3}
+					value={onFailureTask}
+					placeholder="What an agent does after the pipeline fails, e.g. fix the cause"
+					onChange={(ev) => onOnFailureTask(ev.target.value)}
+					disabled={disabled}
+				/>
+				<p className="hint">Runs after every failed run, before the next retry. No acceptance criteria, no judge.</p>
+			</div>
+		</div>
+	);
+}

@@ -269,6 +269,79 @@ To let the next agent step see a failure and fix it, mark that job step
 failed job step's log goes to the agent (see the next section). No other
 failure policy is needed.
 
+### Branch agents
+
+A command step can hold two agents of its own: an **on-success** agent and an
+**on-failure** agent. Each one is only a task (`onSuccessTask`,
+`onFailureTask`). It has no acceptance criteria, no judge and no subagent. An
+empty task means no agent for that branch, which is how every command step
+worked before.
+
+| Run conclusion | With a branch agent |
+| --- | --- |
+| `success` | The on-success agent runs. When its turn ends, the step is `done` (or `waiting`, with `manualReview`) and the workflow advances. |
+| `failure` | The on-failure agent runs. When its turn ends, the failed attempt settles as it would without the agent: the whole pipeline re-runs while `maxRetries` lasts, and otherwise the step and the workflow fail. |
+
+The flow for a step with `maxRetries: 2` and both agents:
+
+```
+run pipeline ─ success ─▶ on-success agent ─▶ done
+      │
+      └─ failure ─▶ on-failure agent ─▶ retry left? ─ yes ─▶ (wait retryIntervalSeconds) ─▶ run pipeline …
+                                                    └─ no ──▶ failed
+```
+
+- The on-failure agent runs after **every** failed run, the last one included,
+  so it can fix the cause before each re-run.
+- A branch agent is dispatched on the workflow's conversation, like an agent
+  step. Its prompt carries the pipeline report (see
+  [Prepended to the next prompt](#prepended-to-the-next-prompt)), then the
+  line `The pipeline of this command step passed. Your task:` (or `failed.`),
+  then the task. The report is then marked delivered, so the next agent step
+  does not receive it a second time.
+- The step stays `running` while the agent works, in phase `on_success` or
+  `on_failure`. The UI labels it "agent: on success" or "agent: on failure", and
+  the agents are drawn inside the command step's card.
+- The step's result is the pipeline report, followed by `On-success agent:` or
+  `On-failure agent:` and what the agent answered. The agent's session becomes
+  the step's session and the workflow's conversation.
+- No agent runs for a refusal before anything ran (`pipeline not trusted`,
+  `pipeline revoked`, `pipeline does not validate`, a docker sandbox), or for a
+  hub error, an abort or a hub restart. An agent cannot fix those.
+- A branch agent that fails, cannot be dispatched or times out fails the step
+  and the workflow. It does not spend a pipeline retry.
+- Abort while a branch agent runs kills that agent's run on the broker, as for
+  an agent step, and fails the step with `error = "aborted"`.
+- A hub restart during a branch agent leaves the step `running`: the agent runs
+  on the broker, and its callback can still arrive. The agent watchdog times it
+  out otherwise.
+- Events: `step.started` with `phase: "on_success"` or `"on_failure"` when the
+  agent is dispatched, then the usual `step.completed` or `step.failed`.
+- The `workflow.plan` snapshot carries, for a command step, `pipeline_id`,
+  `on_success_task`, `on_failure_task` and `branch_failed` (true when the agent
+  itself failed, timed out or was aborted, rather than the pipeline staying red).
+
+**On the canvas** (hub and server alike, `ui/src/lib/canvasLayout.ts` in both):
+
+```
+┌──────────────┐ ✓      ┌───────────────┐
+│ 3  command   │───────▶│ ✓ agent · on   │   green edge: runs when the pipeline passes
+│ ⌘ pipeline   │        │   success      │
+│              │ ✗      ├───────────────┤
+│              │───────▶│ ✗ agent · on   │   red edge: runs when it fails
+└──────▲───────┘        │   failure  1/2 │   the retry count rides on it
+       └ ─ ─ ─ ─ ─ ─ ─ ─└───────────────┘   dashed: the retry that follows its turn
+```
+
+- The agents sit in the column a judge uses, since a command step has no judge.
+  A box is drawn only for a branch that has a task.
+- A box lights while its agent runs, and settles `done` or `failed`. The failure
+  box is `done` once it has run (the pipeline is retried after it), and `failed`
+  only when the agent itself failed.
+- The dashed retry loop from the failure box into the card exists only with a
+  retry budget, and is active while the pipeline re-runs.
+- The step list draws the same two agents inside the command step's card.
+
 ## What the agent receives
 
 A command step does not start a turn of its own. Its result is handed to the
@@ -342,6 +415,9 @@ step's result (`hub/step-results.ts`):
 - New nullable column `pending_report`: the block for the agent, until it is
   delivered. `pending_report_delivered` is set once an agent dispatch has
   carried it.
+- New nullable columns `on_success_task` and `on_failure_task`: the
+  [branch agents](#branch-agents). Null for every other kind.
+- `phase` gains `on_success` and `on_failure`, used while a branch agent runs.
 
 ### `pipeline_runs` and `pipeline_run_steps`
 
@@ -354,8 +430,9 @@ One `pipeline_run_steps` row per job step: `index`, `name`, `status`,
 
 ### Templates
 
-A template step can be a command step. The template stores the pipeline id and
-the inputs. Seeding a workflow from the template copies them. The pipeline's
+A template step can be a command step. The template stores the pipeline id, the
+inputs and the branch-agent tasks. Seeding a workflow from the template copies
+them. The pipeline's
 detail (`GET /api/pipelines/:id`) lists the steps and templates that use it as
 `referencedBy`, and deleting the pipeline is refused while either exists. The
 template editor does not show that list yet.
@@ -486,8 +563,9 @@ pipeline's `inputs`.
   (returns the source and `trusted`).
 - Write: `create_pipeline` and `update_pipeline` save YAML through the bearer
   token. The pipeline stays untrusted until an operator approves it in the UI.
-- `add_step` and `edit_step` accept `kind`, `pipelineId` and `pipelineInputs`.
-  Template tools carry the same fields.
+- `add_step` and `edit_step` accept `kind`, `pipelineId` and `pipelineInputs`,
+  and `onSuccessTask` and `onFailureTask` for the
+  [branch agents](#branch-agents). Template tools carry the same fields.
 - There is no MCP tool to approve a pipeline or to read or set a secret. A test
   (`mcp/target-mcp.test.mjs`) asserts that the tool list has no such tool.
   `hub_api` uses the bearer token, so the session-only routes refuse it with
@@ -764,6 +842,26 @@ status and duration. It never shows log content.
 - Old servers: the hub advertises `pipelines: true`. A server built before this
   change validates the capability object strictly and rejects that key, so a new
   hub registering against it gets a 400. See [Open questions](#open-questions).
+
+### Branch agents on the server
+
+The [branch agents](#branch-agents) travel through `target-server` too:
+
+- A server template's command step keeps `onSuccessTask`, `onFailureTask`,
+  `maxRetries` and `retryIntervalSeconds`. The server's template editor shows the
+  two agent fields under the pipeline. (Before this, the server forced a command
+  step's retries to 0.)
+- Catalog sync hands the template to the hub as stored, and the hub's template
+  normaliser keeps the two tasks.
+- `step.add` for a command step carries `max_retries`, `retry_interval_seconds`,
+  `on_success_task` and `on_failure_task`; `step.edit` can set or clear the two
+  tasks. The hub's `step.add` handler now honours `kind: "command"`,
+  `pipeline_id` and `pipeline_inputs` (it used to create an agent step from it).
+- The server canvas and step list draw the agents from the hub's
+  `workflow.plan`. A plan from an older hub has no tasks, so nothing is drawn.
+- Still not carried: `workflow.create_with_steps` and the server's remote-step
+  table have no command fields at all, so a remote workflow's draft preview
+  draws a command step as an agent step until the hub reports its plan.
 
 ## Out of scope for v1
 

@@ -153,6 +153,8 @@ function stepConfigBody(a, { requireDescription = false } = {}) {
 	if ("kind" in a) body.kind = a.kind;
 	if ("pipelineId" in a) body.pipelineId = a.pipelineId == null ? null : String(a.pipelineId);
 	if ("pipelineInputs" in a) body.pipelineInputs = a.pipelineInputs == null ? null : a.pipelineInputs;
+	if ("onSuccessTask" in a) body.onSuccessTask = a.onSuccessTask == null ? null : String(a.onSuccessTask);
+	if ("onFailureTask" in a) body.onFailureTask = a.onFailureTask == null ? null : String(a.onFailureTask);
 	return body;
 }
 
@@ -212,6 +214,16 @@ const STEP_CONFIG_SCHEMA = {
 		type: "object",
 		additionalProperties: { type: "string" },
 		description: 'For kind "command": values for the pipeline\'s declared inputs, as strings.',
+	},
+	onSuccessTask: {
+		type: ["string", "null"],
+		description:
+			'For kind "command": a task for an agent to run when the pipeline passes, with the pipeline report in front of it. No acceptance criteria, no judge. Empty or null = no agent.',
+	},
+	onFailureTask: {
+		type: ["string", "null"],
+		description:
+			'For kind "command": a task for an agent to run after each failed pipeline run, before the next retry (maxRetries) or the final failure. No acceptance criteria, no judge. Empty or null = no agent.',
 	},
 	acceptanceCriteria: { type: "string", description: "Acceptance criterion judged after the step (agent steps only)" },
 	manualReview: { type: "boolean", description: "Pause workflow for operator review when step completes" },

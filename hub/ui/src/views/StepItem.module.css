@@ -476,3 +476,46 @@
 	font-weight: 600;
 	white-space: nowrap;
 }
+
+/* A command step's branch agents, drawn inside its card (docs/pipelines.md, "Branch agents"). */
+.branchList {
+	list-style: none;
+	margin: var(--space-2) 0 0;
+	padding: 0 0 0 var(--space-4);
+	display: grid;
+	gap: var(--space-1);
+	min-width: 0;
+}
+
+.branchItem {
+	display: grid;
+	gap: 2px;
+	min-width: 0;
+	padding: var(--space-1) var(--space-2);
+	border-left: 3px solid var(--border, #d4d4d8);
+	border-radius: var(--radius-sm, 4px);
+}
+
+.branchSuccess {
+	border-left-color: var(--success-600, #16a34a);
+}
+
+.branchFailure {
+	border-left-color: var(--danger-600, #dc2626);
+}
+
+.branchActive {
+	background: var(--accent-50, #eff6ff);
+}
+
+.branchLabel {
+	font-size: var(--text-xs);
+	font-weight: 600;
+	color: var(--text-muted, #71717a);
+}
+
+.branchTask {
+	font-size: var(--text-sm);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}

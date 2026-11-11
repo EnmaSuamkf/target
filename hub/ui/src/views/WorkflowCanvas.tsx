@@ -191,6 +191,8 @@ export function WorkflowCanvas({
 							<JudgeCircle key={node.id} node={node} onOpen={onOpenStep} />
 						) : node.kind === "subagent" ? (
 							<SubagentBox key={node.id} node={node} onOpen={onOpenStep} />
+						) : node.kind === "branch_success" || node.kind === "branch_failure" ? (
+							<BranchBox key={node.id} node={node} onOpen={onOpenStep} />
 						) : (
 							<StepCard key={node.id} node={node} step={stepById.get(node.stepId)} onOpen={onOpenStep} />
 						),
@@ -218,6 +220,16 @@ export function WorkflowCanvas({
 				<li>
 					<span className={`${styles.swatch} ${styles.swatchSubagent}`} aria-hidden="true" /> runs in a subagent
 				</li>
+				{graph.nodes.some((n) => n.kind === "branch_success") && (
+					<li>
+						<span className={`${styles.swatch} ${styles.swatchBranchSuccess}`} aria-hidden="true" /> agent if the pipeline passes
+					</li>
+				)}
+				{graph.nodes.some((n) => n.kind === "branch_failure") && (
+					<li>
+						<span className={`${styles.swatch} ${styles.swatchBranchFailure}`} aria-hidden="true" /> agent if the pipeline fails
+					</li>
+				)}
 			</ul>
 		</div>
 	);
@@ -227,7 +239,14 @@ function EdgeLine({ edge }: { edge: CanvasEdge }): React.JSX.Element {
 	return (
 		<path
 			d={edgePath(edge)}
-			className={cls(styles.edge, styles[`edge_${edge.state}`], edge.kind === "retry" && styles.edgeRetry)}
+			className={cls(
+				styles.edge,
+				styles[`edge_${edge.state}`],
+				edge.kind === "retry" && styles.edgeRetry,
+				// A branch arrow keeps its meaning (pass / fail) until the run reaches it.
+				edge.state === "pending" && edge.kind === "success" && styles.edgeSuccess,
+				edge.state === "pending" && edge.kind === "failure" && styles.edgeFailure,
+			)}
 			markerEnd={`url(#arrow-${edge.state})`}
 			fill="none"
 		/>
@@ -282,8 +301,9 @@ function StepCard({
 					{queuedReasonLabel(step.queuedReason, step.queueBlocker)}
 				</span>
 			)}
-			{!isContext && (node.manualReview || node.inline || node.selected || (queued && step?.manualRun)) && (
+			{!isContext && (node.manualReview || node.inline || node.selected || node.command || (queued && step?.manualRun)) && (
 				<span className={styles.cardFoot}>
+					{node.command && <span className={styles.flag}>⌘ pipeline</span>}
 					{node.selected && <span className={styles.flag}>selected</span>}
 					{node.manualReview && <span className={styles.flag}>manual review</span>}
 					{node.inline && <span className={styles.flag}>inline</span>}
@@ -329,6 +349,40 @@ function SubagentBox({ node, onOpen }: { node: CanvasNode; onOpen: (stepId: stri
 			</svg>
 			<span className={styles.subagentLabel}>subagent</span>
 			{live && <span className={styles.dot} aria-hidden="true" />}
+		</button>
+	);
+}
+
+/**
+ * A command step's branch agent: the box on the right of its card that runs when
+ * the pipeline passes (green edge) or fails (red edge). No judge hangs off it —
+ * the agent's turn ending is the branch ending. The failure box carries the
+ * pipeline's retry count, since each retry follows its turn.
+ */
+function BranchBox({ node, onOpen }: { node: CanvasNode; onOpen: (stepId: string) => void }): React.JSX.Element {
+	const success = node.kind === "branch_success";
+	const live = isLiveState(node.state);
+	const when = success ? "when the pipeline passes" : "when the pipeline fails, before each retry";
+	return (
+		<button
+			type="button"
+			data-canvas-node={node.id}
+			data-canvas-branch={success ? "success" : "failure"}
+			className={cls(styles.branch, success ? styles.branchSuccess : styles.branchFailure, styles[`state_${node.state}`])}
+			style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
+			onClick={() => onOpen(node.stepId)}
+			title={`Agent ${when}: ${node.description}`}
+			aria-label={`Agent ${when} — ${node.state}. Opens this step in the list.`}
+		>
+			<span className={styles.branchHead}>
+				<span className={styles.branchMark} aria-hidden="true">
+					{success ? "✓" : "✗"}
+				</span>
+				<span className={styles.branchLabel}>agent · {node.label}</span>
+				{live && <span className={styles.dot} aria-hidden="true" />}
+				{node.retries && <span className={styles.branchRetries}>{`${node.retries.count}/${node.retries.max}`}</span>}
+			</span>
+			<span className={styles.branchTask}>{node.description}</span>
 		</button>
 	);
 }

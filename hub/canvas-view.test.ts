@@ -37,6 +37,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 const {
+	BRANCH_HEIGHT,
 	CANVAS_PADDING,
 	CARD_HEIGHT,
 	CARD_WIDTH,
@@ -621,4 +622,75 @@ test("the drawing is centred in the viewport when the viewport is wider", () => 
 	// empty. Auto margins centre it and compute to 0 when the graph is wider
 	// than the viewport, so scrolling loses nothing.
 	assert.match(css, /\.stage \{[\s\S]{0,400}margin-inline: auto/);
+});
+
+// ---------------------------------------------------------------------------
+// A command step's branch agents (docs/pipelines.md, "Branch agents")
+// ---------------------------------------------------------------------------
+
+function commandStep(over: Partial<CanvasStep> = {}): CanvasStep {
+	return step({ kind: "command", useSubagent: false, ...over });
+}
+
+test("a command step draws one box per branch agent it has, on its right, and no subagent or judge", () => {
+	const both = commandStep({ orderIndex: 0, onSuccessTask: "Ship", onFailureTask: "Fix", maxRetries: 2 });
+	const onlyFail = commandStep({ orderIndex: 1, onFailureTask: "Fix" });
+	const none = commandStep({ orderIndex: 2 });
+	const { nodes, edges } = layoutWorkflow([both, onlyFail, none]);
+
+	const success = byId(nodes, `${both.id}:on-success`);
+	const failure = byId(nodes, `${both.id}:on-failure`);
+	const card = byId(nodes, both.id);
+	assert.equal(success.kind, "branch_success");
+	assert.equal(failure.kind, "branch_failure");
+	assert.equal(success.description, "Ship");
+	assert.equal(card.command, true);
+	assert.equal(card.inline, false, "a command step runs no agent, inline or not");
+	assert.ok(success.x >= card.x + CARD_WIDTH, "the agents sit to the right of the card");
+	assert.ok(success.y + BRANCH_HEIGHT <= failure.y, "success above failure, not overlapping");
+	assert.ok(success.y >= card.y && failure.y + BRANCH_HEIGHT <= card.y + CARD_HEIGHT, "both within the card's height");
+	assert.equal(edgeBetween(edges, both.id, success.id).kind, "success");
+	assert.equal(edgeBetween(edges, both.id, failure.id).kind, "failure");
+	assert.equal(edgeBetween(edges, failure.id, both.id).kind, "retry", "the failure agent loops back into the pipeline");
+	assert.deepEqual(failure.retries, { count: 0, max: 2 });
+
+	assert.equal(nodes.filter((n) => n.stepId === onlyFail.id).length, 2, "the card and its failure agent only");
+	assert.ok(!edges.some((e) => e.from === `${onlyFail.id}:on-failure` && e.kind === "retry"), "no retry budget, no loop");
+	assert.equal(nodes.filter((n) => n.stepId === none.id).length, 1, "no agents, just the card");
+	assert.ok(!nodes.some((n) => n.kind === "judge" || n.kind === "subagent"));
+});
+
+test("the branch box lights while its agent runs and settles with the step", () => {
+	const passing = commandStep({ status: "running", phase: "on_success", onSuccessTask: "Ship", onFailureTask: "Fix" });
+	let { nodes, edges } = layoutWorkflow([passing]);
+	assert.equal(byId(nodes, `${passing.id}:on-success`).state, "running");
+	assert.equal(byId(nodes, `${passing.id}:on-failure`).state, "pending");
+	assert.equal(edgeBetween(edges, passing.id, `${passing.id}:on-success`).state, "active");
+
+	({ nodes } = layoutWorkflow([{ ...passing, status: "done" }]));
+	assert.equal(byId(nodes, `${passing.id}:on-success`).state, "done");
+
+	const fixing = commandStep({ status: "running", phase: "on_failure", onFailureTask: "Fix", maxRetries: 2, retryCount: 1 });
+	({ nodes, edges } = layoutWorkflow([fixing]));
+	assert.equal(byId(nodes, `${fixing.id}:on-failure`).state, "running");
+
+	const rerunning = { ...fixing, phase: "exec" };
+	({ nodes, edges } = layoutWorkflow([rerunning]));
+	assert.equal(byId(nodes, `${fixing.id}:on-failure`).state, "done", "it ran before this retry");
+	assert.equal(edgeBetween(edges, `${fixing.id}:on-failure`, fixing.id).state, "active", "the retry it handed to is running");
+
+	const agentFailed = { ...fixing, status: "failed", error: "on-failure agent failed: boom" };
+	({ nodes } = layoutWorkflow([agentFailed]));
+	assert.equal(byId(nodes, `${fixing.id}:on-failure`).state, "failed");
+	const stillRed = { ...fixing, status: "failed", error: "pipeline failed: Tests exit 1" };
+	({ nodes } = layoutWorkflow([stillRed]));
+	assert.equal(byId(nodes, `${fixing.id}:on-failure`).state, "done", "the agent finished; the pipeline is what failed");
+});
+
+test("the canvas draws branch agents as buttons and lists them in the legend", () => {
+	const src = read("views/WorkflowCanvas.tsx");
+	assert.match(src, /function BranchBox/);
+	assert.match(src, /data-canvas-branch/);
+	assert.match(src, /agent if the pipeline passes/);
+	assert.match(src, /agent if the pipeline fails/);
 });
