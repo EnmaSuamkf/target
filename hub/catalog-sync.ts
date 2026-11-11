@@ -1,9 +1,11 @@
 /**
  * On-demand pull of the linked server's catalog (GET /api/sync/catalog).
  *
- * TCP and RCI are upserted first so template selections can resolve against
- * copies that arrived in the same response. Local rows with the same id are
- * never overwritten. Catalog-sourced copies the server no longer grants lose
+ * TCP, RCI and pipelines are upserted before templates so template selections
+ * and command steps can resolve against copies that arrived in the same
+ * response. Local rows with the same id are never overwritten. A response that
+ * does not list a domain's flag in `allowed` (an older server) leaves that
+ * domain untouched. Catalog-sourced copies the server no longer grants lose
  * the `catalog` source and are deleted, or marked revoked when a workflow
  * still references them.
  */
@@ -27,6 +29,16 @@ import {
 	setResourceSetSyncMeta,
 	upsertServerResourceSet,
 } from "./rci-store.ts";
+import {
+	deletePipeline,
+	getPipeline,
+	listPipelines,
+	pipelineGrantedByCatalog,
+	pipelineReferences,
+	setPipelineSyncMeta,
+	ungrantCatalogSource,
+	upsertServerPipeline,
+} from "./pipeline-store.ts";
 import { authHeaders, syncFetch, syncUrl, type FetchLike } from "./sync.ts";
 import {
 	deleteTcp,
@@ -62,6 +74,7 @@ export interface CatalogSyncResult {
 	templates: CatalogSyncDomainResult;
 	tcp_tools: CatalogSyncDomainResult;
 	resource_sets: CatalogSyncDomainResult;
+	pipelines: CatalogSyncDomainResult;
 }
 
 export interface CatalogSyncStatus {
@@ -69,6 +82,7 @@ export interface CatalogSyncStatus {
 	templates: CatalogSyncDomainResult | null;
 	tcp_tools: CatalogSyncDomainResult | null;
 	resource_sets: CatalogSyncDomainResult | null;
+	pipelines: CatalogSyncDomainResult | null;
 }
 
 export interface CatalogSyncOptions {
@@ -83,10 +97,11 @@ interface CatalogItem {
 }
 
 interface CatalogResponse {
-	allowed?: { templates?: boolean; tcp_tools?: boolean; resource_sets?: boolean };
+	allowed?: { templates?: boolean; tcp_tools?: boolean; resource_sets?: boolean; pipelines?: boolean };
 	templates?: CatalogItem[];
 	tcp_tools?: CatalogItem[];
 	resource_sets?: CatalogItem[];
+	pipelines?: CatalogItem[];
 }
 
 let catalogFetchOverride: FetchLike | null = null;
@@ -134,10 +149,12 @@ function parseCatalog(payload: unknown): CatalogResponse {
 			templates: parseFlag(allowedRaw.templates),
 			tcp_tools: parseFlag(allowedRaw.tcp_tools),
 			resource_sets: parseFlag(allowedRaw.resource_sets),
+			pipelines: parseFlag(allowedRaw.pipelines),
 		},
 		templates: asItems(obj.templates),
 		tcp_tools: asItems(obj.tcp_tools),
 		resource_sets: asItems(obj.resource_sets),
+		pipelines: asItems(obj.pipelines),
 	};
 }
 
@@ -149,17 +166,24 @@ export function getCatalogSyncStatus(): CatalogSyncStatus {
 	const row = open().prepare("SELECT * FROM settings WHERE key = ?").get(CATALOG_SYNC_STATUS_KEY) as
 		| Record<string, unknown>
 		| undefined;
-	if (!row) return { syncedAt: null, templates: null, tcp_tools: null, resource_sets: null };
+	const empty: CatalogSyncStatus = { syncedAt: null, templates: null, tcp_tools: null, resource_sets: null, pipelines: null };
+	if (!row) return empty;
 	try {
-		const value = JSON.parse(String(row.value)) as CatalogSyncResult;
+		const value = JSON.parse(String(row.value)) as Partial<CatalogSyncResult>;
 		return {
-			syncedAt: value.templates?.syncedAt ?? value.tcp_tools?.syncedAt ?? value.resource_sets?.syncedAt ?? null,
+			syncedAt:
+				value.templates?.syncedAt ??
+				value.tcp_tools?.syncedAt ??
+				value.resource_sets?.syncedAt ??
+				value.pipelines?.syncedAt ??
+				null,
 			templates: value.templates ?? null,
 			tcp_tools: value.tcp_tools ?? null,
 			resource_sets: value.resource_sets ?? null,
+			pipelines: value.pipelines ?? null,
 		};
 	} catch {
-		return { syncedAt: null, templates: null, tcp_tools: null, resource_sets: null };
+		return empty;
 	}
 }
 
@@ -213,9 +237,73 @@ function upsertResourceSets(items: CatalogItem[], syncedAt: string): CatalogSync
 	return stats;
 }
 
+/**
+ * Upserts server pipelines. A local pipeline with the same id is skipped, never
+ * overwritten. A server copy whose text changed becomes untrusted (see
+ * `upsertServerPipeline`), and a computed-hash mismatch is logged.
+ */
+function upsertPipelines(items: CatalogItem[], syncedAt: string): CatalogSyncDomainResult {
+	const stats = emptyDomain(syncedAt);
+	for (const item of items) {
+		const existing = getPipeline(item.id);
+		if (existing?.origin === "local") {
+			stats.skipped += 1;
+			continue;
+		}
+		const source = typeof item.data?.source === "string" ? item.data.source : null;
+		if (source === null) {
+			stats.skipped += 1;
+			continue;
+		}
+		const result = upsertServerPipeline(
+			item.id,
+			{ name: item.name, tags: item.data?.tags, source, serverHash: item.data?.sourceHash },
+			"catalog",
+		);
+		if (!result) {
+			stats.skipped += 1;
+			continue;
+		}
+		if (result.hashMismatch) {
+			console.warn(`[catalog-sync] pipeline ${item.id}: the server's source_hash differs from the received text; using the computed hash`);
+		}
+		if (existing) stats.updated += 1;
+		else stats.added += 1;
+	}
+	return stats;
+}
+
+/**
+ * Drops the catalog grant from server pipelines the server no longer lists. One
+ * still referenced by a step or template is marked revoked, so a run of it fails
+ * with "pipeline revoked"; an unreferenced one is deleted.
+ */
+function prunePipelines(grantedIds: Set<string>, stats: CatalogSyncDomainResult): void {
+	for (const pipeline of listPipelines()) {
+		if (!pipelineGrantedByCatalog(pipeline)) continue;
+		if (grantedIds.has(pipeline.id)) continue;
+		const next = ungrantCatalogSource(pipeline);
+		if (next) {
+			setPipelineSyncMeta(pipeline.id, { syncSource: next, revoked: pipeline.revoked });
+			continue;
+		}
+		if (pipelineReferences(pipeline.id).length > 0) {
+			setPipelineSyncMeta(pipeline.id, { syncSource: null, revoked: true });
+			stats.revoked += 1;
+		} else {
+			deletePipeline(pipeline.id, { allowServerManaged: true });
+			stats.removed += 1;
+		}
+	}
+}
+
 function upsertTemplates(items: CatalogItem[], syncedAt: string): CatalogSyncDomainResult {
 	const tcpIds = new Set(listTcps().map((tcp) => tcp.id));
 	const resourceSetIds = new Set(listResourceSets().map((set) => set.id));
+	// A command step is kept only when its pipeline is known to this hub after the
+	// pipelines domain has been applied. Revoked copies stay known, so their runs
+	// fail with "pipeline revoked" instead of the step vanishing.
+	const pipelineIds = new Set(listPipelines().map((pipeline) => pipeline.id));
 	const stats = emptyDomain(syncedAt);
 	for (const item of items) {
 		const existing = getTemplate(item.id);
@@ -240,13 +328,20 @@ function upsertTemplates(items: CatalogItem[], syncedAt: string): CatalogSyncDom
 						resourceSetIds.has(String((selection as { resourceSetId?: unknown }).resourceSetId ?? "")),
 				)
 			: [];
+		const steps = Array.isArray(data.steps)
+			? data.steps.filter((step) => {
+					const obj = step as { kind?: unknown; pipelineId?: unknown } | null;
+					if (!obj || obj.kind !== "command") return true;
+					return pipelineIds.has(String(obj.pipelineId ?? ""));
+				})
+			: data.steps;
 		const wasServer = existing?.origin === "server";
 		upsertServerTemplate(
 			item.id,
 			{
 				name: item.name,
 				tags: data.tags,
-				steps: data.steps,
+				steps,
 				tcpSelections,
 				resourceSelections,
 			},
@@ -338,6 +433,7 @@ export async function syncServerCatalog(options: CatalogSyncOptions = {}): Promi
 		templates: emptyDomain(syncedAt),
 		tcp_tools: emptyDomain(syncedAt),
 		resource_sets: emptyDomain(syncedAt),
+		pipelines: emptyDomain(syncedAt),
 	};
 	const db = open();
 	db.exec("BEGIN");
@@ -349,6 +445,11 @@ export async function syncServerCatalog(options: CatalogSyncOptions = {}): Promi
 		if (domainCameBack(catalog.allowed?.resource_sets)) {
 			result.resource_sets = upsertResourceSets(catalog.resource_sets ?? [], syncedAt);
 			pruneResourceSets(new Set((catalog.resource_sets ?? []).map((item) => item.id)), result.resource_sets);
+		}
+		// Before templates: a command step's pipeline must already be here.
+		if (domainCameBack(catalog.allowed?.pipelines)) {
+			result.pipelines = upsertPipelines(catalog.pipelines ?? [], syncedAt);
+			prunePipelines(new Set((catalog.pipelines ?? []).map((item) => item.id)), result.pipelines);
 		}
 		if (domainCameBack(catalog.allowed?.templates)) {
 			result.templates = upsertTemplates(catalog.templates ?? [], syncedAt);

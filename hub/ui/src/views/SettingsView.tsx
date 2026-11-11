@@ -102,6 +102,7 @@ function catalogSyncToast(result: CatalogSyncResult): string {
 		catalogDomainSummary("Templates:", result.templates),
 		catalogDomainSummary("TCP:", result.tcp_tools),
 		catalogDomainSummary("RCI:", result.resource_sets),
+		...(result.pipelines ? [catalogDomainSummary("Pipelines:", result.pipelines)] : []),
 	].join("; ");
 }
 

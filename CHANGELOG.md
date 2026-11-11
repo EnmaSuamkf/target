@@ -24,6 +24,20 @@ The current version is reported by every instance to the central server (see
   steps are refused for docker-sandboxed workflows in this version. See
   `docs/pipelines.md`.
 
+- **Pipelines in the server catalog (Phase 2).** Pipelines are a catalog entity
+  on `target-server` with their own `client.pipelines.*` permissions and a
+  `pipelines` sync domain. A linked hub that advertises the `pipelines`
+  capability receives them, `origin: server` and untrusted, before templates. An
+  operator approves each one in the hub browser. A changed source becomes
+  untrusted again. A pipeline the server stops granting is deleted, or marked
+  `revoked` while a step or template uses it. Server templates may hold command
+  steps. They reach only hubs that can run pipelines and whose owner is granted
+  every pipeline they run. The server validates pipeline YAML with a port of the
+  hub validator, and both are checked against one set of conformance fixtures.
+  The server canvas draws command steps as their own card, and the event feed
+  summarises them without log content. See `docs/pipelines.md` (Phase 2) and
+  `target-server/docs/pipelines.md`.
+
 - **Step notes timeline and note source.** A step's notes are shown as a
   timeline, oldest first, with each note's position, time, author (Agent or
   Operator), an Edited marker when it changed after creation, the full text and
@@ -215,6 +229,14 @@ The current version is reported by every instance to the central server (see
   [`docs/hub-permissions.md`](docs/hub-permissions.md).
 
 ### Changed
+
+- **Pipeline writes use `client.pipelines.*`.** On a linked hub, create, edit,
+  delete, import and export of pipelines were gated by `client.workflows.manage`.
+  They now use `client.pipelines.create`, `.edit`, `.delete`, `.import` and
+  `.export`, as TCPs use `client.tcp-tools.*`. Approval keeps
+  `client.workflows.manage` because it is a trust decision. The sync trigger
+  accepts `client.pipelines.sync`. An owner who had only `client.workflows.manage`
+  needs the matching `client.pipelines.*` IDs to write pipelines again.
 
 - **Client permission IDs are `client.*`, not `remote.*`.** The hub gate, UI
   types, tooltips and `docs/hub-permissions.md` now use IDs such as

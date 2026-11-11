@@ -291,7 +291,7 @@ test("step.add with notes copies them onto the new step", async () => {
 
 test("capabilities include resources v2 and resource command types", () => {
 	const caps = syncClientCapabilities();
-	assert.deepEqual(caps.resources, { version: 2, tcp_tools: true, resource_sets: true });
+	assert.deepEqual(caps.resources, { version: 2, tcp_tools: true, resource_sets: true, pipelines: true });
 	assert.ok(SYNC_COMMAND_TYPES.includes("tcp-tool.upsert"));
 	assert.ok(SYNC_COMMAND_TYPES.includes("tcp-tool.delete"));
 	assert.ok(SYNC_COMMAND_TYPES.includes("resource-set.upsert"));
@@ -341,7 +341,7 @@ test("register and heartbeat advertise resources v2", async () => {
 		resources?: unknown;
 		commands?: string[];
 	};
-	assert.deepEqual(registerCaps.resources, { version: 2, tcp_tools: true, resource_sets: true });
+	assert.deepEqual(registerCaps.resources, { version: 2, tcp_tools: true, resource_sets: true, pipelines: true });
 	const commands = registerCaps.commands ?? [];
 	assert.ok(commands.includes("tcp-tool.upsert"));
 	assert.ok(heartbeats.length >= 1);
@@ -349,6 +349,7 @@ test("register and heartbeat advertise resources v2", async () => {
 		version: 2,
 		tcp_tools: true,
 		resource_sets: true,
+		pipelines: true,
 	});
 });
 

@@ -14,7 +14,14 @@
  */
 
 import * as crypto from "node:crypto";
-import { open, type TemplateStep } from "./db.ts";
+import {
+	catalogSyncSourceIncludes,
+	dropCatalogSyncSource,
+	mergeCatalogSyncSources,
+	open,
+	type CatalogSyncSource,
+	type TemplateStep,
+} from "./db.ts";
 import { parsePipeline, sourceHash, type PipelineError, type PipelineSpec } from "./pipeline-yaml.ts";
 
 export type PipelineOrigin = "local" | "server";
@@ -226,9 +233,15 @@ export function pipelineReferences(id: string): string[] {
 	return [...usage.steps.map((s) => `step ${s}`), ...usage.templates.map((t) => `template ${t}`)];
 }
 
-/** Deletes a pipeline. Refused, with what still refers to it, while any step or template uses it. */
-export function deletePipeline(id: string): boolean {
-	if (!getPipeline(id)) return false;
+/**
+ * Deletes a pipeline. Refused, with what still refers to it, while any step or
+ * template uses it. A `server` copy is refused too, unless sync is the caller
+ * (`allowServerManaged`), because the server owns it.
+ */
+export function deletePipeline(id: string, options: { allowServerManaged?: boolean } = {}): boolean {
+	const existing = getPipeline(id);
+	if (!existing) return false;
+	if (existing.origin === "server" && !options.allowServerManaged) throw new PipelineStoreError("server_managed");
 	const references = pipelineReferences(id);
 	if (references.length > 0) throw new PipelineStoreError("in_use", { references });
 	return open().prepare("DELETE FROM pipelines WHERE id = ?").run(id).changes > 0;
@@ -257,6 +270,78 @@ export function pipelineInputProblems(spec: PipelineSpec, inputs: Record<string,
 export function pipelineSpec(pipeline: Pipeline): PipelineSpec | null {
 	const parsed = parsePipeline(pipeline.source);
 	return parsed.ok ? parsed.pipeline : null;
+}
+
+// --- Catalog sync (docs/pipelines.md, "Catalog sync") ----------------------------
+//
+// A server copy is written only by sync. Its trust follows the same hash rule as
+// every other pipeline: `trusted_hash` is never touched by the upsert, so an
+// unchanged text keeps the operator's approval, and a changed text (a new
+// `source_hash`) is untrusted until an operator approves it from the browser.
+
+/** What a sync did to one pipeline row. `hashMismatch` is set when the server's hash is not the hub's. */
+export interface ServerPipelineUpsert {
+	pipeline: Pipeline;
+	hashMismatch: boolean;
+}
+
+/**
+ * Stores a server copy. The hash is always recomputed from the received text,
+ * and a server-sent hash that disagrees is reported (the computed one wins). A
+ * text that does not validate is still stored, untrusted: dispatch refuses it
+ * with "pipeline does not validate" (see workflow.ts `startCommandStep`), so the
+ * operator sees the copy and its name rather than a silently missing pipeline.
+ * Returns null, and writes nothing, when `id` is a local pipeline.
+ */
+export function upsertServerPipeline(
+	id: string,
+	input: { name: string; tags?: unknown; source: string; serverHash?: unknown },
+	syncSource: CatalogSyncSource,
+): ServerPipelineUpsert | null {
+	const existing = getPipeline(id);
+	if (existing?.origin === "local") return null;
+	const hash = sourceHash(input.source);
+	const parsed = parsePipeline(input.source);
+	const name = parsed.ok ? parsed.pipeline.name : input.name.trim() || id;
+	const now = new Date().toISOString();
+	const merged = mergeCatalogSyncSources(existing?.syncSource, syncSource);
+	// Insert: untrusted. Update: `trusted_hash` is deliberately left out of the SET,
+	// so the earlier approval is kept, and it stops matching once the hash moves.
+	open()
+		.prepare(
+			`INSERT INTO pipelines (id, name, tags, source, source_hash, trusted_hash, origin, sync_source, synced_at, revoked, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, NULL, 'server', ?, ?, 0, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+			   name = excluded.name,
+			   tags = excluded.tags,
+			   source = excluded.source,
+			   source_hash = excluded.source_hash,
+			   origin = 'server',
+			   sync_source = excluded.sync_source,
+			   synced_at = excluded.synced_at,
+			   revoked = 0,
+			   updated_at = excluded.updated_at`,
+		)
+		.run(id, name, JSON.stringify(normalizeTags(input.tags)), input.source, hash, merged, now, now, now);
+	const pipeline = getPipeline(id)!;
+	return { pipeline, hashMismatch: typeof input.serverHash === "string" && input.serverHash !== hash };
+}
+
+/** Sets a server copy's sync state: which sources still grant it, and whether it is revoked. */
+export function setPipelineSyncMeta(id: string, input: { syncSource: string | null; revoked: boolean }): void {
+	open()
+		.prepare("UPDATE pipelines SET sync_source = ?, revoked = ?, updated_at = ? WHERE id = ?")
+		.run(input.syncSource, input.revoked ? 1 : 0, new Date().toISOString(), id);
+}
+
+/** Whether a server pipeline with this sync source still counts as granted by the catalog. */
+export function pipelineGrantedByCatalog(pipeline: Pipeline): boolean {
+	return pipeline.origin === "server" && catalogSyncSourceIncludes(pipeline.syncSource, "catalog");
+}
+
+/** Drops the catalog source from a server copy that is no longer granted. Returns the remaining source, or null. */
+export function ungrantCatalogSource(pipeline: Pipeline): string | null {
+	return dropCatalogSyncSource(pipeline.syncSource);
 }
 
 // --- Bundles ----------------------------------------------------------------
