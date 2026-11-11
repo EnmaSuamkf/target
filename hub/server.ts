@@ -1399,7 +1399,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			sendJson(res, 409, { error: "not_linked" });
 			return;
 		}
-		if (!requirePermission(cfg, req, res, "client.templates.sync", "client.tcp-tools.sync", "client.rci.sync")) {
+		if (!requirePermission(cfg, req, res, "client.templates.sync", "client.tcp-tools.sync", "client.rci.sync", "client.pipelines.sync")) {
 			return;
 		}
 		void syncServerCatalog()
@@ -1986,7 +1986,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (!pipelineId && req.method === "POST") {
-			if (!requirePermission(cfg, req, res, "client.workflows.manage")) return;
+			if (!requirePermission(cfg, req, res, "client.pipelines.create")) return;
 			const session = isSessionCaller(cfg, req.headers);
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
 				if (typeof body.source !== "string") {
@@ -2007,7 +2007,8 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		// Routes whose second segment is a word, not an id. Checked before the
 		// `:id` routes below so `export` is never read as a pipeline id.
 		if (pipelineId === "validate" && !parts[3] && req.method === "POST") {
-			if (!requirePermission(cfg, req, res, "client.workflows.manage")) return;
+			// Checking text writes nothing, so either authoring right may use it.
+			if (!requirePermission(cfg, req, res, "client.pipelines.create", "client.pipelines.edit")) return;
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
 				if (typeof body.source !== "string") {
 					sendJson(res, 400, { error: "source is required" });
@@ -2021,13 +2022,13 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (pipelineId === "export" && !parts[3] && req.method === "GET") {
-			if (!requirePermission(cfg, req, res, "client.workflows.manage")) return;
+			if (!requirePermission(cfg, req, res, "client.pipelines.export")) return;
 			sendJson(res, 200, pipelineBundle(listPipelines().filter((p) => p.origin !== "server")));
 			return;
 		}
 
 		if (pipelineId === "import" && !parts[3] && req.method === "POST") {
-			if (!requirePermission(cfg, req, res, "client.workflows.manage")) return;
+			if (!requirePermission(cfg, req, res, "client.pipelines.import")) return;
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
 				try {
 					const created = importPipelines(parsePipelineBundle(body));
@@ -2087,7 +2088,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (pipelineId && !parts[3] && (req.method === "PUT" || req.method === "PATCH")) {
-			if (!requirePermission(cfg, req, res, "client.workflows.manage")) return;
+			if (!requirePermission(cfg, req, res, "client.pipelines.edit")) return;
 			const existing = getPipeline(pipelineId);
 			if (!existing) {
 				sendJson(res, 404, { error: "unknown_pipeline" });
@@ -2124,7 +2125,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		}
 
 		if (pipelineId && !parts[3] && req.method === "DELETE") {
-			if (!requirePermission(cfg, req, res, "client.workflows.manage")) return;
+			if (!requirePermission(cfg, req, res, "client.pipelines.delete")) return;
 			const existing = getPipeline(pipelineId);
 			if (!existing) {
 				sendJson(res, 404, { error: "unknown_pipeline" });

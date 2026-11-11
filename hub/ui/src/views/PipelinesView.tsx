@@ -81,7 +81,14 @@ export function PipelinesView(): React.JSX.Element {
 	const [dragging, setDragging] = useState(false);
 	const isMobile = useIsMobile();
 	const { can } = usePermissions();
-	const canWrite = can("client.workflows.manage");
+	// Each control is gated by the matching client.pipelines.* ID, as TCPs are by
+	// client.tcp-tools.*. Approve is a trust decision with no TCP precedent, so it
+	// keeps client.workflows.manage (docs/hub-permissions.md, "Pipelines").
+	const canCreate = can("client.pipelines.create");
+	const canImport = can("client.pipelines.import");
+	const canApprove = can("client.workflows.manage");
+	// Saving a new pipeline needs create; saving an existing one needs edit.
+	const canWrite = selection.kind === "new" ? canCreate : can("client.pipelines.edit");
 	const { confirm, dialog } = useConfirm();
 	const fileInput = useRef<HTMLInputElement>(null);
 	const importInput = useRef<HTMLInputElement>(null);
@@ -298,8 +305,8 @@ export function PipelinesView(): React.JSX.Element {
 								type="button"
 								className="btn btn--primary btn--sm"
 								onClick={() => void openNew()}
-								disabled={!canWrite}
-								title={canWrite ? undefined : requires("client.workflows.manage")}
+								disabled={!canCreate}
+								title={canCreate ? undefined : requires("client.pipelines.create")}
 							>
 								New
 							</button>
@@ -309,8 +316,8 @@ export function PipelinesView(): React.JSX.Element {
 								type="button"
 								className="btn btn--sm"
 								onClick={() => fileInput.current?.click()}
-								disabled={!canWrite}
-								title={canWrite ? "Pick a .yml or .yaml file; it opens as a new pipeline" : requires("client.workflows.manage")}
+								disabled={!canCreate}
+								title={canCreate ? "Pick a .yml or .yaml file; it opens as a new pipeline" : requires("client.pipelines.create")}
 							>
 								Upload YAML
 							</button>
@@ -318,8 +325,8 @@ export function PipelinesView(): React.JSX.Element {
 								type="button"
 								className="btn btn--sm"
 								onClick={() => importInput.current?.click()}
-								disabled={!canWrite}
-								title={canWrite ? "Import a bundle exported from another hub (.json)" : requires("client.workflows.manage")}
+								disabled={!canImport}
+								title={canImport ? "Import a bundle exported from another hub (.json)" : requires("client.pipelines.import")}
 							>
 								Import
 							</button>
@@ -434,8 +441,8 @@ export function PipelinesView(): React.JSX.Element {
 										type="button"
 										className="btn btn--primary btn--sm"
 										onClick={() => void approve()}
-										disabled={!canWrite || saving || dirty}
-										title={canWrite ? undefined : requires("client.workflows.manage")}
+										disabled={!canApprove || saving || dirty}
+										title={canApprove ? undefined : requires("client.workflows.manage")}
 									>
 										Approve
 									</button>
@@ -478,7 +485,7 @@ export function PipelinesView(): React.JSX.Element {
 									disabled={!canSave}
 									title={
 										!canWrite
-											? requires("client.workflows.manage")
+											? requires(selection.kind === "new" ? "client.pipelines.create" : "client.pipelines.edit")
 											: errors.length > 0
 												? "Fix the errors first"
 												: undefined

@@ -1,9 +1,10 @@
 # Pipelines and command steps
 
-> Status: Phase 1 implemented (hub); Phase 2 (server sync) pending. The text
+> Status: Phase 1 and Phase 2 implemented. Phase 1 is the hub side; Phase 2 adds
+> the server catalog (`target-server`) and the hub's sync of pipelines. The text
 > below describes what exists. Where the first design differed, the difference
-> is written in place, and the Phase 1 limitations are listed under
-> [Phases](#phases).
+> is written in place, and the limitations are listed under
+> [Phases](#phases) and [Open questions](#open-questions).
 
 A **pipeline** is a list of shell commands, written in YAML in the style of a
 GitHub Actions job. A workflow runs a pipeline through a **command step**: a step
@@ -403,7 +404,7 @@ approves it from the browser.
 | Write or paste | **Catalog → Pipelines → New**, in the YAML editor | **Save** |
 | Upload a `.yml` / `.yaml` file | **Catalog → Pipelines → Upload YAML**, or drop the file on the editor | **Save** |
 | Import a bundle exported from another hub | **Catalog → Pipelines → Import** (`.json`, as for TCPs) | **Approve** |
-| Sync from the server (phase 2) | Automatic, `origin: server` | **Approve** |
+| Sync from the server | Automatic on **Sync resources**, `origin: server`, read-only | **Approve** |
 | Through MCP or the bearer token | `POST /api/pipelines` | **Approve** |
 
 ### Uploading a YAML file
@@ -446,16 +447,32 @@ job's `steps:` into the editor and removes the `uses:` steps.
 | --- | --- | --- |
 | `GET /api/pipelines` | open read | List, without `source`. |
 | `GET /api/pipelines/:id` | open read | Includes `source`, `sourceHash`, `trustedHash`, `trusted` and `referencedBy`. It does not return `errors`: the editor gets those from `validate`. |
-| `POST /api/pipelines` | operator, `client.workflows.manage` | Validates before it saves. Approved only when the caller is a session. |
-| `PUT /api/pipelines/:id` (`PATCH` also accepted) | same | Same. `origin: server` copies are refused with 409 `server_managed`. |
-| `DELETE /api/pipelines/:id` | same | Refused with 409 `in_use` while a step or template references it. |
-| `POST /api/pipelines/:id/approve` | session only | Body `{ "sourceHash" }`, which must match the current hash. |
-| `POST /api/pipelines/validate` | operator | Body `{ "source" }`. Returns `{ ok, errors }`. Saves nothing. |
-| `POST /api/pipelines/import`, `GET /api/pipelines/export` | as for TCPs | Exports carry the source, never secret values. |
+| `POST /api/pipelines` | `client.pipelines.create` | Validates before it saves. Approved only when the caller is a session. |
+| `PUT /api/pipelines/:id` (`PATCH` also accepted) | `client.pipelines.edit` | Same. `origin: server` copies are refused with 409 `server_managed`. |
+| `DELETE /api/pipelines/:id` | `client.pipelines.delete` | Refused with 409 `in_use` while a step or template references it. |
+| `POST /api/pipelines/:id/approve` | session only, and `client.workflows.manage` | Body `{ "sourceHash" }`, which must match the current hash. Approval is a trust decision, so it has no `client.pipelines.*` ID (see [Permissions](#permissions)). |
+| `POST /api/pipelines/validate` | `client.pipelines.create` or `client.pipelines.edit` | Body `{ "source" }`. Returns `{ ok, errors }`. Saves nothing. |
+| `POST /api/pipelines/import` | `client.pipelines.import` | Bundle import, as for TCPs. |
+| `GET /api/pipelines/export` | `client.pipelines.export` | Exports carry the source, never secret values. Server copies are not exported. |
 | `GET /api/secrets` | operator | Names, and whether each one is set. |
 | `PUT /api/secrets/:name`, `DELETE /api/secrets/:name` | session only | |
 | `GET /api/steps/:id/pipeline-runs` | open read | Runs and job steps for one command step. |
 | `GET /api/pipeline-runs/:id/log` | operator | The redacted log. `?step=<index>` for one job step. |
+
+### Permissions
+
+On a linked hub, pipeline routes use the server's `client.pipelines.*` IDs, the
+same way TCP routes use `client.tcp-tools.*`. Reads are never blocked. The
+catalogue is in [`docs/hub-permissions.md`](hub-permissions.md#pipelines).
+
+- Writes map to their own ID: create, edit, delete, import and export.
+- `validate` takes either `client.pipelines.create` or `client.pipelines.edit`,
+  because it saves nothing.
+- **Approve** keeps `client.workflows.manage`. A pipeline runs on the host, so
+  approving one is a trust decision, not catalogue maintenance. Nothing in TCP
+  has that shape, so there is no precedent to follow. A holder of every
+  `client.pipelines.*` ID who lacks `client.workflows.manage` cannot approve.
+- Sync is gated by `client.pipelines.sync` on the server, not by the hub.
 
 Steps: `POST /api/workflows/:id/steps` accepts
 `{ "kind": "command", "pipelineId", "pipelineInputs" }` in place of a
@@ -533,10 +550,9 @@ Everything in this document except syncing pipelines from the server:
 - the hub's HTTP API, the MCP tools and the hub UI.
 
 Pipelines come from the editor, an uploaded file, a bundle import or MCP. The
-**Sync from the server** row of [Loading a pipeline](#loading-a-pipeline) does
-not exist yet. The sync columns (`origin`, `sync_source`, `synced_at`,
-`revoked`) are created anyway, so phase 2 needs no migration. Every phase 1
-pipeline has `origin: local`.
+The sync columns (`origin`, `sync_source`, `synced_at`, `revoked`) were created
+in phase 1, so phase 2 needed no migration. Every phase 1 pipeline has
+`origin: local`. Phase 2 uses them as described in [Phase 2](#phase-2-hub-and-target-server).
 
 **Compatibility with an unchanged server.** The server's workflow canvas
 (`target-server/ui/src/lib/canvasLayout.ts`) knows the step kinds `context` and
@@ -639,38 +655,115 @@ are relative to `target-server/ui/src`.
 
 ### Phase 2: hub and `target-server`
 
-**`target-server`:**
+Phase 2 makes pipelines part of the server catalog and syncs them to linked
+hubs. What was built, by area:
 
-- Store pipelines in the server catalog, with their YAML source, and a catalog
-  screen to create, edit and grant them. The server validates with the same
-  rules as the hub. Sharing the validator between the two repositories is a
-  phase 2 decision.
-- Return pipelines in `GET /api/sync/catalog` as a fourth domain,
-  `pipelines`, next to `templates`, `tcp_tools` and `resource_sets`, with its
-  own `allowed.pipelines` flag.
-- Accept template steps with `kind: "command"`, `pipelineId` and
-  `pipelineInputs`, and list a template's pipelines in its references.
-- Add `"command"` to the step `kind` type (`ui/src/api/types.ts`). Draw command
-  steps on the canvas with their own icon and no subagent or judge node.
-- Summarise command step events in the event feed: pipeline name, conclusion,
-  and per-job-step durations.
-- Gate pipeline catalog writes with a permission from the `client.*`
-  catalogue, alongside the existing catalog permissions.
+**Capability.** A hub advertises `resources.pipelines: true` on register and
+heartbeat (`hub/sync.ts`, `syncClientCapabilities`). It is the only way the
+server learns that the hub runs pipelines.
 
-**Hub:**
+**Catalog domain.** `GET /api/sync/catalog` (`target-server/server.mjs`):
 
-- Upsert synced pipelines in `hub/catalog-sync.ts` **before** templates, the
-  same way TCPs and Resource Sets are upserted first, so a template's command
-  steps resolve against pipelines from the same response. A template command
-  step whose pipeline did not arrive is dropped from the copy, as unresolved
-  TCP selections are today.
-- Apply the existing catalog rules: local rows with the same id are never
-  overwritten; a pipeline the server no longer grants is deleted, or marked
-  `revoked` while a workflow or template still references it. A command step
-  whose pipeline is revoked fails at dispatch with `pipeline revoked`.
-- A synced pipeline arrives untrusted, and stays untrusted after any sync that
-  changes its source (see [Trust](#trust)). A sync that does not change the
-  source keeps an earlier approval.
+- `allowed.pipelines` is `true` only when the hub advertises `pipelines` and its
+  owner holds `client.pipelines.sync`.
+- `pipelines` is an array of `{ id, name, updatedAt, data: { tags, source,
+  sourceHash } }`. It is present only for a hub that advertises the capability.
+  Items follow the same per-role sync allowlist as templates and TCPs.
+- The YAML text is the pipeline. A pipeline holds no secret value;
+  `${{ secrets.NAME }}` only names a secret the hub owns.
+
+**Permissions.** The server has `client.pipelines.{create,edit,delete,import,
+export,sync}`, mirroring `client.tcp-tools.*`. The hub uses the same IDs for
+its routes; see [Permissions](#permissions) and
+[`hub-permissions.md`](hub-permissions.md#pipelines). `sync` is the
+`allowed.pipelines` flag.
+
+**Hub sync** (`hub/catalog-sync.ts`, `hub/pipeline-store.ts`). Each sync applies
+the domains in this order: TCPs and Resource Sets, then pipelines, then
+templates. Pipelines come before templates so a template's command step can
+resolve against the same response.
+
+- An absent domain or flag (an older server) leaves every local pipeline
+  untouched.
+- A local row with the same id is skipped, never overwritten.
+- The hub recomputes `source_hash` from the received text. When the server's
+  hash differs, it logs a warning and keeps the computed one.
+- Trust follows the hash. An insert arrives untrusted. An update never writes
+  `trusted_hash`, so a changed source is untrusted again, and an unchanged source
+  keeps the earlier approval.
+- **Invalid synced text is stored, not skipped.** The copy is kept, untrusted,
+  so the operator sees its name and the error. Dispatch refuses it with
+  `pipeline does not validate` (`hub/workflow.ts`). It was not skipped because a
+  silently missing pipeline is harder to diagnose than a visible broken one.
+  Approval stays available, as for any server copy.
+- A pipeline the server no longer grants loses its `catalog` source. It is marked
+  `revoked` while a step or template still references it, and deleted
+  otherwise. A run of a revoked pipeline fails with `pipeline revoked`. Revoked
+  copies still count as known, so those runs fail with a reason rather than the
+  step disappearing.
+- A template command step whose pipeline is not known to the hub after the
+  pipelines domain is applied is dropped from the copy. This mirrors how
+  unresolved TCP selections are filtered.
+- Server copies are read-only in the API: edit and delete return
+  `409 server_managed`, and approval is allowed. Only sync removes a server copy.
+- The status key `CATALOG_SYNC_STATUS_KEY` stores a `pipelines` result beside the
+  others, and the Settings toast shows a Pipelines line.
+
+**Template gating for older hubs** (`target-server`, decided in phase 2). A hub
+receives pipelines and command-step templates only when it advertises the
+`pipelines` capability, and its owner holds `client.pipelines.sync`:
+
+- A template with a command step is **omitted whole** from the catalogue for a
+  hub that cannot run pipelines, and for a hub whose owner is not granted every
+  pipeline the template runs. Dropping only the command step would give the hub
+  a template that quietly does less than the server's copy, so the whole template
+  is withheld instead.
+- A server-side remote workflow built from such a template (`POST
+  /api/sync/remote-workflows` with `template_id`, or `steps_from_template`) is
+  refused with `409 capability_unsupported` for a hub without the capability, and
+  with `409 pipeline_not_synced` (listing `pipelineIds`) when a pipeline is not
+  granted to the hub's owner. The step is never queued.
+- A command step reaches a hub as `step.add` with `kind: "command"`,
+  `pipeline_id` and `pipeline_inputs`, with `use_subagent: false` and no
+  acceptance criteria. Without `kind`, an older hub would create an agent step.
+
+**Validator sharing.** Decided in phase 2 and implemented: the server has no
+TypeScript build for backend code, so it cannot import `hub/pipeline-yaml.ts`.
+
+- `target-server/pipeline-yaml.mjs` is a port of the hub validator with the same
+  rules, messages, line numbers, paths and `sourceHash`. Its header says it must
+  stay in lockstep with the hub file.
+- One set of cases lives in two byte-identical files,
+  `hub/fixtures/pipeline-conformance.json` and
+  `target-server/test/fixtures/pipeline-conformance.json`. Each case is
+  `{ name, source, ok, errors }`. Each repo runs every case through its own
+  validator (`hub/pipeline-conformance.test.ts`,
+  `target-server/test/pipeline-conformance.test.mjs`) and asserts the exact `ok`
+  and `errors`. Each suite also checks the two copies are identical when the
+  sibling repo is present.
+- A change to a rule changes both validators and both fixture copies in the same
+  change set. A rule without a fixture case is not covered and must not ship.
+
+**Canvas and event feed** (`target-server/ui`). A command step is drawn as its own
+card with a terminal glyph and `Pipeline: <name>`, with no subagent or judge
+node. The event feed summarises `step.started|completed|failed` events for
+command steps as the pipeline name, the conclusion, and each job step's name,
+status and duration. It never shows log content.
+
+**Known limitations in phase 2**
+
+- The sync-roles picker (`GET /api/catalog/sync-roles`) accepts only
+  `templates.edit`, `tcp-tools.edit` or `rci.edit`. An editor who holds only the
+  pipeline rights cannot pick sync roles. An admin can.
+- The server allows two pipelines with the same name. Only the browser upload
+  refuses a collision, and only on the client.
+- The hub UI shows a server copy as `from server` and read-only. It has no
+  separate "updated by sync" state.
+- The server UI has no dark theme. The Pipelines panel fits a 390 px phone, but
+  the page as a whole still scrolls horizontally because of the existing top bar.
+- Old servers: the hub advertises `pipelines: true`. A server built before this
+  change validates the capability object strictly and rejects that key, so a new
+  hub registering against it gets a 400. See [Open questions](#open-questions).
 
 ## Out of scope for v1
 
@@ -699,3 +792,13 @@ are relative to `target-server/ui/src`.
    in the workflow's step-results directory until the workflow is removed, and
    removing the workflow deletes that directory (`hub/workflow.ts:1937`).
    **Still open**: a per-workflow cap.
+5. **Deployment order for the `pipelines` capability.** A hub advertises
+   `resources.pipelines: true`. A `target-server` built before phase 2 rejects
+   that key, and a new hub registering against it gets a 400. Ship the server
+   and the hub together, or check a hub against an older server before enabling
+   it. **Still open**: a capability-tolerant server release, so the order does
+   not matter.
+6. **Sync-role picker.** `GET /api/catalog/sync-roles` lists roles for
+   `templates.edit`, `tcp-tools.edit` or `rci.edit` only. An editor who holds only
+   the pipeline rights cannot choose sync roles for a pipeline. **Still open**:
+   accept `pipelines.edit` there.

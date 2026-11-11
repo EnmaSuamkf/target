@@ -444,7 +444,7 @@ export function syncClientCapabilities() {
 	return {
 		commands: [...SYNC_COMMAND_TYPES],
 		...syncRunnerCapabilities(),
-		resources: { version: 2 as const, tcp_tools: true, resource_sets: true },
+		resources: { version: 2 as const, tcp_tools: true, resource_sets: true, pipelines: true },
 	};
 }
 

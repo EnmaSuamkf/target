@@ -740,6 +740,8 @@ export interface CatalogSyncResult {
 	templates: CatalogSyncDomainResult;
 	tcp_tools: CatalogSyncDomainResult;
 	resource_sets: CatalogSyncDomainResult;
+	/** Absent in results saved before the pipelines domain existed. */
+	pipelines?: CatalogSyncDomainResult;
 }
 
 export interface CatalogSyncStatus {
@@ -747,6 +749,7 @@ export interface CatalogSyncStatus {
 	templates: CatalogSyncDomainResult | null;
 	tcp_tools: CatalogSyncDomainResult | null;
 	resource_sets: CatalogSyncDomainResult | null;
+	pipelines?: CatalogSyncDomainResult | null;
 }
 
 /**

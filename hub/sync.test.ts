@@ -204,7 +204,7 @@ test("mock server: heartbeat reports idle availability", async () => {
 	assert.ok(Array.isArray(hb.capabilities?.runners));
 	assert.ok(hb.capabilities!.runners!.some((r) => r.id === "claude" || r.id === "free-code" || r.id === "cursor"));
 	assert.deepEqual(hb.capabilities!.runners!.map((r) => r.id).sort(), ["claude", "copilot", "cursor", "free-code"]);
-	assert.deepEqual(hb.capabilities?.resources, { version: 2, tcp_tools: true, resource_sets: true });
+	assert.deepEqual(hb.capabilities?.resources, { version: 2, tcp_tools: true, resource_sets: true, pipelines: true });
 	assert.ok(hb.capabilities?.commands?.includes("tcp-tool.upsert"));
 });
 

@@ -80,7 +80,7 @@ and not role-gated: there is no owner yet.
 
 | Method | Path | Permission |
 | --- | --- | --- |
-| `POST` | `/api/catalog/sync` | any of `client.templates.sync`, `client.tcp-tools.sync`, `client.rci.sync` (and `enforced`; `409 not_linked` otherwise) |
+| `POST` | `/api/catalog/sync` | any of `client.templates.sync`, `client.tcp-tools.sync`, `client.rci.sync`, `client.pipelines.sync` (and `enforced`; `409 not_linked` otherwise) |
 | `GET` | `/api/catalog/sync/status` | operator gate only |
 
 `POST` calls the linked server's `GET /api/sync/catalog`. An old server that
@@ -197,6 +197,27 @@ returns resources without storing them; saving the set is a later
 
 The catalogue also lists `client.rci.import` and `client.rci.export`. The hub
 has no routes for those IDs today.
+
+### Pipelines
+
+Pipelines follow the TCP precedent: each write has its own `client.pipelines.*`
+ID. Approval is the exception, and keeps `client.workflows.manage`, because it
+is a trust decision (a pipeline runs on the host) and TCPs have no such step.
+
+| Method | Path | Permission |
+| --- | --- | --- |
+| `POST` | `/api/pipelines` | `client.pipelines.create` |
+| `POST` | `/api/pipelines/validate` | `client.pipelines.create` or `client.pipelines.edit` (saves nothing) |
+| `PATCH`/`PUT` | `/api/pipelines/:id` | `client.pipelines.edit` |
+| `DELETE` | `/api/pipelines/:id` | `client.pipelines.delete` |
+| `POST` | `/api/pipelines/import` | `client.pipelines.import` |
+| `GET` | `/api/pipelines/export` | `client.pipelines.export` |
+| `POST` | `/api/pipelines/:id/approve` | `client.workflows.manage` (and a browser session) |
+
+The sync trigger accepts `client.pipelines.sync` with the other `client.*.sync`
+IDs. Reads (`GET /api/pipelines`, `GET /api/pipelines/:id`) are never blocked.
+Server copies (`origin: server`) refuse edit and delete with `409 server_managed`
+and allow approval. Sync removes them, not the operator.
 
 ## UI
 
