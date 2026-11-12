@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Step } from "../api/types.ts";
 import type { CanvasEdge, CanvasNode } from "../lib/canvasLayout.ts";
 import { edgePath, focusNodeId, layoutWorkflow } from "../lib/canvasLayout.ts";
-import { queuedCanvasLabel, queuedReasonLabel, queuedStepTooltip } from "../lib/format.ts";
+import { queuedCanvasLabel, queuedReasonLabel, queuedStepTooltip, retryCanvasLabel } from "../lib/format.ts";
 import styles from "./WorkflowCanvas.module.css";
 
 /**
@@ -269,7 +269,13 @@ function StepCard({
 }): React.JSX.Element {
 	const isContext = node.kind === "context";
 	const queued = node.state === "queued";
-	const stateText = queued && step ? queuedCanvasLabel(step.queuedAt) : node.state;
+	// A step in its retry wait reads its countdown (plan D6), not the bare state name.
+	const retrying = node.state === "retrying";
+	const stateText = queued && step
+		? queuedCanvasLabel(step.queuedAt)
+		: retrying && step?.retryAt
+			? retryCanvasLabel(step.retryAt, Date.now())
+			: node.state;
 	const stateTitle = queued && step ? queuedStepTooltip(step.manualRun) : undefined;
 	return (
 		<button
@@ -299,6 +305,11 @@ function StepCard({
 			{queued && step?.queuedReason && (
 				<span className={styles.cardSubtitle} title={queuedReasonLabel(step.queuedReason, step.queueBlocker)}>
 					{queuedReasonLabel(step.queuedReason, step.queueBlocker)}
+				</span>
+			)}
+			{retrying && step?.retryAt && (
+				<span className={styles.cardSubtitle} title="Retry attempt, and when the next one starts">
+					retry {step.retryCount}/{step.maxRetries} · next at {new Date(step.retryAt).toLocaleTimeString()}
 				</span>
 			)}
 			{!isContext && (node.manualReview || node.inline || node.selected || node.command || (queued && step?.manualRun)) && (
@@ -426,5 +437,5 @@ function JudgeCircle({ node, onOpen }: { node: CanvasNode; onOpen: (stepId: stri
 }
 
 function isLiveState(state: CanvasNode["state"]): boolean {
-	return state === "running" || state === "queued" || state === "judging" || state === "waiting";
+	return state === "running" || state === "queued" || state === "judging" || state === "waiting" || state === "retrying";
 }

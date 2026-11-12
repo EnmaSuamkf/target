@@ -625,6 +625,74 @@ test("the drawing is centred in the viewport when the viewport is wider", () => 
 });
 
 // ---------------------------------------------------------------------------
+// Retry waits (plan D8): a pending step with a due time is `retrying`. It is
+// live for the dot and for the arrows into it, not `running`, and its judge
+// circle stays `pending` because the judge has not run yet.
+// ---------------------------------------------------------------------------
+
+const FUTURE = new Date(Date.now() + 45_000).toISOString();
+
+const stepCardOf = (graph: ReturnType<typeof layoutWorkflow>): CanvasNode => {
+	const card = graph.nodes.find((n) => n.kind === "step");
+	assert.ok(card, "the graph has a step card");
+	return card;
+};
+
+const edgeOf = (graph: ReturnType<typeof layoutWorkflow>, id: string): CanvasEdge => {
+	const edge = graph.edges.find((e) => e.id === id);
+	assert.ok(edge, `the graph has the edge ${id}`);
+	return edge;
+};
+
+test("cardState: a pending step with retryAt is retrying, and without it pending", () => {
+	assert.equal(stepCardOf(layoutWorkflow([step({ status: "pending", retryAt: FUTURE })])).state, "retrying");
+	assert.equal(stepCardOf(layoutWorkflow([step({ status: "pending", retryAt: null })])).state, "pending");
+	assert.equal(stepCardOf(layoutWorkflow([step({ status: "pending" })])).state, "pending", "absent retryAt is pending");
+});
+
+test("cardState: retrying is only for a pending step, every other status keeps its own state", () => {
+	for (const status of ["queued", "running", "waiting", "done", "failed"]) {
+		assert.equal(
+			stepCardOf(layoutWorkflow([step({ status, retryAt: FUTURE })])).state,
+			status,
+			`a ${status} step with retryAt keeps the state ${status}`,
+		);
+	}
+});
+
+test("judgeState stays pending for a retrying step: the judge has not run", () => {
+	const graph = layoutWorkflow([
+		step({ status: "pending", acceptanceCriteria: "must be X", maxRetries: 1, retryCount: 1, retryAt: FUTURE }),
+	]);
+	const judge = graph.nodes.find((n) => n.kind === "judge");
+	assert.ok(judge, "the judge circle is drawn");
+	assert.equal(judge.state, "pending");
+});
+
+test("the arrows into a retrying step are active, and the arrow into a plain pending step is not", () => {
+	const first = { id: "first-step", status: "done", orderIndex: 0 };
+	const retrying = step({
+		id: "second-step",
+		status: "pending",
+		orderIndex: 1,
+		acceptanceCriteria: "must be X",
+		maxRetries: 1,
+		retryCount: 1,
+		retryAt: FUTURE,
+	});
+	const graph = layoutWorkflow([step(first), retrying]);
+
+	assert.equal(edgeOf(graph, "first-step->second-step").state, "active", "the flow arrow into the retrying step");
+	assert.equal(edgeOf(graph, "second-step:from-subagent").state, "active", "the subagent arrow into it");
+	assert.equal(edgeOf(graph, "second-step:retry").state, "active", "the retry loop back into it");
+	assert.equal(edgeOf(graph, "second-step:to-judge").state, "pending", "the judge has not run yet");
+
+	// The same two steps without a wait: the arrow into the second step is what it was before.
+	const plain = layoutWorkflow([step(first), step({ ...retrying, retryAt: null })]);
+	assert.equal(edgeOf(plain, "first-step->second-step").state, "done", "without a wait the arrow is done, not active");
+});
+
+// ---------------------------------------------------------------------------
 // A command step's branch agents (docs/pipelines.md, "Branch agents")
 // ---------------------------------------------------------------------------
 

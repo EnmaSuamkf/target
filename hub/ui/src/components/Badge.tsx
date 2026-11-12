@@ -7,7 +7,8 @@ import { scheduleBadge } from "../lib/scheduleView.ts";
  * that repaints every 2 seconds. A `queued` badge carries a steady dot
  * (accepted by the broker but waiting on the workdir lock — not yet active), and
  * so does `waiting` (held at its manual-review gate: stopped, but it's the
- * status that needs the operator to do something).
+ * status that needs the operator to do something). `retrying` is a pending step
+ * in its retry wait: nothing is running, so its dot is steady too.
  */
 export function Badge({
 	status,
@@ -15,7 +16,8 @@ export function Badge({
 	manual,
 	manualAt,
 }: {
-	status: WorkflowStatus | StepStatus;
+	/** `retrying` is a view state, not a stored status: a `pending` step with a `retryAt`. */
+	status: WorkflowStatus | StepStatus | "retrying";
 	/** Overrides the text without changing the colour (e.g. "judging"). */
 	label?: string;
 	/**
@@ -28,7 +30,7 @@ export function Badge({
 	/** ISO timestamp of the override, shown in the marker's tooltip. */
 	manualAt?: string | null;
 }): React.JSX.Element {
-	const showDot = status === "running" || status === "queued" || status === "waiting";
+	const showDot = status === "running" || status === "queued" || status === "waiting" || status === "retrying";
 	return (
 		<span className={`badge badge--${status}`}>
 			{showDot && <span className="badge__dot" aria-hidden="true" />}

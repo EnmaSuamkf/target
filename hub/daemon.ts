@@ -16,7 +16,13 @@ import { startScheduler } from "./scheduler.ts";
 import { initSyncStateCache, runSyncTick } from "./sync.ts";
 import { createServer } from "./server.ts";
 import { retryRemoteDisconnect } from "./device-link-client.ts";
-import { announceWorkflows, autoArchive, expireStale, failCommandStepsLeftByRestart } from "./workflow.ts";
+import {
+	announceWorkflows,
+	autoArchive,
+	expireStale,
+	failCommandStepsLeftByRestart,
+	reconcileOrphanRetryWaits,
+} from "./workflow.ts";
 import { TARGET_VERSION } from "./version.ts";
 
 function log(message: string, type: "info" | "warning" | "error" = "info"): void {
@@ -58,6 +64,14 @@ export function startHub(): void {
 		if (failed > 0) log(`failed ${failed} command step(s) left running by a restart`, "warning");
 	} catch (err) {
 		log(`command step restart check failed: ${String(err)}`, "warning");
+	}
+	// The same moment, for retry waits: a wait does not survive the process that
+	// held its timer. Cleared and paused here, never re-dispatched (plan 4.2.5).
+	try {
+		const interrupted = reconcileOrphanRetryWaits(log);
+		if (interrupted > 0) log(`cleared ${interrupted} retry wait(s) interrupted by a restart`, "warning");
+	} catch (err) {
+		log(`retry wait restart check failed: ${String(err)}`, "warning");
 	}
 	const server = createServer(cfg, log);
 	server.listen(cfg.port, cfg.host, () => {

@@ -247,6 +247,14 @@ The current version is reported by every instance to the central server (see
   catalog route surfaces “The server does not support resource sync”. See
   [`docs/hub-permissions.md`](docs/hub-permissions.md).
 
+- **Retry-wait indicator.** A step in its retry wait, the interval before its next
+  attempt, is shown as retrying, not as a plain pending step: "retry in 45s" or "retry due" in the
+  step list, "retrying · 45s" on the canvas, and "Retrying in 45s · retry 2/3" in
+  the command-step run panel. The countdown comes from the new `retry_at` column,
+  which holds the time of the next attempt. The step's stored status stays
+  `pending`, and the API carries the time as `retryAt`. See
+  [`docs/timeout-retries.md`](docs/timeout-retries.md) (Retry wait).
+
 ### Changed
 
 - **Pipeline writes use `client.pipelines.*`.** On a linked hub, create, edit,
@@ -352,6 +360,22 @@ The current version is reported by every instance to the central server (see
   "delegated" and "nobody decided".
 
 ### Fixed
+
+- **A step failed, reset or restarted during its retry wait is no longer
+  dispatched when the wait ends.** A retry after a judge reject or a manual-run
+  judge reject could start a step that had been failed or reset while it waited,
+  and a timeout or a command-step retry could start one that had been reset by
+  hand. The wait now ends with a check: the step must still be `pending` with the
+  wait that was scheduled. If it is not, the retry is cancelled, the cancellation
+  is logged, and the workflow is paused if nothing else is in flight. An edit made
+  during the wait is not detected yet (see
+  [`docs/timeout-retries.md`](docs/timeout-retries.md), Retry wait).
+
+- **A hub restart during a retry wait no longer leaves the workflow running with
+  nothing in flight.** The wait's timer dies with the process, so the hub now
+  clears the stored wait at startup and logs that it was interrupted. It does not
+  start the step again: press Start to run it. A running workflow with nothing in
+  flight is paused, so the operator resumes it on purpose.
 
 - **The hub's HTTP latency no longer blocks on availability probes.** The
   agent-CLI and docker probes ran `spawnSync` on the event loop, so every

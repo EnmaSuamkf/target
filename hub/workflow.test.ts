@@ -11,6 +11,7 @@
  * which keeps the hook out of the test.
  */
 import * as assert from "node:assert/strict";
+import * as http from "node:http";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -32,13 +33,18 @@ const {
 	markStepJudging,
 	markStepRunning,
 	nextPendingStep,
+	overrideStepStatus,
+	pendingReportEvents,
 	resetSteps,
+	saveReportSettings,
 	setStepSelection,
 	setWorkflowStatus,
 	startManualRun,
 } = await import("./db.ts");
-const { expireStale, onStepResult, pauseWorkflow, removeStep, resumeWorkflow, restartWorkflow, startWorkflow } =
+const { addStep, createWorkflow, expireStale, onStepResult, pauseWorkflow, removeStep, resumeWorkflow, restartWorkflow, startWorkflow } =
 	await import("./workflow.ts");
+const { insertPipeline } = await import("./pipeline-store.ts");
+const { listPipelineRunsForStep } = await import("./pipeline-runs.ts");
 const { loadConfig } = await import("./config.ts");
 
 const cfg = loadConfig();
@@ -702,4 +708,223 @@ test("restart resets only the selected steps, leaving the rest done", () => {
 	assert.equal(getStep(steps[0].id)?.status, "done");
 	assert.equal(getStep(steps[1].id)?.status, "pending");
 	assert.equal(getStep(steps[2].id)?.status, "done");
+});
+
+// ---------------------------------------------------------------------------
+// Retry waits: the identity guard after the wait (plan 4.2.3) and the snapshot
+// that announces the wait (plan 4.2.2). Each guard test follows one path from
+// the failing attempt through the real wait, then has the operator change the
+// step (fail it) while it waits. Nothing may be dispatched after that.
+// ---------------------------------------------------------------------------
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function until(check: () => boolean, timeoutMs = 15_000): Promise<void> {
+	const started = Date.now();
+	while (!check()) {
+		if (Date.now() - started > timeoutMs) throw new Error("timed out waiting for the engine");
+		await sleep(20);
+	}
+}
+
+/**
+ * A fake awb hook. It records the job id of every dispatch it is sent and
+ * answers ok without calling back, so a dispatched step simply stays `queued`.
+ * One instance serves the whole file; each test counts dispatches by its own
+ * step id.
+ */
+const dispatchedJobIds: string[] = [];
+const fakeHook = http.createServer((req, res) => {
+	let body = "";
+	req.on("data", (chunk: Buffer) => {
+		body += chunk.toString();
+	});
+	req.on("end", () => {
+		try {
+			const parsed = JSON.parse(body) as { jobId?: unknown };
+			if (typeof parsed.jobId === "string") dispatchedJobIds.push(parsed.jobId);
+		} catch {
+			// Not a dispatch body; answer anyway.
+		}
+		res.writeHead(200, { "content-type": "application/json" });
+		res.end(JSON.stringify({ ok: true }));
+	});
+});
+await new Promise<void>((resolve) => fakeHook.listen(0, "127.0.0.1", resolve));
+const fakeHookAddress = fakeHook.address();
+if (!fakeHookAddress || typeof fakeHookAddress === "string") throw new Error("fake hook did not bind a port");
+const fakeHookUrl = `http://127.0.0.1:${fakeHookAddress.port}/hook/agent`;
+test.after(() => {
+	fakeHook.close();
+});
+
+const dispatchesOf = (stepId: string): number => dispatchedJobIds.filter((id) => id === stepId).length;
+
+let guardSeq = 0;
+
+/** A running workflow on the fake hook, with one step carrying the given options (plus `extraSteps` pending bystanders). */
+function hookedWorkflow(
+	options: { acceptanceCriteria?: string | null; maxRetries?: number; retryIntervalSeconds?: number } = {},
+	extraSteps = 0,
+) {
+	const id = `wf-guard-${++guardSeq}`;
+	const workflow = insertWorkflow({
+		id,
+		name: `guard ${id}`,
+		agentName: `agent-${id}`,
+		hookUrl: fakeHookUrl,
+		secret: "s3cret",
+		mdPath: path.join(tmpHome, `${id}.md`),
+	});
+	const step = insertStep(id, "guarded step", options);
+	const others = Array.from({ length: extraSteps }, (_, i) => insertStep(id, `bystander ${i + 1}`));
+	setWorkflowStatus(id, "running");
+	return { workflow, step, others };
+}
+
+/** Puts a step into its judge phase, as if its exec run had just answered. */
+function judgingStep(stepId: string): void {
+	markStepRunning(stepId);
+	markStepJudging(stepId, { result: "the work", sessionId: "sess-guard" });
+}
+
+const REJECT = '{"ok": false, "reason": "no X"}';
+
+test("judge retry: a step failed during its wait is not dispatched, and the idle workflow is paused", async () => {
+	const { workflow, step } = hookedWorkflow({ acceptanceCriteria: "must contain X", maxRetries: 1, retryIntervalSeconds: 1 });
+	judgingStep(step.id);
+
+	const verdict = onStepResult(step.id, { ok: true, result: REJECT }, cfg, silent);
+	await sleep(200);
+	assert.equal(getStep(step.id)?.status, "pending", "precondition: the rejected step is in its retry wait");
+	assert.equal(overrideStepStatus(step.id, "failed"), true, "the operator fails the step during its wait");
+	await verdict;
+
+	assert.equal(dispatchesOf(step.id), 0, "a step changed during its wait must not be dispatched");
+	assert.equal(getStep(step.id)?.status, "failed");
+	assert.equal(getWorkflow(workflow.id)?.status, "paused", "the cancelled retry pauses the workflow when nothing else is in flight");
+});
+
+test("judge retry: a cancelled retry leaves the workflow running while another step is in flight", async () => {
+	const { workflow, step, others } = hookedWorkflow({ acceptanceCriteria: "must contain X", maxRetries: 1, retryIntervalSeconds: 1 }, 1);
+	judgingStep(step.id);
+
+	const verdict = onStepResult(step.id, { ok: true, result: REJECT }, cfg, silent);
+	await sleep(200);
+	markStepRunning(others[0].id); // something else is now in flight
+	overrideStepStatus(step.id, "failed");
+	await verdict;
+
+	assert.equal(dispatchesOf(step.id), 0);
+	assert.equal(getWorkflow(workflow.id)?.status, "running", "pauseIfIdle leaves a workflow with work in flight alone");
+});
+
+test("on-demand judge retry: a step failed during its wait is not dispatched", async () => {
+	const { step } = hookedWorkflow({ acceptanceCriteria: "must contain X", maxRetries: 1, retryIntervalSeconds: 1 });
+	assert.ok(startManualRun(step.id));
+	markStepJudging(step.id, { result: "the work", sessionId: "sess-manual" });
+
+	const verdict = onStepResult(step.id, { ok: true, result: REJECT }, cfg, silent);
+	await sleep(200);
+	assert.equal(getStep(step.id)?.status, "pending", "precondition: the rejected on-demand step is in its retry wait");
+	overrideStepStatus(step.id, "failed");
+	await verdict;
+
+	assert.equal(dispatchesOf(step.id), 0, "an on-demand step changed during its wait must not be dispatched");
+	assert.equal(getStep(step.id)?.status, "failed");
+});
+
+test("timeout retry: a step failed during its wait is not dispatched", async () => {
+	const { workflow, step } = hookedWorkflow({ maxRetries: 1, retryIntervalSeconds: 1 });
+	markStepRunning(step.id);
+
+	expireStale(timeoutCfg, silent); // the timeout consumes the retry and starts the wait
+	await sleep(200);
+	assert.equal(getStep(step.id)?.status, "pending", "precondition: the timed-out step is in its retry wait");
+	overrideStepStatus(step.id, "failed");
+	await sleep(1300); // past the one-second wait
+
+	assert.equal(dispatchesOf(step.id), 0, "a timed-out step changed during its wait must not be dispatched");
+	assert.equal(getStep(step.id)?.status, "failed");
+	assert.equal(getWorkflow(workflow.id)?.status, "paused");
+});
+
+test("command retry: a step failed during its wait does not re-run the pipeline", async () => {
+	const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "target-retry-wait-wd-"));
+	const wf = createWorkflow("command retry guard", { workdir });
+	const pipeline = insertPipeline({ source: "name: flaky\nsteps:\n  - run: exit 1\n", approve: true });
+	const step = addStep(wf.id, "", {
+		kind: "command",
+		pipelineId: pipeline.id,
+		pipelineInputs: {},
+		maxRetries: 1,
+		retryIntervalSeconds: 1,
+	});
+
+	await startWorkflow(wf.id, cfg, silent, [step.id]);
+	// The first run fails, and the retry (budget 1) is consumed and waits.
+	await until(() => getStep(step.id)?.retryCount === 1);
+	assert.equal(getStep(step.id)?.status, "pending", "precondition: the failed pipeline is in its retry wait");
+	overrideStepStatus(step.id, "failed");
+	await sleep(1500); // past the one-second wait
+
+	assert.equal(listPipelineRunsForStep(step.id).length, 1, "a step changed during its wait must not run its pipeline again");
+	assert.equal(getStep(step.id)?.status, "failed");
+});
+
+test("the plan snapshot sent during a judge retry wait carries retry_at for the waiting step", async () => {
+	saveReportSettings({ enabled: true, url: "http://127.0.0.1:9/ingest", token: "test", intervalMs: 60_000, includeConversations: "off" });
+	const { workflow, step } = hookedWorkflow({ acceptanceCriteria: "must contain X", maxRetries: 1, retryIntervalSeconds: 1 });
+	judgingStep(step.id);
+
+	const verdict = onStepResult(step.id, { ok: true, result: REJECT }, cfg, silent);
+	await sleep(200); // inside the wait: the snapshot for the wait has been written
+	const waitingEntries = pendingReportEvents(1000)
+		.filter((event) => event.kind === "workflow.plan" && event.workflowId === workflow.id)
+		.map((event) => JSON.parse(event.payload) as { steps: Array<{ step_id: string; status: string; retry_at?: unknown }> })
+		.flatMap((plan) => plan.steps)
+		.filter((planned) => planned.step_id === step.id && planned.status === "pending" && typeof planned.retry_at === "string");
+	assert.ok(waitingEntries.length > 0, "a pending snapshot with retry_at was emitted before the wait");
+	await verdict;
+});
+
+// The status re-check on the timeout and command paths already refuses a step
+// that was failed during its wait. It does NOT refuse one the operator put back
+// to `pending` by hand: the status matches again, so only the identity of the
+// wait (retry_at) tells the new state apart from the one that was scheduled.
+
+test("timeout retry: a step reset by hand during its wait is not dispatched", async () => {
+	const { workflow, step } = hookedWorkflow({ maxRetries: 1, retryIntervalSeconds: 1 });
+	markStepRunning(step.id);
+
+	expireStale(timeoutCfg, silent);
+	await sleep(200);
+	assert.equal(getStep(step.id)?.status, "pending", "precondition: the timed-out step is in its retry wait");
+	overrideStepStatus(step.id, "pending"); // put back in the queue by hand: pending again, but not the same wait
+	await sleep(1300);
+
+	assert.equal(dispatchesOf(step.id), 0, "a step reset during its wait must not be dispatched by the wait it was in");
+	assert.equal(getWorkflow(workflow.id)?.status, "paused", "the cancelled wait pauses the idle workflow");
+});
+
+test("command retry: a step reset by hand during its wait does not re-run the pipeline", async () => {
+	const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "target-retry-wait-wd-"));
+	const wf = createWorkflow("command reset guard", { workdir });
+	const pipeline = insertPipeline({ source: "name: flaky\nsteps:\n  - run: exit 1\n", approve: true });
+	const step = addStep(wf.id, "", {
+		kind: "command",
+		pipelineId: pipeline.id,
+		pipelineInputs: {},
+		maxRetries: 1,
+		retryIntervalSeconds: 1,
+	});
+
+	await startWorkflow(wf.id, cfg, silent, [step.id]);
+	await until(() => getStep(step.id)?.retryCount === 1);
+	assert.equal(getStep(step.id)?.status, "pending", "precondition: the failed pipeline is in its retry wait");
+	overrideStepStatus(step.id, "pending"); // reset by hand: pending again, but not the same wait
+	await sleep(1500);
+
+	assert.equal(listPipelineRunsForStep(step.id).length, 1, "a step reset during its wait must not re-run its pipeline");
+	assert.equal(getWorkflow(wf.id)?.status, "paused", "the cancelled wait pauses the idle workflow");
 });
