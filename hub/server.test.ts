@@ -34,8 +34,16 @@ process.env.TARGET_HOME = tmpHome;
 // same throwaway dir so each suite gets its own empty hooks.json.
 process.env.AWB_HOME = tmpHome;
 
-const { getStep, insertTemplate, markStepRunning, markStepWaiting, markStepJudging, setWorkflowSessionId, setWorkflowStatus } =
-	await import("./db.ts");
+const {
+	beginRetry,
+	getStep,
+	insertTemplate,
+	markStepRunning,
+	markStepWaiting,
+	markStepJudging,
+	setWorkflowSessionId,
+	setWorkflowStatus,
+} = await import("./db.ts");
 const { deleteAwbHook } = await import("./awb.ts");
 const { loadConfig } = await import("./config.ts");
 const { createServer } = await import("./server.ts");
@@ -1191,4 +1199,43 @@ test("POST /api/templates/import requires an admin token and creates nothing wit
 	const listRes = await fetch(`${baseUrl}/api/templates`, { headers: adminHeaders() });
 	const list = (await listRes.json()) as { templates: { name: string }[] };
 	assert.ok(!list.templates.some((t) => t.name === "unauthorized import"));
+});
+
+test("publicStep serves retryAt: a step in its retry wait carries its due time, a normal step carries null", async () => {
+	const { workflowId, step: waiting } = await createWorkflowWithStep("retry wait served", {
+		description: "judged step",
+		acceptanceCriteria: "must be X",
+		maxRetries: 1,
+		retryIntervalSeconds: 60,
+	});
+	const normalRes = await fetch(`${baseUrl}/api/workflows/${workflowId}/steps`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify({ description: "ordinary step" }),
+	});
+	const normal = ((await normalRes.json()) as StepBody).step;
+
+	// The engine puts a judge-rejected step here when its retry interval is 60 s.
+	const before = Date.now();
+	beginRetry(waiting.id, 60);
+
+	const detailRes = await fetch(`${baseUrl}/api/workflows/${workflowId}`, { headers: adminHeaders() });
+	const detail = (await detailRes.json()) as { steps: Record<string, unknown>[] };
+	const served = (id: string) => detail.steps.find((s) => s.id === id);
+	const retrying = served(waiting.id);
+	const plain = served(normal.id);
+	assert.ok(retrying, "the waiting step is served");
+	assert.ok(plain, "the normal step is served");
+
+	assert.equal(typeof retrying.retryAt, "string", "a step in its retry wait is served with its due time");
+	const dueMs = Date.parse(retrying.retryAt as string);
+	assert.ok(dueMs >= before + 59_000 && dueMs <= Date.now() + 61_000, "the due time is about one interval ahead");
+	assert.equal(retrying.status, "pending", "the status stays pending: the wait is shown from retryAt");
+	// The existing retry fields are served unchanged next to it.
+	assert.equal(retrying.retryCount, 1);
+	assert.equal(retrying.maxRetries, 1);
+	assert.equal(retrying.retryIntervalSeconds, 60);
+
+	assert.equal(plain.retryAt, null, "a normal step is served with retryAt null");
+	assert.equal(plain.status, "pending");
 });

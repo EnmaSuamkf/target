@@ -321,6 +321,13 @@ export interface Step {
 	/** Retries already consumed on the current attempt cycle; reset by restart. */
 	retryCount: number;
 	/**
+	 * When the next attempt of a step in its retry wait is due (ISO-8601 UTC), or null.
+	 * Only meaningful while `status` is `pending`: a pending step with this set is
+	 * waiting `retryIntervalSeconds` before it runs again. Set by `beginRetry`;
+	 * cleared by every statement that moves the step out of `pending`.
+	 */
+	retryAt: string | null;
+	/**
 	 * Last moment this step's agent was observed doing something — the mtime of
 	 * the freshest artifact its harness wrote (see progress.ts). Seeded with the
 	 * run start when the step goes `running`, so the idle clock always has a
@@ -726,6 +733,7 @@ export function open(): DatabaseSync {
 	addColumn("last_progress_at", "last_progress_at TEXT");
 	addColumn("last_progress_kind", "last_progress_kind TEXT");
 	addColumn("last_progress_token", "last_progress_token TEXT");
+	addColumn("retry_at", "retry_at TEXT");
 	addColumn("status_manual", "status_manual INTEGER NOT NULL DEFAULT 0");
 	addColumn("status_manual_at", "status_manual_at TEXT");
 	// Set when the operator aborts a running/queued step (`failRunningStep` with
@@ -1740,6 +1748,7 @@ function rowToStep(row: Record<string, unknown>): Step {
 		maxRetries: Number(row.max_retries ?? 0),
 		retryIntervalSeconds: Number(row.retry_interval_seconds ?? 0),
 		retryCount: Number(row.retry_count ?? 0),
+		retryAt: row.retry_at == null ? null : String(row.retry_at),
 		lastProgressAt: row.last_progress_at == null ? null : String(row.last_progress_at),
 		lastProgressKind: row.last_progress_kind == null ? null : (String(row.last_progress_kind) as ProgressKind),
 		lastProgressToken: row.last_progress_token == null ? null : String(row.last_progress_token),
@@ -1853,6 +1862,7 @@ export function insertStep(
 		maxRetries,
 		retryIntervalSeconds,
 		retryCount: 0,
+		retryAt: null,
 		lastProgressAt: null,
 		lastProgressKind: null,
 		lastProgressToken: null,
@@ -2184,7 +2194,7 @@ export function markStepRunning(id: string, manual = false): void {
 		.prepare(
 			`UPDATE steps SET status = 'running', started_at = ?, is_manual_run = ?, phase = 'exec',
 			 last_progress_at = ?, last_progress_kind = NULL, last_progress_token = NULL,
-			 status_manual = 0, status_manual_at = NULL
+			 status_manual = 0, status_manual_at = NULL, retry_at = NULL
 			 WHERE id = ? AND status = 'pending'`,
 		)
 		.run(now, manual ? 1 : 0, now, id);
@@ -2230,7 +2240,7 @@ export function markStepQueued(id: string, manual = false): void {
 		.prepare(
 			`UPDATE steps SET status = 'queued', queued_at = ?, started_at = NULL, is_manual_run = ?, phase = 'exec',
 			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL,
-			 status_manual = 0, status_manual_at = NULL
+			 status_manual = 0, status_manual_at = NULL, retry_at = NULL
 			 WHERE id = ? AND status = 'pending'`,
 		)
 		.run(new Date().toISOString(), manual ? 1 : 0, id);
@@ -2252,7 +2262,7 @@ export function promoteQueuedToRunning(id: string): boolean {
 		open()
 			.prepare(
 				`UPDATE steps SET status = 'running', started_at = ?, last_progress_at = ?,
-				 last_progress_kind = NULL, last_progress_token = NULL
+				 last_progress_kind = NULL, last_progress_token = NULL, retry_at = NULL
 				 WHERE id = ? AND status = 'queued'`,
 			)
 			.run(now, now, id).changes > 0
@@ -2275,7 +2285,7 @@ export function markStepJudging(id: string, outcome: { result?: string; sessionI
 	open()
 		.prepare(
 			`UPDATE steps SET result = ?, session_id = ?, phase = 'judge', started_at = ?, error = NULL,
-			 last_progress_at = ?, last_progress_kind = NULL, last_progress_token = NULL
+			 last_progress_at = ?, last_progress_kind = NULL, last_progress_token = NULL, retry_at = NULL
 			 WHERE id = ? AND status IN ('running', 'queued')`,
 		)
 		.run(outcome.result ?? null, outcome.sessionId ?? null, now, now, id);
@@ -2366,17 +2376,38 @@ export function finishStepDone(id: string): void {
  * Puts a judge-rejected step back to `pending` for another exec attempt and
  * bumps its retry counter, clearing the prior result/error. The next dispatch
  * re-runs it (with the judge's feedback) exactly like a first run.
+ * With an interval, `retry_at` records when the wait ends (see Step.retryAt).
  */
-export function beginRetry(id: string): void {
+export function beginRetry(id: string, intervalSeconds = 0, nowMs = Date.now()): void {
+	// The due time of the next attempt, or null when there is no wait to show.
+	// Stored so the UI can count down to it, and so a restart can tell a live wait
+	// from one whose timer died with the process (see clearOrphanRetryWaits).
+	const retryAt = intervalSeconds > 0 ? new Date(nowMs + intervalSeconds * 1000).toISOString() : null;
 	open()
 		.prepare(
 			`UPDATE steps SET status = 'pending', phase = 'exec', retry_count = retry_count + 1,
 			 result = NULL, error = NULL, session_id = NULL, started_at = NULL, finished_at = NULL,
 			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL,
-			 status_manual = 0, status_manual_at = NULL
+			 status_manual = 0, status_manual_at = NULL, retry_at = ?
 			 WHERE id = ?`,
 		)
-		.run(id);
+		.run(retryAt, id);
+}
+
+/**
+ * Clears the retry wait of every `pending` step that still carries a `retry_at`,
+ * and returns those steps. Only the boot path calls this: the wait's timer lives
+ * in memory, so a stored `retry_at` seen at boot has no timer behind it. Steps in
+ * any other status are not touched (their `retry_at` is already null by the
+ * clear rules in this file).
+ */
+export function clearOrphanRetryWaits(): Array<{ id: string; workflowId: string }> {
+	const database = open();
+	const orphans = database
+		.prepare("SELECT id, workflow_id FROM steps WHERE status = 'pending' AND retry_at IS NOT NULL")
+		.all() as Record<string, unknown>[];
+	database.prepare("UPDATE steps SET retry_at = NULL WHERE status = 'pending' AND retry_at IS NOT NULL").run();
+	return orphans.map((row) => ({ id: String(row.id), workflowId: String(row.workflow_id) }));
 }
 
 /**
@@ -2401,7 +2432,7 @@ export function completeStep(
 	const status = outcome.ok ? "done" : "failed";
 	open()
 		.prepare(
-			`UPDATE steps SET status = ?, result = ?, error = ?, session_id = COALESCE(?, session_id), finished_at = ?,
+			`UPDATE steps SET status = ?, result = ?, error = ?, session_id = COALESCE(?, session_id), finished_at = ?, retry_at = NULL,
 			 ${DESELECT_IF_STATUS_DONE}
 			 WHERE id = ? AND status IN ('pending', 'queued', 'running')`,
 		)
@@ -2436,7 +2467,7 @@ export function startManualRun(stepId: string): boolean {
 			`UPDATE steps SET status = 'queued', result = NULL, error = NULL, session_id = NULL,
 			 queued_at = ?, started_at = NULL, finished_at = NULL, is_manual_run = 1, phase = 'exec', retry_count = 0,
 			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL,
-			 status_manual = 0, status_manual_at = NULL
+			 status_manual = 0, status_manual_at = NULL, retry_at = NULL
 			 WHERE id = ? AND status NOT IN ('running', 'queued', 'waiting')`,
 		)
 		.run(now, stepId).changes;
@@ -2539,7 +2570,7 @@ export function overrideStepStatus(id: string, status: OverridableStepStatus): b
 				 error = CASE WHEN ? = 'done' THEN NULL
 				              WHEN ? = 'pending' THEN NULL
 				              ELSE COALESCE(error, 'Marked failed manually.') END,
-				 status_manual = 1, status_manual_at = ?,
+				 status_manual = 1, status_manual_at = ?, retry_at = NULL,
 				 ${DESELECT_IF_STATUS_DONE}
 				 WHERE id = ?`,
 			)
@@ -2694,7 +2725,7 @@ export function resetSteps(workflowId: string): void {
 			`UPDATE steps SET status = 'pending', result = NULL, error = NULL, session_id = NULL,
 			 started_at = NULL, finished_at = NULL, is_manual_run = 0, phase = 'exec', retry_count = 0,
 			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL,
-			 status_manual = 0, status_manual_at = NULL
+			 status_manual = 0, status_manual_at = NULL, retry_at = NULL
 			 WHERE workflow_id = ? AND selected = 1`,
 		)
 		.run(workflowId);

@@ -473,6 +473,8 @@ export interface Step {
 	maxRetries: number;
 	retryIntervalSeconds: number;
 	retryCount: number;
+	/** When the next attempt of a retry wait is due (ISO-8601 UTC). Only meaningful while `pending`; null or absent otherwise. */
+	retryAt?: string | null;
 	phase: StepPhase;
 	selected: boolean;
 	/** True when this status was forced by a human rather than reported by a run. */

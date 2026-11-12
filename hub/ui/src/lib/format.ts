@@ -2,7 +2,7 @@
  * Small formatting helpers shared by the views. Everything here is display-only
  * — no business logic, which lives on the server.
  */
-import type { QueueBlocker, QueuedReason, StepActivity } from "../api/types";
+import type { QueueBlocker, QueuedReason, StepActivity } from "../api/types.ts";
 
 /** `1234` → `1.2k`. Used for token counts, which get long fast. */
 export function compactNumber(n: number): string {
@@ -86,6 +86,41 @@ export function queuedStepTooltip(manualRun: boolean): string {
 export function queuedCanvasLabel(queuedAt: string | null): string {
 	const elapsed = duration(null, null, queuedAt);
 	return elapsed ? `queued · ${elapsed}` : "queued";
+}
+
+/**
+ * The countdown of a retry wait, from the step's due time and the caller's clock.
+ * `nowMs` is a parameter on purpose: these helpers are pure, so the list, the
+ * canvas and the tests all read the clock they are given. `seconds` is the time
+ * left, rounded up, and is 0 once the wait is due (`overdue`), never negative.
+ */
+export function retryCountdown(retryAt: string, nowMs: number): { overdue: boolean; seconds: number } {
+	const remainingMs = Date.parse(retryAt) - nowMs;
+	if (!(remainingMs > 0)) return { overdue: true, seconds: 0 };
+	return { overdue: false, seconds: Math.ceil(remainingMs / 1000) };
+}
+
+/**
+ * The countdown text of a retry wait (plan D6): `45s` under a minute, `2m 05s`
+ * under an hour, `1h 02m` from an hour on.
+ */
+export function formatCountdown(seconds: number): string {
+	const s = Math.max(0, Math.floor(seconds));
+	if (s < 60) return `${s}s`;
+	if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+	return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`;
+}
+
+/** The list badge of a step in its retry wait: `retry in 45s`, or `retry due` once the time has passed. */
+export function retryListLabel(retryAt: string, nowMs: number): string {
+	const { overdue, seconds } = retryCountdown(retryAt, nowMs);
+	return overdue ? "retry due" : `retry in ${formatCountdown(seconds)}`;
+}
+
+/** The canvas card's state text for a step in its retry wait: `retrying · 45s`, or `retrying · due`. */
+export function retryCanvasLabel(retryAt: string, nowMs: number): string {
+	const { overdue, seconds } = retryCountdown(retryAt, nowMs);
+	return overdue ? "retrying · due" : `retrying · ${formatCountdown(seconds)}`;
 }
 
 /** Human-readable label for the hub's `queuedReason` code. */

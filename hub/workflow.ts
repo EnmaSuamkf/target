@@ -56,6 +56,7 @@ import {
 	findTimeoutCandidates,
 	finishStepDone,
 	getArchiveSettings,
+	clearOrphanRetryWaits,
 	getContextStep,
 	getReportedDigests,
 	getStep,
@@ -337,7 +338,7 @@ export function expireStale(cfg: HubConfig, log: Logger): void {
 			// alone) before this sweep returns; the re-dispatch itself is
 			// fire-and-forget so a read-path caller isn't blocked by the retry
 			// interval or the dispatch round-trip.
-			beginRetry(stepId); // status → pending, retry_count++, keeps is_manual_run
+			beginRetry(stepId, step.retryIntervalSeconds); // status → pending, retry_count++, retry_at, keeps is_manual_run
 			writeStatusMd(workflowId);
 			log(`step ${stepId} retrying after the timeout (${step.retryCount + 1}/${step.maxRetries})`, "warning");
 			const retried = getStep(stepId);
@@ -370,13 +371,19 @@ export function expireStale(cfg: HubConfig, log: Logger): void {
  * agent continues from partial progress instead of starting over blind.
  */
 async function retryTimedOutStep(step: Step, workflow: Workflow, cfg: HubConfig, log: Logger): Promise<void> {
+	// The wait this retry was scheduled with: `beginRetry` stored it before this call.
+	const scheduledRetryAt = step.retryAt;
 	await abortAwbRun(workflow.hookUrl, workflow.secret, step.id, log);
 	if (step.retryIntervalSeconds > 0) {
 		log(`step ${step.id} waiting ${step.retryIntervalSeconds}s before the timeout retry`);
 		await wait(step.retryIntervalSeconds);
 	}
 	const current = getStep(step.id);
-	if (!current || current.status !== "pending") return; // resolved another way meanwhile
+	if (!retryStillScheduled(current, scheduledRetryAt)) {
+		// Resolved another way meanwhile (failed, reset, aborted, restarted).
+		cancelRetry(step.id, step.workflowId, log);
+		return;
+	}
 	reportStepEvent(current, "step.started", {
 		phase: "exec",
 		manual_run: current.manualRun === true,
@@ -2660,7 +2667,7 @@ async function failCommandAttempt(
 	writeStatusMd(failed.workflowId);
 	if (failed.retryCount < failed.maxRetries) {
 		log(`step ${failed.id} failed (${error}) — re-running the pipeline (${failed.retryCount + 1}/${failed.maxRetries})`, "warning");
-		beginRetry(failed.id);
+		beginRetry(failed.id, failed.retryIntervalSeconds);
 		writeStatusMd(failed.workflowId);
 		void retryCommandStep(failed.id, cfg, log).catch((err: unknown) =>
 			log(`step ${failed.id} retry failed to start: ${String(err)}`, "error"),
@@ -2680,13 +2687,20 @@ async function failCommandAttempt(
 async function retryCommandStep(stepId: string, cfg: HubConfig, log: Logger): Promise<void> {
 	const step = getStep(stepId);
 	if (!step) return;
+	// The wait this attempt was scheduled with: `beginRetry` stored it before this call.
+	const scheduledRetryAt = step.retryAt;
 	if (step.retryIntervalSeconds > 0) {
 		log(`step ${stepId} waiting ${step.retryIntervalSeconds}s before the pipeline retry`);
 		await wait(step.retryIntervalSeconds);
 	}
 	const current = getStep(stepId);
 	const workflow = getWorkflow(step.workflowId);
-	if (!current || current.status !== "pending" || !workflow || workflow.status !== "running") return;
+	// A paused or stopped workflow hands the step to the engine, so there is nothing to do here.
+	if (!workflow || workflow.status !== "running") return;
+	if (!retryStillScheduled(current, scheduledRetryAt)) {
+		cancelRetry(stepId, step.workflowId, log);
+		return;
+	}
 	await startCommandStep(current, workflow, cfg, log);
 }
 
@@ -3020,6 +3034,66 @@ function wait(seconds: number): Promise<void> {
 }
 
 /**
+ * The identity check after a retry wait (plan 4.2.3). A retry runs only if the
+ * step is still `pending` and still carries the wait that was scheduled for it.
+ * Anything else means the step was changed during its wait (failed, reset,
+ * aborted, restarted, or given a newer wait): whoever changed it has decided,
+ * so this path must not dispatch.
+ */
+function retryStillScheduled(current: Step | null, scheduledRetryAt: string | null): current is Step {
+	return current !== null && current.status === "pending" && current.retryAt === scheduledRetryAt;
+}
+
+/**
+ * Logs a cancelled retry, then pauses its workflow if nothing else is in flight.
+ */
+function cancelRetry(stepId: string, workflowId: string, log: Logger): void {
+	log(`step ${stepId} retry cancelled: the step changed while it was waiting`, "warning");
+	pauseIfIdle(workflowId, log);
+}
+
+/**
+ * A cancelled retry can leave its workflow `running` with nothing in flight, and
+ * nothing would notice. In that case pause it, so the operator resumes it on
+ * purpose. A workflow with a step still running, queued or held for review is
+ * left as it is.
+ */
+function pauseIfIdle(workflowId: string, log: Logger): void {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow || workflow.status !== "running") return;
+	const inFlight = listSteps(workflowId).some(
+		(s) => s.status === "running" || s.status === "queued" || s.status === "waiting",
+	);
+	if (inFlight) return;
+	setWorkflowStatus(workflowId, "paused");
+	writeStatusMd(workflowId);
+	log(`workflow ${workflowId} paused: a retry was cancelled and nothing else is in flight`, "warning");
+}
+
+/**
+ * Boot check for retry waits (plan 4.2.5). A wait's timer lives in memory, so a
+ * `pending` step that still carries `retry_at` when the hub starts has no timer
+ * behind it. Its wait is cleared and NOTHING is dispatched: the engine only
+ * dispatches on Start, Resume or a live callback, and a re-run nobody asked for
+ * could run a step the operator did not expect. A running workflow left with
+ * nothing in flight is paused, so the operator resumes it on purpose. Returns
+ * how many waits were interrupted.
+ */
+export function reconcileOrphanRetryWaits(log: Logger): number {
+	const orphans = clearOrphanRetryWaits();
+	const affected = new Set<string>();
+	for (const orphan of orphans) {
+		log(`retry wait of step ${orphan.id} was interrupted by a restart; press Start to run it`, "warning");
+		affected.add(orphan.workflowId);
+	}
+	for (const workflowId of affected) {
+		pauseIfIdle(workflowId, log);
+		writeStatusMd(workflowId);
+	}
+	return orphans.length;
+}
+
+/**
  * Extracts the judge's verdict from its free-form answer. The prompt asks it to
  * end with a bare `{"ok": bool, "reason": string}`, but now that the judge
  * narrates its verification first, the JSON is the LAST thing rather than the
@@ -3196,6 +3270,9 @@ function planStep(step: Step): Record<string, unknown> {
 		manual_run: step.manualRun === true,
 		max_retries: step.maxRetries ?? 0,
 		retry_count: step.retryCount ?? 0,
+		// When the next attempt is due (null outside a retry wait). It rides in the
+		// snapshot written right after `beginRetry`, so the target-server can show the wait.
+		retry_at: step.retryAt ?? null,
 		selected: step.selected === true,
 		started_at: step.startedAt,
 		finished_at: step.finishedAt,
@@ -3685,8 +3762,10 @@ async function onManualJudgeVerdict(
 		retrying: true,
 		error: reportError(step, "judge", "judge_rejected", verdict.reason),
 	});
-	beginRetry(step.id); // status → pending, retry_count++, keeps is_manual_run
+	beginRetry(step.id, step.retryIntervalSeconds); // status → pending, retry_count++, retry_at, keeps is_manual_run
 	writeStatusMd(step.workflowId);
+	// The wait this retry was scheduled with, checked again after the wait.
+	const scheduledRetryAt = getStep(step.id)?.retryAt ?? null;
 	log(`step ${step.id} (on-demand run) rejected by judge (retry ${step.retryCount + 1}/${step.maxRetries}): ${verdict.reason}`);
 	if (step.retryIntervalSeconds > 0) {
 		log(`step ${step.id} waiting ${step.retryIntervalSeconds}s before the retry`);
@@ -3695,6 +3774,10 @@ async function onManualJudgeVerdict(
 	const workflow = getWorkflow(step.workflowId);
 	const retried = getStep(step.id);
 	if (!workflow || !retried) return;
+	if (!retryStillScheduled(retried, scheduledRetryAt)) {
+		cancelRetry(step.id, step.workflowId, log);
+		return;
+	}
 	reportStepEvent(retried, "step.started", {
 		phase: "exec",
 		manual_run: true,
@@ -3788,8 +3871,10 @@ async function onJudgeVerdict(
 		retrying: true,
 		error: reportError(step, "judge", "judge_rejected", verdict.reason),
 	});
-	beginRetry(step.id);
+	beginRetry(step.id, step.retryIntervalSeconds);
 	writeStatusMd(step.workflowId);
+	// The wait this retry was scheduled with, checked again after the wait.
+	const scheduledRetryAt = getStep(step.id)?.retryAt ?? null;
 	log(`step ${step.id} rejected by judge (retry ${step.retryCount + 1}/${step.maxRetries}): ${verdict.reason}`);
 	// The step is back to `pending` with no `started_at` while we wait, so the
 	// stale-step sweep can't time it out mid-interval.
@@ -3800,6 +3885,10 @@ async function onJudgeVerdict(
 	const workflow = getWorkflow(step.workflowId);
 	const retried = getStep(step.id);
 	if (!workflow || !retried) return;
+	if (!retryStillScheduled(retried, scheduledRetryAt)) {
+		cancelRetry(step.id, step.workflowId, log);
+		return;
+	}
 	reportStepEvent(retried, "step.started", {
 		phase: "exec",
 		use_subagent: retried.useSubagent,

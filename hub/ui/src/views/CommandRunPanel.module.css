@@ -41,6 +41,18 @@
 	color: var(--text-muted);
 }
 
+/* The header of a step in its retry wait: the warning amber, not the run's own
+   conclusion colours, so it reads as "not running yet, on a timer". */
+.retry {
+	font-size: var(--text-xs);
+	font-weight: 600;
+	padding: 0 var(--space-2);
+	border-radius: var(--radius-full, 999px);
+	border: 1px solid var(--warn-200);
+	background: var(--warn-50);
+	color: var(--warn-700);
+}
+
 .error {
 	margin: 0;
 	font-size: var(--text-sm);

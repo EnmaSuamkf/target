@@ -58,6 +58,8 @@ export interface CanvasStep {
 	maxRetries?: number;
 	retryCount?: number;
 	selected?: boolean;
+	/** When the next attempt of a retry wait is due (ISO-8601 UTC). Only a `pending` step with this set is `retrying`. */
+	retryAt?: string | null;
 }
 
 export type CanvasNodeKind = "context" | "step" | "judge" | "subagent";
@@ -70,7 +72,7 @@ export type CanvasNodeKind = "context" | "step" | "judge" | "subagent";
  * instead of "running") and the canvas makes in shape: the work is done and the
  * circle is deciding whether it counts.
  */
-export type CanvasNodeState = "pending" | "queued" | "running" | "judging" | "waiting" | "done" | "failed";
+export type CanvasNodeState = "pending" | "queued" | "running" | "judging" | "waiting" | "retrying" | "done" | "failed";
 
 /** How far along the flow an arrow is: already travelled, being travelled, or not yet. */
 export type CanvasEdgeState = "done" | "active" | "pending";
@@ -170,11 +172,14 @@ const RETRY_DROP = 26;
 /** A step in flight, in either of its two senses. */
 const IN_FLIGHT = new Set(["running", "queued"]);
 
-const CARD_STATES = new Set<string>(["pending", "queued", "running", "waiting", "done", "failed"]);
+const CARD_STATES = new Set<string>(["pending", "queued", "running", "waiting", "retrying", "done", "failed"]);
 
 /** The card's own state: the step's status, except that judging is its own word. */
 function cardState(step: CanvasStep): CanvasNodeState {
 	if (step.status === "running" && step.phase === "judge") return "judging";
+	// A step in its retry wait is still `pending` in the database. The wait is what
+	// makes it `retrying` on the canvas: a step in any other status keeps its own state.
+	if (step.status === "pending" && step.retryAt) return "retrying";
 	// A status this UI doesn't know (an older or newer hub) draws as pending
 	// rather than as an unstyled card with no state class at all.
 	return CARD_STATES.has(step.status) ? (step.status as CanvasNodeState) : "pending";
@@ -192,9 +197,13 @@ function judgeState(step: CanvasStep): CanvasNodeState {
 	return "pending";
 }
 
-/** Whether a node's state means "there is a job on this right now". */
+/**
+ * Whether a node's state means "there is a job on this right now". A `retrying`
+ * card counts: its job will run when the wait ends, so it lights the dot and the
+ * arrow into it. It does not count as `running` — nothing is in flight yet.
+ */
 function isLive(state: CanvasNodeState): boolean {
-	return state === "running" || state === "queued" || state === "judging" || state === "waiting";
+	return state === "running" || state === "queued" || state === "judging" || state === "waiting" || state === "retrying";
 }
 
 function hasJudge(step: CanvasStep): boolean {
@@ -310,7 +319,7 @@ export function layoutWorkflow(steps: readonly CanvasStep[], selectedIds?: Reado
 				from: `${step.id}:subagent`,
 				to: step.id,
 				kind: "subagent",
-				state: IN_FLIGHT.has(step.status) ? "active" : state === "done" ? "done" : "pending",
+				state: IN_FLIGHT.has(step.status) || state === "retrying" ? "active" : state === "done" ? "done" : "pending",
 				points: [
 					{ x: CANVAS_PADDING + SUBAGENT_WIDTH, y: midY },
 					{ x, y: midY },
@@ -365,7 +374,7 @@ export function layoutWorkflow(steps: readonly CanvasStep[], selectedIds?: Reado
 					from: `${step.id}:judge`,
 					to: step.id,
 					kind: "retry",
-					state: retried && IN_FLIGHT.has(step.status) ? "active" : retried ? "done" : "pending",
+					state: retried && (IN_FLIGHT.has(step.status) || state === "retrying") ? "active" : retried ? "done" : "pending",
 					points: [
 						{ x: judgeX + JUDGE_SIZE / 2, y: judgeY + JUDGE_SIZE },
 						{ x: judgeX + JUDGE_SIZE / 2, y: dropY },

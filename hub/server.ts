@@ -781,6 +781,9 @@ function publicStep(step: Step, cfg: HubConfig): Record<string, unknown> {
 		maxRetries: step.maxRetries,
 		retryIntervalSeconds: step.retryIntervalSeconds,
 		retryCount: step.retryCount,
+		// When the next attempt of a retry wait is due (ISO-8601 UTC), or null. Only
+		// meaningful while the step is `pending`; the UI counts down to it.
+		retryAt: step.retryAt,
 		phase: step.phase,
 		selected: step.selected,
 		// Set by the manual status override, so the UI can mark a status a person

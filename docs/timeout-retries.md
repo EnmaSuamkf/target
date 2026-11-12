@@ -58,9 +58,13 @@ badge, the progress bar and the workflow-status reconciliation):
 | `running-idle` | quiet for a while, still under the idle timeout — shown in amber, nothing acts on it |
 | `stalled` | no progress for `stepIdleTimeoutMs` → takes the timeout path |
 | `timed-out-hard` | past `stepHardTimeoutMs` since `started_at`, however busy it looks |
+| `retrying` | a `pending` step whose `retry_at` is set: it is in its retry wait, the retry interval before the next attempt. See [Retry wait](#retry-wait). |
 
 They're exposed as `activity` on every step in the API and rendered next to the
 step's elapsed time ("active 8s ago" / "no activity 6m").
+
+`retrying` is not an activity. It comes from `retry_at`, not from progress, and
+the API carries it as `retryAt` on the step. The step's `status` stays `pending`.
 
 ## The sweep, in two phases
 
@@ -85,7 +89,8 @@ instead of only discovering the truth at the deadline.
    - The hung run is best-effort killed on the broker (`abortAwbRun`), freeing
      the workdir `flock`. The helper now returns a typed outcome (see
      [Abort](abort.md)); the retry path ignores it and proceeds either way.
-   - The step's `retryIntervalSeconds` is honored before the re-run.
+   - The step's `retryIntervalSeconds` is honored before the re-run. During its
+     retry wait, the step is shown as `retrying` (see [Retry wait](#retry-wait)).
    - The re-dispatch resumes the shared session with a note that the previous
      attempt timed out, so the agent continues from partial progress.
    - If the step was resolved another way while waiting (abort, restart, manual
@@ -96,6 +101,52 @@ instead of only discovering the truth at the deadline.
 The only thing that changed is *when* a timeout is declared. The `error` now
 says why: `timeout (no progress for 12m; last signal: transcript at …)` or
 `timeout (hard cap: 6h 3m running)`.
+
+## Retry wait
+
+A retry with a wait (`retryIntervalSeconds` above 0) keeps the step visible for
+the whole wait. The rules below are the ones the code enforces.
+
+- **Set.** `beginRetry` stores `retry_at`, the time the wait ends (ISO-8601, UTC),
+  in the same statement that resets the step to `pending` and bumps
+  `retry_count`. It is set only when there is a wait. With an interval of 0 it
+  stays null, and the retry starts at once, as before. Four retry paths call
+  `beginRetry`: the timeout retry (`expireStale`), the command-step pipeline retry
+  (`failCommandAttempt`), the judge reject (`onJudgeVerdict`) and the manual-run
+  judge reject (`onManualJudgeVerdict`).
+- **Shown.** The step stays `pending` in the database and in the API, and
+  `retryAt` carries the time. The UI derives the state from it: "retry in 45s" or
+  "retry due" in the step list, "retrying · 45s" on the canvas, and
+  "Retrying in 45s · retry 2/3" in the command-step run panel. A `pending` step
+  with no `retryAt` is shown as before. A time already passed reads "due": the
+  timer has fired and the dispatch is starting, or the dispatch was lost.
+- **Cleared.** `retry_at` is cleared in the same statement that moves the step out
+  of `pending` or ends the wait: a start (`markStepRunning`, `markStepQueued`,
+  `promoteQueuedToRunning`), completion (`completeStep`), a manual run
+  (`startManualRun`), a manual status override (`overrideStepStatus`), a reset
+  (`resetSteps`), and the restart check below. Statements that act only on
+  `running`, `queued` or `waiting` steps never see a `retry_at`, so they leave it
+  alone.
+- **Post-wait guard.** When the wait ends, the engine reads the step again. It
+  dispatches only if the step is still `pending` and its `retry_at` is the one
+  scheduled for this wait. Otherwise the step was changed during its wait (failed,
+  reset, aborted, restarted, or given a newer wait). The retry is then cancelled:
+  the hub logs `retry cancelled: the step changed while it was waiting`, and
+  pauses the workflow if nothing else is in flight. The guard is on all four
+  paths. It checks the status and the wait only, not the content: an edit made to
+  a pending step during its wait is not detected, so the retry dispatches it with
+  the new text (see the follow-up below).
+- **Restart.** A wait's timer lives in memory, so a restart ends it. At startup
+  the hub clears `retry_at` on every `pending` step that still carries one, logs
+  that the wait was interrupted, and dispatches nothing. Press Start to run the
+  step again. A running workflow with no step running, queued or waiting for
+  review is paused. A workflow with another step in flight keeps running.
+
+Not covered, and recorded as follow-ups: editing a pending step during its retry
+wait (`editStep` accepts a pending step, and only running, queued or waiting steps
+are refused, so the edit is dispatched without being detected), aborting a step
+during its retry wait, changing the retry policy, and correcting clock skew between
+the hub and the browser.
 
 ## Configuration (`~/.target/config.json`)
 
@@ -136,6 +187,9 @@ ran on workflow reads, i.e. only while someone had the UI open.
 - An agent stuck *inside* a long-running tool writes nothing, so it looks
   stalled. That's the accepted trade-off — `stepIdleTimeoutMs` is set well above
   any normal quiet period, and the retry budget still covers a false positive.
+- The retry countdown is computed in the browser from `retryAt` and the browser's
+  own clock. If the hub's clock and the browser's disagree, the countdown is off by
+  the same amount. Clock-skew correction is out of scope for this release.
 
 ## Tests
 

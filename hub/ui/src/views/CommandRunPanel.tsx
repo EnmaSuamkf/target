@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { getPipelineRunLog, listStepPipelineRuns } from "../api/client.ts";
 import type { PipelineRun, PipelineRunJobStep } from "../api/types.ts";
-import { relativeTime } from "../lib/format.ts";
+import { formatCountdown, relativeTime, retryCountdown } from "../lib/format.ts";
 import styles from "./CommandRunPanel.module.css";
 
 /** How often the open run is re-read while its step runs. */
@@ -41,10 +41,17 @@ export function CommandRunPanel({
 	stepId,
 	status,
 	pipelineName,
+	retryAt = null,
+	retryCount = 0,
+	maxRetries = 0,
 }: {
 	stepId: string;
 	status: string;
 	pipelineName: string | null;
+	/** The due time of the next attempt. Only a `pending` step with one is in its retry wait. */
+	retryAt?: string | null;
+	retryCount?: number;
+	maxRetries?: number;
 }): React.JSX.Element {
 	const [runs, setRuns] = useState<PipelineRun[] | null>(null);
 	const [error, setError] = useState<string | null>(null);
@@ -71,6 +78,13 @@ export function CommandRunPanel({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [status, stepId]);
 
+	// The header of a step in its retry wait (plan D6): the countdown to the next
+	// attempt, or "due" once its time has passed. Re-rendered with the 2 s list poll.
+	const retry = status === "pending" && retryAt ? retryCountdown(retryAt, Date.now()) : null;
+	const retryText = retry
+		? `${retry.overdue ? "Retry due" : `Retrying in ${formatCountdown(retry.seconds)}`} · retry ${retryCount}/${maxRetries}`
+		: null;
+
 	const latest = runs && runs.length > 0 ? runs[runs.length - 1] : null;
 	const earlier = runs && runs.length > 1 ? runs.slice(0, -1).reverse() : [];
 
@@ -78,6 +92,7 @@ export function CommandRunPanel({
 		<section className={styles.panel} aria-label="Pipeline run">
 			<div className={styles.head}>
 				<span className={styles.title}>Pipeline{pipelineName ? ` · ${pipelineName}` : ""}</span>
+				{retryText && <span className={styles.retry}>{retryText}</span>}
 				{latest && <span className={`${styles.conclusion} ${runLabel(latest).tone}`}>{runLabel(latest).text}</span>}
 				{latest && <span className={styles.meta}>attempt {latest.attempt} · {relativeTime(latest.startedAt)}</span>}
 			</div>

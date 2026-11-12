@@ -334,6 +334,23 @@
 	color: var(--success-700);
 }
 
+/* A step in its retry wait: a dashed card in the warning amber. Not the
+   attention orange of `waiting`, and the dot is steady (no pulse): nothing runs. */
+.state_retrying {
+	border-style: dashed;
+	border-left-color: var(--warn-500);
+	background: var(--warn-50);
+}
+
+.state_retrying .cardState {
+	background: var(--warn-200);
+	color: var(--warn-700);
+}
+
+.state_retrying .dot {
+	animation: none;
+}
+
 .state_failed {
 	border-left-color: var(--danger-500);
 	background: var(--danger-50);

@@ -16,7 +16,14 @@ import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { Markdown } from "../components/Markdown.tsx";
 import { StepNotes } from "../components/StepNotes.tsx";
 import { Switch } from "../components/Switch.tsx";
-import { activityLabel, duration, queuedReasonLabel, queuedStepLabel, queuedStepTooltip } from "../lib/format.ts";
+import {
+	activityLabel,
+	duration,
+	queuedReasonLabel,
+	queuedStepLabel,
+	queuedStepTooltip,
+	retryListLabel,
+} from "../lib/format.ts";
 import { SCHEDULED_ARMED_TITLE } from "../lib/scheduleView.ts";
 import { AddStepModal } from "./AddStepModal.tsx";
 import styles from "./StepItem.module.css";
@@ -198,7 +205,15 @@ export function StepItem({
 	// it never claims either way.
 	const delegated = !isContext && step.useSubagent !== false;
 	const removable = step.status === "pending";
-	const statusLabel = running && step.phase === "judge" ? "judging" : step.status;
+	// A pending step with a due time is in its retry wait (plan D6): the badge
+	// reads the countdown and takes the `retrying` colour. The status is still `pending`.
+	const retryAt = step.status === "pending" ? step.retryAt : null;
+	const badgeStatus = retryAt ? "retrying" : step.status;
+	const statusLabel = retryAt
+		? retryListLabel(retryAt, Date.now())
+		: running && step.phase === "judge"
+			? "judging"
+			: step.status;
 
 	if (editing) {
 		return (
@@ -308,11 +323,18 @@ export function StepItem({
 					</span>
 				)}
 				<p className={styles.description}>{step.description}</p>
-				<Badge status={step.status} label={statusLabel} manual={step.statusManual} manualAt={step.statusManualAt} />
+				<Badge status={badgeStatus} label={statusLabel} manual={step.statusManual} manualAt={step.statusManualAt} />
 			</div>
 
 			{step.kind === "command" && (
-				<CommandRunPanel stepId={step.id} status={step.status} pipelineName={step.pipeline?.name ?? null} />
+				<CommandRunPanel
+					stepId={step.id}
+					status={step.status}
+					pipelineName={step.pipeline?.name ?? null}
+					retryAt={step.retryAt ?? null}
+					retryCount={step.retryCount}
+					maxRetries={step.maxRetries}
+				/>
 			)}
 
 			{isContext && (
@@ -323,6 +345,7 @@ export function StepItem({
 			)}
 
 			{(step.acceptanceCriteria ||
+				(step.kind === "command" && step.maxRetries > 0) ||
 				elapsed ||
 				step.manualRun ||
 				step.manualReview ||
@@ -361,6 +384,12 @@ export function StepItem({
 									{step.retryCount}/{step.maxRetries}
 								</span>
 							)}
+						</span>
+					)}
+					{/* A command step has no judge, so its retry budget is shown on its own (plan 4.2.7). */}
+					{step.kind === "command" && step.maxRetries > 0 && (
+						<span className={styles.metaItem} data-command-retries>
+							retry {step.retryCount}/{step.maxRetries}
 						</span>
 					)}
 					{/* Flagged for a human sign-off, so the gate is visible before the
