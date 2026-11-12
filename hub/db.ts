@@ -41,7 +41,17 @@ export type StepStatus = "pending" | "queued" | "running" | "waiting" | "done" |
  * back through the same result callback, so the phase is what tells
  * `onStepResult` how to interpret the payload. Meaningless while not running.
  */
-export type StepPhase = "exec" | "judge";
+export type StepPhase = "exec" | "judge" | "on_success" | "on_failure";
+
+/**
+ * A command step's branch agents (docs/pipelines.md, "Branch agents"): once its
+ * pipeline settles, the step stays `running` in one of these phases while an
+ * agent works on the matching task. The callback that ends the agent's turn comes
+ * back to the command step itself, so the phase is what tells it apart.
+ */
+export function isBranchPhase(phase: StepPhase): phase is "on_success" | "on_failure" {
+	return phase === "on_success" || phase === "on_failure";
+}
 
 /**
  * What a step row IS.
@@ -262,6 +272,18 @@ export interface Step {
 	/** For a `command` step: the input values, keyed by the pipeline's input names. Null otherwise. */
 	pipelineInputs: Record<string, string> | null;
 	/**
+	 * A command step's on-success agent task: run by an agent, with no acceptance
+	 * criteria and no judge, when the pipeline passes. Null = no agent, the step
+	 * is done as soon as the pipeline passes. Always null for other kinds.
+	 */
+	onSuccessTask: string | null;
+	/**
+	 * A command step's on-failure agent task: run by an agent after every failed
+	 * pipeline run, before the next retry or the final failure. Null = no agent.
+	 * Always null for other kinds.
+	 */
+	onFailureTask: string | null;
+	/**
 	 * The summary of the last command-step run, waiting to be prepended to the
 	 * NEXT agent step's prompt. Cleared (set to null) only once an agent dispatch
 	 * has carried it — a failed dispatch leaves it pending, so a retry carries it
@@ -414,6 +436,10 @@ export interface TemplateStep {
 	pipelineId: string | null;
 	/** Seeds `Step.pipelineInputs` for a command step. Null for every other kind. */
 	pipelineInputs: Record<string, string> | null;
+	/** Seeds `Step.onSuccessTask`. Null for every other kind, and when the template has none. */
+	onSuccessTask?: string | null;
+	/** Seeds `Step.onFailureTask`. Null for every other kind, and when the template has none. */
+	onFailureTask?: string | null;
 	acceptanceCriteria: string | null;
 	/** Seeds `Step.manualReview` — a template that encodes "a human signs this step off" would be useless if the flag were dropped on use. */
 	manualReview: boolean;
@@ -755,6 +781,10 @@ export function open(): DatabaseSync {
 	addColumn("pipeline_inputs", "pipeline_inputs TEXT");
 	addColumn("pending_report", "pending_report TEXT");
 	addColumn("pending_report_delivered", "pending_report_delivered INTEGER NOT NULL DEFAULT 0");
+	// Branch agents of a command step (docs/pipelines.md, "Branch agents"). NULL =
+	// no agent, which is what every command step was before these existed.
+	addColumn("on_success_task", "on_success_task TEXT");
+	addColumn("on_failure_task", "on_failure_task TEXT");
 	// `step_notes` existed before `source` did, and the CREATE TABLE above skips an
 	// existing table. DEFAULT 'operator': every note written before agents could add
 	// one was written by the operator, so an upgraded row keeps saying that and keeps
@@ -1727,6 +1757,8 @@ function rowToStep(row: Record<string, unknown>): Step {
 		kind: (row.kind as StepKind) ?? "task",
 		pipelineId: row.pipeline_id == null ? null : String(row.pipeline_id),
 		pipelineInputs: parseStoredInputs(row.pipeline_inputs),
+		onSuccessTask: row.on_success_task == null ? null : String(row.on_success_task),
+		onFailureTask: row.on_failure_task == null ? null : String(row.on_failure_task),
 		pendingReport: row.pending_report == null ? null : String(row.pending_report),
 		pendingReportDelivered: Number(row.pending_report_delivered ?? 0) === 1,
 		orderIndex: Number(row.order_index),
@@ -1783,6 +1815,10 @@ export function insertStep(
 		pipelineId?: string | null;
 		/** The command step's input values. Ignored for other kinds. */
 		pipelineInputs?: Record<string, string> | null;
+		/** The command step's on-success agent task. Ignored for other kinds. */
+		onSuccessTask?: string | null;
+		/** The command step's on-failure agent task. Ignored for other kinds. */
+		onFailureTask?: string | null;
 		/**
 		 * Writes this exact `order_index` instead of computing one. The escape
 		 * hatch for the hub-owned context step, which has to land at
@@ -1836,12 +1872,16 @@ export function insertStep(
 	const retryIntervalSeconds = Math.max(0, Math.floor(options.retryIntervalSeconds ?? 0));
 	const pipelineId = isCommand ? (options.pipelineId ?? null) : null;
 	const pipelineInputs = isCommand ? (options.pipelineInputs ?? {}) : null;
+	const onSuccessTask = isCommand ? options.onSuccessTask?.trim() || null : null;
+	const onFailureTask = isCommand ? options.onFailureTask?.trim() || null : null;
 	const step: Step = {
 		id: crypto.randomUUID(),
 		workflowId,
 		kind,
 		pipelineId,
 		pipelineInputs,
+		onSuccessTask,
+		onFailureTask,
 		pendingReport: null,
 		pendingReportDelivered: false,
 		orderIndex,
@@ -1873,8 +1913,8 @@ export function insertStep(
 	};
 	database
 		.prepare(
-			`INSERT INTO steps (id, workflow_id, kind, order_index, description, status, callback_token, created_at, acceptance_criteria, manual_review, use_subagent, max_retries, retry_interval_seconds, selected, pipeline_id, pipeline_inputs)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO steps (id, workflow_id, kind, order_index, description, status, callback_token, created_at, acceptance_criteria, manual_review, use_subagent, max_retries, retry_interval_seconds, selected, pipeline_id, pipeline_inputs, on_success_task, on_failure_task)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			step.id,
@@ -1893,6 +1933,8 @@ export function insertStep(
 			step.selected ? 1 : 0,
 			step.pipelineId,
 			step.pipelineInputs == null ? null : JSON.stringify(step.pipelineInputs),
+			step.onSuccessTask,
+			step.onFailureTask,
 		);
 	return step;
 }
@@ -2003,8 +2045,27 @@ export function updateStepKind(
 	pipelineInputs: Record<string, string> | null,
 ): void {
 	open()
-		.prepare("UPDATE steps SET kind = ?, pipeline_id = ?, pipeline_inputs = ? WHERE id = ?")
-		.run(kind, kind === "command" ? pipelineId : null, kind === "command" && pipelineInputs != null ? JSON.stringify(pipelineInputs) : null, id);
+		.prepare(
+			`UPDATE steps SET kind = ?, pipeline_id = ?, pipeline_inputs = ?,
+			 on_success_task = CASE WHEN ? = 'command' THEN on_success_task ELSE NULL END,
+			 on_failure_task = CASE WHEN ? = 'command' THEN on_failure_task ELSE NULL END
+			 WHERE id = ?`,
+		)
+		.run(
+			kind,
+			kind === "command" ? pipelineId : null,
+			kind === "command" && pipelineInputs != null ? JSON.stringify(pipelineInputs) : null,
+			kind,
+			kind,
+			id,
+		);
+}
+
+/** Writes a command step's two branch-agent tasks. Blank = no agent for that branch. */
+export function updateStepBranchTasks(id: string, tasks: { onSuccessTask: string | null; onFailureTask: string | null }): void {
+	open()
+		.prepare("UPDATE steps SET on_success_task = ?, on_failure_task = ? WHERE id = ? AND kind = 'command'")
+		.run(tasks.onSuccessTask?.trim() || null, tasks.onFailureTask?.trim() || null, id);
 }
 
 /** Updates a step's run config (acceptance criteria + manual-review gate + subagent toggle + retry budget + retry wait). Editing a step is the only place these change after creation. */
@@ -2363,6 +2424,37 @@ export function releaseWaitingStep(id: string): boolean {
 }
 
 /** Marks a judge-accepted step `done`, preserving the exec result already stored by `markStepJudging`. */
+/**
+ * Moves a `running` command step into one of its branch phases: the pipeline has
+ * settled and a branch agent is about to be dispatched. The step keeps `running`
+ * (the engine must not advance past it while the agent works), stores the
+ * pipeline report as its result and, for a failure, the attempt's error. The
+ * clocks are re-seeded as for the judge: the watchdog now measures the agent.
+ * Returns whether it took.
+ */
+export function markStepBranch(
+	id: string,
+	phase: "on_success" | "on_failure",
+	outcome: { result: string; error: string | null },
+): boolean {
+	const now = new Date().toISOString();
+	return (
+		open()
+			.prepare(
+				`UPDATE steps SET phase = ?, result = ?, error = ?, started_at = ?,
+				 last_progress_at = ?, last_progress_kind = NULL, last_progress_token = NULL
+				 WHERE id = ? AND kind = 'command' AND status IN ('running', 'queued')`,
+			)
+			.run(phase, redactSecrets(outcome.result), outcome.error == null ? null : redactSecrets(outcome.error), now, now, id)
+			.changes > 0
+	);
+}
+
+/** Records the session a command step's branch agent ran on, so "Open conversation" works for the step. */
+export function setBranchSession(id: string, sessionId: string): void {
+	open().prepare("UPDATE steps SET session_id = ? WHERE id = ? AND kind = 'command'").run(sessionId, id);
+}
+
 export function finishStepDone(id: string): void {
 	open()
 		.prepare(
@@ -2822,11 +2914,18 @@ function normalizeTemplateSteps(steps: unknown): TemplateStep[] {
 					: null;
 			const pipelineInputs =
 				kind === "command" && pipelineId !== null ? normalizeStepInputs(obj.pipelineInputs) : null;
+			const branchTask = (value: unknown): string | null =>
+				kind === "command" && typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+			const onSuccessTask = branchTask(obj.onSuccessTask);
+			const onFailureTask = branchTask(obj.onFailureTask);
 			return {
 				description,
 				kind,
 				pipelineId,
 				pipelineInputs,
+				// Only present when set, so a template without branch agents keeps its exact old shape.
+				...(onSuccessTask ? { onSuccessTask } : {}),
+				...(onFailureTask ? { onFailureTask } : {}),
 				acceptanceCriteria: kind === "command" ? null : acceptanceCriteria,
 				manualReview,
 				useSubagent: kind === "command" ? false : useSubagent,

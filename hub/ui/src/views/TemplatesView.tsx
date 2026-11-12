@@ -11,7 +11,7 @@ import type {
 } from "../api/types.ts";
 import { CatalogCopyBadges } from "../components/Badge.tsx";
 import { StepNotes } from "../components/StepNotes.tsx";
-import { CommandStepFields } from "./CommandStepFields.tsx";
+import { BranchAgentFields, CommandStepFields } from "./CommandStepFields.tsx";
 import { ResourceSelectionEditor } from "./ResourceSelectionEditor.tsx";
 import { TcpSelectionEditor } from "./TcpSelectionEditor.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
@@ -581,7 +581,7 @@ function TemplateForm({
 											ev.target.value === "command"
 												// A command step has no agent, so the agent-only settings are cleared with it.
 												? { kind: "command", acceptanceCriteria: null, useSubagent: false }
-												: { kind: "task", pipelineId: null, pipelineInputs: null },
+												: { kind: "task", pipelineId: null, pipelineInputs: null, onSuccessTask: null, onFailureTask: null },
 										)
 									}
 									disabled={readOnly}
@@ -599,6 +599,16 @@ function TemplateForm({
 									onInputs={(inputs) => updateStep(index, { pipelineInputs: inputs })}
 									onReady={() => undefined}
 									disabled={readOnly}
+								/>
+							)}
+							{step.kind === "command" && (
+								<BranchAgentFields
+									onSuccessTask={step.onSuccessTask ?? ""}
+									onOnSuccessTask={(task) => updateStep(index, { onSuccessTask: task === "" ? null : task })}
+									onFailureTask={step.onFailureTask ?? ""}
+									onOnFailureTask={(task) => updateStep(index, { onFailureTask: task === "" ? null : task })}
+									disabled={readOnly}
+									idPrefix={`template-step-${index}`}
 								/>
 							)}
 							<ExpandableTextarea

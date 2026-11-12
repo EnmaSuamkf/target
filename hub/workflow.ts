@@ -101,6 +101,10 @@ import {
 	updateStepConfig,
 	updateStepDescription,
 	updateStepKind,
+	updateStepBranchTasks,
+	markStepBranch,
+	setBranchSession,
+	isBranchPhase,
 	updateWorkflowSchedule,
 	type Attachment,
 	type OverridableStepStatus,
@@ -223,7 +227,8 @@ function refreshProgress(cfg: HubConfig): void {
 	pruneProbes(new Set(running.map((step) => step.id)));
 	for (const step of running) {
 		// A command step has no harness writing artifacts; its run has its own timeout.
-		if (step.kind === "command") continue;
+		// Its branch agent does, and is watched like any agent.
+		if (step.kind === "command" && !isBranchPhase(step.phase)) continue;
 		const workflow = getWorkflow(step.workflowId);
 		if (workflow) recordFreshSignal(step, workflow, cfg);
 	}
@@ -294,7 +299,8 @@ export function expireStale(cfg: HubConfig, log: Logger): void {
 		let step = getStep(stepId);
 		if (!step || !workflow) continue;
 		// Its run carries `timeout-minutes`; the agent's idle sweep must not fail it or re-dispatch it as an agent step.
-		if (step.kind === "command") continue;
+		// A branch agent is watched, but a timeout fails it outright (no retry: see below).
+		if (step.kind === "command" && !isBranchPhase(step.phase)) continue;
 
 		// Phase 2: an idle candidate gets one last, unthrottled look at the
 		// harness's artifacts before we believe it's hung.
@@ -331,6 +337,14 @@ export function expireStale(cfg: HubConfig, log: Logger): void {
 		}
 		log(`step ${stepId} timed out — ${error}`, "warning");
 
+		if (step.kind === "command") {
+			// A branch agent that timed out: the retry budget belongs to the pipeline,
+			// and re-dispatching this step would re-send its description to an agent.
+			branchJobSteps.delete(stepId);
+			if (step.manualRun) settleManual(workflowId, log);
+			else failedWorkflowIds.add(workflowId);
+			continue;
+		}
 		if (step.retryCount < step.maxRetries) {
 			// Retry budget left → consume one retry and re-run the step instead of
 			// failing the workflow. `beginRetry` runs synchronously here so the
@@ -1734,6 +1748,8 @@ export function cloneWorkflow(workflowId: string, overrides: CloneOverrides = {}
 			kind: step.kind,
 			pipelineId: step.pipelineId,
 			pipelineInputs: step.pipelineInputs,
+			onSuccessTask: step.onSuccessTask,
+			onFailureTask: step.onFailureTask,
 		});
 		for (const attachment of listStepAttachments(step.id)) copyAttachment(attachment, clone.id, copy.id);
 	}
@@ -2023,6 +2039,14 @@ function refuseAgentOnlySettings(options: { useSubagent?: boolean; acceptanceCri
 	}
 }
 
+/** Branch agents belong to a command step; an agent step asking for one is refused rather than silently dropped. */
+function refuseBranchTasks(options: { onSuccessTask?: string | null; onFailureTask?: string | null }): void {
+	const set = (value: string | null | undefined): boolean => value != null && value.trim() !== "";
+	if (set(options.onSuccessTask) || set(options.onFailureTask)) {
+		throw new WorkflowError("only a command step has on-success and on-failure agents");
+	}
+}
+
 /**
  * Checks a template's command steps before anything is created from it, so a
  * template with a missing pipeline fails the seed as a whole, with the step
@@ -2061,6 +2085,10 @@ export function addStep(
 		pipelineId?: string | null;
 		/** A command step's input values. Checked against the pipeline's declared inputs. */
 		pipelineInputs?: Record<string, string> | null;
+		/** A command step's on-success agent task (docs/pipelines.md, "Branch agents"). */
+		onSuccessTask?: string | null;
+		/** A command step's on-failure agent task. */
+		onFailureTask?: string | null;
 	} = {},
 ): Step {
 	const workflow = getWorkflow(workflowId);
@@ -2078,6 +2106,8 @@ export function addStep(
 		if (!trimmed) trimmed = commandStepDescription(pipeline);
 	} else if (!trimmed) {
 		throw new WorkflowError("description is required");
+	} else {
+		refuseBranchTasks(options);
 	}
 	// The anchor is resolved (and checked to belong to THIS workflow) here rather
 	// than in db.ts, which doesn't validate ownership — otherwise a step id from
@@ -2109,6 +2139,8 @@ export function addStep(
 		kind,
 		pipelineId: kind === "command" ? (options.pipelineId ?? null) : null,
 		pipelineInputs: kind === "command" ? (options.pipelineInputs ?? {}) : null,
+		onSuccessTask: kind === "command" ? (options.onSuccessTask ?? null) : null,
+		onFailureTask: kind === "command" ? (options.onFailureTask ?? null) : null,
 	});
 	// Report the step list itself — lifecycle events alone can't reconstruct
 	// what was PLANNED (a pending step emits nothing until it runs). Task steps
@@ -2155,6 +2187,10 @@ export function editStep(
 		kind?: StepKind;
 		pipelineId?: string | null;
 		pipelineInputs?: Record<string, string> | null;
+		/** A command step's on-success agent task. Omitted = unchanged; null or blank = none. */
+		onSuccessTask?: string | null;
+		/** A command step's on-failure agent task. Omitted = unchanged; null or blank = none. */
+		onFailureTask?: string | null;
 	} = {},
 ): Step {
 	const step = getStep(stepId);
@@ -2185,10 +2221,18 @@ export function editStep(
 		if (!trimmed) trimmed = commandStepDescription(pipeline);
 	} else if (!trimmed) {
 		throw new WorkflowError("description is required");
+	} else {
+		refuseBranchTasks(options);
 	}
 
 	updateStepDescription(stepId, trimmed);
 	if (kindChanges || command) updateStepKind(stepId, nextKind, pipelineId, inputs);
+	if (command && (options.onSuccessTask !== undefined || options.onFailureTask !== undefined)) {
+		updateStepBranchTasks(stepId, {
+			onSuccessTask: options.onSuccessTask !== undefined ? options.onSuccessTask : step.onSuccessTask,
+			onFailureTask: options.onFailureTask !== undefined ? options.onFailureTask : step.onFailureTask,
+		});
+	}
 
 	// Only touch the verification config when the caller actually sent fields — a
 	// plain description edit shouldn't silently wipe an existing criterion (or
@@ -2604,24 +2648,140 @@ async function executeCommandRun(
 		logPath,
 	});
 	// Stored before the settle, so the agent gets it on its next turn whatever happens next.
+	// A branch agent is that next turn: its dispatch carries this report.
 	setPendingReport(step.id, report);
 	if (result.conclusion === "success") {
-		await settleCommandSuccess(step, result, report, cfg, log);
+		if (step.onSuccessTask) {
+			await startBranchAgent(step, "on_success", { report, error: null, jobSteps: result.steps }, cfg, log);
+			return;
+		}
+		await settleCommandSuccess(step, report, cfg, log, result.steps);
 		return;
 	}
-	await failCommandAttempt(step, cfg, log, `pipeline failed: ${commandFailureReason(result)}`, {
-		report,
-		jobSteps: result.steps,
+	const error = `pipeline failed: ${commandFailureReason(result)}`;
+	if (step.onFailureTask) {
+		await startBranchAgent(step, "on_failure", { report, error, jobSteps: result.steps }, cfg, log);
+		return;
+	}
+	await failCommandAttempt(step, cfg, log, error, { report, jobSteps: result.steps });
+}
+
+// --- Branch agents (docs/pipelines.md, "Branch agents") ---------------------
+//
+// A command step may carry an on-success and an on-failure agent task. When its
+// pipeline settles, the matching agent runs on the workflow's conversation with
+// the pipeline report in front of its task. There is no acceptance criterion
+// and no judge: the agent's turn ending is the branch ending. The step stays
+// `running` in the branch phase meanwhile, so nothing else is dispatched.
+//
+//  - on_success: the agent finishes → the step is done (manual review included).
+//  - on_failure: the agent finishes → the failed attempt settles as it would
+//    without the agent: the pipeline re-runs while retries last, otherwise the
+//    step and the workflow fail. The agent runs on every failed run, the last
+//    one included, so it can fix things before each re-run.
+//
+// A refusal before anything ran (pipeline revoked, untrusted, ...) runs no
+// agent: an agent cannot fix trust. An agent that fails, cannot be dispatched,
+// times out or is aborted fails the step and the workflow, with no retry.
+
+/** Job-step summaries of the run a branch agent follows, for the event the branch settles with. Kept in memory only. */
+const branchJobSteps = new Map<string, JobStepState[]>();
+
+async function startBranchAgent(
+	step: Step,
+	branch: "on_success" | "on_failure",
+	outcome: { report: string; error: string | null; jobSteps: JobStepState[] },
+	cfg: HubConfig,
+	log: Logger,
+): Promise<void> {
+	const task = branch === "on_success" ? step.onSuccessTask : step.onFailureTask;
+	const workflow = getWorkflow(step.workflowId);
+	if (!task || !workflow) return;
+	if (!markStepBranch(step.id, branch, { result: outcome.report, error: outcome.error })) return;
+	branchJobSteps.set(step.id, outcome.jobSteps);
+	const branching = getStep(step.id) ?? step;
+	reportStepEvent(branching, "step.started", {
+		phase: branch,
+		pipeline_id: branching.pipelineId,
+		manual_run: branching.manualRun === true,
+		attempt: branching.retryCount + 1,
+		max_retries: branching.maxRetries,
+	});
+	writeStatusMd(step.workflowId);
+	log(`step ${step.id} pipeline ${branch === "on_success" ? "passed" : "failed"} — dispatching its ${branch.replace("_", "-")} agent`);
+	await dispatchStep(branching, workflow, cfg, log, { manual: branching.manualRun, branchTask: { branch, task } });
+	const after = getStep(step.id);
+	if (after?.status === "failed") {
+		// The hook was down or refused the prompt: dispatchStep already failed the step.
+		branchJobSteps.delete(step.id);
+		if (after.manualRun) settleManual(step.workflowId, log);
+		else failWorkflowIfDispatchDied(step.id, step.workflowId, `${branch.replace("_", "-")} agent`, log);
+	}
+}
+
+/** The step's result once a branch agent answered: the pipeline report, then what the agent said. */
+function branchResult(step: Step, branch: "on_success" | "on_failure", agentResult: string | undefined): string {
+	const report = step.result ?? "";
+	const said = agentResult?.trim() ? agentResult.trim() : "(no output)";
+	return `${report}\n\n${branch === "on_success" ? "On-success" : "On-failure"} agent:\n${said}`;
+}
+
+/** The result callback of a command step in a branch phase (see onStepResult). */
+async function onBranchResult(
+	step: Step,
+	outcome: { ok: boolean; result?: string; error?: string; sessionId?: string },
+	cfg: HubConfig,
+	log: Logger,
+): Promise<void> {
+	const branch = step.phase === "on_success" ? "on_success" : "on_failure";
+	const jobSteps = branchJobSteps.get(step.id);
+	branchJobSteps.delete(step.id);
+	// The agent's turn happened on the workflow's conversation: the next step resumes it.
+	chainSession(step.workflowId, outcome.sessionId);
+	const combined = branchResult(step, branch, outcome.ok ? outcome.result : undefined);
+	if (!outcome.ok) {
+		const error = `${branch.replace("_", "-")} agent failed: ${outcome.error ?? "unknown error"}`;
+		completeStep(step.id, { ok: false, result: combined, error, sessionId: outcome.sessionId });
+		const failed = getStep(step.id) ?? step;
+		reportStepEvent(failed, "step.failed", {
+			phase: branch,
+			pipeline_id: failed.pipelineId,
+			manual_run: failed.manualRun === true,
+			duration_ms: stepDurationMs(failed),
+			retry_count: failed.retryCount,
+			max_retries: failed.maxRetries,
+			error: reportError(failed, branch, "agent_error", error),
+		});
+		const wf = getWorkflow(step.workflowId);
+		if (wf) reportUsageSnapshot(wf, failed);
+		if (failed.manualRun) {
+			settleManual(step.workflowId, log);
+			return;
+		}
+		setWorkflowStatus(step.workflowId, "failed");
+		writeStatusMd(step.workflowId);
+		log(`workflow ${step.workflowId} failed at step ${step.id}: ${error}`, "error");
+		return;
+	}
+	if (outcome.sessionId) setBranchSession(step.id, outcome.sessionId);
+	if (branch === "on_success") {
+		await settleCommandSuccess(getStep(step.id) ?? step, combined, cfg, log, jobSteps);
+		return;
+	}
+	// The attempt failed; the agent has had its turn. Settle it as the run would have.
+	await failCommandAttempt(getStep(step.id) ?? step, cfg, log, step.error ?? "pipeline failed", {
+		report: combined,
+		jobSteps,
 	});
 }
 
 /** A passing run: the same path an accepted agent step takes, manual review included. */
 async function settleCommandSuccess(
 	step: Step,
-	result: PipelineRunResult,
 	report: string,
 	cfg: HubConfig,
 	log: Logger,
+	jobSteps?: JobStepState[],
 ): Promise<void> {
 	if (step.manualReview && (await holdForManualReview(step, { result: report }, log))) return;
 	completeStep(step.id, { ok: true, result: report });
@@ -2634,7 +2794,7 @@ async function settleCommandSuccess(
 		duration_ms: stepDurationMs(done),
 		retry_count: done.retryCount,
 		max_retries: done.maxRetries,
-		job_steps: jobStepSummaries(result.steps),
+		...(jobSteps ? { job_steps: jobStepSummaries(jobSteps) } : {}),
 	});
 	await advance(step.workflowId, cfg, log);
 }
@@ -2759,7 +2919,8 @@ export function failCommandStepsLeftByRestart(log: Logger): number {
 	const error = "hub restarted during pipeline run";
 	let count = 0;
 	for (const step of listRunningSteps()) {
-		if (step.kind !== "command" || commandRuns.has(step.id)) continue;
+		// A branch agent runs on the broker, not in this process: its callback can still come.
+		if (step.kind !== "command" || commandRuns.has(step.id) || isBranchPhase(step.phase)) continue;
 		if (!failRunningStep(step.id, error)) continue;
 		const now = new Date().toISOString();
 		for (const pipelineRun of listPipelineRunsForStep(step.id)) {
@@ -3276,6 +3437,21 @@ function planStep(step: Step): Record<string, unknown> {
 		selected: step.selected === true,
 		started_at: step.startedAt,
 		finished_at: step.finishedAt,
+		// A command step: its pipeline and its branch agents, so the server canvas
+		// can draw the agents beside the card (docs/pipelines.md, "Branch agents").
+		// `branch_failed` says whether the agent itself failed, which the phase alone
+		// cannot tell from a pipeline that is still red after the agent's turn.
+		...(step.kind === "command"
+			? {
+					pipeline_id: step.pipelineId,
+					on_success_task: step.onSuccessTask ? step.onSuccessTask.slice(0, PLAN_TEXT_MAX) : null,
+					on_failure_task: step.onFailureTask ? step.onFailureTask.slice(0, PLAN_TEXT_MAX) : null,
+					branch_failed:
+						step.status === "failed" &&
+						isBranchPhase(step.phase) &&
+						(/^on-(success|failure) agent failed/.test(step.error ?? "") || step.error === "aborted" || /^timeout/.test(step.error ?? "")),
+				}
+			: {}),
 	};
 }
 
@@ -3481,6 +3657,12 @@ export async function onStepResult(
 	// leave the abort with nothing to settle. `abortStep` owns the outcome.
 	if (abortingSteps.has(stepId)) {
 		log(`step ${stepId} result ignored: its abort is in progress`);
+		return;
+	}
+
+	// A command step's branch agent answered. No judge, manual run or not.
+	if (step.kind === "command") {
+		if (isBranchPhase(step.phase)) await onBranchResult(step, outcome, cfg, log);
 		return;
 	}
 
@@ -4028,7 +4210,8 @@ export async function abortStep(workflowId: string, stepId: string, log?: Logger
 	}
 	// A command step runs in this process: there is no awb run to kill, so the
 	// abort goes to the run's own controller (no `/abort` call to the hook).
-	if (step.kind === "command") return abortCommandStep(workflow, step, log);
+	// …unless its branch agent is what is running: that is an awb run like any agent's.
+	if (step.kind === "command" && !isBranchPhase(step.phase)) return abortCommandStep(workflow, step, log);
 	if (step.status !== "running" && step.status !== "queued") throw new WorkflowError("only a running step can be aborted");
 	// Kill on the broker FIRST and wait for its verdict, so the operator's report
 	// says whether the agent really stopped. The step is settled below whatever

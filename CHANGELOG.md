@@ -11,6 +11,25 @@ The current version is reported by every instance to the central server (see
 
 ### Added
 
+- **Branch agents in command steps.** A command step can now hold an
+  on-success agent and an on-failure agent, each one only a task (no acceptance
+  criteria, no judge). When the pipeline passes, the on-success agent runs and
+  the step is done when it finishes. When the pipeline fails, the on-failure
+  agent runs with the report, and then the pipeline re-runs while `maxRetries`
+  lasts. Both are set in the add-step form, the step editor, templates
+  (`onSuccessTask`, `onFailureTask`) and the MCP `add_step` and `edit_step`
+  tools. The canvas draws them on the right of the command card (green: on
+  success, red: on failure, with the retry loop), and the step list draws them
+  inside the card. Server templates, `step.add` and the server canvas carry
+  them too. See `docs/pipelines.md`, "Branch agents".
+
+### Fixed
+
+- **`step.add` from the server created an agent step for a command step.** The
+  hub's handler ignored `kind`, `pipeline_id` and `pipeline_inputs`. It now
+  creates a command step, and command steps' status changes are synced back
+  like agent steps'.
+
 - **Pipelines and command steps (Phase 1, hub only).** A pipeline is a YAML
   list of `run:` steps in the style of a GitHub Actions job. A workflow step with
   `kind: "command"` runs one on the host, with no agent turn and no tokens, and

@@ -58,7 +58,7 @@ export type OverridableWorkflowStatus = (typeof OVERRIDABLE_WORKFLOW_STATUSES)[n
  * self-evaluation that follows (`judge`). Meaningless while not running — the
  * UI only uses it to show "judging" instead of "running".
  */
-export type StepPhase = "exec" | "judge";
+export type StepPhase = "exec" | "judge" | "on_success" | "on_failure";
 
 /** Permission modes the create-workflow form may send (server-validated). */
 export const PERMISSION_MODES = ["acceptEdits", "auto", "dontAsk", "plan", "bypassPermissions"] as const;
@@ -469,6 +469,9 @@ export interface Step {
 	/** For a command step: the pipeline it runs, its inputs, and whether that pipeline is approved. */
 	pipelineId?: string | null;
 	pipelineInputs?: Record<string, string> | null;
+	/** A command step's branch agents: a task run when the pipeline passes, and one run after each failed run. Null = none. */
+	onSuccessTask?: string | null;
+	onFailureTask?: string | null;
 	pipeline?: { id: string; name: string | null; trusted: boolean } | null;
 	maxRetries: number;
 	retryIntervalSeconds: number;
@@ -538,6 +541,9 @@ export interface TemplateStep {
 	/** Required for a command step: the pipeline it runs. */
 	pipelineId?: string | null;
 	pipelineInputs?: Record<string, string> | null;
+	/** A command step's branch-agent tasks. Absent or null = no agent. */
+	onSuccessTask?: string | null;
+	onFailureTask?: string | null;
 }
 
 export interface Template {
@@ -1150,6 +1156,9 @@ export interface StepConfigInput {
 	kind?: "task" | "command";
 	pipelineId?: string;
 	pipelineInputs?: Record<string, string>;
+	/** A command step's branch-agent tasks. Null clears one. */
+	onSuccessTask?: string | null;
+	onFailureTask?: string | null;
 	description: string;
 	acceptanceCriteria?: string;
 	/** Omitting it leaves the stored gate untouched; the forms always send it, so a toggle-off really turns it off. */

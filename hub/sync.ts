@@ -729,6 +729,14 @@ function collectInstanceAnnouncements(): void {
 	}
 }
 
+/** An object of string values (a command step's inputs), or an empty one. */
+function stringRecord(value: unknown): Record<string, string> {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return {};
+	return Object.fromEntries(
+		Object.entries(value as Record<string, unknown>).filter(([, v]) => typeof v === "string") as [string, string][],
+	);
+}
+
 /** The D18 payload: enough for the server to create its remote-workflow row for
  * the instance and address its steps by step_key. */
 function instanceCreatedPayload(workflow: Workflow): Record<string, unknown> {
@@ -738,7 +746,7 @@ function instanceCreatedPayload(workflow: Workflow): Record<string, unknown> {
 		Object.entries(getSyncStepMap(workflow.remoteId!)).map(([key, stepId]) => [stepId, key]),
 	);
 	const steps = listSteps(workflow.id)
-		.filter((s) => s.kind === "task" && keyByStepId.has(s.id))
+		.filter((s) => s.kind !== "context" && keyByStepId.has(s.id))
 		.map((s) => ({
 			step_key: keyByStepId.get(s.id)!,
 			description: s.description,
@@ -890,7 +898,7 @@ function collectLocalStateEvents(): void {
 		const stepMap = getSyncStepMap(workflow.remoteId);
 		for (const [stepKey, stepId] of Object.entries(stepMap)) {
 			const step = listSteps(workflow.id).find((s) => s.id === stepId);
-			if (!step || step.kind !== "task") continue;
+			if (!step || step.kind === "context") continue;
 			const cacheKey = `${workflow.remoteId}:${stepKey}`;
 			const prevStep = stepStatusCache.get(cacheKey);
 			if (prevStep === step.status) continue;
@@ -1087,15 +1095,31 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 		const workflow = resolveStepCommandWorkflow(remoteId);
 		const stepKey = typeof payload.step_key === "string" ? payload.step_key : "";
 		const description = typeof payload.description === "string" ? payload.description : "";
+		// A command step (docs/pipelines.md, "Phase 2"): the server marks it with
+		// `kind`, names its pipeline, and may carry its branch agents. Without `kind`
+		// it is an agent step, as every step.add was before.
+		const isCommand = payload.kind === "command";
 		const added = addStep(workflow.id, description, {
-			acceptanceCriteria:
-				typeof payload.acceptance_criteria === "string" ? payload.acceptance_criteria : null,
+			acceptanceCriteria: isCommand
+				? null
+				: typeof payload.acceptance_criteria === "string"
+					? payload.acceptance_criteria
+					: null,
 			manualReview: payload.manual_review === true,
-			useSubagent: payload.use_subagent !== false,
+			useSubagent: isCommand ? false : payload.use_subagent !== false,
 			maxRetries: typeof payload.max_retries === "number" ? payload.max_retries : 0,
 			retryIntervalSeconds:
 				typeof payload.retry_interval_seconds === "number" ? payload.retry_interval_seconds : 0,
 			templateNotes: Array.isArray(payload.notes) ? normalizeTemplateStepNotes(payload.notes) : undefined,
+			...(isCommand
+				? {
+						kind: "command" as const,
+						pipelineId: typeof payload.pipeline_id === "string" ? payload.pipeline_id : null,
+						pipelineInputs: stringRecord(payload.pipeline_inputs),
+						onSuccessTask: typeof payload.on_success_task === "string" ? payload.on_success_task : null,
+						onFailureTask: typeof payload.on_failure_task === "string" ? payload.on_failure_task : null,
+					}
+				: {}),
 		});
 		setSyncStepKey(remoteId, stepKey, added.id);
 		if (typeof payload.order_index === "number") {
@@ -1120,6 +1144,13 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 			maxRetries: typeof payload.max_retries === "number" ? payload.max_retries : undefined,
 			retryIntervalSeconds:
 				typeof payload.retry_interval_seconds === "number" ? payload.retry_interval_seconds : undefined,
+			// Branch agents of a command step: only when the server sent them.
+			...(existing.kind === "command" && "on_success_task" in payload
+				? { onSuccessTask: typeof payload.on_success_task === "string" ? payload.on_success_task : null }
+				: {}),
+			...(existing.kind === "command" && "on_failure_task" in payload
+				? { onFailureTask: typeof payload.on_failure_task === "string" ? payload.on_failure_task : null }
+				: {}),
 		});
 		return { localId: workflow.id };
 	},

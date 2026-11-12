@@ -54,7 +54,7 @@ import {
 import { ContextPanel } from "./ContextPanel.tsx";
 import { RciPanel } from "./RciPanel.tsx";
 import { TcpPanel } from "./TcpPanel.tsx";
-import { CommandStepFields } from "./CommandStepFields.tsx";
+import { BranchAgentFields, CommandStepFields } from "./CommandStepFields.tsx";
 import { RenameWorkflowModal } from "./RenameWorkflowModal.tsx";
 import { ScheduleModal, type ScheduleSaveResult } from "./ScheduleModal.tsx";
 import { SeriesPanel } from "./SeriesPanel.tsx";
@@ -1109,6 +1109,8 @@ function AddStepForm({
 	const [pipelineId, setPipelineId] = useState("");
 	const [pipelineInputs, setPipelineInputs] = useState<Record<string, string>>({});
 	const [commandReady, setCommandReady] = useState(false);
+	const [onSuccessTask, setOnSuccessTask] = useState("");
+	const [onFailureTask, setOnFailureTask] = useState("");
 	const isCommand = kind === "command";
 	const { can } = usePermissions();
 	const canAdd = can("client.workflows.steps.add");
@@ -1119,6 +1121,8 @@ function AddStepForm({
 		setKind("agent");
 		setPipelineId("");
 		setPipelineInputs({});
+		setOnSuccessTask("");
+		setOnFailureTask("");
 		setDescription("");
 		setCriteria("");
 		setManualReview(false);
@@ -1148,6 +1152,8 @@ function AddStepForm({
 							pipelineId,
 							// Only the inputs the operator filled in; the rest take the pipeline's defaults.
 							pipelineInputs: Object.fromEntries(Object.entries(pipelineInputs).filter(([, v]) => v !== "")),
+							onSuccessTask: onSuccessTask.trim() || null,
+							onFailureTask: onFailureTask.trim() || null,
 							// Empty means "use the pipeline's name", which the hub generates.
 							description: trimmed,
 							manualReview,
@@ -1259,6 +1265,17 @@ function AddStepForm({
 						autoFocus={!isCommand}
 					/>
 				</div>
+
+				{isCommand && (
+					<BranchAgentFields
+						onSuccessTask={onSuccessTask}
+						onOnSuccessTask={setOnSuccessTask}
+						onFailureTask={onFailureTask}
+						onOnFailureTask={setOnFailureTask}
+						disabled={saving}
+						idPrefix="new-step"
+					/>
+				)}
 
 				{!isCommand && (
 				<div className="field">

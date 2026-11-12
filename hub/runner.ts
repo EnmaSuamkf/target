@@ -317,6 +317,12 @@ export function composeStepInput(
 		 * Never used by the context step or a judge, both of which return earlier.
 		 */
 		pipelineReports?: readonly string[];
+		/**
+		 * A command step's branch agent (docs/pipelines.md, "Branch agents"): this
+		 * task replaces the step's description as the work. A branch agent has no
+		 * acceptance criteria and no subagent, so neither instruction is added.
+		 */
+		branchTask?: { branch: "on_success" | "on_failure"; task: string };
 	} = {},
 ): string {
 	// The hub-owned context step: the background, and nothing else. Deliberately
@@ -368,6 +374,13 @@ export function composeStepInput(
 	// hub notices a boundary the agent has already lost the history, so the
 	// pointer has to have been given while the conversation was still intact.
 	const priorResults = stepResultsNote(workflow.agentName);
+	if (options.branchTask) {
+		// The pipeline report above is the context; the task is the work. Nothing is
+		// judged, so there is no criterion note, and the agent works inline.
+		return `${preamble}${tcpBlock}${resourcesBlock}${reportsBlock}${branchLead(options.branchTask.branch)}${options.branchTask.task}${priorResults}${
+			options.interrupted && !options.timedOut ? ABORT_NOTE : ""
+		}`;
+	}
 	return `${preamble}${tcpBlock}${resourcesBlock}${reportsBlock}${step.description}${descriptionImages}${criteriaNote(
 		step.acceptanceCriteria,
 		acceptanceImages,
@@ -378,6 +391,13 @@ export function composeStepInput(
 	}${options.retryReason ? retryNote(options.retryReason) : ""}${options.timedOut ? TIMEOUT_NOTE : ""}${
 		options.interrupted && !options.timedOut && !options.retryReason ? ABORT_NOTE : ""
 	}`;
+}
+
+/** The line that tells a branch agent why it is running, before its task. */
+function branchLead(branch: "on_success" | "on_failure"): string {
+	return branch === "on_success"
+		? "The pipeline of this command step passed. Your task:\n\n"
+		: "The pipeline of this command step failed. Your task:\n\n";
 }
 
 /**
@@ -449,6 +469,8 @@ export async function dispatchStep(
 		/** The previous attempt timed out — append TIMEOUT_NOTE so the re-run continues the partial work. */
 		timedOut?: boolean;
 		manual?: boolean;
+		/** Dispatch a command step's branch agent instead of the step's own work (see composeStepInput). */
+		branchTask?: { branch: "on_success" | "on_failure"; task: string };
 	} = {},
 ): Promise<void> {
 	const mode = options.mode ?? "exec";
@@ -555,6 +577,7 @@ export async function dispatchStep(
 		timedOut: options.timedOut,
 		interrupted,
 		tcpExecuteUrl,
+		branchTask: options.branchTask,
 	});
 	// A contained workflow can only run if its image exists on this machine. The
 	// broker's `docker run` would otherwise try to PULL it, and the default
