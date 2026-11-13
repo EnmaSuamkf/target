@@ -1284,12 +1284,36 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		await act(
 			"Could not import the templates",
 			async () => {
-				const created = await api.importTemplates(JSON.parse(await file.text()));
-				toast.success(
+				const { templates: created, pipelines, warnings } = await api.importTemplates(JSON.parse(await file.text()));
+				// Created pipelines are untrusted, so the operator has to approve them before a
+				// template that uses them can run. Reused ones already hold their own approval.
+				const createdCount = pipelines.filter((p) => p.action === "created").length;
+				const reusedCount = pipelines.length - createdCount;
+				const parts = [
 					created.length === 1
 						? `Imported "${created[0]?.name}".`
 						: `Imported ${created.length} templates: ${created.map((t) => t.name).join(", ")}.`,
-				);
+				];
+				if (createdCount > 0) {
+					parts.push(
+						`${createdCount} pipeline${createdCount === 1 ? "" : "s"} created — approve ${createdCount === 1 ? "it" : "them"} in Pipelines before running.`,
+					);
+				}
+				if (reusedCount > 0) {
+					parts.push(`${reusedCount} identical pipeline${reusedCount === 1 ? " was" : "s were"} already here.`);
+				}
+				toast.success(parts.join(" "));
+				for (const warning of warnings) {
+					toast.warning(
+						warning.code === "unresolved_pipeline"
+							? `Template "${warning.template}", step ${warning.stepIndex + 1}: ${
+									warning.reason === "unknown_id"
+										? "its pipeline is not on this hub"
+										: "the bundle names no pipeline for it"
+								}. Pick a pipeline for that step.`
+							: `Pipeline "${warning.name}" already exists here with different text. The imported copy is a separate pipeline; check both in Pipelines.`,
+					);
+				}
 			},
 			refreshTemplates,
 		);

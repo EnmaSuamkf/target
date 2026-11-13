@@ -21,6 +21,7 @@ const { deleteStep, getStep, getTemplate, insertStep, insertTemplate, open } = a
 const {
 	approvePipeline,
 	deletePipeline,
+	findPipelineByHash,
 	getPipeline,
 	importPipelines,
 	insertPipeline,
@@ -29,6 +30,7 @@ const {
 	parsePipelineBundle,
 	pipelineBundle,
 	PipelineStoreError,
+	setPipelineSyncMeta,
 	updatePipeline,
 	PIPELINE_BUNDLE_KIND,
 } = await import("./pipeline-store.ts");
@@ -237,8 +239,11 @@ test("an agent step reads back with no pipeline fields set", () => {
 	assert.equal(read.pipelineInputs, null);
 });
 
-test("a bundle carries the text and no trust, ids or secrets; an import comes back untrusted", () => {
-	const original = insertPipeline({ source: VERIFY, tags: ["ci"], approve: true });
+test("a bundle carries the text and no trust, ids or secrets; on a hub without that text an import comes back untrusted", () => {
+	// A text of its own: the other tests in this file insert VERIFY and OTHER too, and an
+	// import would reuse one of those rows instead of creating the one this test removes.
+	const text = `${VERIFY}# bundle round trip\n`;
+	const original = insertPipeline({ source: text, tags: ["ci"], approve: true });
 	const bundle = pipelineBundle([original]);
 	assert.equal(bundle.kind, PIPELINE_BUNDLE_KIND);
 	const serialized = JSON.stringify(bundle);
@@ -246,14 +251,63 @@ test("a bundle carries the text and no trust, ids or secrets; an import comes ba
 	assert.ok(!serialized.includes("trusted"), "no trust");
 	assert.ok(!serialized.includes(original.sourceHash), "no hash");
 
-	const entries = parsePipelineBundle(JSON.parse(serialized));
-	const [copy] = importPipelines(entries);
-	assert.notEqual(copy.id, original.id, "an import mints a new id, never overwrites");
-	assert.equal(copy.source, VERIFY, "the text survives the round trip");
+	// Another hub: this one no longer has the text, so the import has to create it.
+	assert.equal(deletePipeline(original.id), true);
+	const [result] = importPipelines(parsePipelineBundle(JSON.parse(serialized)));
+	assert.equal(result.action, "created");
+	const copy = result.pipeline;
+	assert.equal(copy.source, text, "the text survives the round trip");
 	assert.equal(copy.name, "verify");
 	assert.deepEqual(copy.tags, ["ci"]);
 	assert.equal(isTrusted(copy), false, "an import is untrusted");
-	assert.equal(isTrusted(getPipeline(original.id)!), true, "the original is untouched");
+});
+
+test("importing a pipeline whose text is already here reuses it: no new row, trust kept, reported as reused", () => {
+	const original = insertPipeline({ source: `${OTHER}# reuse check\n`, tags: ["x"], approve: true });
+	const before = listPipelines().length;
+
+	const [result] = importPipelines(parsePipelineBundle(pipelineBundle([original])));
+
+	assert.equal(result.action, "reused");
+	assert.equal(result.pipeline.id, original.id, "the same row, not a copy");
+	assert.equal(listPipelines().length, before, "no duplicate row");
+	assert.equal(isTrusted(getPipeline(original.id)!), true, "the approval is kept");
+});
+
+test("two identical entries in one import resolve to one pipeline: created, then reused", () => {
+	const text = "name: twin-entries\nsteps:\n  - run: echo twins\n";
+	const results = importPipelines(
+		parsePipelineBundle({
+			kind: PIPELINE_BUNDLE_KIND,
+			schemaVersion: 1,
+			pipelines: [
+				{ name: "twin-entries", tags: [], source: text },
+				{ name: "twin-entries", tags: [], source: text },
+			],
+		}),
+	);
+
+	assert.deepEqual(
+		results.map((r) => r.action),
+		["created", "reused"],
+	);
+	assert.equal(results[0].pipeline.id, results[1].pipeline.id);
+	assert.equal(listPipelines().filter((p) => p.sourceHash === sourceHash(text)).length, 1);
+	assert.equal(isTrusted(results[0].pipeline), false, "an import never approves");
+});
+
+test("findPipelineByHash skips a revoked copy and prefers a trusted match", () => {
+	const text = "name: hash-lookup\nsteps:\n  - run: echo lookup\n";
+	const hash = sourceHash(text);
+	const revoked = insertPipeline({ source: text, approve: true });
+	setPipelineSyncMeta(revoked.id, { syncSource: null, revoked: true });
+	assert.equal(findPipelineByHash(hash), null, "a revoked copy is not a match");
+
+	const untrusted = insertPipeline({ source: text });
+	assert.equal(findPipelineByHash(hash)?.id, untrusted.id);
+
+	const trusted = insertPipeline({ source: text, approve: true });
+	assert.equal(findPipelineByHash(hash)?.id, trusted.id, "the trusted one wins over the older untrusted one");
 });
 
 test("a bundle with an invalid entry is refused whole, with the line of the error", () => {

@@ -30,6 +30,9 @@
 .error {
 	border-left-color: var(--danger-500);
 }
+.warning {
+	border-left-color: var(--warn-500);
+}
 .info {
 	border-left-color: var(--info-500);
 }
@@ -52,6 +55,9 @@
 }
 .error .icon {
 	background: var(--danger-500);
+}
+.warning .icon {
+	background: var(--warn-500);
 }
 .info .icon {
 	background: var(--info-500);

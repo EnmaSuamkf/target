@@ -430,12 +430,107 @@ One `pipeline_run_steps` row per job step: `index`, `name`, `status`,
 
 ### Templates
 
-A template step can be a command step. The template stores the pipeline id, the
+A template step can be a command step. The template stores the pipeline, the
 inputs and the branch-agent tasks. Seeding a workflow from the template copies
 them. The pipeline's
 detail (`GET /api/pipelines/:id`) lists the steps and templates that use it as
 `referencedBy`, and deleting the pipeline is refused while either exists. The
 template editor does not show that list yet.
+
+#### Bundles (schema version 2)
+
+A template export (`GET /api/templates/export` for every template, and
+`GET /api/templates/:id/export` for one) carries the YAML of every pipeline its
+command steps use. Each pipeline is listed once under `pipelines`. A command step
+names its pipeline by `pipelineRef`, a name local to the file, not by the local
+pipeline id, which means nothing on another hub. Server-synced templates are not
+exported.
+
+```json
+{
+  "kind": "target.templates",
+  "schemaVersion": 2,
+  "exportedAt": "2026-11-13T12:00:00.000Z",
+  "templates": [
+    {
+      "name": "checkout and install",
+      "tags": [],
+      "steps": [
+        {
+          "description": "Check out main",
+          "kind": "command",
+          "pipelineRef": "p1",
+          "pipelineInputs": { "dir": ".", "branch": "main" },
+          "onSuccessTask": null,
+          "onFailureTask": null,
+          "acceptanceCriteria": null,
+          "manualReview": false,
+          "useSubagent": false,
+          "maxRetries": 3,
+          "retryIntervalSeconds": 0
+        }
+      ],
+      "tcpIds": [],
+      "tcpSelections": [],
+      "resourceSelections": []
+    }
+  ],
+  "pipelines": [
+    {
+      "ref": "p1",
+      "name": "git-checkout-base",
+      "tags": ["git"],
+      "source": "name: git-checkout-base\n...",
+      "sourceHash": "<sha-256 of source>"
+    }
+  ]
+}
+```
+
+The bundle carries no trust state, no hub ids and no secret values, as with the
+pipeline bundle. `sourceHash` is informational: the importing hub recomputes it
+from `source` and never trusts the value in the file.
+
+On import:
+
+1. **Validate first.** Every embedded pipeline's YAML is validated before anything
+   is written. If one does not validate, the whole import is refused with 400
+   `{ "error": "invalid_pipeline", "errors": [...] }`, and nothing is created.
+2. **Resolve by hash.** Each pipeline's hash is recomputed from its text. An
+   identical local pipeline (same hash, not revoked) is **reused**: it is the same
+   row, and its approval is kept. When several local pipelines match, a trusted
+   one is preferred, then the oldest. Otherwise a **new pipeline is created
+   untrusted**. An import never approves anything: the operator approves it in
+   Pipelines before a template that uses it can run. The same text listed twice in
+   one bundle is resolved once.
+3. **Rewire the steps.** Each command step gets the local id of its pipeline, and
+   `pipelineRef` is dropped. The template stored on this hub never carries it.
+4. **One transaction.** Pipelines and templates are written together. A failure
+   leaves nothing behind.
+
+The response is `{ "templates", "pipelines", "warnings" }`. Each entry of
+`pipelines` is `{ "ref", "action", "pipeline" }`, where `action` is `created` or
+`reused`.
+
+Warnings do not stop the import. The template is imported and the step is kept
+with `pipelineId: null`, so it cannot be seeded until a pipeline is chosen for it:
+
+- `unresolved_pipeline` with reason `missing_ref`: the step names no pipeline in
+  `pipelines`, or it was exported without one because its pipeline was already
+  gone where it was exported. `stepIndex` is the step's position in the bundle's
+  `steps` array.
+- `unresolved_pipeline` with reason `unknown_id`: a version 1 step whose
+  `pipelineId` is not on this hub (see below).
+- `pipeline_name_conflict`: a local pipeline has the same name but different text.
+  The bundle's text is still created as a separate pipeline, because a template
+  must run the exact text that was exported. The operator should check both.
+
+**Version 1 bundles** have no `pipelines` and their command steps name a
+`pipelineId`. They still import. The id is kept when it exists on this hub, which
+is the same-machine round trip, and otherwise the step is reported as `unknown_id`.
+Names are never matched for a version 1 step: it carries no name, and names are not
+unique. A bundle with a `schemaVersion` above 2 is refused with
+`unsupported_schema_version`.
 
 ## Trust
 
@@ -529,7 +624,7 @@ job's `steps:` into the editor and removes the `uses:` steps.
 | `DELETE /api/pipelines/:id` | `client.pipelines.delete` | Refused with 409 `in_use` while a step or template references it. |
 | `POST /api/pipelines/:id/approve` | session only, and `client.workflows.manage` | Body `{ "sourceHash" }`, which must match the current hash. Approval is a trust decision, so it has no `client.pipelines.*` ID (see [Permissions](#permissions)). |
 | `POST /api/pipelines/validate` | `client.pipelines.create` or `client.pipelines.edit` | Body `{ "source" }`. Returns `{ ok, errors }`. Saves nothing. |
-| `POST /api/pipelines/import` | `client.pipelines.import` | Bundle import, as for TCPs. |
+| `POST /api/pipelines/import` | `client.pipelines.import` | Bundle import. Answers `pipelines` (the imported rows) and `results`: one `{ action: "created" \| "reused", pipeline }` per entry. Pipelines whose text already exists here are reused, not duplicated. Created ones are untrusted. |
 | `GET /api/pipelines/export` | `client.pipelines.export` | Exports carry the source, never secret values. Server copies are not exported. |
 | `GET /api/secrets` | operator | Names, and whether each one is set. |
 | `PUT /api/secrets/:name`, `DELETE /api/secrets/:name` | session only | |

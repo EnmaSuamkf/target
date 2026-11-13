@@ -126,6 +126,24 @@ export function listPipelines(): Pipeline[] {
 }
 
 /**
+ * The local pipeline whose text hashes to `hash`, or null. Revoked copies are
+ * skipped: a revoked server copy is one the server no longer grants, so an
+ * import must not bind a template to it. Among the matches a trusted one wins
+ * (so a reused pipeline keeps its approval when an untrusted twin exists), then
+ * the oldest, so the answer is the same on every call.
+ */
+export function findPipelineByHash(hash: string): Pipeline | null {
+	const row = open()
+		.prepare(
+			`SELECT * FROM pipelines WHERE source_hash = ? AND revoked = 0
+			 ORDER BY CASE WHEN trusted_hash = source_hash THEN 0 ELSE 1 END, created_at ASC, rowid ASC
+			 LIMIT 1`,
+		)
+		.get(hash);
+	return row ? rowToPipeline(row as Record<string, unknown>) : null;
+}
+
+/**
  * Creates a pipeline from its YAML text. The name comes from the text. It is
  * trusted only when `approve` is set, which the caller sets for a browser
  * session and never for a bearer token (see docs/pipelines.md, "Trust").
@@ -413,11 +431,40 @@ export function parsePipelineBundle(input: unknown): PipelineBundleEntry[] {
 }
 
 /**
- * Imports bundle entries as NEW local pipelines with fresh ids, so an import can
- * never overwrite an existing row (the TCP rule). Every import is untrusted.
+ * What an import did with one entry. `created` is a new row, always untrusted.
+ * `reused` is an existing row with the same text: the local one, or the one an
+ * earlier entry of the SAME import created or reused (the same text is resolved
+ * once, so two identical entries never make two rows). A reused row keeps the
+ * trust it already had.
+ */
+export interface PipelineImportResult {
+	pipeline: Pipeline;
+	action: "created" | "reused";
+}
+
+/**
+ * Imports bundle entries. An entry whose text already exists locally (same
+ * recomputed hash) is REUSED instead of duplicated, so importing the same
+ * pipeline twice creates nothing the second time. Anything else becomes a NEW
+ * local pipeline with a fresh id, so an import can never overwrite an existing
+ * row (the TCP rule). An import never approves anything.
  * Names are not made unique: the name lives inside the text, and renaming it
  * would change the text the operator is asked to approve.
+ * The result is aligned with `entries`, one per entry, in the same order.
  */
-export function importPipelines(entries: PipelineBundleEntry[]): Pipeline[] {
-	return entries.map((entry) => insertPipeline({ source: entry.source, tags: entry.tags, approve: false }));
+export function importPipelines(entries: PipelineBundleEntry[]): PipelineImportResult[] {
+	// Keyed by the hash the import COMPUTED, never one from the file.
+	const resolved = new Map<string, Pipeline>();
+	return entries.map((entry) => {
+		// Validate before the lookup: a text that does not validate must not be bound to
+		// an existing row, and the hash alone says nothing about validity.
+		requireValidSpec(entry.source);
+		const hash = sourceHash(entry.source);
+		const earlier = resolved.get(hash);
+		if (earlier) return { pipeline: earlier, action: "reused" as const };
+		const existing = findPipelineByHash(hash);
+		const pipeline = existing ?? insertPipeline({ source: entry.source, tags: entry.tags, approve: false });
+		resolved.set(hash, pipeline);
+		return { pipeline, action: existing ? ("reused" as const) : ("created" as const) };
+	});
 }

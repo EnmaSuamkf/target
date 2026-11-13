@@ -6,12 +6,12 @@ import styles from "./Toast.module.css";
  * every failure. `alert()` blocks the event loop, which on a page that polls
  * every 2s means the queue keeps filling behind the dialog.
  *
- * Errors stay until dismissed (a failed action is worth reading); successes
- * auto-dismiss. The region is an `aria-live` polite log so screen readers
- * announce it without stealing focus.
+ * Errors and warnings stay until dismissed (a failed action, or something the
+ * operator must act on, is worth reading); successes auto-dismiss. The region is
+ * an `aria-live` polite log so screen readers announce it without stealing focus.
  */
 
-type ToastKind = "success" | "error" | "info";
+type ToastKind = "success" | "error" | "warning" | "info";
 
 interface Toast {
 	id: number;
@@ -22,6 +22,8 @@ interface Toast {
 interface ToastApi {
 	success: (message: string) => void;
 	error: (message: string) => void;
+	/** Succeeded, but something needs the operator's attention (e.g. an unresolved reference). Stays until dismissed. */
+	warning: (message: string) => void;
 	info: (message: string) => void;
 }
 
@@ -45,8 +47,8 @@ export function ToastProvider({ children }: { children: React.ReactNode }): Reac
 		(kind: ToastKind, message: string) => {
 			const id = nextId.current++;
 			setToasts((current) => [...current, { id, kind, message }]);
-			// Errors persist until dismissed; transient kinds clear themselves.
-			if (kind !== "error") setTimeout(() => dismiss(id), 4000);
+			// Errors and warnings persist until dismissed; the others clear themselves.
+			if (kind === "success" || kind === "info") setTimeout(() => dismiss(id), 4000);
 		},
 		[dismiss],
 	);
@@ -55,6 +57,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }): Reac
 		() => ({
 			success: (message) => push("success", message),
 			error: (message) => push("error", message),
+			warning: (message) => push("warning", message),
 			info: (message) => push("info", message),
 		}),
 		[push],
@@ -67,7 +70,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }): Reac
 				{toasts.map((toast) => (
 					<div key={toast.id} className={`${styles.toast} ${styles[toast.kind]}`}>
 						<span className={styles.icon} aria-hidden="true">
-							{toast.kind === "success" ? "✓" : toast.kind === "error" ? "!" : "i"}
+							{toast.kind === "success" ? "✓" : toast.kind === "error" || toast.kind === "warning" ? "!" : "i"}
 						</span>
 						<span className={styles.message}>{toast.message}</span>
 						<button

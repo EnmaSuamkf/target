@@ -214,7 +214,7 @@ test("a server copy is read-only: PUT and DELETE are 409", async () => {
 	assert.equal((await call("DELETE", `/api/pipelines/${id}`, "bearer")).status, 409);
 });
 
-test("export carries the text and no secret values; import comes back untrusted", async () => {
+test("export carries the text and no secret values; importing text this hub already has reuses it", async () => {
 	await call("PUT", "/api/secrets/EXPORT_CHECK", "session", { value: "export-secret-value-000" });
 	const exported = await call("GET", "/api/pipelines/export", "bearer");
 	assert.equal(exported.status, 200);
@@ -223,9 +223,35 @@ test("export carries the text and no secret values; import comes back untrusted"
 	assert.ok(!exported.text.includes("export-secret-value-000"), "no secret value in the export");
 	assert.ok(!exported.text.includes("trustedHash"), "no trust in the export");
 
+	const before = (await call("GET", "/api/pipelines", "bearer")).json.pipelines.length;
 	const imported = await call("POST", "/api/pipelines/import", "bearer", exported.json);
 	assert.equal(imported.status, 200);
-	assert.ok(imported.json.pipelines.every((p: { trusted: boolean }) => p.trusted === false), "imports are untrusted");
+	// Every exported text is already on this hub, so each entry is reported reused and no row is added.
+	assert.equal(imported.json.results.length, exported.json.pipelines.length);
+	assert.ok(imported.json.results.every((r: { action: string }) => r.action === "reused"), "all reused");
+	assert.equal(imported.json.pipelines.length, imported.json.results.length, "pipelines keeps one entry per result");
+	const after = (await call("GET", "/api/pipelines", "bearer")).json.pipelines.length;
+	assert.equal(after, before, "no duplicate row");
+});
+
+test("POST /api/pipelines/import creates a text this hub lacks as untrusted, and a repeat of it is reused", async () => {
+	const bundle = {
+		kind: "target.pipelines",
+		schemaVersion: 1,
+		exportedAt: "2026-11-13T12:00:00.000Z",
+		pipelines: [{ name: "route-created", tags: [], source: "name: route-created\nsteps:\n  - run: echo created\n" }],
+	};
+
+	const first = await call("POST", "/api/pipelines/import", "bearer", bundle);
+	assert.equal(first.status, 200);
+	assert.equal(first.json.results[0].action, "created");
+	assert.equal(first.json.results[0].pipeline.trusted, false, "created untrusted");
+	assert.equal(first.json.pipelines[0].trusted, false);
+
+	const again = await call("POST", "/api/pipelines/import", "bearer", bundle);
+	assert.equal(again.status, 200);
+	assert.equal(again.json.results[0].action, "reused");
+	assert.equal(again.json.results[0].pipeline.id, first.json.results[0].pipeline.id, "the same row, not a copy");
 });
 
 test("GET /api/secrets lists names and whether each is set, never a value", async () => {

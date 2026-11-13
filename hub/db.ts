@@ -3189,6 +3189,24 @@ export function deleteTemplate(id: string, options: { allowServerManaged?: boole
 	return open().prepare("DELETE FROM templates WHERE id = ?").run(id).changes > 0;
 }
 
+/**
+ * Runs `fn` inside one SQLite transaction: every write it makes lands, or none
+ * does. A throw rolls back and is rethrown. SQLite has no nested BEGIN, so a
+ * caller that is already inside a transaction must not call this again.
+ */
+export function withTransaction<T>(fn: () => T): T {
+	const database = open();
+	database.exec("BEGIN");
+	try {
+		const result = fn();
+		database.exec("COMMIT");
+		return result;
+	} catch (err) {
+		database.exec("ROLLBACK");
+		throw err;
+	}
+}
+
 // --- Template export / import -----------------------------------------
 //
 // A template is already pure, portable data: no filesystem paths, no secrets,
@@ -3207,8 +3225,41 @@ export function deleteTemplate(id: string, options: { allowServerManaged?: boole
 /** Marks a file as ours, so a stray JSON dropped on the import control is refused rather than half-read. */
 export const TEMPLATE_BUNDLE_KIND = "target.templates";
 
-/** Version of the bundle envelope. Bump when a change can NOT be absorbed by the normalizers' defaults. */
-export const TEMPLATE_BUNDLE_SCHEMA_VERSION = 1;
+/**
+ * Version of the bundle envelope. Bump when a change can NOT be absorbed by the normalizers' defaults.
+ *
+ * 2 adds `pipelines[]` and a command step's `pipelineRef` (docs/pipelines.md,
+ * "Templates"): the pipelines a template uses travel inside the bundle and are
+ * resolved by content hash on import. A version 1 file still imports; its
+ * `pipelineId` can only be matched on the machine that exported it.
+ */
+export const TEMPLATE_BUNDLE_SCHEMA_VERSION = 2;
+
+/**
+ * A template step as it sits in a bundle: a stored step, except that a command
+ * step names its pipeline by `pipelineRef` (a `pipelines[]` entry of the same
+ * bundle), not by the local `pipelineId`. A version 1 bundle has only `pipelineId`.
+ * Neither key is ever stored: `normalizeTemplateSteps` keeps only the fields it
+ * knows, and `pipelineRef` is resolved to a local id before that runs.
+ */
+export type TemplateBundleStep = Omit<TemplateStep, "pipelineId"> & {
+	pipelineId?: string | null;
+	pipelineRef?: string;
+};
+
+/**
+ * A pipeline embedded in a version 2 bundle. The YAML `source` is the pipeline;
+ * there is no trust, no hub id and no secret value in it. `ref` is local to the
+ * file (`p1`, `p2`, … in order of first use), not a hub id.
+ */
+export interface TemplateBundlePipeline {
+	ref: string;
+	name: string;
+	tags: string[];
+	source: string;
+	/** Informational. An import recomputes the hash from `source` and never trusts this value. */
+	sourceHash: string;
+}
 
 /**
  * One template inside a bundle. Deliberately WITHOUT the id and the
@@ -3220,7 +3271,7 @@ export const TEMPLATE_BUNDLE_SCHEMA_VERSION = 1;
 export interface TemplateBundleEntry {
 	name: string;
 	tags: string[];
-	steps: TemplateStep[];
+	steps: TemplateBundleStep[];
 	tcpIds: string[];
 	tcpSelections: TcpSelection[];
 	resourceSelections: ResourceSelection[];
@@ -3231,6 +3282,8 @@ export interface TemplateBundle {
 	schemaVersion: number;
 	exportedAt: string;
 	templates: TemplateBundleEntry[];
+	/** Version 2 only: the pipelines the templates' command steps use, each listed once. */
+	pipelines?: TemplateBundlePipeline[];
 }
 
 /** Thrown by `parseTemplateBundle`; `code` is the wire error string the route answers with. */
@@ -3243,7 +3296,12 @@ export class TemplateBundleError extends Error {
 	}
 }
 
-/** Wraps templates in the export envelope. Used for one template and for the whole list alike. */
+/**
+ * Wraps templates in the export envelope, with each command step's local
+ * `pipelineId` kept as it is. That id means nothing on another machine, so this
+ * is the same-machine envelope only: the export routes use `buildTemplateBundle`
+ * (template-bundle.ts), which embeds the pipelines and writes `pipelineRef`.
+ */
 export function templateBundle(templates: Template[]): TemplateBundle {
 	return {
 		kind: TEMPLATE_BUNDLE_KIND,
@@ -3263,6 +3321,12 @@ export function templateBundle(templates: Template[]): TemplateBundle {
 /**
  * Reads an untrusted bundle into entries ready for `importTemplates`, or throws
  * a `TemplateBundleError` naming what's wrong with it.
+ *
+ * It does not read `pipelines[]` or `pipelineRef`: those are resolved by
+ * `importTemplateBundle` (template-bundle.ts) BEFORE this runs, which rewrites
+ * each command step to a local `pipelineId`. So a step reaching this function
+ * with no `pipelineId` simply stays unresolved, and the step's `pipelineRef` is
+ * dropped by `normalizeTemplateSteps`, which copies only the fields it knows.
  *
  * The canonical shape is the envelope, but a bare array of templates and a bare
  * single template are accepted too — someone hand-editing a file, or pasting

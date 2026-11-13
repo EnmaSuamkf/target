@@ -1046,7 +1046,8 @@ const TOOLS = [
 	},
 	{
 		name: "export_template",
-		description: "Export one template as a bundle",
+		description:
+			"Export one template as a bundle. The bundle embeds the YAML of every pipeline the template's command steps use (schemaVersion 2, under `pipelines`), so it can be imported on another hub. Command steps refer to those pipelines by `pipelineRef`, not by local id.",
 		inputSchema: {
 			type: "object",
 			properties: { templateId: { type: "string" } },
@@ -1057,13 +1058,15 @@ const TOOLS = [
 	},
 	{
 		name: "export_all_templates",
-		description: "Export all templates",
+		description:
+			"Export all templates as one bundle. The bundle embeds the YAML of every pipeline their command steps use (schemaVersion 2, under `pipelines`). Server-synced templates are not exported.",
 		inputSchema: { type: "object", properties: {}, additionalProperties: false },
 		run: async () => hubJson("GET", "/api/templates/export"),
 	},
 	{
 		name: "import_templates",
-		description: "Import a template bundle",
+		description:
+			"Import a template bundle as new templates. Embedded pipelines are matched by their text: identical local pipelines are reused (keeping their approval), and missing ones are created UNAPPROVED, so an operator must approve them in the hub UI before a template runs them. Returns `templates`, `pipelines` (each `created` or `reused`) and `warnings` (an unresolved pipeline reference, or a local pipeline with the same name but different text). An invalid embedded pipeline refuses the whole bundle with `invalid_pipeline`.",
 		inputSchema: {
 			type: "object",
 			properties: { bundle: { type: "object" } },

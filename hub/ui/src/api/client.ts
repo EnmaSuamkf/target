@@ -81,6 +81,7 @@ import type {
 	TcpUsage,
 	Template,
 	TemplateBundle,
+	TemplateImportResult,
 	TemplateInput,
 	Workflow,
 	WorkflowScheduleDetail,
@@ -785,19 +786,20 @@ export function exportAllTemplates(): Promise<TemplateBundle> {
 }
 
 /**
- * Stores a bundle's templates as new ones and returns what was created — with
- * fresh ids, and with a colliding name disambiguated by the hub, so the result
- * is what to tell the operator they actually got. `bundle` is whatever was
- * parsed out of the chosen file: the hub validates it and answers 400 with the
- * reason (`unknown_kind`, `unsupported_schema_version`, `invalid_bundle`).
+ * Stores a bundle's templates as new ones and returns what the import did — the
+ * templates with fresh ids (a colliding name disambiguated by the hub), the
+ * embedded pipelines (`created` untrusted, or `reused` when identical text was
+ * already here) and the warnings. `bundle` is whatever was parsed out of the
+ * chosen file: the hub validates it and answers 400 with the reason
+ * (`unknown_kind`, `unsupported_schema_version`, `invalid_bundle`), or
+ * `invalid_pipeline` when an embedded pipeline does not validate.
  */
-export async function importTemplates(bundle: unknown): Promise<Template[]> {
-	const data = await request<{ templates: Template[] }>("/api/templates/import", {
+export async function importTemplates(bundle: unknown): Promise<TemplateImportResult> {
+	return request<TemplateImportResult>("/api/templates/import", {
 		method: "POST",
 		admin: true,
 		body: json(bundle),
 	});
-	return data.templates;
 }
 
 // --- tcps ---

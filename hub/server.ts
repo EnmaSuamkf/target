@@ -167,7 +167,6 @@ import {
 	getShortcutSettings,
 	getUiSettings,
 	getWorkflow,
-	importTemplates,
 	insertTemplate,
 	getTemplate,
 	latestStepSession,
@@ -178,7 +177,6 @@ import {
 	normalizeShortcutBindings,
 	OVERRIDABLE_STEP_STATUSES,
 	OVERRIDABLE_WORKFLOW_STATUSES,
-	parseTemplateBundle,
 	saveArchiveSettings,
 	saveAgentModelSettings,
 	saveDockerMountSettings,
@@ -195,7 +193,6 @@ import {
 	saveShortcutSettings,
 	saveUiSettings,
 	stepProgress,
-	templateBundle,
 	TemplateBundleError,
 	updateTemplate,
 	type Attachment,
@@ -235,6 +232,7 @@ import {
 	type TcpSelection,
 } from "./tcp-store.ts";
 import { getTcpUsage } from "./tcp-usage.ts";
+import { buildTemplateBundle, importTemplateBundle } from "./template-bundle.ts";
 import {
 	approvePipeline,
 	deletePipeline,
@@ -1855,7 +1853,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			if (!requirePermission(cfg, req, res, "client.templates.export")) {
 				return;
 			}
-			sendJson(res, 200, templateBundle(listTemplates().filter((template) => template.origin !== "server")));
+			sendJson(res, 200, buildTemplateBundle(listTemplates().filter((template) => template.origin !== "server")));
 			return;
 		}
 
@@ -1864,22 +1862,42 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				return;
 			}
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
-				let entries;
+				let result;
 				try {
-					entries = parseTemplateBundle(body);
+					// Pipelines and templates land in one transaction (template-bundle.ts): a refused
+					// bundle leaves nothing behind, and a pipeline is never approved by an import.
+					result = importTemplateBundle(body);
 				} catch (err) {
 					// The parser's `code` IS the wire error ("unknown_kind",
 					// "unsupported_schema_version", …) so the UI can say which of them
-					// the file failed on rather than a flat "bad file".
+					// the file failed on rather than a flat "bad file". An embedded pipeline
+					// that does not validate answers `invalid_pipeline` with every error.
 					if (err instanceof TemplateBundleError) {
 						sendJson(res, 400, { error: err.code });
 						return;
 					}
+					if (err instanceof PipelineStoreError) {
+						sendPipelineError(res, err);
+						return;
+					}
 					throw err;
 				}
-				const created = importTemplates(entries);
-				log(`imported ${created.length} template(s): ${created.map((t) => `'${t.name}' (${t.id})`).join(", ")}`);
-				sendJson(res, 200, { templates: created.map(publicTemplate) });
+				const { templates, pipelines, warnings } = result;
+				const created = pipelines.filter((p) => p.action === "created").length;
+				const reused = pipelines.length - created;
+				log(
+					`imported ${templates.length} template(s): ${templates.map((t) => `'${t.name}' (${t.id})`).join(", ")}; ` +
+						`pipelines created ${created}, reused ${reused}`,
+				);
+				sendJson(res, 200, {
+					templates: templates.map(publicTemplate),
+					pipelines: pipelines.map((p) => ({
+						ref: p.ref,
+						action: p.action,
+						pipeline: publicPipelineSummary(p.pipeline),
+					})),
+					warnings,
+				});
 			});
 			return;
 		}
@@ -1899,7 +1917,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, 409, { error: "server_managed" });
 				return;
 			}
-			sendJson(res, 200, templateBundle([template]));
+			sendJson(res, 200, buildTemplateBundle([template]));
 			return;
 		}
 
@@ -2053,9 +2071,17 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			if (!requirePermission(cfg, req, res, "client.pipelines.import")) return;
 			readJsonBody(req, res, catalogMaxBytes, (body) => {
 				try {
-					const created = importPipelines(parsePipelineBundle(body));
-					log(`imported ${created.length} pipeline(s): ${created.map((p) => `'${p.name}' (${p.id})`).join(", ")}`);
-					sendJson(res, 200, { pipelines: created.map(publicPipelineSummary) });
+					// `pipelines` keeps its shape for existing callers; `results` says, per entry,
+					// whether the row is new (`created`, untrusted) or already here (`reused`).
+					const results = importPipelines(parsePipelineBundle(body));
+					const created = results.map((result) => result.pipeline);
+					log(
+						`imported ${results.length} pipeline(s): ${results.map((r) => `'${r.pipeline.name}' (${r.pipeline.id}) ${r.action}`).join(", ")}`,
+					);
+					sendJson(res, 200, {
+						pipelines: created.map(publicPipelineSummary),
+						results: results.map((r) => ({ action: r.action, pipeline: publicPipelineSummary(r.pipeline) })),
+					});
 				} catch (err) {
 					sendPipelineError(res, err);
 				}
