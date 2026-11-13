@@ -566,7 +566,7 @@ export interface Template {
 
 /**
  * The file a template export downloads and an import reads back (the hub's
- * `templateBundle` / `parseTemplateBundle` in db.ts).
+ * `buildTemplateBundle` in template-bundle.ts, and `parseTemplateBundle` in db.ts).
  *
  * No id and no timestamps per template: those describe a row on the machine
  * that exported it, and the importing hub mints its own. `schemaVersion` is
@@ -576,10 +576,29 @@ export interface Template {
 export interface TemplateBundleEntry {
 	name: string;
 	tags: string[];
-	steps: TemplateStep[];
+	steps: TemplateBundleStep[];
 	tcpIds: string[];
 	tcpSelections: TcpSelection[];
 	resourceSelections: ResourceSelection[];
+}
+
+/**
+ * A command step in a bundle names its pipeline by `pipelineRef` (a `pipelines`
+ * entry of the same file). A version 1 file names it by `pipelineId` instead.
+ */
+export type TemplateBundleStep = Omit<TemplateStep, "pipelineId"> & {
+	pipelineId?: string | null;
+	pipelineRef?: string;
+};
+
+/** A pipeline embedded in a version 2 bundle. `ref` is local to the file, not a hub id. */
+export interface TemplateBundlePipeline {
+	ref: string;
+	name: string;
+	tags: string[];
+	source: string;
+	/** Informational: the importing hub recomputes it from `source`. */
+	sourceHash: string;
 }
 
 export interface TemplateBundle {
@@ -587,6 +606,38 @@ export interface TemplateBundle {
 	schemaVersion: number;
 	exportedAt: string;
 	templates: TemplateBundleEntry[];
+	/** Version 2: every pipeline the templates' command steps use, each listed once. */
+	pipelines?: TemplateBundlePipeline[];
+}
+
+/** What an import did with one embedded pipeline. `created` rows are always untrusted. */
+export interface TemplateBundlePipelineResult {
+	ref: string;
+	action: "created" | "reused";
+	pipeline: PipelineSummary;
+}
+
+/**
+ * Something the import did not do exactly as written, but did not refuse. Shown
+ * to the operator as a warning. `unresolved_pipeline` means a command step has no
+ * pipeline (`pipelineId: null`); `pipeline_name_conflict` means a local pipeline
+ * with the same name but different text exists, and the bundle's text was created
+ * as its own pipeline.
+ */
+export type TemplateImportWarning =
+	| { code: "pipeline_name_conflict"; ref: string; name: string }
+	| {
+			code: "unresolved_pipeline";
+			template: string;
+			stepIndex: number;
+			reason: "missing_ref" | "unknown_id";
+	  };
+
+/** The answer to `POST /api/templates/import`. */
+export interface TemplateImportResult {
+	templates: Template[];
+	pipelines: TemplateBundlePipelineResult[];
+	warnings: TemplateImportWarning[];
 }
 
 /** Which tools from an TCP pack are attached. Null/empty toolNames = all tools. */

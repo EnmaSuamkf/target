@@ -50,6 +50,7 @@ const { createServer } = await import("./server.ts");
 const { _impl: terminalImpl } = await import("./terminal.ts");
 const { transcriptPath } = await import("./transcript.ts");
 const { FALLBACK_CONTEXT_WINDOW_TOKENS } = await import("./models.ts");
+const { insertPipeline } = await import("./pipeline-store.ts");
 
 const cfg = loadConfig();
 const silent = () => {};
@@ -1109,9 +1110,12 @@ test("GET /api/templates/:id/export returns that template as a versioned bundle"
 		schemaVersion: number;
 		exportedAt: string;
 		templates: { name: string; tags: string[]; steps: { description: string; manualReview: boolean }[] }[];
+		pipelines: unknown[];
 	};
 	assert.equal(bundle.kind, "target.templates");
-	assert.equal(bundle.schemaVersion, 1);
+	// A fresh export is the current schema (v2), and this template uses no pipeline.
+	assert.equal(bundle.schemaVersion, 2);
+	assert.deepEqual(bundle.pipelines, []);
 	assert.ok(!Number.isNaN(Date.parse(bundle.exportedAt)));
 	assert.equal(bundle.templates.length, 1);
 	assert.equal(bundle.templates[0].name, "exportable");
@@ -1186,6 +1190,88 @@ test("POST /api/templates/import rejects a malformed bundle with the reason it f
 		assert.equal(res.status, 400);
 		assert.equal(((await res.json()) as { error: string }).error, expected);
 	}
+});
+
+test("GET /api/templates/:id/export is v2: the command step names its pipeline by pipelineRef and the pipeline is embedded", async () => {
+	const pipeline = insertPipeline({ source: "name: srv-embed\nsteps:\n  - run: echo embedded\n", tags: ["ci"], approve: true });
+	const template = insertTemplate({
+		name: "embeds its pipeline",
+		steps: [{ description: "run it", kind: "command", pipelineId: pipeline.id, pipelineInputs: {} }],
+	});
+
+	const res = await fetch(`${baseUrl}/api/templates/${template.id}/export`, { headers: adminHeaders() });
+	assert.equal(res.status, 200);
+	const bundle = (await res.json()) as {
+		schemaVersion: number;
+		templates: { steps: Record<string, unknown>[] }[];
+		pipelines: { ref: string; name: string; tags: string[]; source: string; sourceHash: string }[];
+	};
+	assert.equal(bundle.schemaVersion, 2);
+	const step = bundle.templates[0].steps[0];
+	assert.equal(step.pipelineRef, "p1");
+	assert.ok(!("pipelineId" in step), "the local id does not travel");
+	assert.equal(bundle.pipelines.length, 1);
+	assert.equal(bundle.pipelines[0].ref, "p1");
+	assert.equal(bundle.pipelines[0].name, "srv-embed");
+	assert.deepEqual(bundle.pipelines[0].tags, ["ci"]);
+	assert.equal(bundle.pipelines[0].source, pipeline.source);
+	assert.equal(bundle.pipelines[0].sourceHash, pipeline.sourceHash);
+	assert.ok(!JSON.stringify(bundle).includes(pipeline.id), "no hub id in the bundle");
+});
+
+test("POST /api/templates/import answers templates, pipelines and warnings; an identical local pipeline is reused", async () => {
+	const pipeline = insertPipeline({ source: "name: srv-import-reuse\nsteps:\n  - run: echo reuse\n", approve: true });
+	const origin = insertTemplate({
+		name: "import reuse origin",
+		steps: [{ description: "run it", kind: "command", pipelineId: pipeline.id, pipelineInputs: {} }],
+	});
+	const exportRes = await fetch(`${baseUrl}/api/templates/${origin.id}/export`, { headers: adminHeaders() });
+	const bundle = await exportRes.json();
+
+	const res = await fetch(`${baseUrl}/api/templates/import`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify(bundle),
+	});
+	assert.equal(res.status, 200);
+	const body = (await res.json()) as {
+		templates: { id: string; steps: { pipelineId: string | null }[] }[];
+		pipelines: { ref: string; action: string; pipeline: { id: string; trusted: boolean } }[];
+		warnings: unknown[];
+	};
+	assert.equal(body.templates.length, 1);
+	assert.equal(body.templates[0].steps[0].pipelineId, pipeline.id, "the step points at the local pipeline");
+	assert.equal(body.pipelines.length, 1);
+	assert.equal(body.pipelines[0].ref, "p1");
+	assert.equal(body.pipelines[0].action, "reused");
+	assert.equal(body.pipelines[0].pipeline.id, pipeline.id);
+	assert.equal(body.pipelines[0].pipeline.trusted, true, "reuse keeps the approval");
+	assert.deepEqual(body.warnings, []);
+});
+
+test("POST /api/templates/import with an invalid embedded pipeline answers 400 invalid_pipeline with the errors, and creates nothing", async () => {
+	const doc = {
+		kind: "target.templates",
+		schemaVersion: 2,
+		templates: [
+			{ name: "srv refused import", tags: [], steps: [], tcpIds: [], tcpSelections: [], resourceSelections: [] },
+		],
+		pipelines: [{ ref: "p1", name: "srv-bad", tags: [], source: "name: srv-bad\nsteps: []\n", sourceHash: "x" }],
+	};
+
+	const res = await fetch(`${baseUrl}/api/templates/import`, {
+		method: "POST",
+		headers: adminHeaders(),
+		body: JSON.stringify(doc),
+	});
+	assert.equal(res.status, 400);
+	const body = (await res.json()) as { error: string; errors: { path: string }[] };
+	assert.equal(body.error, "invalid_pipeline");
+	assert.ok(body.errors.some((e) => e.path.startsWith("pipelines[0]")));
+
+	const listRes = await fetch(`${baseUrl}/api/templates`, { headers: adminHeaders() });
+	const list = (await listRes.json()) as { templates: { name: string }[] };
+	assert.ok(!list.templates.some((t) => t.name === "srv refused import"), "nothing was created");
 });
 
 test("POST /api/templates/import requires an admin token and creates nothing without one", async () => {
