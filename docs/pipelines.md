@@ -318,7 +318,7 @@ run pipeline ─ success ─▶ on-success agent ─▶ done
 - Events: `step.started` with `phase: "on_success"` or `"on_failure"` when the
   agent is dispatched, then the usual `step.completed` or `step.failed`.
 - The `workflow.plan` snapshot carries, for a command step, `pipeline_id`,
-  `on_success_task`, `on_failure_task` and `branch_failed` (true when the agent
+  `pipeline_name`, `on_success_task`, `on_failure_task` and `branch_failed` (true when the agent
   itself failed, timed out or was aborted, rather than the pipeline staying red).
 
 **On the canvas** (hub and server alike, `ui/src/lib/canvasLayout.ts` in both):
@@ -697,8 +697,11 @@ pipeline's `inputs`.
 ## Reporting
 
 Command steps emit `step.started`, `step.completed` and `step.failed` with
-`kind: "command"`, `pipeline_id`, `conclusion` and per-job-step durations
-(`job_steps`) in `data`. No log content is sent in report events.
+`kind: "command"`, `pipeline_id`, `pipeline_name`, `conclusion` and per-job-step
+durations (`job_steps`) in `data`. `pipeline_name` is the name of the hub's
+local pipeline, or `null` when that pipeline no longer exists; it is the same
+value the `workflow.plan` snapshot carries. No log content is sent in report
+events.
 
 A finished agent step is reported as `step.done`, not `step.completed`, so a
 command step's success uses a different name from every other success. The

@@ -262,12 +262,43 @@ test("step events for command steps carry kind 'command' and never log text", as
 	const kinds = events.map((e) => e.kind);
 	assert.ok(kinds.includes("step.started"), `expected step.started, got ${kinds}`);
 	assert.ok(kinds.includes("step.completed"), `expected step.completed, got ${kinds}`);
+	const started = events.find((e) => e.kind === "step.started")!;
+	assert.equal(started.payload.pipeline_id, pipeline.id);
+	assert.equal(started.payload.pipeline_name, "noisy", "a started event names the pipeline");
 	const completed = events.find((e) => e.kind === "step.completed")!;
 	assert.equal(completed.payload.conclusion, "success");
+	assert.equal(completed.payload.pipeline_name, "noisy", "a finished event names the pipeline");
 	assert.ok(Array.isArray(completed.payload.job_steps));
 	assert.equal(typeof (completed.payload.job_steps as { duration_ms: unknown }[])[0].duration_ms, "number");
 	const everything = JSON.stringify(reportEvents(wf.id));
 	assert.equal(everything.includes(LOG_MARKER), false, "no event carries the log");
+});
+
+test("a command step whose pipeline no longer exists reports pipeline_name null, never the id", async () => {
+	const wf = createWorkflow("pipeline gone", { workdir: freshWorkdir() });
+	const pipeline = pipelineWith("vanishing", `  - run: echo ok\n`);
+	const step = addStep(wf.id, "", { kind: "command", pipelineId: pipeline.id, pipelineInputs: {} });
+	// deletePipeline refuses a pipeline that a step uses, so the row is removed
+	// directly: the step is left pointing at an id the hub no longer has.
+	open().prepare("DELETE FROM pipelines WHERE id = ?").run(pipeline.id);
+
+	await startWorkflow(wf.id, cfg, silent, [step.id]);
+	await until(() => getWorkflow(wf.id)?.status === "failed");
+
+	assert.equal(getStep(step.id)!.error, "pipeline not found");
+	const failed = reportEvents(wf.id).find((e) => e.kind === "step.failed" && e.payload.step_id === step.id)!;
+	assert.equal(failed.payload.pipeline_id, pipeline.id);
+	assert.equal(failed.payload.pipeline_name, null, "the name is unknown, so it is null, not the id");
+
+	const failedInPlans = reportEvents(wf.id)
+		.filter((e) => e.kind === "workflow.plan")
+		.flatMap((e) => e.payload.steps as Record<string, unknown>[])
+		.filter((s) => s.step_id === step.id && s.status === "failed");
+	assert.ok(failedInPlans.length > 0, "a plan snapshot showed the step failed");
+	for (const planned of failedInPlans) {
+		assert.equal(planned.pipeline_id, pipeline.id);
+		assert.equal(planned.pipeline_name, null, "the plan snapshot carries null too");
+	}
 });
 
 test("the result of a command step reaches the next agent prompt once, and is kept until a dispatch takes it", async () => {

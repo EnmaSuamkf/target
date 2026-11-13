@@ -3444,6 +3444,7 @@ function planStep(step: Step): Record<string, unknown> {
 		...(step.kind === "command"
 			? {
 					pipeline_id: step.pipelineId,
+					pipeline_name: pipelineNameOf(step.pipelineId),
 					on_success_task: step.onSuccessTask ? step.onSuccessTask.slice(0, PLAN_TEXT_MAX) : null,
 					on_failure_task: step.onFailureTask ? step.onFailureTask.slice(0, PLAN_TEXT_MAX) : null,
 					branch_failed:
@@ -3545,6 +3546,15 @@ function reportError(step: Step, phase: StepPhase, kind: string, message: string
 	};
 }
 
+/**
+ * The name of the local pipeline `id` points at, or null when there is none or
+ * it no longer exists. Command steps report it beside `pipeline_id`, so a server
+ * can label the step without a copy of this hub's pipeline catalog.
+ */
+function pipelineNameOf(id: string | null): string | null {
+	return id ? (getPipeline(id)?.name ?? null) : null;
+}
+
 /** Emit a step lifecycle event. `step` is re-read by the caller after settling so timestamps are fresh. */
 function reportStepEvent(step: Step, kind: string, data: Record<string, unknown>): void {
 	// Command steps report too (docs/pipelines.md, "Reporting"); only the hub-owned
@@ -3557,7 +3567,9 @@ function reportStepEvent(step: Step, kind: string, data: Record<string, unknown>
 			step_id: step.id,
 			order_index: step.orderIndex,
 			// Command steps are marked on every event, so a consumer can tell a pipeline from an agent run.
-			...(step.kind === "command" ? { kind: "command", pipeline_id: step.pipelineId } : {}),
+			...(step.kind === "command"
+				? { kind: "command", pipeline_id: step.pipelineId, pipeline_name: pipelineNameOf(step.pipelineId) }
+				: {}),
 			...data,
 		},
 	});

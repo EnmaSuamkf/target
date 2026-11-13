@@ -311,6 +311,7 @@ test("the plan reported to the server carries the branch agents and the branch p
 	).map((row) => JSON.parse(row.payload) as { steps: Record<string, unknown>[] });
 	const latest = plans[plans.length - 1]!.steps.find((s) => s.step_id === step.id)!;
 	assert.equal(latest.pipeline_id, pipeline.id);
+	assert.equal(latest.pipeline_name, "planned", "the plan names the pipeline, not only its id");
 	assert.equal(latest.on_success_task, "Ship");
 	assert.equal(latest.on_failure_task, "Fix");
 	assert.equal(latest.phase, "on_failure");
