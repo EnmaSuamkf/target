@@ -33,6 +33,7 @@ import {
 	type PublishableSandbox,
 } from "./awb.ts";
 import { effectiveDockerMounts, syncWorkflowDockerMounts } from "./docker-mounts.ts";
+import { parseJudgeVerdict } from "./judge-verdict.ts";
 import { loadReportConfig, targetDir, type HubConfig } from "./config.ts";
 import { readConversationPreview, type ConversationSummary } from "./conversations.ts";
 import { emit as reportEmit } from "./reporter.ts";
@@ -3252,42 +3253,6 @@ export function reconcileOrphanRetryWaits(log: Logger): number {
 		writeStatusMd(workflowId);
 	}
 	return orphans.length;
-}
-
-/**
- * Extracts the judge's verdict from its free-form answer. The prompt asks it to
- * end with a bare `{"ok": bool, "reason": string}`, but now that the judge
- * narrates its verification first, the JSON is the LAST thing rather than the
- * only thing. So we try, in order: the whole text (pure JSON), then each
- * flat `{...}` block scanned from the end (the final one is the verdict), then
- * a greedy `{...}` as a last resort for a nested shape. Also accepts a
- * `{"verdict": "ok"|"fail"}` shape. Returns null when nothing parses — the
- * caller treats that as "can't evaluate" and fails the workflow rather than
- * looping on a guess.
- */
-function parseJudgeVerdict(text: string | undefined): { ok: boolean; reason: string } | null {
-	if (!text) return null;
-	const candidates = [text];
-	// Flat (non-nested) objects, last first — the verdict is the closing line.
-	const flat = text.match(/\{[^{}]*\}/g);
-	if (flat) candidates.push(...flat.reverse());
-	const greedy = text.match(/\{[\s\S]*\}/);
-	if (greedy) candidates.push(greedy[0]);
-	for (const candidate of candidates) {
-		try {
-			const obj = JSON.parse(candidate) as Record<string, unknown>;
-			if (obj && typeof obj === "object") {
-				const reason = typeof obj.reason === "string" ? obj.reason : "";
-				if (typeof obj.ok === "boolean") return { ok: obj.ok, reason };
-				if (typeof obj.verdict === "string") {
-					return { ok: /^(ok|pass|passed|true|approv)/i.test(obj.verdict.trim()), reason };
-				}
-			}
-		} catch {
-			// try the next candidate
-		}
-	}
-	return null;
 }
 
 /**
