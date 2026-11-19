@@ -156,8 +156,8 @@ export function clearAdminToken(): void {
 	}
 }
 
-async function request<T>(path: string, init: RequestInit & { admin?: boolean } = {}): Promise<T> {
-	const { admin = false, headers, body, ...rest } = init;
+async function request<T>(path: string, init: RequestInit & { admin?: boolean; skipAuthLost?: boolean } = {}): Promise<T> {
+	const { admin = false, skipAuthLost = false, headers, body, ...rest } = init;
 	const finalHeaders = new Headers(headers);
 	if (body !== undefined) finalHeaders.set("content-type", "application/json");
 	if (admin) {
@@ -190,7 +190,7 @@ async function request<T>(path: string, init: RequestInit & { admin?: boolean } 
 			payload && typeof payload === "object" && "error" in payload
 				? String((payload as { error: unknown }).error)
 				: `request failed (${res.status})`;
-		if (res.status === 401 && message === "login_required" && authLostHandler) authLostHandler();
+		if (!skipAuthLost && res.status === 401 && message === "login_required" && authLostHandler) authLostHandler();
 		throw new ApiError(res.status, message, payload);
 	}
 	return payload as T;
@@ -927,7 +927,9 @@ export function syncServerResources(): Promise<CatalogSyncResult> {
 }
 
 export function getCatalogSyncStatus(): Promise<CatalogSyncStatus> {
-	return request<CatalogSyncStatus>("/api/catalog/sync/status");
+	// The 2s poll calls this while signed out (landing, login). A 401 must not
+	// trip the session-lost handler — that would bounce the page every tick.
+	return request<CatalogSyncStatus>("/api/catalog/sync/status", { skipAuthLost: true });
 }
 
 export async function getDeviceLinkStatus(): Promise<DeviceLinkStatus> {

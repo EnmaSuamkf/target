@@ -28,7 +28,7 @@ process.env.TARGET_HOME = tmpHome;
 process.env.AWB_HOME = tmpHome;
 
 const { loadConfig } = await import("./config.ts");
-const { createServer } = await import("./server.ts");
+const { createServer, resetResetThrottleForTests } = await import("./server.ts");
 
 const cfg = loadConfig();
 const silent = () => {};
@@ -195,6 +195,10 @@ test("password reset: bad token is 401, good token rotates it and kills other se
 });
 
 test("five bad reset attempts trip the per-IP throttle (429 with retryAfterSec)", async () => {
+	// The case above already failed one guess of this token. The token bucket
+	// survives a later successful reset of a different token, so start clean:
+	// this test is "five failures, then 429", not "five plus whatever leaked".
+	resetResetThrottleForTests();
 	for (let i = 0; i < 4; i++) {
 		const res = await fetch(`${baseUrl}/api/auth/password/reset`, {
 			method: "POST",

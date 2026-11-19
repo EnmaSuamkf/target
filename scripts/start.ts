@@ -70,26 +70,6 @@ function hubEndpoint(): Endpoint {
 	return endpointFromConfig(path.join(targetHome(), "config.json"), { host: "127.0.0.1", port: 8893 });
 }
 
-/**
- * The admin token from the hub's config.
- *
- * A hub we spawned prints it itself on startup, but one we're only reusing
- * printed it into whatever terminal started it — which isn't this one. Reading
- * it here means `npm start` always shows the token, however the hub got up.
- */
-function adminToken(): string | null {
-	try {
-		const cfg = JSON.parse(fs.readFileSync(path.join(targetHome(), "config.json"), "utf8")) as {
-			adminToken?: unknown;
-		};
-		return typeof cfg.adminToken === "string" && cfg.adminToken !== "" ? cfg.adminToken : null;
-	} catch {
-		// No config yet (first run, before the hub writes one) — the spawned hub
-		// prints the token itself, so this is never the only way to see it.
-		return null;
-	}
-}
-
 function brokerEndpoint(): Endpoint {
 	const home = process.env.AWB_HOME ?? path.join(os.homedir(), ".agent-webhook-bridge");
 	return endpointFromConfig(path.join(home, "hooks.json"), { host: "127.0.0.1", port: 8890 });
@@ -259,8 +239,8 @@ async function main(): Promise<void> {
 		openBrowser(urlOf(hub.endpoint));
 	}
 
-	const token = adminToken();
 	const reusedAny = components.some((c) => c.reused);
+	const configFile = path.join(targetHome(), "config.json");
 
 	console.log(`
 Ready.
@@ -270,9 +250,10 @@ Ready.
 		process.env.TARGET_NO_BROWSER === "1" ? "UI not opened — desktop shell will load it" : "UI opened in your browser"
 	})${hub.reused ? "   (reused)" : ""}
 
-  admin token: ${token ?? "(unavailable — see ~/.target/config.json)"}
+  admin token: ${configFile}
+  (the value is not printed)
 
-The UI asks for the token and the CLI uses it automatically.${
+The UI signs in with the account password. Scripts read the admin token from the config file above; the CLI uses the database directly.${
 		reusedAny ? "\nServices already running were reused; Ctrl-C stops them too." : ""
 	}
 Press Ctrl-C to stop both.

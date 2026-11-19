@@ -52,6 +52,13 @@ export function SetupView({
 		} catch (err) {
 			if (err instanceof ApiError && err.status === 409) {
 				setError("This machine already has its account — setup only runs once. Sign in instead.");
+			} else if (err instanceof ApiError && err.status === 403 && err.message === "setup_loopback_only") {
+				const payload = err.payload as { message?: unknown } | null;
+				setError(
+					typeof payload?.message === "string"
+						? payload.message
+						: "First-run setup is only available from this computer. On the machine running the hub, open http://127.0.0.1 and the hub's port and create the account there.",
+				);
 			} else {
 				setError(err instanceof Error ? err.message : String(err));
 			}

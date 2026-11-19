@@ -140,8 +140,8 @@ route answers `401 login_required` without the session cookie. See
 including the wipe-and-reinstall procedure for a lost password **and** token.
 
 The admin token lives in `~/.target/config.json`. The hub log does not print
-it (it is also the bundled Target Management pack's tool token). `npm start`
-shows it in its `Ready.` block for the operator at the terminal. It keeps
+it (it is also the bundled Target Management pack's tool token), and `npm start`
+does not print it either — the `Ready.` block names that config file. It keeps
 working as a Bearer credential for scripts and automation, and the CLI talks
 to the database directly.
 
@@ -978,9 +978,12 @@ into `~/.target/config.json`, then listens there. Use this when you run
 **`--sandbox docker` workflows that use TCP tools** (or any step that calls the
 hub API from inside the container).
 
-That exposes the hub on all interfaces, so it stays opt-in — every mutating
-route still needs the admin token, but treat it as you would any bound port;
-use a host firewall or a narrower bind in `config.json` if you prefer not to
+That exposes the hub on all interfaces, so it stays opt-in. The `Host`
+allowlist still applies, and first-run setup from a non-loopback client is
+refused. Every other `/api` route still needs a signed-in session or the
+admin token in `~/.target/config.json` — that value is not printed in the hub
+log or by `npm start`. Treat the bind as you would any other open port: use a
+host firewall or a narrower `host` in `config.json` if you prefer not to
 listen on every interface. You can still set `host` / `sandboxHost` manually in
 `~/.target/config.json` instead (for rootless docker, podman, a custom bridge,
 or a hub reached by hostname). Set `sandboxHost` for anything the default bridge
