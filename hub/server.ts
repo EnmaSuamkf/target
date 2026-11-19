@@ -1724,7 +1724,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					if (workflow) workdir = hookRuntime(workflow.hookUrl).workdir;
 				}
 				const result = isLocalTcpTool(found.tool)
-					? executeLocalTcpTool(found.tool, request, { workdir })
+					? executeLocalTcpTool(found.tool, request, { workdir, caller: viaStep ? "step" : "operator" })
 					: await executeTcpTool(found.tool, request);
 				sendJson(res, 200, { result });
 			})().catch((err) => {

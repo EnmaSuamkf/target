@@ -226,6 +226,7 @@ async function main(): Promise<void> {
 		log(`awb broker already listening on ${urlOf(broker.endpoint)} — reusing it.`);
 	} else {
 		log(`starting awb broker (${urlOf(broker.endpoint)})...`);
+		// Operator starter. cwd is the awb checkout, not a workflow workdir.
 		broker.child = spawn(process.execPath, [brokerEntry], { cwd: awbDir(), stdio: "inherit" });
 	}
 
@@ -233,6 +234,7 @@ async function main(): Promise<void> {
 		log(`The Target Project hub already listening on ${urlOf(hub.endpoint)} — reusing it.`);
 	} else {
 		log(`starting The Target Project hub (${urlOf(hub.endpoint)})...`);
+		// Operator starter. cwd is the hub source tree, not a workflow workdir.
 		hub.child = spawn(process.execPath, ["daemon.ts"], { cwd: HUB_DIR, stdio: "inherit" });
 	}
 

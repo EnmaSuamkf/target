@@ -193,7 +193,9 @@ tabs, workflow attach panels, and template attach sections. The hub API and MCP
 are unchanged. When you write a curl template, each placeholder is filled once
 and encoded for its position, and the request origin stays the one in the
 template. A step credential authorises tool calls only while that step is
-queued or running. See [`docs/tcp-tools.md`](docs/tcp-tools.md).
+queued or running. Local `target://git-clone` and `target://git-push` stay
+inside the workflow directory, do not run repository hooks or config, and do
+not store the GitHub token in the clone. See [`docs/tcp-tools.md`](docs/tcp-tools.md).
 Preferences live in the hub database (same `settings` table as notifications and
 shortcuts).
 

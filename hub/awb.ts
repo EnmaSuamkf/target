@@ -954,6 +954,8 @@ type BuildLogger = (message: string, type?: "info" | "warning" | "error") => voi
 function runImageBuild(spec: BuildableImage): Promise<{ ok: boolean; output: string }> {
 	const { cmd, args, cwd } = imageBuildCommand(spec);
 	return new Promise((resolve) => {
+		// `cwd` is this hub checkout (the Dockerfiles), not a workflow workdir.
+		// The operator's image setup starts the build; a step does not choose the command.
 		const child = _impl.spawn(cmd, args, { cwd, stdio: ["ignore", "pipe", "pipe"], timeout: IMAGE_BUILD_TIMEOUT_MS });
 		// Only the tail is kept: a full build log is megabytes of layer chatter,
 		// and what has to reach the operator is the line the build died on.

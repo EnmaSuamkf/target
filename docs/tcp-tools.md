@@ -98,3 +98,61 @@ instead of applying it. The following dispatch is what retires the token.
 
 An operator call (session cookie or admin bearer, no step token) is unchanged
 and may run any tool.
+
+## Local git directories
+
+`target://git-clone` and `target://git-push` run `git` on the hub machine.
+The directory they use depends on who is calling.
+
+A running step (`queued` or `running`, step credential) may only clone into
+or push from its own workflow workdir. That includes the optional `workdir`
+input and the clone destination (`<workdir>/<repo>`). The hub resolves the
+path with `realpath`, following symlinks, including a destination that does
+not exist yet (the missing suffix is joined onto the real path of the longest
+existing ancestor). An absolute path, a `..` segment, or a symlink that lands
+outside that workdir is refused with `workdir_outside_workflow`. Git is not
+started. Repository names `.` and `..` are refused with `invalid_inputs`.
+
+An operator call may pass any directory the hub user can reach. The operator
+already has this process's filesystem access, so there is no workflow
+boundary on that call. `.` and `..` are still refused as repository names.
+
+For a step, `.git` itself has to stay inside that workdir. A `.git` directory,
+a `gitdir:` file, a symlink, the common git dir, the object store, or an
+object alternate that realpaths outside is `git_dir_outside_workflow` and git
+is not started. An operator may follow a `gitdir:` that points at a linked
+worktree outside the directory they named.
+
+## Local git execution
+
+The hub runs `git` itself, on the host. A repository the agent can write is
+not allowed to choose what that process executes or where credentials go.
+
+System config is skipped (`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_SYSTEM=/dev/null`)
+and global config is an empty file created for the command, so `~/.gitconfig`
+and the XDG git config are not read. Git variables inherited from the hub
+process that would select another repository or a program are dropped
+(`GIT_DIR`, `GIT_WORK_TREE`, `GIT_SSH_COMMAND`, `GIT_PROXY_COMMAND`,
+`GIT_EXTERNAL_DIFF`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, and the other
+`GIT_CONFIG_*` values).
+`GIT_PAGER`, `GIT_ASKPASS`, and `GIT_EDITOR` are neutral programs. On top of that the hub sets
+`GIT_CONFIG_KEY_*` / `GIT_CONFIG_VALUE_*`, which override a repository value
+for a single-valued key: hooks come from an empty directory outside the
+repo, fsmonitor is off, `core.sshCommand` is plain `ssh`, the credential
+helper list is reset, only `https` is allowed, TLS verification stays on,
+and an HTTP proxy is not taken from the repo.
+
+`url.*.insteadOf` and `include.path` are lists. Adding another value does
+not remove a repo entry, and the longest `insteadOf` match wins, so a
+repository can still rewrite a URL after an override. Push therefore does
+not read the repository config: the hub copies refs and points object
+alternates at the repo, and runs git against that sanitized git dir. Clone
+runs with a current directory that is not inside any repository, and the
+URL it is given is the plain `https://github.com/<owner>/<repo>.git`.
+
+The GitHub token is not put in that URL, in argv, or in any file in the
+workdir. When the tool has a token it is sent as an `Authorization: Bearer`
+header through `http.extraHeader` in the environment. After a clone,
+`remote.origin.url` is the plain https URL. The token is registered with
+the hub's secret redaction, and text returned to the agent (git's stdout,
+stderr, and a spawn error) is passed through that redaction as well.

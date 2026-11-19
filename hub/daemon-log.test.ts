@@ -56,18 +56,21 @@ test("the hub log does not include the admin token or a tool token", async () =>
 		out += chunk.toString("utf8");
 	});
 	try {
+		// The listen callback writes "listening on" and then the redaction note as
+		// two writes. Resolving on the first line races the second chunk.
 		await new Promise<void>((resolve, reject) => {
-			const timer = setTimeout(() => reject(new Error(`daemon did not listen\n${out}`)), 20_000);
+			const timer = setTimeout(() => reject(new Error(`daemon startup log did not settle\n${out}`)), 20_000);
 			const watch = (): void => {
-				if (!out.includes("listening on")) return;
+				if (!out.includes("listening on") || !out.includes("not written to this log")) return;
 				clearTimeout(timer);
 				resolve();
 			};
 			child.stdout?.on("data", watch);
 			child.stderr?.on("data", watch);
+			watch();
 			child.once("exit", (code) => {
 				clearTimeout(timer);
-				reject(new Error(`daemon exited ${code} before listening\n${out}`));
+				reject(new Error(`daemon exited ${code} before the startup log settled\n${out}`));
 			});
 		});
 		assert.equal(out.includes(token), false);

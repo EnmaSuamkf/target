@@ -196,6 +196,8 @@ function trySpawn(candidate: TerminalCandidate, secretEnv: Record<string, string
 		};
 		let child: ChildProcess;
 		try {
+			// The operator opened this terminal. It is their shell in the workdir,
+			// not a git command invoked by the step agent.
 			child = _impl.spawn(candidate.bin, candidate.args, {
 				detached: true,
 				stdio: "ignore",
