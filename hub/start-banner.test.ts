@@ -44,6 +44,29 @@ test("scripts/start.ts points at the config file and does not print the admin to
 
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "target-start-banner-"));
 	const awb = fs.mkdtempSync(path.join(os.tmpdir(), "target-start-banner-awb-"));
+	// CI checks out this repo without vendor/ (gitignored) and without the UI
+	// build. start.ts only needs a broker file that accepts a connection and an
+	// index.html on disk; the banner text does not depend on either being real.
+	const awbCheckout = fs.mkdtempSync(path.join(os.tmpdir(), "target-start-banner-awb-dir-"));
+	fs.mkdirSync(path.join(awbCheckout, "broker"), { recursive: true });
+	fs.writeFileSync(
+		path.join(awbCheckout, "broker", "daemon.ts"),
+		[
+			'import * as fs from "node:fs";',
+			'import * as http from "node:http";',
+			'import * as path from "node:path";',
+			"const home = process.env.AWB_HOME ?? '';",
+			"const cfg = JSON.parse(fs.readFileSync(path.join(home, 'hooks.json'), 'utf8')) as { port: number };",
+			"http.createServer((_req, res) => { res.writeHead(200); res.end('ok'); }).listen(cfg.port, '127.0.0.1');",
+			"",
+		].join("\n"),
+	);
+	const uiIndex = path.join(repo, "hub", "ui", "dist", "index.html");
+	const createdUi = !fs.existsSync(uiIndex);
+	if (createdUi) {
+		fs.mkdirSync(path.dirname(uiIndex), { recursive: true });
+		fs.writeFileSync(uiIndex, "<!doctype html><title>banner test</title>\n");
+	}
 	const token = `banner-${crypto.randomUUID()}`;
 	const hubPort = await unusedPort();
 	const brokerPort = await unusedPort();
@@ -53,7 +76,13 @@ test("scripts/start.ts points at the config file and does not print the admin to
 		JSON.stringify({ host: "127.0.0.1", port: brokerPort, hooks: {} }),
 	);
 
-	const env: NodeJS.ProcessEnv = { ...process.env, TARGET_HOME: home, AWB_HOME: awb, TARGET_NO_BROWSER: "1" };
+	const env: NodeJS.ProcessEnv = {
+		...process.env,
+		TARGET_HOME: home,
+		AWB_HOME: awb,
+		AWB_DIR: awbCheckout,
+		TARGET_NO_BROWSER: "1",
+	};
 	delete env.TARGET_HUB_DOCKER_FRIENDLY;
 	// Own process group: SIGTERM can land before start.ts installs its handler
 	// and then the hub and broker it already spawned keep the pipes open.
@@ -106,6 +135,7 @@ test("scripts/start.ts points at the config file and does not print the admin to
 				signalGroup("SIGKILL");
 				child.stdout?.destroy();
 				child.stderr?.destroy();
+				if (createdUi) fs.rmSync(uiIndex, { force: true });
 				resolve();
 			};
 			const timer = setTimeout(stop, 2_000);
