@@ -267,8 +267,8 @@ the UI:
 
   npm start
 
-The hub prints its admin token on startup (also in ~/.target/config.json) and
-serves the UI at http://127.0.0.1:8893.
+The admin token is in ~/.target/config.json (the hub log does not print it) and
+the UI is at http://127.0.0.1:8893. `npm start` shows the token in its Ready block.
 `);
 }
 

@@ -16,8 +16,13 @@ export function registerSecret(value: string): void {
 	if (value.length >= 8) knownValues.add(value);
 }
 
+/** A callback or TCP url puts the step credential in `?token=`. Never keep that value. */
+function redactCallbackTokens(text: string): string {
+	return text.replace(/([?&]token=)[^&\s"'<>]*/gi, "$1***");
+}
+
 export function redactSecrets(text: string): string {
-	let out = text.replace(TOKEN_SHAPES, "***");
+	let out = redactCallbackTokens(text.replace(TOKEN_SHAPES, "***"));
 	for (const value of knownValues) {
 		if (out.includes(value)) out = out.split(value).join("***");
 	}

@@ -139,8 +139,9 @@ route answers `401 login_required` without the session cookie. See
 [`docs/authentication.md`](docs/authentication.md) for the full story,
 including the wipe-and-reinstall procedure for a lost password **and** token.
 
-The hub also prints its **admin token** on startup, and `npm start` shows it
-in its `Ready.` block (it always lives in `~/.target/config.json`) — it keeps
+The admin token lives in `~/.target/config.json`. The hub log does not print
+it (it is also the bundled Target Management pack's tool token). `npm start`
+shows it in its `Ready.` block for the operator at the terminal. It keeps
 working as a Bearer credential for scripts and automation, and the CLI talks
 to the database directly.
 
@@ -189,7 +190,10 @@ npm run test:sync  # remote-sync agent tests only
 
 Operators can hide **TCP** and **RCI** (resource sets) in the UI: header catalog
 tabs, workflow attach panels, and template attach sections. The hub API and MCP
-are unchanged.
+are unchanged. When you write a curl template, each placeholder is filled once
+and encoded for its position, and the request origin stays the one in the
+template. A step credential authorises tool calls only while that step is
+queued or running. See [`docs/tcp-tools.md`](docs/tcp-tools.md).
 Preferences live in the hub database (same `settings` table as notifications and
 shortcuts).
 

@@ -155,6 +155,7 @@ import {
 } from "./account.ts";
 import {
 	promoteQueuedToRunning,
+	stepAcceptsRunCredential,
 	deleteTemplate,
 	ARCHIVED_FILTERS,
 	getArchiveSettings,
@@ -1298,6 +1299,10 @@ async function parseCloneOverrides(body: Record<string, unknown>, res: http.Serv
 }
 
 export function createServer(cfg: HubConfig, log: Logger): http.Server {
+	// Every line this server hands its logger passes through redaction, so a
+	// step credential echoed in an agent error cannot land in the log.
+	const emit = log;
+	log = (message, type) => emit(redactSecrets(message), type);
 	return http.createServer((req, res) => {
 		try {
 			handleRequest(cfg, log, req, res);
@@ -1465,6 +1470,12 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// if this callback is lost, the result callback still settles the step
 	// (see `onStepResult`'s `queued` branch) and the `queuedTimeoutMs` safety
 	// net eventually fails it.
+	//
+	// The token is the one `dispatchStep` issued for THIS run. It is not
+	// checked against the step's status: a late `started` or `result` for the
+	// run that is finishing must still authenticate, and `onStepResult` drops
+	// it once the step is no longer `queued` or `running`. The next dispatch
+	// rotates the token, which is what rejects the previous run.
 
 	if (parts[1] === "steps" && parts[2] && parts[3] === "started" && req.method === "POST") {
 		const step = getStep(parts[2]);
@@ -1653,13 +1664,17 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// Above the access gate because one of its two callers is not the operator.
 	//
 	// The operator is one: the UI's "execute" button, `isAdmin`, unscoped — they
-	// may run any tool on their own machine. The other is a RUNNING STEP's agent,
-	// through the url the TCP catalog in its prompt was built with. That caller is
-	// the whole reason this route can't sit below the gate: the agent holds no
-	// login session and must never be handed the admin token, so it authenticates
-	// the same way awb's callbacks do — the per-step `callbackToken` — and is
-	// scoped to the tools its own workflow attached. The blast radius of a leaked
-	// prompt is therefore that workflow's own selection and nothing else.
+	// may run any tool on their own machine. The other is the agent of a step
+	// whose run is `queued` or `running` (any phase), through the url the TCP
+	// catalog in its prompt was built with. That caller is the whole reason this
+	// route can't sit below the gate: the agent holds no login session and must
+	// never be handed the admin token, so it authenticates the same way awb's
+	// callbacks do — the per-step `callbackToken` — and is scoped to the tools
+	// its own workflow attached. The token rotates on every dispatch
+	// (`rotateStepCallbackToken`), and a match is not enough: `done`, `failed`
+	// (including an abort), `waiting`, and `pending` (including a retry wait)
+	// are refused with `step_not_running`. The blast radius of a leaked prompt
+	// is therefore this run of this workflow's own selection, and nothing else.
 	//
 	// This is also the only path by which a tool call can happen at all: the hub
 	// never reads the agent's output, so an agent that merely *writes* a call has
@@ -1668,8 +1683,13 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 		const stepId = url.searchParams.get("stepId") ?? "";
 		const stepToken = url.searchParams.get("token") ?? "";
 		const callingStep = stepId ? getStep(stepId) : null;
-		const viaStep =
+		const tokenMatches =
 			callingStep !== null && stepToken !== "" && timingSafeEqualStr(stepToken, callingStep.callbackToken);
+		const viaStep = tokenMatches && callingStep !== null && stepAcceptsRunCredential(callingStep);
+		if (tokenMatches && !viaStep && !isAdmin(cfg, req.headers)) {
+			sendJson(res, 403, { error: "step_not_running" });
+			return;
+		}
 		if (!viaStep && !requirePermission(cfg, req, res, "client.workflows.execute")) {
 			return;
 		}

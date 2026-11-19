@@ -23,7 +23,7 @@ import { type ResourceSelection, normalizeResourceSelections } from "./rci-selec
 import * as path from "node:path";
 import { dbFile, ensureTargetDirSecure, type ConversationReportMode } from "./config.ts";
 import type { ProgressKind } from "./progress.ts";
-import { redactSecrets } from "./redact.ts";
+import { redactSecrets, registerSecret } from "./redact.ts";
 import type { ScheduleSpec } from "./schedule.ts";
 
 /**
@@ -299,7 +299,13 @@ export interface Step {
 	error: string | null;
 	/** Claude session this step's run produced, reported by awb's callback. */
 	sessionId: string | null;
-	/** Per-step token that authenticates awb's POST to /api/steps/:id/result. */
+	/**
+	 * Credential for this step's current run. Authenticates awb's
+	 * `POST /api/steps/:id/started|result` and, while the run is `queued` or
+	 * `running`, `POST /api/tcps/execute`. `dispatchStep` replaces it at the
+	 * start of every run, so a token from an earlier prompt is dead.
+	 * See `stepAcceptsRunCredential` and docs/tcp-tools.md.
+	 */
 	callbackToken: string;
 	createdAt: string;
 	startedAt: string | null;
@@ -1936,6 +1942,7 @@ export function insertStep(
 			step.onSuccessTask,
 			step.onFailureTask,
 		);
+	registerSecret(step.callbackToken);
 	return step;
 }
 
@@ -2239,6 +2246,45 @@ export function swapStepOrder(aId: string, bId: string): void {
 		database.exec("ROLLBACK");
 		throw err;
 	}
+}
+
+/**
+ * Replaces the step's callback token with a new one and returns it.
+ *
+ * Called at the start of every `dispatchStep` (exec, judge, and a command
+ * step's on-success / on-failure agent), before the callback URLs are built.
+ * The previous value stops matching immediately, so a token copied from an
+ * earlier prompt or log cannot drive the next run. Returns null when the
+ * step row is already gone. The value is registered for redaction and is
+ * never logged.
+ */
+export function rotateStepCallbackToken(id: string): string | null {
+	const token = crypto.randomBytes(24).toString("hex");
+	const changed = open().prepare("UPDATE steps SET callback_token = ? WHERE id = ?").run(token, id).changes > 0;
+	if (!changed) return null;
+	registerSecret(token);
+	return token;
+}
+
+/**
+ * Whether `POST /api/tcps/execute` may treat this step's current callback
+ * token as a credential.
+ *
+ * `queued` counts: the run is dispatched and the broker may not have posted
+ * `started` yet, and the agent's first tool call can race that callback.
+ * `running` counts in every phase — `exec`, `judge`, `on_success`, and
+ * `on_failure` — because that phase's agent holds the token this dispatch
+ * just issued. `pending` does not, including a retry wait (`retryAt` set):
+ * the attempt is over and the next one has not been dispatched. `waiting`
+ * (manual review), `done`, and `failed` (an abort is a `failed` step) do not.
+ *
+ * The awb `started` and `result` routes do not use this check. They accept
+ * the current token even when a late `result` arrives as the run settles;
+ * `onStepResult` ignores it once the step is no longer `queued` or `running`.
+ * The next `dispatchStep` rotates the token, which is what kills the previous run.
+ */
+export function stepAcceptsRunCredential(step: Step): boolean {
+	return step.status === "queued" || step.status === "running";
 }
 
 export function markStepRunning(id: string, manual = false): void {

@@ -13,7 +13,7 @@ process.env.TARGET_HOME = tmpHome;
 process.env.AWB_HOME = tmpHome;
 
 const { executeLocalTcpTool, isLocalTcpTool } = await import("./tcp-local.ts");
-const { insertWorkflow, insertStep, getStep } = await import("./db.ts");
+const { insertWorkflow, insertStep, getStep, markStepRunning } = await import("./db.ts");
 const { insertTcp, setWorkflowTcps } = await import("./tcp-store.ts");
 const { createAwbHook } = await import("./awb.ts");
 const { loadConfig } = await import("./config.ts");
@@ -124,6 +124,7 @@ test("POST /api/tcps/execute runs a target://git-clone tool into the calling wor
 	});
 	setWorkflowTcps(workflow.id, [tcp.id]);
 	const step = getStep(insertStep(workflow.id, "clone it").id)!;
+	markStepRunning(step.id);
 
 	const res = await fetch(
 		`${baseUrl}/api/tcps/execute?stepId=${step.id}&token=${step.callbackToken}`,

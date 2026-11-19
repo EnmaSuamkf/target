@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import { refreshAvailableRunners, refreshDockerAvailable, refreshDockerGitHubToken } from "./awb.ts";
 import { ensureBundledCatalog } from "./bundled-bootstrap.ts";
 import { isInsecureReportUrl, loadConfig } from "./config.ts";
+import { redactSecrets, registerSecret } from "./redact.ts";
+import { rememberStoredTcpTokens } from "./tcp-store.ts";
 import { listWorkflows } from "./db.ts";
 import { loadEffectiveReportConfig, loadEffectiveSyncConfig } from "./remote-config.ts";
 import { emitHeartbeat, flush } from "./reporter.ts";
@@ -27,7 +29,8 @@ import { TARGET_VERSION } from "./version.ts";
 
 function log(message: string, type: "info" | "warning" | "error" = "info"): void {
 	const prefix = type === "error" ? "[error]" : type === "warning" ? "[warn]" : "[info]";
-	console.log(`${prefix} ${message}`);
+	// Callback tokens travel in `?token=`. Strip them before they reach the log.
+	console.log(`${prefix} ${redactSecrets(message)}`);
 }
 
 /**
@@ -44,11 +47,19 @@ const AVAILABILITY_REFRESH_INTERVAL_MS = 60_000;
 
 export function startHub(): void {
 	const cfg = loadConfig();
+	// The admin token is also TOKEN_1 of the bundled Target Management pack.
+	// Register it before any log line so a later message cannot keep the value.
+	registerSecret(cfg.adminToken);
 	try {
 		const { tcp, resourceSet } = ensureBundledCatalog(cfg);
 		log(`bundled catalog: TCP '${tcp.name}', resource set '${resourceSet.name}'`);
 	} catch (err) {
 		log(`bundled catalog import failed: ${String(err)}`, "warning");
+	}
+	try {
+		rememberStoredTcpTokens();
+	} catch (err) {
+		log(`tcp token redaction setup failed: ${String(err)}`, "warning");
 	}
 	// Existing copilot docker workflows pick up the token the hub resolves now
 	// (best effort; every dispatch refreshes it again).
@@ -76,7 +87,7 @@ export function startHub(): void {
 	const server = createServer(cfg, log);
 	server.listen(cfg.port, cfg.host, () => {
 		log(`target hub v${TARGET_VERSION} listening on http://${cfg.host}:${cfg.port}`);
-		log(`admin token (for mutating /api routes): ${cfg.adminToken}`);
+		log("admin token is kept in the hub config file and is not written to this log");
 	});
 	void retryRemoteDisconnect().catch(() => {});
 	const cleanupRetry = setInterval(() => {

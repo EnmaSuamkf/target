@@ -2,6 +2,7 @@
  * Persistence for TCP (Tool Context Protocol) definitions and workflow attachments.
  */
 import { mergeCatalogSyncSources, open, type CatalogSyncSource } from "./db.ts";
+import { registerSecret } from "./redact.ts";
 import {
 	type TcpSelection,
 	mergeTcpSelections,
@@ -159,6 +160,17 @@ function normalizeToolInputs(inputs: unknown): TcpToolInput[] {
 	return out;
 }
 
+function rememberToolTokens(tools: TcpTool[]): void {
+	for (const tool of tools) {
+		for (const value of Object.values(tool.tokens)) registerSecret(value);
+	}
+}
+
+/** Mask every tool token already stored, including ones written by a previous process. */
+export function rememberStoredTcpTokens(): void {
+	for (const tcp of listTcps()) rememberToolTokens(tcp.tools);
+}
+
 function normalizeTokens(tokens: unknown): Record<string, string> {
 	if (tokens == null || typeof tokens !== "object" || Array.isArray(tokens)) return {};
 	const out: Record<string, string> = {};
@@ -237,6 +249,7 @@ export function insertTcp(input: { name: string; tags?: unknown; tools?: unknown
 	open()
 		.prepare(`INSERT INTO tcps (id, name, tags, tools, origin, sync_source, synced_at, revoked, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 		.run(tcp.id, tcp.name, JSON.stringify(tcp.tags), JSON.stringify(tcp.tools), tcp.origin, tcp.syncSource, tcp.syncedAt, 0, tcp.createdAt, tcp.updatedAt);
+	rememberToolTokens(tcp.tools);
 	return tcp;
 }
 
@@ -289,6 +302,7 @@ export function upsertServerTcp(
 			tcp.createdAt,
 			tcp.updatedAt,
 		);
+	rememberToolTokens(tcp.tools);
 	return getTcp(id)!;
 }
 
@@ -319,6 +333,7 @@ export function updateTcp(id: string, input: { name?: string; tags?: unknown; to
 	open()
 		.prepare("UPDATE tcps SET name = ?, tags = ?, tools = ?, updated_at = ? WHERE id = ?")
 		.run(name, JSON.stringify(tags), JSON.stringify(tools), updatedAt, id);
+	rememberToolTokens(tools);
 	return { ...existing, name, tags, tools, updatedAt };
 }
 

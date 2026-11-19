@@ -68,11 +68,14 @@ matters.
 
 `~/.target/config.json`'s `adminToken` still works as a Bearer credential
 alongside sessions (for scripts and automation), and the CLI keeps talking to
-the database directly with no HTTP auth at all. `GET /api/auth/status` is the
+the database directly with no HTTP auth at all. The hub log does not print it.
+`npm start` shows it once in the operator's terminal. `GET /api/auth/status` is the
 only data-adjacent route that stays open; everything else under `/api` —
 reads included — answers `401 login_required` without a session cookie or the
 admin token. The awb step callbacks (`/api/steps/:id/started|result`) keep
-their per-step tokens and are unaffected.
+their per-step tokens and are unaffected by this gate. That token rotates on
+every dispatch and only authorises `POST /api/tcps/execute` while the step is
+`queued` or `running` (see `docs/tcp-tools.md`).
 
 ## Threat model (stated plainly)
 

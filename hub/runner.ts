@@ -44,6 +44,7 @@ import {
 	listUndeliveredReports,
 	markReportsDelivered,
 	markStepQueued,
+	rotateStepCallbackToken,
 	takeStepInterrupted,
 } from "./db.ts";
 import { listWorkflowTcpSelections } from "./tcp-store.ts";
@@ -474,6 +475,15 @@ export async function dispatchStep(
 	} = {},
 ): Promise<void> {
 	const mode = options.mode ?? "exec";
+	// A new run gets a new credential before any URL is built. The broker and
+	// the agent then see only this value; the previous run's token no longer
+	// matches `/started`, `/result`, or `/api/tcps/execute`.
+	const runToken = rotateStepCallbackToken(step.id);
+	if (!runToken) {
+		log(`step ${step.id} (workflow ${workflow.id}) is gone; not dispatching`, "error");
+		return;
+	}
+	step = { ...step, callbackToken: runToken };
 	// Which Claude session (if any) awb should `--resume` for this dispatch.
 	// The judge resumes the very run it is grading (the step's own `sessionId`,
 	// set by markStepJudging — equal to `workflow.lastSessionId` once the shared

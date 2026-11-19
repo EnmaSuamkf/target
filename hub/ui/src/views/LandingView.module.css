@@ -608,7 +608,22 @@
 @media (max-width: 768px) {
 	.nav {
 		padding: var(--space-3) var(--space-4);
-		gap: var(--space-3);
+		gap: var(--space-2);
+	}
+
+	/* The brand name is nowrap. Let it shrink so Sign in / Get started stay
+	   inside a 390px screen instead of pushing the page sideways. */
+	.brand {
+		min-width: 0;
+	}
+
+	.brandName {
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.navActions {
+		flex-shrink: 0;
 	}
 
 	.hero {

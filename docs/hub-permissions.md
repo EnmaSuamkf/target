@@ -158,7 +158,7 @@ TCP/RCI stays allowed.
 | `POST` | `/api/workflows/:id/pause` | `client.workflows.execute` **or** `client.workflows.manage` (D6) |
 | `POST` | `/api/workflows/:id/archive` | `client.workflows.manage` |
 | `POST` | `/api/workflows/:id/unarchive` | `client.workflows.manage` |
-| `POST` | `/api/tcps/execute` | `client.workflows.execute` (skipped when the caller is a running step with its callback token) |
+| `POST` | `/api/tcps/execute` | `client.workflows.execute` (skipped when the caller is a `queued` or `running` step with its current callback token; a dead or idle step's token is `403 step_not_running`) |
 
 ### Templates
 
