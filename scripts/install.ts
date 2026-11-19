@@ -124,6 +124,11 @@ function requireGit(): void {
  * warning: an already-cloned awb is enough to start, and the machine may
  * simply be offline or the clone parked on a local branch.
  */
+/**
+ * Operator install only. Clones or fast-forwards the awb checkout. A workflow
+ * step never calls this, and the directory is the vendor clone (or `AWB_DIR`),
+ * not a step workdir. Repo hooks are the operator's checkout, not an agent's.
+ */
 function syncAwb(dir: string): void {
 	if (!fs.existsSync(dir)) {
 		log(`agent-webhook-bridge: cloning into ${dir}...`);

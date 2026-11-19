@@ -453,6 +453,10 @@ function runJobStep(args: {
 	const { cmd, args: argv } = shellCommand(step.shell, step.run);
 	let child: ChildProcess;
 	try {
+		// Approved pipeline text, not a program the step agent picked. `cwd` is
+		// already confined to the workflow workdir. This is not the local git
+		// sandbox: if the pipeline itself runs `git`, that git still honors the
+		// repo's hooks and config. Running it is what the operator approved.
 		child = spawn(cmd, argv, { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
 	} catch (err) {
 		return Promise.resolve(finishJobStep(state, log, { status: "failed", exitCode: null, error: messageOf(err) }, tail, notify));
