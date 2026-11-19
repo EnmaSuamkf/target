@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { ApiError, getCatalogSyncStatus } from "../api/client.ts";
 import type { CatalogSyncStatus } from "../api/types.ts";
 
 /**
@@ -28,4 +29,22 @@ export function setCatalogSyncStatusSnapshot(next: CatalogSyncStatus | null): vo
 
 export function useCatalogSyncStatus(): CatalogSyncStatus | null {
 	return useSyncExternalStore(subscribe, () => snapshot, () => null);
+}
+
+/**
+ * One tick of the catalog-status poll (App.tsx, on the permissions interval).
+ * A 401 means the operator isn't signed in. That is an empty snapshot: it
+ * does not throw, and `getCatalogSyncStatus` does not report the session lost.
+ * Any other failure also leaves the last screen quiet and retries next tick.
+ */
+export async function pollCatalogSyncStatus(): Promise<void> {
+	try {
+		setCatalogSyncStatusSnapshot(await getCatalogSyncStatus());
+	} catch (err) {
+		if (err instanceof ApiError && err.status === 401) {
+			setCatalogSyncStatusSnapshot(null);
+			return;
+		}
+		setCatalogSyncStatusSnapshot(null);
+	}
 }

@@ -81,7 +81,7 @@ and not role-gated: there is no owner yet.
 | Method | Path | Permission |
 | --- | --- | --- |
 | `POST` | `/api/catalog/sync` | any of `client.templates.sync`, `client.tcp-tools.sync`, `client.rci.sync`, `client.pipelines.sync` (and `enforced`; `409 not_linked` otherwise) |
-| `GET` | `/api/catalog/sync/status` | operator gate only |
+| `GET` | `/api/catalog/sync/status` | operator gate only. No session and no admin token is `401 {"error":"unauthorized"}` (not `login_required`). The UI poll treats that as an empty snapshot and does not toast. |
 
 `POST` calls the linked server's `GET /api/sync/catalog`. An old server that
 404s that path becomes `502 { "error": "catalog_sync_unsupported" }`. The hub
@@ -230,8 +230,10 @@ require `client.workflows.manage` (D5). Settings → **Catalog navigation**
 shows a **Sync resources** button when the mode is `enforced` and the owner
 has any `client.*.sync` permission; it polls `GET /api/catalog/sync/status`
 on the same 2s tick and toasts the per-domain added/updated/removed/revoked
-counts (or “The server does not support resource sync”). Template, TCP and
-RCI lists filter All / Own / Synced and show a Synced badge plus an
+counts (or “The server does not support resource sync”). A signed-out poll is
+`401 unauthorized`; the hook clears the snapshot and does not toast or treat
+the session as lost. Template, TCP and RCI lists filter All / Own / Synced
+and show a Synced badge plus an
 Enabled/Disabled pill. Unusable server templates appear as disabled options
 suffixed “ — Disabled”; unusable TCP/RCI checkboxes stay off unless they are
 already selected (so they can still be removed).
@@ -242,8 +244,9 @@ This is UI governance of the local API, **not a security boundary**.
 
 Anyone with a shell on this machine can skip it:
 
-- the **adminToken** printed when the daemon starts (and stored in
-  `~/.target/config.json`) authorizes every `/api` route as the operator;
+- the **adminToken** stored in `~/.target/config.json` (it is not printed
+  when the daemon starts, and `npm start` does not print it either) authorizes
+  every `/api` route as the operator;
 - `hub/cli.ts` talks **directly to the SQLite database**, not through
   `requirePermission`;
 - editing `~/.target/target.db` (or `$TARGET_HOME/target.db`) writes the same

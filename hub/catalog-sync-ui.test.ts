@@ -32,10 +32,15 @@ test("Settings Sync resources is gated on enforced mode and a catalog sync permi
 	assert.match(settings, /Pull the templates, TCP tools and RCI resources your role is allowed to sync from/);
 });
 
-test("catalog status rides the existing 2s permissions tick", () => {
-	assert.match(app, /getCatalogSyncStatus/);
-	assert.match(app, /setCatalogSyncStatusSnapshot/);
+test("catalog status rides the existing 2s permissions tick and a 401 stays quiet", () => {
+	assert.match(app, /pollCatalogSyncStatus/);
 	assert.match(app, /POLL_INTERVAL_MS = 2000/);
+	const hook = fs.readFileSync(path.join(ui, "hooks", "useCatalogSyncStatus.ts"), "utf8");
+	assert.match(hook, /status === 401/);
+	assert.match(hook, /setCatalogSyncStatusSnapshot\(null\)/);
+	assert.doesNotMatch(hook, /toast/);
+	const client = fs.readFileSync(path.join(ui, "api", "client.ts"), "utf8");
+	assert.match(client, /getCatalogSyncStatus[\s\S]*skipAuthLost: true/);
 });
 
 test("SyncedBadge and UsagePill titles distinguish permission vs revoked", () => {
