@@ -1167,7 +1167,7 @@ const TOOLS = [
 	},
 	{
 		name: "create_tcp",
-		description: "Create a TCP pack",
+		description: "Create a TCP pack. In a tool's curl template each placeholder is filled once: URL inputs are percent-encoded and cannot change the template's origin; token placeholders come only from the tool's tokens.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -1182,7 +1182,7 @@ const TOOLS = [
 	},
 	{
 		name: "update_tcp",
-		description: "Update a TCP pack",
+		description: "Update a TCP pack. In a tool's curl template each placeholder is filled once: URL inputs are percent-encoded and cannot change the template's origin; token placeholders come only from the tool's tokens.",
 		inputSchema: {
 			type: "object",
 			properties: {

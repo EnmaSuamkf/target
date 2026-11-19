@@ -364,7 +364,7 @@ function TcpForm({
 					<Field label="Tool name">{(props) => <input {...props} type="text" className="input" value={tool.name} onChange={(ev) => updateTool(index, { name: ev.target.value })} placeholder="get_me" disabled={serverManaged} />}</Field>
 					<Field label="Description">{(props) => <input {...props} type="text" className="input" value={tool.description} onChange={(ev) => updateTool(index, { description: ev.target.value })} disabled={serverManaged} />}</Field>
 					<Field label="Request template (curl)">{(props) => <textarea {...props} className="input" rows={4} value={tool.requestTemplate} onChange={(ev) => updateTool(index, { requestTemplate: ev.target.value })} placeholder="curl -X GET https://api.github.com/user -H 'Authorization: Bearer $TOKEN_1'" disabled={serverManaged} />}</Field>
-					<Field label="Tokens (JSON)" hint="Keys like TOKEN_1 map to $TOKEN_1 in the template.">{(props) => (
+					<Field label="Tokens (JSON)" hint="Keys like TOKEN_1 map to $TOKEN_1. Each placeholder is filled once from this map; an input cannot override a token.">{(props) => (
 						<textarea
 							{...props}
 							className="input"
@@ -378,7 +378,7 @@ function TcpForm({
 							disabled={serverManaged}
 						/>
 					)}</Field>
-					<Field label="Inputs (JSON)" hint='Array of { name, placeholder, description, required }. Leave [] if none.'>{(props) => (
+					<Field label="Inputs (JSON)" hint="Array of { name, placeholder, description, required }. A value is substituted once and percent-encoded in the URL; it cannot change the template origin. Leave [] if none.">{(props) => (
 						<textarea
 							{...props}
 							className="input"

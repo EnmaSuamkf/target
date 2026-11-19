@@ -204,7 +204,7 @@ export function Header({
 					open={dialogOpen}
 					size="sm"
 					title={hasToken ? "Replace admin token" : "Admin token"}
-					description="The hub prints this token on startup; it also lives in ~/.target/config.json. It's kept in this browser's local storage and sent as a bearer token on actions that change state."
+					description="The admin token lives in the hub config file (~/.target/config.json). The hub log does not print it. npm start shows it in that command's terminal. It's kept in this browser's local storage and sent as a bearer token on actions that change state."
 					onClose={() => setDialogOpen(false)}
 					footer={
 						<>
@@ -225,7 +225,7 @@ export function Header({
 								className="input"
 								autoComplete="off"
 								value={draft}
-								placeholder="Paste the token printed by the hub"
+								placeholder="Paste the token from the hub config file"
 								onChange={(ev) => setDraft(ev.target.value)}
 								onKeyDown={(ev) => {
 									if (ev.key === "Enter") {

@@ -28,7 +28,7 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-tcp-execute-"));
 process.env.TARGET_HOME = tmpHome;
 process.env.AWB_HOME = tmpHome;
 
-const { insertWorkflow, insertStep, getStep } = await import("./db.ts");
+const { insertWorkflow, insertStep, getStep, markStepRunning } = await import("./db.ts");
 const { insertTcp, setWorkflowTcps } = await import("./tcp-store.ts");
 const { loadConfig } = await import("./config.ts");
 const { createServer } = await import("./server.ts");
@@ -93,6 +93,7 @@ const workflow = insertWorkflow({
 });
 setWorkflowTcps(workflow.id, [tcp.id]);
 const step = getStep(insertStep(workflow.id, "call the tool").id)!;
+markStepRunning(step.id);
 
 function execUrl(stepId: string, token: string) {
 	return `${baseUrl}/api/tcps/execute?stepId=${stepId}&token=${token}`;
@@ -152,6 +153,7 @@ test("another step's token does not work for this workflow's tools", async () =>
 		mdPath: path.join(tmpHome, "w2.md"),
 	});
 	const otherStep = getStep(insertStep(otherWorkflow.id, "unrelated").id)!;
+	markStepRunning(otherStep.id);
 	// Valid token, but for a step whose workflow has nothing attached.
 	const res = await fetch(execUrl(otherStep.id, otherStep.callbackToken), {
 		method: "POST",
