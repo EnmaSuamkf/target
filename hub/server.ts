@@ -92,6 +92,15 @@
  * callbacks requires the operator: a login-session cookie or the admin bearer
  * token (single-user model — see usershandler.html). Without one they all
  * answer 401 {"error":"login_required"}.
+ *
+ * Before any of that routing, the request has to name this hub. A Host that
+ * isn't one of the names in `allowedHostNames` on the port this connection
+ * arrived on is 403 {"error":"forbidden_host"}. POST/PUT/PATCH/DELETE are
+ * 403 {"error":"cross_origin"} when Origin is present and isn't one of this
+ * hub's own origins, or when Sec-Fetch-Site is cross-site. A missing Origin
+ * (CLI, MCP, awb, curl) is allowed. JSON bodies must be
+ * Content-Type: application/json or the route answers 415. See
+ * docs/authentication.md.
  */
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
@@ -130,11 +139,13 @@ import {
 import { needsContextReinjection, observeCompaction } from "./compaction.ts";
 import type { HubConfig } from "./config.ts";
 import {
+	DOCKER_FRIENDLY_SANDBOX_HOST_DEFAULT,
 	dockerFriendlyHubEnabled,
 	isInsecureReportUrl,
 	loadReportConfigFromEnv,
 	loadSlackDeliveryTokensFromEnv,
 } from "./config.ts";
+import { dockerHostAddress } from "./sandbox-net.ts";
 import { disconnectDeviceLink, pollDeviceLink, startDeviceLink } from "./device-link-client.ts";
 import { getDeviceLinkStatus } from "./device-link.ts";
 import { CatalogSyncError, getCatalogSyncStatus, syncServerCatalog } from "./catalog-sync.ts";
@@ -153,6 +164,7 @@ import {
 	resolveSession,
 	verifyAccountPassword,
 } from "./account.ts";
+import { hashRecoveryToken } from "./auth.ts";
 import {
 	promoteQueuedToRunning,
 	stepAcceptsRunCredential,
@@ -474,41 +486,132 @@ function clearSessionCookieHeader(): string {
 	return `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`;
 }
 
-// --- password-reset throttle (per IP, in-memory) ---
+// --- password-reset throttle (in-memory) ---
 //
-// The reset endpoint is open by design, so this is its abuse control: 5 failed
-// token attempts from one address hold it for 15 minutes, doubling on repeat,
-// capped at 6h. In-memory is enough — an attacker who can restart the hub to
-// reset a counter already owns the machine; and the token itself is 100 bits,
-// so the throttle is defence-in-depth, not the barrier.
-const resetAttempts = new Map<string, { failures: number; lockedUntil: number }>();
+// The reset endpoint is open by design. Three buckets limit guessing without
+// letting one client behind a shared address (proxy, docker bridge) freeze
+// every other client for the old 15-minute-and-doubling hold:
+//
+// - one bucket per recovery token: 5 failures lock THAT token for 15 minutes,
+//   doubling on repeat, capped at 6h. Guessing a token stays expensive.
+// - one bucket per client address: 5 failures hold that address for
+//   RESET_ADDRESS_LOCK_MS (a short hold, not doubled). After it expires, a
+//   different token from the same address can try again.
+// - one global bucket: RESET_GLOBAL_MAX_FAILURES failures impose
+//   RESET_GLOBAL_LOCK_MS on everyone, then the counter resets. A distributed
+//   flood is slowed; the hold does not grow into hours.
+//
+// In-memory is enough — an attacker who can restart the hub already owns the
+// machine. A locked attempt is 429 with retryAfterSec.
+const resetBuckets = new Map<string, { failures: number; lockedUntil: number }>();
 const RESET_MAX_FAILURES = 5;
-const RESET_BASE_LOCK_MS = 15 * 60 * 1000;
-const RESET_MAX_LOCK_MS = 6 * 60 * 60 * 1000;
+export const RESET_ADDRESS_LOCK_MS = 30_000;
+const RESET_TOKEN_BASE_LOCK_MS = 15 * 60 * 1000;
+const RESET_TOKEN_MAX_LOCK_MS = 6 * 60 * 60 * 1000;
+export const RESET_GLOBAL_MAX_FAILURES = 20;
+export const RESET_GLOBAL_LOCK_MS = 10_000;
+const RESET_ADDRESS_PREFIX = "addr:";
+const RESET_TOKEN_PREFIX = "token:";
+const RESET_GLOBAL_KEY = "global";
 
-/** Seconds the caller must wait before another reset attempt; 0 = allowed. */
-function checkResetThrottle(key: string): number {
-	const rec = resetAttempts.get(key);
+let resetClock: () => number = () => Date.now();
+let clientAddressOverride: ((req: http.IncomingMessage) => string | undefined) | null = null;
+
+/** Test seam: the clock the reset buckets compare against. Null restores Date.now. */
+export function setResetThrottleClockForTests(clock: (() => number) | null): void {
+	resetClock = clock ?? (() => Date.now());
+}
+
+/**
+ * Test seam: where the hub reads the client address for setup and the reset
+ * throttle. Null restores `req.socket.remoteAddress`. Not an HTTP header —
+ * nothing on the wire can set this.
+ */
+export function setClientAddressForTests(read: ((req: http.IncomingMessage) => string | undefined) | null): void {
+	clientAddressOverride = read;
+}
+
+/** Drops every reset bucket and both test seams. */
+export function resetResetThrottleForTests(): void {
+	resetBuckets.clear();
+	resetClock = () => Date.now();
+	clientAddressOverride = null;
+}
+
+function clientAddress(req: http.IncomingMessage): string {
+	const raw = clientAddressOverride ? clientAddressOverride(req) : req.socket.remoteAddress;
+	return raw && raw.trim() !== "" ? raw.trim() : "unknown";
+}
+
+/** 127.0.0.0/8, ::1, and IPv4-mapped loopback. `localhost` counts too. */
+function isLoopbackAddress(address: string | undefined): boolean {
+	if (!address) return false;
+	let name = address.trim().toLowerCase();
+	if (name.startsWith("[") && name.endsWith("]")) name = name.slice(1, -1);
+	const zone = name.indexOf("%");
+	if (zone !== -1) name = name.slice(0, zone);
+	if (name.startsWith("::ffff:")) name = name.slice("::ffff:".length);
+	if (name === "localhost" || name === "::1" || name === "0:0:0:0:0:0:0:1") return true;
+	const parts = name.split(".");
+	if (parts.length !== 4 || parts[0] !== "127") return false;
+	return parts.every((part) => /^\d+$/.test(part) && Number(part) <= 255);
+}
+
+/** True when this hub is bound somewhere a non-loopback client can open a socket. */
+function hubListensBeyondLoopback(host: string): boolean {
+	return !isLoopbackAddress(host);
+}
+
+function resetBucketWait(key: string, now: number): number {
+	const rec = resetBuckets.get(key);
 	if (!rec) return 0;
-	const waitMs = rec.lockedUntil - Date.now();
+	const waitMs = rec.lockedUntil - now;
 	return waitMs > 0 ? Math.ceil(waitMs / 1000) : 0;
 }
 
-/** Counts one failed reset attempt; returns the lock it just triggered (seconds), or 0 while still only counting. */
-function registerResetFailure(key: string): number {
-	const rec = resetAttempts.get(key) ?? { failures: 0, lockedUntil: 0 };
-	rec.failures += 1;
-	if (rec.failures >= RESET_MAX_FAILURES) {
-		const lockCount = Math.floor(rec.failures / RESET_MAX_FAILURES);
-		const lockMs = Math.min(RESET_BASE_LOCK_MS * 2 ** (lockCount - 1), RESET_MAX_LOCK_MS);
-		rec.lockedUntil = Date.now() + lockMs;
-	}
-	resetAttempts.set(key, rec);
-	return Math.max(0, Math.ceil((rec.lockedUntil - Date.now()) / 1000));
+/** Seconds the caller must wait; 0 = allowed. `tokenHash` is omitted before the body is read. */
+function checkResetThrottle(address: string, tokenHash: string | null): number {
+	const now = resetClock();
+	const waits = [resetBucketWait(RESET_ADDRESS_PREFIX + address, now), resetBucketWait(RESET_GLOBAL_KEY, now)];
+	if (tokenHash) waits.push(resetBucketWait(RESET_TOKEN_PREFIX + tokenHash, now));
+	return Math.max(...waits);
 }
 
-function resetThrottleClear(key: string): void {
-	resetAttempts.delete(key);
+function lockSeconds(lockedUntil: number, now: number): number {
+	return Math.max(0, Math.ceil((lockedUntil - now) / 1000));
+}
+
+/** Counts one failed reset attempt. Returns the longest lock it just left in force, in seconds. */
+function registerResetFailure(address: string, tokenHash: string): number {
+	const now = resetClock();
+	const addr = resetBuckets.get(RESET_ADDRESS_PREFIX + address) ?? { failures: 0, lockedUntil: 0 };
+	addr.failures += 1;
+	if (addr.failures % RESET_MAX_FAILURES === 0) addr.lockedUntil = now + RESET_ADDRESS_LOCK_MS;
+	resetBuckets.set(RESET_ADDRESS_PREFIX + address, addr);
+
+	const token = resetBuckets.get(RESET_TOKEN_PREFIX + tokenHash) ?? { failures: 0, lockedUntil: 0 };
+	token.failures += 1;
+	if (token.failures % RESET_MAX_FAILURES === 0) {
+		const lockCount = token.failures / RESET_MAX_FAILURES;
+		const lockMs = Math.min(RESET_TOKEN_BASE_LOCK_MS * 2 ** (lockCount - 1), RESET_TOKEN_MAX_LOCK_MS);
+		token.lockedUntil = now + lockMs;
+	}
+	resetBuckets.set(RESET_TOKEN_PREFIX + tokenHash, token);
+
+	const global = resetBuckets.get(RESET_GLOBAL_KEY) ?? { failures: 0, lockedUntil: 0 };
+	global.failures += 1;
+	if (global.failures >= RESET_GLOBAL_MAX_FAILURES) {
+		global.lockedUntil = now + RESET_GLOBAL_LOCK_MS;
+		global.failures = 0;
+	}
+	resetBuckets.set(RESET_GLOBAL_KEY, global);
+
+	return Math.max(lockSeconds(addr.lockedUntil, now), lockSeconds(token.lockedUntil, now), lockSeconds(global.lockedUntil, now));
+}
+
+function resetThrottleClear(address: string, tokenHash: string): void {
+	resetBuckets.delete(RESET_ADDRESS_PREFIX + address);
+	resetBuckets.delete(RESET_TOKEN_PREFIX + tokenHash);
 }
 
 /**
@@ -1129,12 +1232,29 @@ function sendJson(res: http.ServerResponse, status: number, payload: unknown): v
 	res.end(JSON.stringify(payload));
 }
 
+function isJsonContentType(value: string | string[] | undefined): boolean {
+	if (typeof value !== "string") return false;
+	const media = value.split(";")[0]?.trim().toLowerCase() ?? "";
+	return media === "application/json";
+}
+
 function readJsonBody(
 	req: http.IncomingMessage,
 	res: http.ServerResponse,
 	maxBytes: number,
 	onBody: (body: Record<string, unknown>) => void | Promise<void>,
 ): void {
+	// A browser on another port is the same site as this hub, so it can POST
+	// `text/plain` (a "simple" request) with no CORS preflight and with the
+	// session cookie attached. Refusing anything but application/json here
+	// makes that body a 415 before it is parsed. Callers that already send
+	// application/json — the UI, the CLI, the MCP server, awb — are unchanged.
+	// `application/json; charset=utf-8` counts; the parameters are ignored.
+	if (!isJsonContentType(req.headers["content-type"])) {
+		sendJson(res, 415, { error: "unsupported_media_type" });
+		req.resume();
+		return;
+	}
 	const chunks: Buffer[] = [];
 	let size = 0;
 	let aborted = false;
@@ -1298,6 +1418,159 @@ async function parseCloneOverrides(body: Record<string, unknown>, res: http.Serv
 	return overrides;
 }
 
+/** Loopback names the browser UI, Electron, the CLI, MCP, and awb callbacks use. */
+const LOOPBACK_HOST_NAMES = ["localhost", "127.0.0.1", "::1"] as const;
+/** Published inside every sandboxed `docker run` (see hub/awb.ts) and by Docker Desktop. */
+const DOCKER_INTERNAL_HOST = "host.docker.internal";
+
+function normalizeHostName(raw: string | undefined | null): string | null {
+	if (raw == null) return null;
+	let name = raw.trim().toLowerCase();
+	if (name.startsWith("[") && name.endsWith("]")) name = name.slice(1, -1);
+	if (name.endsWith(".")) name = name.slice(0, -1);
+	const zone = name.indexOf("%");
+	if (zone !== -1) name = name.slice(0, zone);
+	if (name === "") return null;
+	return name;
+}
+
+function isWildcardBind(host: string): boolean {
+	const name = normalizeHostName(host);
+	return name === "0.0.0.0" || name === "::";
+}
+
+/**
+ * Hostnames a request may use for this hub. The port is checked separately
+ * against the port the connection arrived on, so nothing here is tied to 8893.
+ *
+ * `cfg.host` is what the CLI and Electron put in the URL (including `0.0.0.0`
+ * when docker-friendly networking is on). `cfg.sandboxHost` and the docker
+ * bridge address are what a sandboxed agent uses to call back.
+ * `host.docker.internal` is the name the broker publishes inside the container.
+ * A wildcard bind also accepts this machine's own interface addresses, so a
+ * browser that opened the UI on a LAN address still matches.
+ */
+function allowedHostNames(cfg: HubConfig): Set<string> {
+	const names = new Set<string>([...LOOPBACK_HOST_NAMES, DOCKER_INTERNAL_HOST]);
+	const add = (raw: string | null | undefined) => {
+		const name = normalizeHostName(raw);
+		if (name) names.add(name);
+	};
+	add(cfg.host);
+	add(cfg.sandboxHost);
+	add(DOCKER_FRIENDLY_SANDBOX_HOST_DEFAULT);
+	add(dockerHostAddress());
+	if (isWildcardBind(cfg.host)) {
+		for (const addrs of Object.values(os.networkInterfaces())) {
+			for (const addr of addrs ?? []) {
+				if (addr.internal) continue;
+				add(addr.address);
+			}
+		}
+	}
+	return names;
+}
+
+function parsePort(raw: string): number | null {
+	if (!/^[0-9]+$/.test(raw)) return null;
+	const port = Number(raw);
+	if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+	return port;
+}
+
+/** Host header split into a name and an explicit port. A missing port is the HTTP default, 80. */
+function parseHostHeader(raw: string | string[] | undefined): { name: string; port: number } | null {
+	if (typeof raw !== "string") return null;
+	const value = raw.trim();
+	if (value === "" || /[\s,]/.test(value)) return null;
+	let name: string;
+	let port: number | null;
+	if (value.startsWith("[")) {
+		const end = value.indexOf("]");
+		if (end <= 1) return null;
+		name = value.slice(1, end);
+		const rest = value.slice(end + 1);
+		if (rest === "") port = 80;
+		else if (!rest.startsWith(":")) return null;
+		else port = parsePort(rest.slice(1));
+	} else {
+		const colon = value.lastIndexOf(":");
+		if (colon === -1) {
+			name = value;
+			port = 80;
+		} else if (value.indexOf(":") !== colon) {
+			return null;
+		} else {
+			name = value.slice(0, colon);
+			port = parsePort(value.slice(colon + 1));
+		}
+	}
+	if (name === "" || port === null) return null;
+	return { name, port };
+}
+
+function connectionPort(req: http.IncomingMessage, cfg: HubConfig): number {
+	const local = req.socket?.localPort;
+	if (typeof local === "number" && local > 0) return local;
+	return cfg.port;
+}
+
+interface AcceptedHost {
+	/** Raw Host header, safe to use as the base of `new URL`. */
+	header: string;
+	port: number;
+}
+
+function acceptedHost(cfg: HubConfig, req: http.IncomingMessage): AcceptedHost | null {
+	const raw = req.headers.host;
+	const parsed = parseHostHeader(raw);
+	if (!parsed || typeof raw !== "string") return null;
+	const port = connectionPort(req, cfg);
+	if (parsed.port !== port) return null;
+	const name = normalizeHostName(parsed.name);
+	if (!name || !allowedHostNames(cfg).has(name)) return null;
+	return { header: raw.trim(), port };
+}
+
+function headerText(value: string | string[] | undefined): string | undefined {
+	if (typeof value === "string") return value.trim().toLowerCase();
+	if (Array.isArray(value)) return value.join(",").trim().toLowerCase();
+	return undefined;
+}
+
+function isCrossSite(value: string | string[] | undefined): boolean {
+	const text = headerText(value);
+	if (!text) return false;
+	return text.split(",").some((part) => part.trim() === "cross-site");
+}
+
+function allowedOrigins(cfg: HubConfig, port: number): Set<string> {
+	const origins = new Set<string>();
+	for (const name of allowedHostNames(cfg)) {
+		const host = name.includes(":") ? `[${name}]` : name;
+		origins.add(`http://${host}:${port}`);
+	}
+	return origins;
+}
+
+/**
+ * State-changing browser requests must be from this hub's own origin.
+ * No Origin header means a non-browser client (CLI, MCP, awb, curl, a
+ * sandboxed agent) and is allowed. `Sec-Fetch-Site: cross-site` is refused
+ * even when Origin was stripped. Another port on 127.0.0.1 is same-site for
+ * cookies but a different origin, so it is refused here.
+ */
+function stateChangingOriginAllowed(cfg: HubConfig, req: http.IncomingMessage, port: number): boolean {
+	if (isCrossSite(req.headers["sec-fetch-site"])) return false;
+	const origin = headerText(req.headers.origin);
+	if (origin === undefined || origin === "") return true;
+	return allowedOrigins(cfg, port).has(origin);
+}
+
+function isStateChangingMethod(method: string | undefined): boolean {
+	return method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
+}
+
 export function createServer(cfg: HubConfig, log: Logger): http.Server {
 	// Every line this server hands its logger passes through redaction, so a
 	// step credential echoed in an agent error cannot land in the log.
@@ -1315,7 +1588,18 @@ export function createServer(cfg: HubConfig, log: Logger): http.Server {
 }
 
 function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, res: http.ServerResponse): void {
-	const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+	const host = acceptedHost(cfg, req);
+	if (!host) {
+		sendJson(res, 403, { error: "forbidden_host" });
+		req.resume();
+		return;
+	}
+	if (isStateChangingMethod(req.method) && !stateChangingOriginAllowed(cfg, req, host.port)) {
+		sendJson(res, 403, { error: "cross_origin" });
+		req.resume();
+		return;
+	}
+	const url = new URL(req.url ?? "/", `http://${host.header}`);
 	const parts = url.pathname.split("/").filter(Boolean);
 
 	if (req.method === "GET" && url.pathname === "/health") {
@@ -1411,6 +1695,13 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	// operator-gated (same as GET /api/device-link) but not role-gated: this
 	// is how the client learns the role. The body is only public metadata.
 	if (parts[1] === "catalog" && parts[2] === "sync" && parts[3] === "status" && !parts[4] && req.method === "GET") {
+		// Same operator gate as GET /api/permissions and POST /api/catalog/sync.
+		// `unauthorized` (not `login_required`) so the UI's 2s poll does not
+		// treat a signed-out tick as "the session was lost".
+		if (!isAdmin(cfg, req.headers)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
 		sendJson(res, 200, getCatalogSyncStatus());
 		return;
 	}
@@ -1542,6 +1833,19 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	if (parts[1] === "auth" && parts[2] === "setup" && !parts[3] && req.method === "POST") {
+		// Bound to loopback, only a local client can connect at all. Bound beyond
+		// loopback (docker-friendly 0.0.0.0, or any other non-loopback host), a
+		// LAN client could otherwise create the account and own the hub. Setup
+		// stays on the host; sign-in afterwards is unchanged.
+		if (hubListensBeyondLoopback(cfg.host) && !isLoopbackAddress(clientAddress(req))) {
+			sendJson(res, 403, {
+				error: "setup_loopback_only",
+				message:
+					"First-run setup is only available from this computer. On the machine running the hub, open http://127.0.0.1 and the hub's port and create the account there. Other machines can sign in after that.",
+			});
+			req.resume();
+			return;
+		}
 		// The door closes the moment the account exists — checked before even
 		// reading the body, and enforced again by the singleton CHECK constraint
 		// inside createAccount, so a raced double setup loses to a 409 either way.
@@ -1621,12 +1925,10 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 	}
 
 	// The forgot-password route: open by design (it's the recovery channel), so
-	// it carries the strictest throttle in the app — per-IP, 5 failures then a
-	// 15-minute hold, doubling on repeat (in-memory; a restart resetting it is
-	// acceptable for a 128-bit-token target).
+	// it carries the reset throttle (per token, short per address, short global).
 	if (parts[1] === "auth" && parts[2] === "password" && parts[3] === "reset" && !parts[4] && req.method === "POST") {
-		const throttleKey = req.socket.remoteAddress ?? "unknown";
-		const retryAfterSec = checkResetThrottle(throttleKey);
+		const throttleAddress = clientAddress(req);
+		const retryAfterSec = checkResetThrottle(throttleAddress, null);
 		if (retryAfterSec > 0) {
 			sendJson(res, 429, { error: "too_many_attempts", retryAfterSec });
 			return;
@@ -1640,7 +1942,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			}
 			const outcome = resetPasswordWithToken(recoveryToken, newPassword);
 			if (!outcome) {
-				const lockedForSec = registerResetFailure(throttleKey);
+				const lockedForSec = registerResetFailure(throttleAddress, hashRecoveryToken(recoveryToken));
 				if (lockedForSec > 0) {
 					sendJson(res, 429, { error: "too_many_attempts", retryAfterSec: lockedForSec });
 					return;
@@ -1648,7 +1950,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, 401, { error: "invalid_token" });
 				return;
 			}
-			resetThrottleClear(throttleKey);
+			resetThrottleClear(throttleAddress, hashRecoveryToken(recoveryToken));
 			// Less friction after a reset: the user is logged straight in (every
 			// OTHER session was just killed by the reset itself).
 			const session = createSession();

@@ -57,7 +57,7 @@ import { useToast } from "./components/Toast.tsx";
 import { NoticesBanner } from "./components/NoticesBanner.tsx";
 import { VoiceDock } from "./components/VoiceDock.tsx";
 import { useAdminToken } from "./hooks/useAdminToken.ts";
-import { setCatalogSyncStatusSnapshot } from "./hooks/useCatalogSyncStatus.ts";
+import { pollCatalogSyncStatus } from "./hooks/useCatalogSyncStatus.ts";
 import { getPermissionsOrigin, setPermissionsSnapshot, usePermissions } from "./hooks/usePermissions.ts";
 import { useDictation } from "./hooks/useDictation.ts";
 import { useIsMobile } from "./hooks/useIsMobile.ts";
@@ -406,13 +406,12 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 	}, []);
 
 	const refreshPermissions = useCallback(async (): Promise<void> => {
-		const [permissions, link, catalog] = await Promise.all([
+		const [permissions, link] = await Promise.all([
 			api.getPermissions(),
 			api.getDeviceLinkStatus().catch(() => null),
-			api.getCatalogSyncStatus().catch(() => null),
 		]);
 		setPermissionsSnapshot(permissions, link?.origin ?? null);
-		setCatalogSyncStatusSnapshot(catalog);
+		await pollCatalogSyncStatus();
 	}, []);
 
 	// Leaving the workflows view closes the "All workflows" page so a return to
