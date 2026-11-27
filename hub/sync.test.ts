@@ -535,6 +535,8 @@ test("announcement: sent with the D18 payload and the deterministic id; accepted
 			use_subagent: true,
 			max_retries: 2,
 			retry_interval_seconds: 0,
+			recover_on_failure: false,
+			max_recoveries: 1,
 		},
 	]);
 	assert.deepEqual(p.tcp_selections, []);
@@ -548,6 +550,27 @@ test("announcement: sent with the D18 payload and the deterministic id; accepted
 	const { token } = getSyncCredentials();
 	await runSyncTick({ hubConfig: loadConfig(), fetchImpl: mock.fetchImpl, config: syncCfg(token!) });
 	assert.equal(announcementsIn(mock, nextRemoteId).length, 1);
+});
+
+test("announcement: the step snapshot carries Failure recovery's recover_on_failure and max_recoveries", async () => {
+	const { next, nextRemoteId } = remoteSeriesWithClone();
+	const { addStep } = await import("./workflow.ts");
+	const on = addStep(next, "Recovers twice", { recoverOnFailure: true, maxRecoveries: 2 });
+	const off = addStep(next, "Never recovers", {});
+	saveStepMap(nextRemoteId, { ...stepMapOf(nextRemoteId), k_on: on.id, k_off: off.id });
+
+	const mock = createMockSyncServer();
+	mock.state.heartbeatCapabilities = { events: ANNOUNCE };
+	await runSyncTick({ hubConfig: loadConfig(), fetchImpl: mock.fetchImpl, config: syncCfg("") });
+
+	const sent = announcementsIn(mock, nextRemoteId);
+	assert.equal(sent.length, 1);
+	const steps = sent[0]!.payload.steps as Array<Record<string, unknown>>;
+	const byKey = new Map(steps.map((s) => [s.step_key, s]));
+	assert.equal(byKey.get("k_on")!.recover_on_failure, true);
+	assert.equal(byKey.get("k_on")!.max_recoveries, 2);
+	assert.equal(byKey.get("k_off")!.recover_on_failure, false, "default off");
+	assert.equal(byKey.get("k_off")!.max_recoveries, 1, "default budget 1");
 });
 
 test("announcement: queued once per cycle, and a failed push leaves announced_at NULL until the server answers", async () => {

@@ -1214,6 +1214,54 @@ export function setHookModel(hookUrl: string, model: string | null): boolean {
 	}
 }
 
+/** The name of a workflow's Failure recovery hook: its own hook's name plus `-recovery`. */
+export function recoveryHookName(hookName: string): string {
+	return `${hookName}-recovery`;
+}
+
+/**
+ * The prompt template of a Failure recovery hook. The recovery prompt is
+ * complete on its own (role, ids, URLs, token, curl examples — see
+ * recovery.ts), so the template only carries it through.
+ */
+export const RECOVERY_PROMPT_TEMPLATE = "{{payload}}";
+
+/**
+ * Creates or refreshes the Failure recovery hook of the workflow whose hook is
+ * `hookUrl`: `<name>-recovery`, a COPY of the workflow's hook (same runner,
+ * workdir, permission mode, sandbox block with its image, mounts and env, same
+ * secret) whose only differences are `model` (= `model`, or none for the CLI
+ * default) and the prompt template. Copied afresh every time, so a mount or a
+ * token the workflow's hook gained since is carried over too.
+ *
+ * Returns the recovery hook's URL and secret, or null when the workflow's hook
+ * is not on this machine's broker (a remote hook is not ours to copy) or
+ * hooks.json could not be written. Never throws.
+ */
+export function upsertRecoveryHook(hookUrl: string, model: string | null): { hookUrl: string; secret: string; name: string } | null {
+	try {
+		const info = inspectLocalHook(hookUrl);
+		if (!info.local || !info.found || !info.name) return null;
+		const cfg = loadAwbConfig();
+		const source = cfg.hooks[info.name];
+		if (!source) return null;
+		const name = recoveryHookName(info.name);
+		const copy = JSON.parse(JSON.stringify(source)) as Record<string, unknown>;
+		copy.promptTemplate = RECOVERY_PROMPT_TEMPLATE;
+		if (model) copy.model = model;
+		else delete copy.model;
+		const current = cfg.hooks[name];
+		if (!current || JSON.stringify(current) !== JSON.stringify(copy)) {
+			cfg.hooks[name] = copy;
+			writeAwbConfig(cfg);
+		}
+		const secret = typeof copy.secret === "string" ? copy.secret : "";
+		return { hookUrl: `http://${cfg.host}:${cfg.port}/hook/${encodeURIComponent(name)}`, secret, name };
+	} catch {
+		return null;
+	}
+}
+
 /**
  * Makes sure a GitHub-authenticated Docker hook carries the token the hub
  * resolves RIGHT NOW (see `ensureHookTokenEnv`). Called before every dispatch

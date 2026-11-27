@@ -7,7 +7,7 @@ description: >-
   workflow, use the create-workflow skill. Requires the Target hub running
   (npm start) and auth via TARGET MCP tools or curl with the admin token from
   ~/.target/config.json.
-TARGET_SKILL_VERSION: "6";
+TARGET_SKILL_VERSION: "7"
 managedBy: target
 ---
 
@@ -44,13 +44,35 @@ Use `add_step` or `edit_step` with the full form — no separate hub API call ne
   "useSubagent": true,
   "manualReview": true,
   "maxRetries": 2,
-  "retryIntervalSeconds": 15
+  "retryIntervalSeconds": 15,
+  "recoverOnFailure": true,
+  "maxRecoveries": 1
 }
 ```
 
 Steps another agent will run must be self-contained: always set `acceptanceCriteria`, and use `maxRetries` of at least 2.
 
-Omit `useSubagent` / `manualReview` only when you intentionally leave the stored value unchanged on **edit**; on **create**, set them explicitly.
+Omit `useSubagent` / `manualReview` / `recoverOnFailure` / `maxRecoveries` only when you intentionally leave the stored value unchanged on **edit**; on **create**, set them explicitly (or accept the defaults: recovery off, `maxRecoveries` 1).
+
+## Failure recovery
+
+A step with **Recover on failure** does not stop the workflow when it fails for good (its judge rejects it with no retries left, its pipeline fails with no retries left, or it times out with no retries left). Instead the workflow goes to status **`recovering`** and the hub sends a **recovery agent** that fixes the **plan, never the code**, then reopens the step and relaunches the workflow in its own conversation — or gives up, which leaves the step and the workflow `failed`. Infrastructure failures (hook down, usage limit, untrusted/revoked pipeline, a judge that could not run or answered unreadably, an operator abort) never trigger it.
+
+| Field | Where | Meaning |
+|-------|-------|---------|
+| `recoverOnFailure` | step (`add_step` / `edit_step`) | boolean, default `false` — the "Recover on failure" toggle |
+| `maxRecoveries` | step (`add_step` / `edit_step`) | integer ≥ 0, default `1` — how many recoveries the step may use; once used up it fails as before |
+| `recoveryCount` | step (read-only) | recoveries the step already used; owned by the hub, reset only by `restart_workflow` |
+| `recoveryModel` | workflow (`create_workflow`, `clone_workflow`, `set_recovery_model`) | model id the recovery agent runs with (one of the runner's `models[]` from `list_runners`); `null` = CLI default. Same runner, sandbox, workdir and permissions as the workflow |
+| `recovering` | workflow `status` | a recovery is running on the workflow; nothing else is dispatched on it |
+
+Tools:
+
+- `reopen_step` `{ workflowId, stepId }` — puts a **failed** step back to `pending` with its retries reset (`retryCount` 0), keeping `recoveryCount`; then `start_workflow` runs it again. Route: `POST /api/workflows/:id/steps/:stepId/reopen`.
+- `set_workflow_model` `{ workflowId, model }` — the workflow's own model (`null` = CLI default). Route: `PATCH /api/workflows/:id/model`.
+- `set_recovery_model` `{ workflowId, model }` — the recovery model (`null` = CLI default). Route: `PATCH /api/workflows/:id/recovery-model`.
+
+While a workflow is **`recovering`**, its steps cannot be added, edited, moved, deleted or reopened, and start/restart/run are refused (409 `{"error":"recovering"}`): only the recovery agent changes the plan. To stop a recovery, `POST /api/workflows/:id/recovery/abort` (it settles as gave up). The history is `GET /api/workflows/:id/recoveries`. Every change the recovery made is a "Recovery: <field>: before → after" note on the changed step. The recovery agent itself does **not** use this MCP: it uses a separate recovery API with a token valid only for that workflow and that recovery.
 
 ## Before mutating
 
@@ -59,7 +81,7 @@ Omit `useSubagent` / `manualReview` only when you intentionally leave the stored
 
 ## Rules
 
-- **Edit/delete steps** only while the step is `pending` (not started or done).
+- **Edit/delete steps** only while the step is `pending` (not started or done), and never while the workflow is `recovering`.
 - **Conversation context** is locked after `contextInjected` is true — restart the workflow to change it.
 - **Confirm with the operator** before `delete_workflow`.
 - Prefer `add_step` over restarting when extending a workflow.
@@ -77,6 +99,10 @@ Omit `useSubagent` / `manualReview` only when you intentionally leave the stored
 | Add step | POST | `/api/workflows/:id/steps` or MCP `add_step` |
 | Edit step | PATCH | `/api/workflows/:id/steps/:stepId` or MCP `edit_step` |
 | Delete step | DELETE | `/api/workflows/:id/steps/:stepId` |
+| Reopen failed step | POST | `/api/workflows/:id/steps/:stepId/reopen` or MCP `reopen_step` |
+| Workflow model | PATCH | `/api/workflows/:id/model` body `{ "model" }` or MCP `set_workflow_model` |
+| Recovery model | PATCH | `/api/workflows/:id/recovery-model` body `{ "recoveryModel" }` or MCP `set_recovery_model` |
+| Abort a recovery | POST | `/api/workflows/:id/recovery/abort` |
 | Start | POST | `/api/workflows/:id/start` |
 | Archive | POST | `/api/workflows/:id/archive` (completed/failed only; 409 `not_archivable`) or MCP `archive_workflow` |
 | Unarchive | POST | `/api/workflows/:id/unarchive` or MCP `unarchive_workflow` |

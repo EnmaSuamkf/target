@@ -25,7 +25,9 @@ import {
 	ensureHookMounts,
 	defaultSandboxImage,
 	hookRuntime,
+	recoveryHookName,
 	setHookModel,
+	upsertRecoveryHook,
 	PUBLISHABLE_RUNNERS,
 	type HookOptions,
 	type PublishablePermissionMode,
@@ -119,6 +121,22 @@ import {
 	type Workflow,
 	type WorkflowStatus,
 	insertStepNote,
+	appendRecoveryChange,
+	failReopenedStep,
+	finishRecovery,
+	getRecovery,
+	getRunningRecovery,
+	incrementRecoveryCount,
+	insertRecovery,
+	listRunningRecoveries,
+	markRecoveryRunStarted,
+	recordRecoveryResult,
+	reopenStepRow,
+	setRecoveryNotification,
+	setWorkflowRecoveryModel,
+	updateStepRecoveryConfig,
+	type Recovery,
+	type RecoveryFailureKind,
 } from "./db.ts";
 import {
 	deletePipelineRunsForWorkflow,
@@ -140,7 +158,10 @@ import {
 	type ScheduleFieldError,
 	type ScheduleSpec,
 } from "./schedule.ts";
-import { sendManualReviewNotification, sendWorkflowCompletedNotification } from "./notifier.ts";
+import { sendManualReviewNotification, sendRecoveryNotification, sendWorkflowCompletedNotification } from "./notifier.ts";
+import { buildRecoveryPrompt } from "./recovery-prompt.ts";
+import { registerSecret } from "./redact.ts";
+import { hubHostForStep } from "./sandbox-net.ts";
 import { forgetProbe, humanizeSeconds, probeStepProgress, pruneProbes, stepActivity } from "./progress.ts";
 import { dispatchStep, type Logger } from "./runner.ts";
 import { lockStepResults, stepResultsDir, unlockStepResults, writeStepResults } from "./step-results.ts";
@@ -288,6 +309,7 @@ function timeoutError(step: Step, reason: TimeoutReason, cfg: HubConfig): string
  */
 export function expireStale(cfg: HubConfig, log: Logger): void {
 	refreshProgress(cfg);
+	expireStaleRecoveries(cfg, log);
 	const candidates = findTimeoutCandidates({
 		idleTimeoutMs: cfg.stepIdleTimeoutMs,
 		hardTimeoutMs: cfg.stepHardTimeoutMs,
@@ -342,6 +364,7 @@ export function expireStale(cfg: HubConfig, log: Logger): void {
 			// A branch agent that timed out: the retry budget belongs to the pipeline,
 			// and re-dispatching this step would re-send its description to an agent.
 			branchJobSteps.delete(stepId);
+			if (recoverAfterTimeout(stepId, workflowId, error, cfg, log)) continue;
 			if (step.manualRun) settleManual(workflowId, log);
 			else failedWorkflowIds.add(workflowId);
 			continue;
@@ -360,6 +383,8 @@ export function expireStale(cfg: HubConfig, log: Logger): void {
 			if (retried) void retryTimedOutStep(retried, workflow, cfg, log);
 			continue;
 		}
+		// No retries left: Failure recovery, when the step asks for it.
+		if (recoverAfterTimeout(stepId, workflowId, error, cfg, log)) continue;
 		failedWorkflowIds.add(workflowId);
 	}
 	for (const workflowId of failedWorkflowIds) {
@@ -371,6 +396,25 @@ export function expireStale(cfg: HubConfig, log: Logger): void {
 		writeStatusMd(workflowId);
 	}
 	healSettledStatuses(log);
+}
+
+/**
+ * A timeout with no retries left, on a step with "Recover on failure": the
+ * workflow goes `recovering` and a recovery starts (fire-and-forget: the sweep
+ * runs on read paths). Only for a workflow the engine was driving (`running`)
+ * or a ▶ run. Returns whether it took the step.
+ */
+function recoverAfterTimeout(stepId: string, workflowId: string, error: string, cfg: HubConfig, log: Logger): boolean {
+	const step = getStep(stepId);
+	const workflow = getWorkflow(workflowId);
+	if (!step || !workflow || !recoveryEligible(step)) return false;
+	if (workflow.status !== "running" && !step.manualRun) return false;
+	setWorkflowStatus(workflowId, "recovering");
+	void beginRecovery(stepId, "timeout", error, cfg, log).catch((err: unknown) =>
+		log(`step ${stepId} recovery failed to start: ${String(err)}`, "error"),
+	);
+	writeStatusMd(workflowId);
+	return true;
 }
 
 /**
@@ -614,6 +658,7 @@ export function forceStepStatus(
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
 	refuseContextStep(step);
+	refuseRecovering(workflow, "operator");
 	if (!OVERRIDABLE_STEP_STATUSES.includes(status)) {
 		throw new WorkflowError(`a step's status can only be set to ${OVERRIDABLE_STEP_STATUSES.join(", ")}`);
 	}
@@ -654,6 +699,7 @@ export function forceStepStatus(
 export function forceWorkflowStatus(workflowId: string, status: OverridableWorkflowStatus, log: Logger): Workflow {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
+	refuseRecovering(workflow, "operator");
 	if (!OVERRIDABLE_WORKFLOW_STATUSES.includes(status)) {
 		throw new WorkflowError(`a workflow's status can only be set to ${OVERRIDABLE_WORKFLOW_STATUSES.join(", ")}`);
 	}
@@ -1282,6 +1328,8 @@ export function createWorkflow(
 		dockerMounts?: string[];
 		conversationContext?: string | null;
 		adoptedSessionId?: string | null;
+		/** Failure recovery model (validated by the caller); omitted/null = the CLI default. */
+		recoveryModel?: string | null;
 	} = {},
 ): Workflow {
 	const trimmed = name.trim();
@@ -1314,15 +1362,24 @@ export function createWorkflow(
 		dockerMounts,
 	});
 	syncWorkflowDockerMounts(workflow);
+	if (options.recoveryModel) {
+		setWorkflowRecoveryModel(workflow.id, options.recoveryModel);
+		upsertRecoveryHook(workflow.hookUrl, options.recoveryModel);
+	}
 	// Before writeStatusMd, so a workflow created with a context has that step in
 	// its progress file from the first write rather than only after the next edit.
 	reconcileContextStep(workflow.id);
 	writeStatusMd(workflow.id);
 	reportEmit("workflow.created", {
 		workflowId: workflow.id,
-		data: { name: workflow.name, agent_name: workflow.agentName, ...workflowRuntimeMeta(workflow.hookUrl) },
+		data: {
+			name: workflow.name,
+			agent_name: workflow.agentName,
+			...workflowRuntimeMeta(workflow.hookUrl),
+			recovery_model: options.recoveryModel ?? null,
+		},
 	});
-	return workflow;
+	return getWorkflow(workflow.id) ?? workflow;
 }
 
 /** Replaces a workflow's docker-only bind mounts and rewrites its awb hook. */
@@ -1360,6 +1417,19 @@ export function updateWorkflowDockerMounts(workflowId: string, mounts: string[])
 }
 
 /**
+ * The metadata a `workflow.updated` reports (and its digest is taken over):
+ * name, agent, runtime, and Failure recovery's model (null = the CLI default).
+ */
+function workflowReportMeta(workflow: Workflow): Record<string, unknown> {
+	return {
+		name: workflow.name,
+		agent_name: workflow.agentName,
+		...workflowRuntimeMeta(workflow.hookUrl),
+		recovery_model: workflow.recoveryModel ?? null,
+	};
+}
+
+/**
  * The runtime facts the report dashboard shows per workflow: which agent CLI
  * runs the steps and where (host or docker image). Read back from the hook
  * (same source `publicWorkflow` uses) so defaults the hook applied are
@@ -1393,17 +1463,8 @@ function backfillLegacyReportDigests(): void {
 		try {
 			const workflow = getWorkflow(id);
 			if (!workflow) continue;
-			const metaDigest = JSON.stringify({
-				name: workflow.name,
-				agent_name: workflow.agentName,
-				...workflowRuntimeMeta(workflow.hookUrl),
-			});
-			const planDigest = JSON.stringify({
-				name: workflow.name,
-				status: workflow.status,
-				status_manual: workflow.statusManual === true,
-				steps: listSteps(workflow.id).map(planStep),
-			});
+			const metaDigest = JSON.stringify(workflowReportMeta(workflow));
+			const planDigest = JSON.stringify(planPayload(workflow, listSteps(workflow.id)));
 			setReportedDigests(id, { meta: metaDigest, plan: planDigest });
 		} catch {
 			// Best-effort: a workflow that can't be read/serialized just stays
@@ -1450,7 +1511,7 @@ export function announceWorkflows(): void {
 	if (!rc.enabled) return;
 	for (const workflow of listWorkflows()) {
 		try {
-			const data = { name: workflow.name, agent_name: workflow.agentName, ...workflowRuntimeMeta(workflow.hookUrl) };
+			const data = workflowReportMeta(workflow);
 			const digest = JSON.stringify(data);
 			if (getReportedDigests(workflow.id).meta !== digest) {
 				reportEmit("workflow.updated", { workflowId: workflow.id, data }, rc);
@@ -1494,10 +1555,7 @@ export function renameWorkflow(workflowId: string, name: string): Workflow {
 	if (!renamed) throw new WorkflowError("workflow disappeared");
 	// The dashboard resolves a workflow's display name from the LATEST event
 	// that carries one, so this doubles as the rename notification.
-	reportEmit("workflow.updated", {
-		workflowId,
-		data: { name: renamed.name, agent_name: renamed.agentName, ...workflowRuntimeMeta(renamed.hookUrl) },
-	});
+	reportEmit("workflow.updated", { workflowId, data: workflowReportMeta(renamed) });
 	return renamed;
 }
 
@@ -1612,6 +1670,8 @@ export interface CloneOverrides {
 	permissionMode?: PublishablePermissionMode | null;
 	/** Absent inherits the source's model (only while the runner is unchanged); empty/null = CLI default. */
 	model?: string | null;
+	/** Failure recovery's model, by the same rule as `model`. */
+	recoveryModel?: string | null;
 	runner?: PublishableRunner | null;
 	sandbox?: PublishableSandbox | null;
 	image?: string | null;
@@ -1697,6 +1757,11 @@ export function cloneWorkflow(workflowId: string, overrides: CloneOverrides = {}
 	// A model id belongs to one runner: a clone moved to another runner must not
 	// carry the source's id into a CLI that has never heard of it.
 	const model = pick(overrides.model, runner === (sourceRunner ?? "claude") ? (runtime.model ?? undefined) : undefined);
+	// Same for Failure recovery's model: it is an id of the source's runner.
+	const recoveryModel = pick(
+		overrides.recoveryModel,
+		runner === (sourceRunner ?? "claude") ? (source.recoveryModel ?? undefined) : undefined,
+	);
 	// The image only means anything to a docker sandbox: a clone moved onto the
 	// host must not carry the original's image into a hook that won't use it.
 	// A default image belongs to the runner it was derived for: moving the clone to
@@ -1715,6 +1780,7 @@ export function cloneWorkflow(workflowId: string, overrides: CloneOverrides = {}
 		...(runner ? { runner } : {}),
 		...(permissionMode ? { permissionMode } : {}),
 		...(model ? { model } : {}),
+		...(recoveryModel ? { recoveryModel } : {}),
 		...(sandbox ? { sandbox } : {}),
 		...(image ? { image } : {}),
 		...(sandbox === "docker" ? { dockerMounts } : {}),
@@ -1746,6 +1812,8 @@ export function cloneWorkflow(workflowId: string, overrides: CloneOverrides = {}
 			useSubagent: step.useSubagent,
 			maxRetries: step.maxRetries,
 			retryIntervalSeconds: step.retryIntervalSeconds,
+			recoverOnFailure: step.recoverOnFailure,
+			maxRecoveries: step.maxRecoveries,
 			kind: step.kind,
 			pipelineId: step.pipelineId,
 			pipelineInputs: step.pipelineInputs,
@@ -1951,6 +2019,8 @@ export function removeWorkflow(workflowId: string): void {
 	// cancel so the transition is observed the same way; past instances stay.
 	if (workflow.scheduleState === "armed") cancelSchedule(workflowId, { actor: workflow.managedBy });
 	deleteAwbHook(workflow.agentName);
+	// Its Failure recovery hook, when it has one (best-effort, like the hook above).
+	deleteAwbHook(recoveryHookName(workflow.agentName));
 	fs.rmSync(workflow.mdPath, { force: true });
 	// The agent-facing copies of its results live under ~/.target/steps/<agent
 	// name>/ — the hub's own directory, so removing the workflow removes them too.
@@ -2066,6 +2136,14 @@ export function assertTemplateCommandSteps(steps: TemplateStep[], sandboxed: boo
 	}
 }
 
+/** `maxRecoveries` must be an integer ≥ 0 when given. */
+function assertMaxRecoveries(value: number | undefined): void {
+	if (value === undefined) return;
+	if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+		throw new WorkflowError("maxRecoveries must be an integer ≥ 0");
+	}
+}
+
 export function addStep(
 	workflowId: string,
 	description: string,
@@ -2090,10 +2168,18 @@ export function addStep(
 		onSuccessTask?: string | null;
 		/** A command step's on-failure agent task. */
 		onFailureTask?: string | null;
+		/** Failure recovery toggle ("Recover on failure"). Omitted = off. */
+		recoverOnFailure?: boolean;
+		/** Failure recovery budget (integer ≥ 0). Omitted = 1. */
+		maxRecoveries?: number;
+		/** Who adds it: while a recovery runs, only the recovery may. */
+		actor?: StepActor;
 	} = {},
 ): Step {
 	const workflow = getWorkflow(workflowId);
 	if (!workflow) throw new WorkflowError("unknown workflow");
+	refuseRecovering(workflow, options.actor);
+	assertMaxRecoveries(options.maxRecoveries);
 	const kind: StepKind = options.kind ?? "task";
 	if (kind === "context") throw new WorkflowError("the context step is hub-owned");
 	let trimmed = description.trim();
@@ -2142,6 +2228,8 @@ export function addStep(
 		pipelineInputs: kind === "command" ? (options.pipelineInputs ?? {}) : null,
 		onSuccessTask: kind === "command" ? (options.onSuccessTask ?? null) : null,
 		onFailureTask: kind === "command" ? (options.onFailureTask ?? null) : null,
+		recoverOnFailure: options.recoverOnFailure === true,
+		maxRecoveries: options.maxRecoveries ?? 1,
 	});
 	// Report the step list itself — lifecycle events alone can't reconstruct
 	// what was PLANNED (a pending step emits nothing until it runs). Task steps
@@ -2192,11 +2280,19 @@ export function editStep(
 		onSuccessTask?: string | null;
 		/** A command step's on-failure agent task. Omitted = unchanged; null or blank = none. */
 		onFailureTask?: string | null;
+		/** Failure recovery toggle. Omitted = unchanged. */
+		recoverOnFailure?: boolean;
+		/** Failure recovery budget (integer ≥ 0). Omitted = unchanged. */
+		maxRecoveries?: number;
+		/** Who edits it: while a recovery runs, only the recovery may. */
+		actor?: StepActor;
 	} = {},
 ): Step {
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
 	refuseContextStep(step);
+	refuseRecovering(getWorkflow(workflowId), options.actor);
+	assertMaxRecoveries(options.maxRecoveries);
 	if (step.status === "running" || step.status === "queued") throw new WorkflowError("cannot edit a step while its job is running");
 	// A step held at its gate has already produced the result the human is
 	// reviewing — editing the task under them (or switching the gate off from
@@ -2256,15 +2352,20 @@ export function editStep(
 			retryIntervalSeconds: options.retryIntervalSeconds ?? step.retryIntervalSeconds,
 		});
 	}
+	// Only the fields the caller sent: an edit that omits them keeps the stored values.
+	if (options.recoverOnFailure !== undefined || options.maxRecoveries !== undefined) {
+		updateStepRecoveryConfig(stepId, { recoverOnFailure: options.recoverOnFailure, maxRecoveries: options.maxRecoveries });
+	}
 	writeStatusMd(workflowId);
 	const updated = getStep(stepId);
 	if (!updated) throw new WorkflowError("step disappeared");
 	return updated;
 }
 
-export function removeStep(workflowId: string, stepId: string): void {
+export function removeStep(workflowId: string, stepId: string, options: { actor?: StepActor } = {}): void {
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
+	refuseRecovering(getWorkflow(workflowId), options.actor);
 	// The context step is removed by clearing the workflow's conversation context,
 	// which is the thing it mirrors — deleting the row directly would leave a
 	// context that says it will be delivered and nothing to deliver it.
@@ -2303,9 +2404,15 @@ export type StepMoveDirection = "up" | "down";
  *   `CONTEXT_STEP_ORDER_INDEX`, before everything), so it neither moves nor is
  *   moved past. Only `task` steps are considered as neighbours.
  */
-export function moveStep(workflowId: string, stepId: string, direction: StepMoveDirection): Step {
+export function moveStep(
+	workflowId: string,
+	stepId: string,
+	direction: StepMoveDirection,
+	options: { actor?: StepActor } = {},
+): Step {
 	const step = getStep(stepId);
 	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
+	refuseRecovering(getWorkflow(workflowId), options.actor);
 	refuseContextStep(step);
 	if (step.status !== "pending") throw new WorkflowError("only a pending step can be moved");
 	const tasks = listSteps(workflowId).filter((s) => s.kind !== "context");
@@ -2429,6 +2536,8 @@ function reconcileStatus(workflowId: string, log?: Logger): boolean {
 	// `setWorkflowStatus`'s `manual` option). Without this the whole override
 	// feature would be undone by the next poll: this function runs on every read.
 	if (workflow.statusManual) return false;
+	// A running Failure recovery owns the badge until it relaunches or gives up.
+	if (workflow.status === "recovering") return false;
 	// A step held at its manual-review gate owns the badge: the workflow is
 	// `waiting` until a human releases it, whatever the other steps add up to.
 	// Without this the heal would "settle" a workflow whose only unfinished step
@@ -2664,7 +2773,7 @@ async function executeCommandRun(
 		await startBranchAgent(step, "on_failure", { report, error, jobSteps: result.steps }, cfg, log);
 		return;
 	}
-	await failCommandAttempt(step, cfg, log, error, { report, jobSteps: result.steps });
+	await failCommandAttempt(step, cfg, log, error, { report, jobSteps: result.steps, ran: true });
 }
 
 // --- Branch agents (docs/pipelines.md, "Branch agents") ---------------------
@@ -2773,6 +2882,7 @@ async function onBranchResult(
 	await failCommandAttempt(getStep(step.id) ?? step, cfg, log, step.error ?? "pipeline failed", {
 		report: combined,
 		jobSteps,
+		ran: true,
 	});
 }
 
@@ -2810,7 +2920,12 @@ async function failCommandAttempt(
 	cfg: HubConfig,
 	log: Logger,
 	error: string,
-	outcome: { report?: string; jobSteps?: JobStepState[] } = {},
+	outcome: {
+		report?: string;
+		jobSteps?: JobStepState[];
+		/** The pipeline actually ran (a run that failed), as opposed to a refusal before anything ran. Only then may Failure recovery apply. */
+		ran?: boolean;
+	} = {},
 ): Promise<void> {
 	if (!getStep(step.id)) return;
 	completeStep(step.id, { ok: false, result: outcome.report, error });
@@ -2835,8 +2950,16 @@ async function failCommandAttempt(
 		);
 		return;
 	}
-	setWorkflowStatus(failed.workflowId, "failed");
+	// The final failure of a pipeline that RAN: Failure recovery, when the step
+	// asks for it. A refusal before anything ran (untrusted, revoked, missing
+	// pipeline) never gets here with `ran`, so it fails the workflow as before.
+	const recover = outcome.ran === true && recoveryEligible(failed);
+	setWorkflowStatus(failed.workflowId, recover ? "recovering" : "failed");
 	writeStatusMd(failed.workflowId);
+	if (recover) {
+		await beginRecovery(failed.id, "command_failed", error, cfg, log);
+		return;
+	}
 	log(`workflow ${failed.workflowId} failed at step ${failed.id}: ${error}`, "error");
 }
 
@@ -3038,6 +3161,7 @@ export async function startWorkflow(
 	if (!workflow) throw new WorkflowError("unknown workflow");
 	refuseArchived(workflow);
 	refuseScheduledArmed(workflow);
+	refuseRecovering(workflow, "operator");
 	if (workflow.status === "completed" || workflow.status === "failed") {
 		throw new WorkflowError(`workflow is ${workflow.status} — use restart instead`);
 	}
@@ -3155,6 +3279,7 @@ export async function restartWorkflow(
 	refuseArchived(workflow);
 	refuseScheduledArmed(workflow);
 	if (workflow.status === "running") throw new WorkflowError("pause the workflow before restarting it");
+	refuseRecovering(workflow, "operator");
 	// Selection first, so resetSteps only wipes the chosen steps.
 	setStepSelection(workflowId, stepIds);
 	resetSteps(workflowId);
@@ -3270,10 +3395,15 @@ function failWorkflowAt(
 	workflowId: string,
 	error: string,
 	log: Logger,
-	options: { report?: boolean } = {},
+	options: { report?: boolean; recover?: boolean } = {},
 ): void {
-	completeStep(stepId, { ok: false, error });
-	setWorkflowStatus(workflowId, "failed");
+	// A step going into a recovery keeps the result it was judged on: that result
+	// is what the recovery agent has to read. Without a recovery the row is
+	// written exactly as before.
+	const kept = options.recover ? (getStep(stepId)?.result ?? undefined) : undefined;
+	completeStep(stepId, { ok: false, error, ...(kept !== undefined ? { result: kept } : {}) });
+	// `recover`: the caller is about to start a Failure recovery for this step.
+	setWorkflowStatus(workflowId, options.recover ? "recovering" : "failed");
 	const failed = options.report === false ? null : getStep(stepId);
 	if (failed) {
 		reportStepEvent(failed, "step.failed", {
@@ -3379,6 +3509,21 @@ export function resetPlanDigestCacheForTests(): void {
 	lastPlanDigest.clear();
 }
 
+/**
+ * The `workflow.plan` snapshot (and the digest it is deduplicated by). The
+ * status may be `recovering` while a Failure recovery runs; `recovery_model` is
+ * the model it runs with (null = the CLI default).
+ */
+function planPayload(workflow: Workflow, steps: readonly Step[]): Record<string, unknown> {
+	return {
+		name: workflow.name,
+		status: workflow.status,
+		status_manual: workflow.statusManual === true,
+		recovery_model: workflow.recoveryModel ?? null,
+		steps: steps.map(planStep),
+	};
+}
+
 /** One step, as the canvas needs to see it (mirrors `CanvasStep` in the UI). */
 function planStep(step: Step): Record<string, unknown> {
 	return {
@@ -3396,6 +3541,11 @@ function planStep(step: Step): Record<string, unknown> {
 		manual_run: step.manualRun === true,
 		max_retries: step.maxRetries ?? 0,
 		retry_count: step.retryCount ?? 0,
+		// Failure recovery (contract with target-server): the per-step toggle, its
+		// budget and how much of it is used.
+		recover_on_failure: step.recoverOnFailure === true,
+		max_recoveries: step.maxRecoveries ?? 1,
+		recovery_count: step.recoveryCount ?? 0,
 		// When the next attempt is due (null outside a retry wait). It rides in the
 		// snapshot written right after `beginRetry`, so the target-server can show the wait.
 		retry_at: step.retryAt ?? null,
@@ -3446,12 +3596,7 @@ function reportPlan(workflow: Workflow, steps: readonly Step[]): void {
 	const rc = loadReportConfig();
 	if (!rc.enabled) return;
 	try {
-		const payload = {
-			name: workflow.name,
-			status: workflow.status,
-			status_manual: workflow.statusManual === true,
-			steps: steps.map(planStep),
-		};
+		const payload = planPayload(workflow, steps);
 		const body = JSON.stringify(payload);
 		if (lastPlanDigest.get(workflow.id) === body) return;
 		if (getReportedDigests(workflow.id).plan === body) {
@@ -3900,7 +4045,9 @@ async function onManualJudgeVerdict(
 	// Rejected. Out of retries → fail; otherwise re-run the same manual step.
 	if (step.retryCount >= step.maxRetries) {
 		const error = `rejected by the judge after ${step.retryCount} retry(ies): ${verdict.reason || "(no reason given)"}`;
-		completeStep(step.id, { ok: false, error });
+		// Kept for the recovery agent to read when one follows (see failWorkflowAt).
+		const kept = recoveryEligible(step) ? (step.result ?? undefined) : undefined;
+		completeStep(step.id, { ok: false, error, ...(kept !== undefined ? { result: kept } : {}) });
 		const err = reportError(step, "judge", "judge_rejected", verdict.reason);
 		reportStepEvent(getStep(step.id) ?? step, "step.judged", {
 			ok: false,
@@ -3910,6 +4057,14 @@ async function onManualJudgeVerdict(
 		});
 		reportManualSettle("step.failed", { phase: "judge", max_retries: step.maxRetries, error: err });
 		log(`step ${step.id} (on-demand run) failed: rejected by the judge`, "error");
+		// The judge's final rejection of a ▶ run would fail the workflow (the
+		// settle derives `failed`): Failure recovery, when the step asks for it.
+		if (recoveryEligible(step)) {
+			setWorkflowStatus(step.workflowId, "recovering");
+			writeStatusMd(step.workflowId);
+			await beginRecovery(step.id, "judge_rejected", error, cfg, log);
+			return;
+		}
 		settleManual(step.workflowId, log);
 		return;
 	}
@@ -3997,13 +4152,16 @@ async function onJudgeVerdict(
 
 	// Rejected. Out of retries → fail; otherwise re-run the same step with feedback.
 	if (step.retryCount >= step.maxRetries) {
+		const rejection = `rejected by the judge after ${step.retryCount} retry(ies): ${verdict.reason || "(no reason given)"}`;
+		// The judge's final rejection: Failure recovery, when the step asks for it.
+		const recover = recoveryEligible(step);
 		failWorkflowAt(
 			step.id,
 			step.workflowId,
-			`rejected by the judge after ${step.retryCount} retry(ies): ${verdict.reason || "(no reason given)"}`,
+			rejection,
 			log,
 			// This path emits its own pair below, carrying the verdict's reason.
-			{ report: false },
+			{ report: false, recover },
 		);
 		const failed = getStep(step.id) ?? step;
 		const wfFailed = getWorkflow(step.workflowId);
@@ -4017,6 +4175,7 @@ async function onJudgeVerdict(
 			error: err,
 		});
 		if (wfFailed) reportUsageSnapshot(wfFailed, failed);
+		if (recover) await beginRecovery(step.id, "judge_rejected", rejection, cfg, log);
 		return;
 	}
 
@@ -4085,6 +4244,7 @@ export async function runStep(workflowId: string, stepId: string, cfg: HubConfig
 	// outside the sequential engine, which is neither what "before every other
 	// step" means nor something the operator can undo. Restart re-primes it.
 	refuseContextStep(step);
+	refuseRecovering(workflow, "operator");
 	if (listSteps(workflowId).some((s) => s.status === "running" || s.status === "queued")) {
 		throw new WorkflowError("a step is already running for this workflow");
 	}
@@ -4246,4 +4406,386 @@ function abortNoteText(outcome: AbortOutcome): string {
 	if (outcome.result === "cancelled_queued") return "Abort: cancelled before it started";
 	if (outcome.result === "not_running") return "Abort: nothing was running";
 	return `Abort: COULD NOT confirm the agent stopped (${outcome.result}) — it may still be running; check the workdir`;
+}
+
+// --- Failure recovery ---------------------------------------------------------
+//
+// A step with "Recover on failure" (`recoverOnFailure`) that fails FOR GOOD —
+// the judge's final rejection, a command step's final failure (after its
+// on-failure agent, no retries left), or a timeout with no retries left — does
+// not stop the workflow. The workflow goes `recovering`, the step's
+// `recoveryCount` grows by one, and a recovery agent is dispatched to the
+// workflow's second hook (`<agentName>-recovery`: same runner, workdir, sandbox
+// and permission mode, its own model) in a NEW session. That agent reads why the
+// step failed and changes the PLAN through the recovery API (recovery.ts),
+// authenticated by a token that is valid for this workflow and only while this
+// recovery runs. It never edits code: the step's own agent does that when the
+// step runs again.
+//
+// It ends one of two ways:
+//  - relaunch: the failed step is reopened (pending, retryCount 0, recoveryCount
+//    kept) and the workflow continues in its own conversation with every pending
+//    step selected → `step.recovery` "relaunched" + a notification;
+//  - give up: the agent's turn ends without a relaunch, its run fails, it asks
+//    to give up, or the operator aborts it → the step stays failed, the workflow
+//    `failed`, `step.recovery` "gave_up" + a notification.
+//
+// Infrastructure failures never trigger it (a hook that is down, a usage limit,
+// a pipeline refused before anything ran, an unparseable verdict, a judge that
+// could not run, an abort): those call sites keep failing the workflow as before.
+// With the toggle off nothing here runs at all.
+
+/** Thrown by the operator-facing mutators while a recovery owns the workflow. */
+export class WorkflowRecoveringError extends WorkflowError {
+	constructor(message = "a Failure recovery is running on this workflow — wait for it to end, or abort it") {
+		super(message);
+		this.name = "WorkflowRecoveringError";
+	}
+}
+
+/** Who is calling a step mutator: the operator (UI, MCP, sync) or the recovery API. */
+export type StepActor = "operator" | "recovery";
+
+/** While a recovery runs, only the recovery itself may change the workflow's steps. */
+function refuseRecovering(workflow: Workflow | null, actor: StepActor | undefined): void {
+	if (workflow?.status === "recovering" && actor !== "recovery") throw new WorkflowRecoveringError();
+}
+
+/** Whether a step that just failed for good gets a recovery instead of failing the workflow. */
+export function recoveryEligible(step: Step): boolean {
+	return step.kind !== "context" && step.recoverOnFailure === true && step.recoveryCount < step.maxRecoveries;
+}
+
+/** How long a recovery run may take before the watchdog gives up on it. */
+function recoveryTimeoutMs(cfg: HubConfig): number {
+	return cfg.stepHardTimeoutMs;
+}
+
+function hashRecoveryToken(token: string): string {
+	return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+/** The step's 1-based number as the UI shows it. */
+function stepNumber(step: Step): number {
+	return step.orderIndex + 1;
+}
+
+/** A human label for a failure kind, used in the prompt and the logs. */
+export function failureKindLabel(kind: RecoveryFailureKind): string {
+	if (kind === "judge_rejected") return "its judge rejected the result and no retries were left";
+	if (kind === "command_failed") return "its pipeline failed and no retries were left";
+	return "it timed out and no retries were left";
+}
+
+/**
+ * Starts a recovery for a step that just failed for good. The caller has
+ * already recorded the failure and set the workflow `recovering` (both
+ * synchronously, before this is awaited). Everything up to the hook POST is
+ * synchronous too, so a fire-and-forget caller (the timeout sweep) still sees
+ * `recoveryCount` and the recovery row in place when it returns.
+ */
+async function beginRecovery(
+	stepId: string,
+	kind: RecoveryFailureKind,
+	reason: string,
+	cfg: HubConfig,
+	log: Logger,
+): Promise<void> {
+	const step = getStep(stepId);
+	const workflow = step ? getWorkflow(step.workflowId) : null;
+	if (!step || !workflow) return;
+	incrementRecoveryCount(stepId);
+	const token = crypto.randomBytes(32).toString("hex");
+	registerSecret(token);
+	const recovery = insertRecovery({ workflowId: workflow.id, stepId, failureKind: kind, reason, tokenHash: hashRecoveryToken(token) });
+	if (getWorkflow(workflow.id)?.status !== "recovering") setWorkflowStatus(workflow.id, "recovering");
+	const started = getStep(stepId) ?? step;
+	reportStepEvent(started, "step.recovery", {
+		action: "started",
+		reason,
+		changes: "",
+		recovery_id: recovery.id,
+		failure_kind: kind,
+		recovery_count: started.recoveryCount,
+		max_recoveries: started.maxRecoveries,
+	});
+	writeStatusMd(workflow.id);
+	log(
+		`step ${stepId} failed for good (${kind}) — Failure recovery ${started.recoveryCount}/${started.maxRecoveries} started (recovery ${recovery.id})`,
+		"warning",
+	);
+
+	const hook = upsertRecoveryHook(workflow.hookUrl, workflow.recoveryModel);
+	if (!hook) {
+		await settleRecoveryGaveUp(recovery.id, "the recovery hook could not be prepared (the workflow's hook is not on this machine)", log);
+		return;
+	}
+	const sandboxed = hookRuntime(workflow.hookUrl).sandbox != null;
+	const baseUrl = `http://${hubHostForStep(cfg, sandboxed)}:${cfg.port}`;
+	const brokerOrigin = `http://127.0.0.1:${cfg.port}`;
+	const input = buildRecoveryPrompt({
+		workflowId: workflow.id,
+		workflowName: workflow.name,
+		step: started,
+		failureKind: kind,
+		failureLabel: failureKindLabel(kind),
+		reason,
+		baseUrl,
+		token,
+	});
+	const callbackUrl = `${brokerOrigin}/api/recoveries/${recovery.id}/result?token=${recovery.callbackToken}`;
+	const startedCallbackUrl = `${brokerOrigin}/api/recoveries/${recovery.id}/started?token=${recovery.callbackToken}`;
+	try {
+		// No `sessionid` header: the recovery runs in a NEW session, never in the
+		// workflow's own conversation.
+		const res = await fetch(hook.hookUrl, {
+			method: "POST",
+			headers: { "content-type": "application/json", "x-webhook-secret": hook.secret },
+			body: JSON.stringify({ jobId: recovery.id, input, callbackUrl, startedCallbackUrl }),
+			signal: AbortSignal.timeout(10_000),
+		});
+		if (!res.ok) {
+			await settleRecoveryGaveUp(recovery.id, `the recovery could not be dispatched (hook answered ${res.status})`, log);
+			return;
+		}
+		log(`recovery ${recovery.id} (workflow ${workflow.id}) -> '${hook.name}' accepted`);
+	} catch (err) {
+		await settleRecoveryGaveUp(recovery.id, `the recovery could not be dispatched (hook unreachable: ${String(err)})`, log);
+	}
+}
+
+/** Sends the relaunch / give-up notification and records the notifier's outcome on the recovery. Never throws. */
+async function notifyRecovery(recovery: Recovery, outcome: "relaunched" | "gave_up", reason: string, log: Logger): Promise<void> {
+	try {
+		const workflow = getWorkflow(recovery.workflowId);
+		const step = getStep(recovery.stepId);
+		const changes = getRecovery(recovery.id)?.changes ?? recovery.changes;
+		const result = await sendRecoveryNotification({
+			outcome,
+			workflowName: workflow?.name ?? recovery.workflowId,
+			stepNumber: step ? stepNumber(step) : 0,
+			stepDescription: step?.description ?? "(step removed)",
+			reason,
+			changes: changes.join("; "),
+		});
+		const recorded = result.sent ? "sent" : describeSkip(result);
+		setRecoveryNotification(recovery.id, recorded);
+		log(
+			result.sent
+				? `recovery ${outcome === "relaunched" ? "relaunch" : "give-up"} notification sent for workflow ${recovery.workflowId}`
+				: `recovery ${outcome === "relaunched" ? "relaunch" : "give-up"} notification not sent for workflow ${recovery.workflowId} (${recorded})`,
+		);
+	} catch (err) {
+		log(`recovery notification failed for workflow ${recovery.workflowId}: ${String(err)}`, "warning");
+	}
+}
+
+/** A recovery note on a step. Best-effort: a note must never undo a settled transition. */
+function recoveryNote(stepId: string, workflowId: string, content: string, theme: "warning" | "success" | "neutral", log?: Logger): void {
+	try {
+		if (getStep(stepId)) insertStepNote(stepId, workflowId, content, theme, "agent");
+	} catch (err) {
+		log?.(`step ${stepId} recovery note not saved: ${String((err as Error).message ?? err)}`, "warning");
+	}
+}
+
+/**
+ * Settles a running recovery as "gave up": the step stays (or goes back to)
+ * failed, the workflow `failed`, a `step.recovery` "gave_up" event and a
+ * notification. Returns false when the recovery had already settled.
+ */
+export async function settleRecoveryGaveUp(recoveryId: string, reason: string, log: Logger): Promise<boolean> {
+	const recovery = getRecovery(recoveryId);
+	if (!recovery) return false;
+	if (!finishRecovery(recoveryId, "gave_up", reason)) return false;
+	// A recovery may have reopened the step without relaunching: put it back to
+	// failed, as the give-up leaves the step as it found it.
+	failReopenedStep(recovery.stepId, recovery.reason);
+	if (getWorkflow(recovery.workflowId)?.status === "recovering") setWorkflowStatus(recovery.workflowId, "failed");
+	const settled = getRecovery(recoveryId) ?? recovery;
+	recoveryNote(recovery.stepId, recovery.workflowId, `Recovery gave up: ${reason}`, "warning", log);
+	const step = getStep(recovery.stepId);
+	if (step) {
+		reportStepEvent(step, "step.recovery", {
+			action: "gave_up",
+			reason,
+			changes: settled.changes.join("; "),
+			recovery_id: recovery.id,
+			failure_kind: recovery.failureKind,
+			recovery_count: step.recoveryCount,
+			max_recoveries: step.maxRecoveries,
+		});
+	}
+	writeStatusMd(recovery.workflowId);
+	log(`recovery ${recoveryId} (workflow ${recovery.workflowId}) gave up: ${reason}`, "error");
+	await notifyRecovery(settled, "gave_up", reason, log);
+	return true;
+}
+
+/** Records one plan change of a running recovery (it feeds the events' `changes`). */
+export function recordRecoveryChange(recoveryId: string, change: string): void {
+	appendRecoveryChange(recoveryId, change);
+}
+
+/**
+ * Reopens a failed step: back to `pending` with `retryCount` 0, keeping
+ * `recoveryCount` (unlike the manual status override, which keeps the retries
+ * already spent). Reconciles the workflow's badge afterwards, so a workflow
+ * whose only failure was this step reads `draft` again and Start continues it
+ * in its existing conversation. Refused while a recovery runs, except for the
+ * recovery itself.
+ */
+export function reopenStep(workflowId: string, stepId: string, log: Logger, options: { actor?: StepActor } = {}): Step {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	refuseRecovering(workflow, options.actor);
+	const step = getStep(stepId);
+	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
+	refuseContextStep(step);
+	if (step.status !== "failed") throw new WorkflowError("only a failed step can be reopened");
+	if (!reopenStepRow(stepId)) throw new WorkflowError("only a failed step can be reopened");
+	log(`step ${stepId} reopened (retries reset, recovery count ${step.recoveryCount} kept)`);
+	const reopened = getStep(stepId) ?? step;
+	reportStepEvent(reopened, "step.reset", { reopened: true, from: step.status, retry_count: 0, recovery_count: reopened.recoveryCount });
+	reconcileStatus(workflowId, log);
+	writeStatusMd(workflowId);
+	return reopened;
+}
+
+/**
+ * The recovery's relaunch: reopens the failed step if the recovery has not
+ * already, settles the recovery as "relaunched" (its token dies here), selects
+ * every pending step and continues the workflow in its EXISTING conversation —
+ * the session is kept, exactly like Start on a draft workflow.
+ */
+export async function relaunchFromRecovery(
+	recoveryId: string,
+	summary: string,
+	cfg: HubConfig,
+	log: Logger,
+): Promise<{ workflow: Workflow; changes: string[] }> {
+	const recovery = getRecovery(recoveryId);
+	if (!recovery || recovery.status !== "running") throw new WorkflowError("this recovery is no longer running");
+	const workflow = getWorkflow(recovery.workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	const step = getStep(recovery.stepId);
+	if (step?.status === "failed") {
+		const before = step.retryCount;
+		reopenStepRow(step.id);
+		const line = `step ${stepNumber(step)} status: failed → pending; retryCount: ${before} → 0`;
+		appendRecoveryChange(recoveryId, line);
+		recoveryNote(step.id, workflow.id, `Recovery: status: failed → pending; retryCount: ${before} → 0\nReason: reopened by the relaunch`, "neutral", log);
+	}
+	const pending = listSteps(workflow.id).filter((s) => s.kind !== "context" && s.status === "pending");
+	if (pending.length === 0) throw new WorkflowError("there is no pending step to relaunch");
+	const text = summary.trim() || "relaunched by the recovery";
+	if (!finishRecovery(recoveryId, "relaunched", text)) throw new WorkflowError("this recovery is no longer running");
+	const settled = getRecovery(recoveryId) ?? recovery;
+	const changes = settled.changes.join("; ");
+	setStepSelection(workflow.id, pending.map((s) => s.id));
+	const current = getStep(recovery.stepId);
+	if (current) {
+		recoveryNote(current.id, workflow.id, `Recovery relaunched the workflow: ${text}${changes ? `\nChanges: ${changes}` : ""}`, "success", log);
+		reportStepEvent(getStep(current.id) ?? current, "step.recovery", {
+			action: "relaunched",
+			reason: recovery.reason,
+			changes,
+			summary: text,
+			recovery_id: recovery.id,
+			failure_kind: recovery.failureKind,
+			recovery_count: current.recoveryCount,
+			max_recoveries: current.maxRecoveries,
+		});
+	}
+	setWorkflowStatus(workflow.id, "running");
+	writeStatusMd(workflow.id);
+	log(`recovery ${recoveryId} relaunched workflow ${workflow.id} (${pending.length} pending step(s)): ${text}`, "warning");
+	void notifyRecovery(settled, "relaunched", recovery.reason, log);
+	await advance(workflow.id, cfg, log);
+	const updated = getWorkflow(workflow.id);
+	if (!updated) throw new WorkflowError("workflow disappeared");
+	return { workflow: updated, changes: settled.changes };
+}
+
+/** The recovery agent's run started on the broker (awb's `started` callback). */
+export function onRecoveryStarted(recoveryId: string): boolean {
+	return markRecoveryRunStarted(recoveryId);
+}
+
+/**
+ * The recovery agent's turn ended (awb's result callback). A recovery that
+ * already relaunched only records the answer; one still running gives up — the
+ * turn ended without a relaunch, or the run itself failed.
+ */
+export async function onRecoveryResult(
+	recoveryId: string,
+	outcome: { ok: boolean; result?: string; error?: string; sessionId?: string },
+	log: Logger,
+): Promise<void> {
+	const recovery = getRecovery(recoveryId);
+	if (!recovery) return;
+	recordRecoveryResult(recoveryId, outcome.result ?? null, outcome.sessionId ?? null);
+	if (recovery.status !== "running") return;
+	const said = outcome.result?.trim() ? `: ${truncateText(outcome.result.trim(), 500)}` : "";
+	const reason = outcome.ok
+		? `the recovery agent ended its turn without relaunching the workflow${said}`
+		: `the recovery run failed: ${outcome.error ?? "unknown error"}`;
+	await settleRecoveryGaveUp(recoveryId, reason, log);
+}
+
+/**
+ * The operator stops a running recovery: its run is killed on the broker
+ * (best-effort) and it settles as "gave up".
+ */
+export async function abortRecovery(workflowId: string, log: Logger): Promise<Workflow> {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	const recovery = getRunningRecovery(workflowId);
+	if (!recovery) throw new WorkflowError("no Failure recovery is running on this workflow");
+	await abortAwbRun(`${workflow.hookUrl}-recovery`, workflow.secret, recovery.id, log);
+	await settleRecoveryGaveUp(recovery.id, "aborted by the operator", log);
+	const updated = getWorkflow(workflowId);
+	if (!updated) throw new WorkflowError("workflow disappeared");
+	return updated;
+}
+
+/**
+ * The recovery watchdog, run by the stale sweep: a recovery whose run has
+ * been going longer than the hard step timeout is given up, so a hung recovery
+ * cannot hold a workflow `recovering` forever.
+ */
+function expireStaleRecoveries(cfg: HubConfig, log: Logger): void {
+	const now = Date.now();
+	for (const recovery of listRunningRecoveries()) {
+		const since = Date.parse(recovery.runStartedAt ?? recovery.startedAt);
+		if (!Number.isFinite(since) || now - since < recoveryTimeoutMs(cfg)) continue;
+		void settleRecoveryGaveUp(recovery.id, "the recovery run timed out", log);
+	}
+}
+
+/**
+ * Sets (null clears) the model the workflow's Failure recovery runs with, and
+ * creates or refreshes its `<agentName>-recovery` hook to match. The id is
+ * validated by the route, like the workflow model's.
+ */
+export function updateWorkflowRecoveryModel(workflowId: string, model: string | null): Workflow {
+	const workflow = getWorkflow(workflowId);
+	if (!workflow) throw new WorkflowError("unknown workflow");
+	if (workflow.status === "recovering") throw new WorkflowRecoveringError("a Failure recovery is running — change the recovery model once it ends");
+	if (!hookRuntime(workflow.hookUrl).harness) throw new WorkflowError("this workflow's hook is not on this machine");
+	const hook = upsertRecoveryHook(workflow.hookUrl, model);
+	if (!hook || hookRuntime(hook.hookUrl).model !== model) throw new WorkflowError("could not write the recovery hook");
+	setWorkflowRecoveryModel(workflowId, model);
+	writeStatusMd(workflowId);
+	const updated = getWorkflow(workflowId) ?? workflow;
+	// The report server learns the new recovery model like a rename: a
+	// `workflow.updated` with the full metadata (the plan snapshot written by
+	// writeStatusMd above carries it too).
+	reportEmit("workflow.updated", { workflowId, data: workflowReportMeta(updated) });
+	return updated;
+}
+
+/** Test hook: the name of a workflow's recovery hook. */
+export function workflowRecoveryHookName(workflow: Workflow): string {
+	return recoveryHookName(workflow.agentName);
 }

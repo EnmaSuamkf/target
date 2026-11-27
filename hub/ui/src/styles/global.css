@@ -320,6 +320,20 @@ kbd,
 	border-color: var(--danger-200);
 	color: var(--danger-700);
 }
+/* A Failure recovery is fixing the plan: its own violet (see tokens.css), with
+   a pulsing dot because an agent is at work. `.badge--recovery` is the step
+   card's marker for the toggle ("Recovery 1/1"): the same hue, quieter. */
+.badge--recovering {
+	background: var(--recovery-50);
+	border-color: var(--recovery-200);
+	color: var(--recovery-700);
+}
+.badge--recovery {
+	background: var(--surface);
+	border-color: var(--recovery-200);
+	color: var(--recovery-700);
+	text-transform: none;
+}
 .badge--remote,
 .badge--synced {
 	background: #eef2ff;
@@ -382,7 +396,8 @@ kbd,
 }
 
 /* A soft pulse marks work actually in flight (running step, judging). */
-.badge--running .badge__dot {
+.badge--running .badge__dot,
+.badge--recovering .badge__dot {
 	animation: pulse 1.6s ease-in-out infinite;
 }
 /* A queued step is waiting its turn on the workdir lock — a steady dot

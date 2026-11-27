@@ -57,3 +57,13 @@ function timestampOf(iso: string): number {
 function sameLocalDay(a: Date, b: Date): boolean {
 	return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
+
+/**
+ * True for a note Failure recovery wrote: a plan change ("Recovery: field:
+ * before → after"), a recovery agent's own note ("Recovery note: …"), or its
+ * outcome ("Recovery relaunched the workflow: …", "Recovery gave up: …"). These
+ * are agent notes whose author is the recovery, so the timeline tags them.
+ */
+export function isRecoveryNote(note: { content: string; source: StepNoteSource }): boolean {
+	return note.source === "agent" && /^Recovery( note)?:|^Recovery (relaunched|gave up)\b/.test(note.content);
+}

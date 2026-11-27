@@ -1,0 +1,44 @@
+/* Same row shape as the Manual review / Use subagent toggles in the step forms. */
+.block {
+	display: grid;
+	gap: var(--space-3);
+	min-width: 0;
+}
+
+.gateRow {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--space-4);
+}
+
+.gateText {
+	display: grid;
+	gap: var(--space-1);
+	min-width: 0;
+}
+
+.maxRow {
+	display: grid;
+	gap: var(--space-1);
+	min-width: 0;
+}
+
+.maxInput {
+	max-width: 10rem;
+}
+
+.maxRow :global(.hint) {
+	margin: 0;
+}
+
+@media (max-width: 768px) {
+	.gateRow {
+		align-items: flex-start;
+		gap: var(--space-3);
+	}
+
+	.maxInput {
+		max-width: none;
+	}
+}

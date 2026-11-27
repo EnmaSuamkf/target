@@ -44,6 +44,7 @@ import type {
 	CopilotTokenStatus,
 	SlackDeliverySettings,
 	SlackDeliverySettingsInput,
+	Recovery,
 	ReportSettings,
 	ReportSettingsInput,
 	SyncSettings,
@@ -1233,6 +1234,47 @@ export async function updateWorkflowModel(workflowId: string, model: string): Pr
 		body: json({ model }),
 	});
 	return data.workflow;
+}
+
+/**
+ * Sets the model the workflow's Failure recovery agent runs with (empty string
+ * = CLI default; the hub stores null). The hub keeps its `<agentName>-recovery`
+ * hook in step with it.
+ */
+export async function updateWorkflowRecoveryModel(workflowId: string, recoveryModel: string): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${workflowId}/recovery-model`, {
+		method: "PATCH",
+		admin: true,
+		body: json({ recoveryModel: recoveryModel === "" ? null : recoveryModel }),
+	});
+	return data.workflow;
+}
+
+/** The workflow's Failure recovery history, oldest first. */
+export async function listRecoveries(workflowId: string): Promise<Recovery[]> {
+	const data = await request<{ recoveries: Recovery[] }>(`/api/workflows/${workflowId}/recoveries`, { admin: true });
+	return data.recoveries;
+}
+
+/** Stops the running Failure recovery; the hub settles it as gave up (the step stays failed). */
+export async function abortRecovery(workflowId: string): Promise<Workflow> {
+	const data = await request<{ workflow: Workflow }>(`/api/workflows/${workflowId}/recovery/abort`, {
+		method: "POST",
+		admin: true,
+	});
+	return data.workflow;
+}
+
+/**
+ * Reopens a failed step: back to pending with its retries reset (retryCount 0),
+ * keeping its Failure recovery count. Unlike forcing it to pending, the step
+ * gets its whole retry budget back. Start the workflow to run it.
+ */
+export async function reopenStep(workflowId: string, stepId: string): Promise<{ step: Step; workflow: Workflow }> {
+	return request<{ step: Step; workflow: Workflow }>(`/api/workflows/${workflowId}/steps/${stepId}/reopen`, {
+		method: "POST",
+		admin: true,
+	});
 }
 
 export async function updateWorkflowDockerMounts(workflowId: string, mounts: string[]): Promise<Workflow> {

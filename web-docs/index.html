@@ -286,6 +286,7 @@
           <a href="#steps">Steps &amp; statuses</a>
           <a href="#judge">Judge &amp; retries</a>
           <a href="#review">Human review &amp; waiting</a>
+          <a href="#recovery">Failure recovery</a>
           <a href="#override">Fixing a status by hand</a>
           <a href="#templates">Templates</a>
           <a href="#conversation">The conversation</a>
@@ -443,6 +444,7 @@
           <li><strong>done</strong> &mdash; finished and accepted.</li>
           <li><strong>failed</strong> &mdash; the step (and therefore the workflow) ended in error. If the work actually landed and only the reporting went wrong, you can say so &mdash; see <a href="#override">Fixing a status by hand</a>.</li>
         </ul>
+        <p>A workflow can also read <strong>recovering</strong>: a step with <strong>Recover on failure</strong> failed for good and a recovery agent is fixing the plan. (See <a href="#recovery">Failure recovery</a>.)</p>
         <div class="callout">
           <span class="tag">badge = bar</span>
           <p>The workflow&rsquo;s badge and its progress bar are computed from the same step data, so they can never disagree. A run that ends with a step still <code>failed</code> ends the workflow <code>failed</code> &mdash; never <code>completed</code> with a red bar.</p>
@@ -508,6 +510,31 @@
         <div class="callout">
           <span class="tag">heads up</span>
           <p>If you&rsquo;ve turned on notifications, the hub can ping you on Slack the moment a step starts waiting &mdash; so you don&rsquo;t have to keep the UI open. The message names the workflow, the step and what to check. The notification is advisory: the hold is the feature; a failed delivery changes nothing.</p>
+        </div>
+      </section>
+
+      <section id="recovery">
+        <h2>Failure recovery &mdash; the recovering status</h2>
+        <p>
+          Normally a step that uses up its retries stops the workflow. Turn on
+          <strong>Recover on failure</strong> on a step (and set <strong>Max recoveries</strong>,
+          default 1), and when that step fails for good the workflow does <em>not</em> become
+          <code>failed</code>. It becomes <strong>recovering</strong>, and the hub sends a
+          <strong>recovery agent</strong> &mdash; the same agent CLI, sandbox, working directory and
+          permissions as the workflow, running with the workflow&rsquo;s <strong>Recovery model</strong>
+          (chosen next to <strong>Model</strong> on the workflow page; CLI default if you leave it).
+        </p>
+        <p>How it behaves, in plain words:</p>
+        <ul>
+          <li><strong>It fixes the plan, never the code.</strong> The recovery agent reads why the step failed and may rewrite the step&rsquo;s description or acceptance criteria, change its retries or a command step&rsquo;s pipeline inputs, and add, delete or move pending steps. Then it reopens the step and relaunches the workflow in its own conversation; the step&rsquo;s agent writes the code on the next run.</li>
+          <li><strong>Only real plan failures trigger it.</strong> A judge rejection, a pipeline that ran and failed, or a timeout &mdash; each with no retries left. A hook that is down, a usage limit, an untrusted pipeline, an unreadable verdict or your own abort never do.</li>
+          <li><strong>It has a budget.</strong> Each recovery uses one of the step&rsquo;s <strong>Max recoveries</strong>. When they are used up, or the agent can&rsquo;t fix the plan, it gives up: the step stays failed and the workflow reads <code>failed</code>. <strong>Start over</strong> resets the budget.</li>
+          <li><strong>Hands off while it runs.</strong> The steps can&rsquo;t be edited and nothing else runs. <strong>Stop recovery</strong> on the workflow page ends it (as gave up).</li>
+          <li><strong>Every change is written down.</strong> Each edit leaves a &ldquo;Recovery: &hellip; before &rarr; after&rdquo; note on the step, and the hub sends a notification when it relaunches and when it gives up.</li>
+        </ul>
+        <div class="callout">
+          <span class="tag">safety net</span>
+          <p>The recovery agent talks to the hub through its own recovery API, with a token valid only for that workflow and only while that recovery runs &mdash; never the admin token. Write acceptance criteria as observable outcomes all the same: recovery catches a plan that turned out wrong, it doesn&rsquo;t replace a good one. The full story is in <code>docs/failure-recovery.md</code>.</p>
         </div>
       </section>
 
@@ -1003,10 +1030,13 @@ hub    →  next selected step dispatched              until none remain, then t
               <tr><td><code>POST /api/workflows</code></td><td>Create a workflow (+ its hook). Body: <code>{name, workdir?, permissionMode?, runner?, sandbox?, image?, acceptBypassRisk?, templateId?}</code>. <code>sandbox</code> is <code>"host"</code> (default) or <code>"docker"</code> and is validated server-side; <code>image</code> only means anything alongside <code>"docker"</code>, and falls back to <code>target-agent:latest</code>.</td></tr>
               <tr><td><code>GET /api/workflows/:id</code></td><td>Workflow detail + its steps.</td></tr>
               <tr><td><code>PATCH /api/workflows/:id/context</code></td><td>Set or clear the conversation context.</td></tr>
-              <tr><td><code>POST /api/workflows/:id/steps</code></td><td>Add a step. Body: <code>{description, acceptanceCriteria?, maxRetries?, retryIntervalSeconds?, manualReview?}</code>.</td></tr>
+              <tr><td><code>POST /api/workflows/:id/steps</code></td><td>Add a step. Body: <code>{description, acceptanceCriteria?, maxRetries?, retryIntervalSeconds?, manualReview?, recoverOnFailure?, maxRecoveries?}</code>.</td></tr>
               <tr><td><code>POST /api/workflows/:id/steps/:stepId/run</code></td><td>Run one step now, out of order, on a fresh session.</td></tr>
               <tr><td><code>POST /api/workflows/:id/steps/:stepId/abort</code></td><td>Force-fail a stuck step, preserving its session, and kill the agent process on the broker.</td></tr>
               <tr><td><code>POST /api/workflows/:id/steps/:stepId/continue</code></td><td>Release a step&rsquo;s manual-review hold.</td></tr>
+              <tr><td><code>POST /api/workflows/:id/steps/:stepId/reopen</code></td><td>Put a failed step back to pending with its retries reset, keeping its recovery count.</td></tr>
+              <tr><td><code>PATCH /api/workflows/:id/recovery-model</code></td><td>Set (or, with <code>null</code>, clear) the Failure recovery model. Body: <code>{recoveryModel}</code>; also writes the <code>&lt;agentName&gt;-recovery</code> hook.</td></tr>
+              <tr><td><code>POST /api/workflows/:id/recovery/abort</code></td><td>Stop a running Failure recovery; it settles as gave up.</td></tr>
               <tr><td><code>POST /api/workflows/:id/steps/:stepId/status</code></td><td>Set a step&rsquo;s status by hand. Body: <code>{status}</code> &mdash; <code>done</code>, <code>failed</code> or <code>pending</code>. Never dispatches; refused (<code>400</code>) while the step has a job in flight.</td></tr>
               <tr><td><code>POST /api/workflows/:id/status</code></td><td>Set the workflow&rsquo;s status by hand. Body: <code>{status}</code> &mdash; <code>completed</code>, <code>failed</code>, <code>paused</code> or <code>draft</code>. Pinned against re-derivation until the engine writes a status itself.</td></tr>
               <tr><td><code>POST /api/workflows/:id/start | pause | resume | restart</code></td><td>Run control. Optional <code>{stepIds: [...]}</code> to restrict which steps run.</td></tr>

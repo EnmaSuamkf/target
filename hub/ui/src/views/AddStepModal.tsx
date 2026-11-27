@@ -3,6 +3,8 @@ import type { StagedStepImages, StepConfigInput } from "../api/types.ts";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
 import { Field } from "../components/Field.tsx";
 import { Modal } from "../components/Modal.tsx";
+import { RecoveryFields } from "../components/RecoveryFields.tsx";
+import { parseMaxRecoveries } from "../lib/recovery.ts";
 import { Switch } from "../components/Switch.tsx";
 import { usePermissions, requires } from "../hooks/usePermissions.ts";
 import { useStagedImages } from "../hooks/useStagedImages.ts";
@@ -44,6 +46,9 @@ export function AddStepModal({
 	const [useSubagent, setUseSubagent] = useState(true);
 	const [maxRetries, setMaxRetries] = useState("0");
 	const [interval, setInterval] = useState("0");
+	// Failure recovery: off by default, with a budget of one recovery once on.
+	const [recoverOnFailure, setRecoverOnFailure] = useState(false);
+	const [maxRecoveries, setMaxRecoveries] = useState("1");
 	const [saving, setSaving] = useState(false);
 
 	// Fresh form on every open — a dialog reopened after an add must not still be
@@ -56,6 +61,8 @@ export function AddStepModal({
 		setUseSubagent(true);
 		setMaxRetries("0");
 		setInterval("0");
+		setRecoverOnFailure(false);
+		setMaxRecoveries("1");
 		staged.reset();
 		// `staged.reset` is stable (useCallback with no deps); listing it would only
 		// add noise to a "clear the form when it opens" effect.
@@ -83,6 +90,9 @@ export function AddStepModal({
 					useSubagent,
 					maxRetries: Math.max(0, parseInt(maxRetries, 10) || 0),
 					retryIntervalSeconds: intervalEnabled ? Math.max(0, parseInt(interval, 10) || 0) : 0,
+					// Always sent, like the toggles above.
+					recoverOnFailure,
+					maxRecoveries: parseMaxRecoveries(maxRecoveries),
 				},
 				staged.staged,
 			);
@@ -212,6 +222,14 @@ export function AddStepModal({
 						)}
 					</Field>
 				</div>
+
+				<RecoveryFields
+					recoverOnFailure={recoverOnFailure}
+					onRecoverOnFailure={setRecoverOnFailure}
+					maxRecoveries={maxRecoveries}
+					onMaxRecoveries={setMaxRecoveries}
+					disabled={saving}
+				/>
 			</form>
 		</Modal>
 	);

@@ -155,7 +155,22 @@ function stepConfigBody(a, { requireDescription = false } = {}) {
 	if ("pipelineInputs" in a) body.pipelineInputs = a.pipelineInputs == null ? null : a.pipelineInputs;
 	if ("onSuccessTask" in a) body.onSuccessTask = a.onSuccessTask == null ? null : String(a.onSuccessTask);
 	if ("onFailureTask" in a) body.onFailureTask = a.onFailureTask == null ? null : String(a.onFailureTask);
+	// Failure recovery. Only what was given is sent, so an edit that omits them
+	// keeps the stored values. `maxRecoveries` is passed as given: the hub refuses
+	// anything that is not an integer ≥ 0 with a 400 that names the field.
+	if (a.recoverOnFailure !== undefined && a.recoverOnFailure !== null) body.recoverOnFailure = a.recoverOnFailure === true;
+	if (a.maxRecoveries !== undefined && a.maxRecoveries !== null) body.maxRecoveries = a.maxRecoveries;
 	return body;
+}
+
+/**
+ * The model body shared by set_workflow_model and set_recovery_model: a model
+ * id, or null/"" for the CLI default (the hub routes read "" and null alike).
+ */
+function modelValue(a) {
+	if (a.model === undefined || a.model === null) return null;
+	const model = String(a.model).trim();
+	return model === "" ? null : model;
 }
 
 function createWorkflowBody(a) {
@@ -166,6 +181,8 @@ function createWorkflowBody(a) {
 	if (runner) body.runner = runner;
 	const model = pickString(a, "model");
 	if (model) body.model = model;
+	const recoveryModel = pickString(a, "recoveryModel");
+	if (recoveryModel) body.recoveryModel = recoveryModel;
 	const sandbox = pickString(a, "sandbox");
 	if (sandbox) body.sandbox = sandbox;
 	const image = pickString(a, "image");
@@ -194,6 +211,8 @@ function cloneWorkflowBody(a) {
 		sandbox: pickString(a, "sandbox", true),
 		image: a.image !== undefined ? String(a.image) : undefined,
 		model: a.model !== undefined ? String(a.model) : undefined,
+		// Omitted = inherit the source's recovery model; empty = the CLI default.
+		recoveryModel: a.recoveryModel !== undefined ? (a.recoveryModel === null ? "" : String(a.recoveryModel)) : undefined,
 		permissionMode: a.permissionMode !== undefined ? String(a.permissionMode) : undefined,
 		acceptBypassRisk: a.acceptBypassRisk === true ? true : undefined,
 	});
@@ -230,6 +249,17 @@ const STEP_CONFIG_SCHEMA = {
 	useSubagent: { type: "boolean", description: "Run step in a subagent (default true if omitted on create)" },
 	maxRetries: { type: "integer", minimum: 0 },
 	retryIntervalSeconds: { type: "integer", minimum: 0 },
+	recoverOnFailure: {
+		type: "boolean",
+		description:
+			"Run Failure recovery when this step fails for good (final judge rejection, final pipeline failure, or a timeout with no retries left): instead of stopping, the hub sends a recovery agent (the workflow's recovery model) that fixes the plan — never the code — and relaunches the workflow. Default false; omit on edit to keep the stored value.",
+	},
+	maxRecoveries: {
+		type: "integer",
+		minimum: 0,
+		description:
+			"How many Failure recoveries this step may use (integer ≥ 0, default 1). Only used when recoverOnFailure is true; omit on edit to keep the stored value.",
+	},
 };
 
 /** @type {Array<{ name: string; description: string; inputSchema: object; run: (a: Record<string, unknown>) => Promise<unknown> }>} */
@@ -293,6 +323,11 @@ const TOOLS = [
 					type: "string",
 					description: "Model id enabled for the runner (see list_runners models[]); omit for the CLI default",
 				},
+				recoveryModel: {
+					type: "string",
+					description:
+						"Model the Failure recovery agent runs with (a model id enabled for the runner, see list_runners models[]). Failure recovery fixes the plan of a step that failed for good and relaunches the workflow; omit for none / the CLI default.",
+				},
 				sandbox: { type: "string", enum: SANDBOXES },
 				image: { type: "string" },
 				templateId: { type: "string" },
@@ -327,6 +362,11 @@ const TOOLS = [
 					type: "string",
 					description: "Model id enabled for the clone's runner; empty = CLI default; omit to inherit the source's (same runner only)",
 				},
+				recoveryModel: {
+					type: ["string", "null"],
+					description:
+						"Failure recovery model for the clone (a model id enabled for its runner, see list_runners models[]); empty or null = CLI default; omit to inherit the source's.",
+				},
 				sandbox: { type: "string", enum: SANDBOXES },
 				image: { type: "string" },
 				permissionMode: { type: "string", enum: [...PERMISSION_MODES, ""] },
@@ -338,6 +378,12 @@ const TOOLS = [
 		run: async (a) => {
 			const id = enc(a.workflowId);
 			if (a.name) return hubJson("POST", `/api/workflows/${id}/clone`, cloneWorkflowBody(a));
+			// No form fields: a plain copy, still carrying an explicit recovery model when one was given.
+			if (a.recoveryModel !== undefined) {
+				return hubJson("POST", `/api/workflows/${id}/clone`, {
+					recoveryModel: a.recoveryModel === null ? "" : String(a.recoveryModel),
+				});
+			}
 			return hubJson("POST", `/api/workflows/${id}/clone`);
 		},
 	},
@@ -679,7 +725,8 @@ const TOOLS = [
 	},
 	{
 		name: "add_step",
-		description: "Add a step (full step form: description, acceptance, subagent, manual review, retries)",
+		description:
+			"Add a step (full step form: description, acceptance, subagent, manual review, retries, Failure recovery). With recoverOnFailure, a step that fails for good gets a recovery agent that fixes the plan and relaunches the workflow, up to maxRecoveries times.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -696,7 +743,8 @@ const TOOLS = [
 	},
 	{
 		name: "edit_step",
-		description: "Edit a pending step (same fields as the step editor)",
+		description:
+			"Edit a pending step (same fields as the step editor, Failure recovery included). description is required; the optional fields you omit (recoverOnFailure and maxRecoveries among them) keep their stored values. Refused while a Failure recovery runs on the workflow.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -783,6 +831,49 @@ const TOOLS = [
 			hubJson("POST", `/api/workflows/${enc(a.workflowId)}/steps/${enc(a.stepId)}/status`, {
 				status: String(a.status),
 			}),
+	},
+	{
+		name: "reopen_step",
+		description:
+			"Reopen a failed step: back to pending with its retries reset (retryCount 0), keeping its Failure recovery count (POST /api/workflows/:id/steps/:stepId/reopen). Unlike set_step_status pending, the step gets its whole retry budget back; start the workflow afterwards to run it in the same conversation.",
+		inputSchema: {
+			type: "object",
+			properties: { workflowId: { type: "string" }, stepId: { type: "string" } },
+			required: ["workflowId", "stepId"],
+			additionalProperties: false,
+		},
+		run: async (a) => hubJson("POST", `/api/workflows/${enc(a.workflowId)}/steps/${enc(a.stepId)}/reopen`),
+	},
+	{
+		name: "set_workflow_model",
+		description:
+			"Change the model the workflow's agent runs with (PATCH /api/workflows/:id/model). model: a model id enabled for the workflow's runner (see list_runners models[]), or null for the CLI default. Applies from the next step on.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				workflowId: { type: "string" },
+				model: { type: ["string", "null"], description: "Model id, or null for the CLI default" },
+			},
+			required: ["workflowId", "model"],
+			additionalProperties: false,
+		},
+		run: async (a) => hubJson("PATCH", `/api/workflows/${enc(a.workflowId)}/model`, { model: modelValue(a) ?? "" }),
+	},
+	{
+		name: "set_recovery_model",
+		description:
+			"Set the model the workflow's Failure recovery agent runs with (PATCH /api/workflows/:id/recovery-model). The recovery agent fixes the plan of a step that failed for good and relaunches the workflow; it uses the workflow's runner, sandbox, workdir and permissions with this model. model: a model id enabled for the runner (see list_runners models[]), or null for the CLI default.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				workflowId: { type: "string" },
+				model: { type: ["string", "null"], description: "Model id, or null for the CLI default" },
+			},
+			required: ["workflowId", "model"],
+			additionalProperties: false,
+		},
+		run: async (a) =>
+			hubJson("PATCH", `/api/workflows/${enc(a.workflowId)}/recovery-model`, { recoveryModel: modelValue(a) }),
 	},
 	{
 		name: "open_step_terminal",

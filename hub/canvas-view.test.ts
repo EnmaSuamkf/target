@@ -489,11 +489,11 @@ test("WorkflowDetail renders the canvas behind a List/Canvas toggle, in place of
 	assert.match(source, /data-steps-view=\{mode\}/, "the toggle needs a stable hook for its two halves");
 	assert.match(
 		source,
-		/stepsView === "canvas" \? \(\s*<WorkflowCanvas steps=\{steps\} selectedIds=\{selection\} onOpenStep=\{openStepInList\} \/>/,
+		/stepsView === "canvas" \? \(\s*<WorkflowCanvas\s+steps=\{steps\}\s+selectedIds=\{selection\}\s+onOpenStep=\{openStepInList\}\s+recoveringStepId=\{recoveryStepId\}\s*\/>/,
 	);
 	// The canvas gets `steps`, not `taskSteps`: the context step is part of the
 	// picture (it runs before step 1), it is just not part of the numbering.
-	assert.match(source, /<WorkflowCanvas steps=\{steps\}/);
+	assert.match(source, /<WorkflowCanvas\s+steps=\{steps\}/);
 	// "Select all" is a list control — there are no checkboxes on the canvas.
 	assert.match(source, /taskSteps\.length > 0 && stepsView === "list" &&/);
 });

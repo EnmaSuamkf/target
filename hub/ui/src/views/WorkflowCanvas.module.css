@@ -351,6 +351,17 @@
 	animation: none;
 }
 
+/* The failed step a Failure recovery is fixing: the recovery violet (tokens.css). */
+.state_recovering {
+	border-left-color: var(--recovery-500);
+	background: var(--recovery-50);
+}
+
+.state_recovering .cardState {
+	background: var(--recovery-200);
+	color: var(--recovery-700);
+}
+
 .state_failed {
 	border-left-color: var(--danger-500);
 	background: var(--danger-50);

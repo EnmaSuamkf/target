@@ -458,6 +458,52 @@
 	margin-top: var(--space-3);
 }
 
+/* Failure recovery running: the recovery violet (tokens.css), with why the step
+   failed and the plan changes so far, and the one control that ends it. */
+.recoveryBanner {
+	display: grid;
+	gap: var(--space-2);
+	padding: var(--space-3);
+	border: 1px solid var(--recovery-200);
+	border-radius: var(--radius);
+	background: var(--recovery-50);
+	color: var(--recovery-700);
+	min-width: 0;
+}
+
+.recoveryBanner p {
+	margin: 0;
+	overflow-wrap: anywhere;
+}
+
+.recoveryReason {
+	white-space: pre-wrap;
+	max-height: 12rem;
+	overflow-y: auto;
+	color: var(--text);
+}
+
+.recoveryReasonLabel {
+	font-weight: 600;
+	color: var(--recovery-700);
+}
+
+.recoveryChanges {
+	margin: 0;
+	padding-left: var(--space-5);
+	display: grid;
+	gap: var(--space-1);
+	color: var(--text);
+	overflow-wrap: anywhere;
+	white-space: pre-wrap;
+}
+
+.recoveryActions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--space-2);
+}
+
 /* Agent / Command toggle at the top of the add-step form. */
 .kindToggle {
 	display: inline-flex;

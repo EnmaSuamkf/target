@@ -29,6 +29,23 @@
 	background: linear-gradient(to right, var(--attention-50), var(--surface) 40%);
 }
 
+/* The failed step a Failure recovery is working on: the recovery violet. */
+.stepRecovering {
+	border-color: var(--recovery-200);
+	background: linear-gradient(to right, var(--recovery-50), var(--surface) 40%);
+}
+
+.recoveringNote {
+	margin: 0;
+	padding: var(--space-2) var(--space-3);
+	border: 1px solid var(--recovery-200);
+	border-radius: var(--radius-sm);
+	background: var(--recovery-50);
+	color: var(--recovery-700);
+	font-size: var(--text-sm);
+	overflow-wrap: anywhere;
+}
+
 .editing {
 	border-color: var(--accent-200);
 	background: var(--accent-50);

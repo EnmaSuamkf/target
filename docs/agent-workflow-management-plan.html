@@ -519,7 +519,7 @@ node hub/cli.ts sync-skills
             <tr>
               <td><code>cursor</code></td>
               <td><code>agent</code></td>
-              <td><code>~/.cursor/skills-cursor/target-workflows/SKILL.md</code></td>
+              <td><code>~/.cursor/skills/target-workflows/SKILL.md</code></td>
             </tr>
             <tr>
               <td><code>claude</code></td>
@@ -537,7 +537,7 @@ node hub/cli.ts sync-skills
         <p>
           Bundled source in repo: <code>skills/target-workflows/</code> (one tree; small runner-specific
           frontmatter overrides if needed — e.g. Cursor vs Claude trigger wording). Paths follow each
-          harness's existing skill discovery (same as Cursor's <code>skills-cursor</code> layout today).
+          harness's existing skill discovery. Cursor reads user skills from <code>~/.cursor/skills</code>; <code>~/.cursor/skills-cursor</code> is a folder Cursor manages and wipes, so Target no longer writes there and the sync removes the Target-stamped copies it left behind.
         </p>
 
         <h3>Guardrails (addressing earlier concerns)</h3>

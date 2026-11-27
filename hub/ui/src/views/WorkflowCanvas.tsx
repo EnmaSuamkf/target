@@ -70,12 +70,24 @@ export function WorkflowCanvas({
 	selectedIds,
 	/** Sends the operator to this step's row in the list, where it can be edited. */
 	onOpenStep,
+	/** The failed step a running Failure recovery is working on; its card reads `recovering`. */
+	recoveringStepId = null,
 }: {
 	steps: Step[];
 	selectedIds: ReadonlySet<string>;
 	onOpenStep: (stepId: string) => void;
+	recoveringStepId?: string | null;
 }): React.JSX.Element {
-	const graph = useMemo(() => layoutWorkflow(steps, selectedIds), [steps, selectedIds]);
+	const graph = useMemo(
+		() =>
+			layoutWorkflow(
+				recoveringStepId
+					? steps.map((step) => (step.id === recoveringStepId ? { ...step, recovering: true } : step))
+					: steps,
+				selectedIds,
+			),
+		[steps, selectedIds, recoveringStepId],
+	);
 	const stepById = useMemo(() => new Map(steps.map((s) => [s.id, s])), [steps]);
 	const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX);
 	const viewportRef = useRef<HTMLDivElement>(null);
@@ -437,5 +449,12 @@ function JudgeCircle({ node, onOpen }: { node: CanvasNode; onOpen: (stepId: stri
 }
 
 function isLiveState(state: CanvasNode["state"]): boolean {
-	return state === "running" || state === "queued" || state === "judging" || state === "waiting" || state === "retrying";
+	return (
+		state === "running" ||
+		state === "queued" ||
+		state === "judging" ||
+		state === "waiting" ||
+		state === "retrying" ||
+		state === "recovering"
+	);
 }

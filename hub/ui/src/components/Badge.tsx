@@ -1,4 +1,5 @@
 import type { StepStatus, Workflow, WorkflowOrigin, WorkflowStatus } from "../api/types.ts";
+import { recoveryMarkerLabel } from "../lib/recovery.ts";
 import { scheduleBadge } from "../lib/scheduleView.ts";
 
 /**
@@ -9,6 +10,8 @@ import { scheduleBadge } from "../lib/scheduleView.ts";
  * so does `waiting` (held at its manual-review gate: stopped, but it's the
  * status that needs the operator to do something). `retrying` is a pending step
  * in its retry wait: nothing is running, so its dot is steady too.
+ * `recovering` (a Failure recovery agent fixing the plan) has its own violet and
+ * a pulsing dot: an agent is at work, but not on the workflow's steps.
  */
 export function Badge({
 	status,
@@ -30,7 +33,8 @@ export function Badge({
 	/** ISO timestamp of the override, shown in the marker's tooltip. */
 	manualAt?: string | null;
 }): React.JSX.Element {
-	const showDot = status === "running" || status === "queued" || status === "waiting" || status === "retrying";
+	const showDot =
+		status === "running" || status === "queued" || status === "waiting" || status === "retrying" || status === "recovering";
 	return (
 		<span className={`badge badge--${status}`}>
 			{showDot && <span className="badge__dot" aria-hidden="true" />}
@@ -147,5 +151,37 @@ export function CatalogCopyBadges({
 			<SyncedBadge />
 			<UsagePill enabled={item.usable !== false} revoked={item.revoked === true} />
 		</>
+	);
+}
+
+/**
+ * The step card's Failure recovery marker: shown while "Recover on failure" is
+ * on, with the budget once a recovery has been used ("Recovery 1/1"). Renders
+ * nothing for a step with the toggle off and no recovery used.
+ */
+export function RecoveryMarker({
+	recoverOnFailure,
+	maxRecoveries,
+	recoveryCount,
+}: {
+	recoverOnFailure: boolean | undefined;
+	maxRecoveries: number | undefined;
+	recoveryCount: number | undefined;
+}): React.JSX.Element | null {
+	const label = recoveryMarkerLabel({ recoverOnFailure, maxRecoveries, recoveryCount });
+	if (!label) return null;
+	const used = recoveryCount ?? 0;
+	const max = maxRecoveries ?? 1;
+	const title = recoverOnFailure
+		? `Recover on failure is on: if this step fails for good, an agent fixes the plan and relaunches the workflow (${used} of ${max} used).`
+		: `Recover on failure is off now; ${used} of ${max} recoveries were used.`;
+	return (
+		<span className="badge badge--recovery" title={title} data-recovery-marker>
+			<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+				<path d="M3 12a9 9 0 1 0 3-6.7" />
+				<path d="M3 4v5h5" />
+			</svg>
+			{label}
+		</span>
 	);
 }
