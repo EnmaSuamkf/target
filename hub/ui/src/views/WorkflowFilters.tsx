@@ -21,11 +21,18 @@ import styles from "./WorkflowFilters.module.css";
 const STATUS_LABELS: Record<WorkflowStatus, string> = {
 	waiting: "Waiting",
 	running: "Running",
+	recovering: "Recovering",
 	paused: "Paused",
 	draft: "Draft",
 	failed: "Failed",
 	completed: "Completed",
 };
+
+/**
+ * Statuses only offered while something has them: `draft` is not part of the
+ * everyday set, and `recovering` lasts only while a Failure recovery runs.
+ */
+const OCCASIONAL_STATUSES: ReadonlySet<WorkflowStatus> = new Set(["draft", "recovering"]);
 
 /**
  * `All N` plus one tab per status in STATUS_ORDER order. A status with no
@@ -43,7 +50,7 @@ export function StatusTabs({
 	onChange: (status: StatusFilter) => void;
 }): React.JSX.Element {
 	const statuses = (Object.keys(STATUS_ORDER) as WorkflowStatus[])
-		.filter((s) => s !== "draft" || counts.draft > 0 || value === "draft")
+		.filter((s) => !OCCASIONAL_STATUSES.has(s) || counts[s] > 0 || value === s)
 		.sort((a, b) => STATUS_ORDER[a] - STATUS_ORDER[b]);
 	return (
 		<div className={styles.tabs} role="group" aria-label="Filter by status" data-status-tabs>
@@ -382,7 +389,7 @@ export function StatusSection({
 	onChange: (status: StatusFilter) => void;
 }): React.JSX.Element {
 	const statuses = (Object.keys(STATUS_ORDER) as WorkflowStatus[])
-		.filter((s) => s !== "draft" || counts.draft > 0 || value === "draft")
+		.filter((s) => !OCCASIONAL_STATUSES.has(s) || counts[s] > 0 || value === s)
 		.sort((a, b) => STATUS_ORDER[a] - STATUS_ORDER[b]);
 	return (
 		<FilterSection<StatusFilter>

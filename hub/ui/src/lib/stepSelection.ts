@@ -88,7 +88,8 @@ export function workflowRunActive(
 	workflowStatus: string,
 	steps: readonly SelectableStep[],
 ): boolean {
-	if (workflowStatus === "running" || workflowStatus === "waiting") return true;
+	// `recovering`: a Failure recovery may relaunch any moment and select every pending step itself.
+	if (workflowStatus === "running" || workflowStatus === "waiting" || workflowStatus === "recovering") return true;
 	return steps.some((step) => STEP_IN_FLIGHT.has(step.status));
 }
 

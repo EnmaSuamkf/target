@@ -9,7 +9,9 @@ import type {
 	StepNoteTheme,
 } from "../api/types.ts";
 import { OVERRIDABLE_STEP_STATUSES } from "../api/types.ts";
-import { Badge } from "../components/Badge.tsx";
+import { Badge, RecoveryMarker } from "../components/Badge.tsx";
+import { RecoveryFields } from "../components/RecoveryFields.tsx";
+import { parseMaxRecoveries } from "../lib/recovery.ts";
 import { CommandRunPanel } from "./CommandRunPanel.tsx";
 import { BranchAgentFields, CommandStepFields } from "./CommandStepFields.tsx";
 import { ExpandableTextarea } from "../components/ExpandableTextarea.tsx";
@@ -89,6 +91,10 @@ import styles from "./StepItem.module.css";
 /** Length past which a resolution pane offers "Show more" — see below. */
 const RESULT_CLAMP = 220;
 
+/** Why a step control is off while a Failure recovery runs on the workflow. */
+const RECOVERING_TITLE =
+	"A Failure recovery is fixing this workflow's plan. Steps can't be changed or run until it relaunches the workflow or gives up (Stop recovery on the workflow page ends it).";
+
 /** How to recover a step stuck in the broker queue. */
 const QUEUED_RECOVERY_TOOLTIP =
 	"Stuck in the queue? Abort force-fails the step and frees the workdir lock, then press Retry to run just this step again — or use Start over to reset the whole workflow.";
@@ -117,6 +123,7 @@ export function StepItem({
 	onSelectWorkflow,
 	archived = false,
 	scheduledArmed = false,
+	workflowRecovering = false,
 	busy,
 }: {
 	step: Step;
@@ -154,6 +161,13 @@ export function StepItem({
 	archived?: boolean;
 	/** The workflow is a schedule's armed instance: it runs automatically, and the hub refuses a manual run (409 `scheduled_armed`). */
 	scheduledArmed?: boolean;
+	/**
+	 * A Failure recovery is running on the workflow (status `recovering`): the hub
+	 * refuses step edits, removals, moves, status changes and runs until it
+	 * relaunches or gives up, so those controls are disabled. The step it is
+	 * recovering is the workflow's `recovery.stepId`.
+	 */
+	workflowRecovering?: boolean | { stepId: string };
 	busy: boolean;
 }): React.JSX.Element {
 	const [editing, setEditing] = useState(false);
@@ -167,8 +181,11 @@ export function StepItem({
 	const canEdit = can("client.workflows.steps.edit");
 	const canAdd = can("client.workflows.steps.add");
 	const canManage = can("client.workflows.manage");
-	const canMoveUp = canMoveUpAllowed && canEdit;
-	const canMoveDown = canMoveDownAllowed && canEdit;
+	const recoveryLock = workflowRecovering !== false;
+	// The failed step the running recovery is fixing (when the hub said which).
+	const recoveringThis = typeof workflowRecovering === "object" && workflowRecovering.stepId === step.id;
+	const canMoveUp = canMoveUpAllowed && canEdit && !recoveryLock;
+	const canMoveDown = canMoveDownAllowed && canEdit && !recoveryLock;
 
 	// The hub-owned conversation-context step. Everything an operator can do to a
 	// step is refused for it by the server (edit, remove, Continue, Set status),
@@ -198,18 +215,20 @@ export function StepItem({
 	// Abort covers two different situations: unsticking a dispatch that never
 	// called back, and refusing the result of a step held for review.
 	const abortable = inFlight || waiting;
-	const editable = !running && !waiting;
+	const editable = !running && !waiting && !recoveryLock;
 	// Delegated to a subagent, which is what a step does unless the toggle was
 	// turned off — and what a step stored before that toggle existed did too. The
 	// hub-owned context step is dispatched by the engine, not by this choice, so
 	// it never claims either way.
 	const delegated = !isContext && step.useSubagent !== false;
-	const removable = step.status === "pending";
+	const removable = step.status === "pending" && !recoveryLock;
 	// A pending step with a due time is in its retry wait (plan D6): the badge
 	// reads the countdown and takes the `retrying` colour. The status is still `pending`.
 	const retryAt = step.status === "pending" ? step.retryAt : null;
-	const badgeStatus = retryAt ? "retrying" : step.status;
-	const statusLabel = retryAt
+	const badgeStatus = recoveringThis ? "recovering" : retryAt ? "retrying" : step.status;
+	const statusLabel = recoveringThis
+		? "recovering"
+		: retryAt
 		? retryListLabel(retryAt, Date.now())
 		: !running
 			? step.status
@@ -249,7 +268,9 @@ export function StepItem({
 	// be querySelector'd. See `openStepInList` in WorkflowDetail.
 	return (
 		<li
-			className={`${styles.step} ${running ? styles.stepRunning : ""} ${waiting ? styles.stepWaiting : ""}`}
+			className={`${styles.step} ${running ? styles.stepRunning : ""} ${waiting ? styles.stepWaiting : ""} ${
+				recoveringThis ? styles.stepRecovering : ""
+			}`}
 			data-step-id={step.id}
 		>
 			<div className={styles.head}>
@@ -291,7 +312,9 @@ export function StepItem({
 									? "Move up — this step runs one place earlier."
 									: !canEdit
 										? requires("client.workflows.steps.edit")
-										: "Can't move up: this step is already first, or it (or the step above) has already run. Only pending steps can be reordered."
+										: recoveryLock
+											? RECOVERING_TITLE
+											: "Can't move up: this step is already first, or it (or the step above) has already run. Only pending steps can be reordered."
 							}
 							data-move-step="up"
 						>
@@ -310,7 +333,9 @@ export function StepItem({
 									? "Move down — this step runs one place later."
 									: !canEdit
 										? requires("client.workflows.steps.edit")
-										: "Can't move down: this step is already last, or it (or the step below) has already run. Only pending steps can be reordered."
+										: recoveryLock
+											? RECOVERING_TITLE
+											: "Can't move down: this step is already last, or it (or the step below) has already run. Only pending steps can be reordered."
 							}
 							data-move-step="down"
 						>
@@ -329,8 +354,22 @@ export function StepItem({
 					</span>
 				)}
 				<p className={styles.description}>{step.description}</p>
+				{!isContext && (
+					<RecoveryMarker
+						recoverOnFailure={step.recoverOnFailure}
+						maxRecoveries={step.maxRecoveries}
+						recoveryCount={step.recoveryCount}
+					/>
+				)}
 				<Badge status={badgeStatus} label={statusLabel} manual={step.statusManual} manualAt={step.statusManualAt} />
 			</div>
+
+			{recoveringThis && (
+				<p className={styles.recoveringNote} role="status" data-step-recovering>
+					This step failed for good. A recovery agent is fixing the plan and will relaunch the workflow, or give up.
+					Its changes appear as &ldquo;Recovery:&rdquo; notes below.
+				</p>
+			)}
 
 			{step.kind === "command" && (
 				<CommandRunPanel
@@ -668,11 +707,13 @@ export function StepItem({
 						type="button"
 						className="btn btn--sm btn--primary"
 						onClick={() => onRunStep(step.id)}
-						disabled={busy || !canExecute || archived}
+						disabled={busy || !canExecute || archived || recoveryLock}
 						title={
 							!canExecute
 								? requires("client.workflows.execute")
-								: archived
+								: recoveryLock
+									? RECOVERING_TITLE
+									: archived
 									? "This workflow is archived — unarchive it to run this step again."
 									: "Re-run this step now. Use after Abort cleared a stuck queue, or any time a failed step should be tried again."
 						}
@@ -703,7 +744,7 @@ export function StepItem({
 						className="btn btn--sm"
 						onClick={() => setEditing(true)}
 						disabled={!editable || busy || !canEdit}
-						title={canEdit ? undefined : requires("client.workflows.steps.edit")}
+						title={!canEdit ? requires("client.workflows.steps.edit") : recoveryLock ? RECOVERING_TITLE : undefined}
 					>
 						Edit
 					</button>
@@ -717,9 +758,11 @@ export function StepItem({
 						title={
 							!canEdit
 								? requires("client.workflows.steps.edit")
-								: removable
-									? "Remove this step"
-									: "Only a pending step can be removed."
+								: recoveryLock
+									? RECOVERING_TITLE
+									: removable
+										? "Remove this step"
+										: "Only a pending step can be removed."
 						}
 					>
 						Remove
@@ -736,12 +779,14 @@ export function StepItem({
 				<select
 					className={`select ${styles.statusSelect}`}
 					value=""
-					disabled={inFlight || busy || !canManage}
+					disabled={inFlight || busy || !canManage || recoveryLock}
 					aria-label={`Set the status of step ${step.orderIndex + 1} by hand`}
 					title={
 						!canManage
 							? requires("client.workflows.manage")
-							: inFlight
+							: recoveryLock
+								? RECOVERING_TITLE
+								: inFlight
 								? "This step still has a job in flight — abort it first."
 								: "Say what really happened: mark this step done, failed or pending by hand. Nothing is run."
 					}
@@ -800,6 +845,9 @@ function StepEditor({
 	const [useSubagent, setUseSubagent] = useState(step.useSubagent !== false);
 	const [maxRetries, setMaxRetries] = useState(String(step.maxRetries ?? 0));
 	const [interval, setInterval] = useState(String(step.retryIntervalSeconds ?? 0));
+	// Failure recovery, loaded from the step (off / 1 for a step from an older hub).
+	const [recoverOnFailure, setRecoverOnFailure] = useState(step.recoverOnFailure === true);
+	const [maxRecoveries, setMaxRecoveries] = useState(String(step.maxRecoveries ?? 1));
 	const [saving, setSaving] = useState(false);
 	const [attaching, setAttaching] = useState(false);
 	// A command step is edited with the same fields the add-step form shows for
@@ -861,6 +909,8 @@ function StepEditor({
 					useSubagent: false,
 					maxRetries: Math.max(0, parseInt(maxRetries, 10) || 0),
 					retryIntervalSeconds: intervalEnabled ? Math.max(0, parseInt(interval, 10) || 0) : 0,
+					recoverOnFailure,
+					maxRecoveries: parseMaxRecoveries(maxRecoveries),
 				});
 			} finally {
 				setSaving(false);
@@ -880,6 +930,9 @@ function StepEditor({
 				useSubagent,
 				maxRetries: Math.max(0, parseInt(maxRetries, 10) || 0),
 				retryIntervalSeconds: intervalEnabled ? Math.max(0, parseInt(interval, 10) || 0) : 0,
+				// Always sent, so turning the toggle off really turns it off.
+				recoverOnFailure,
+				maxRecoveries: parseMaxRecoveries(maxRecoveries),
 			});
 		} finally {
 			setSaving(false);
@@ -1033,6 +1086,15 @@ function StepEditor({
 					/>
 				</div>
 			</div>
+
+			<RecoveryFields
+				recoverOnFailure={recoverOnFailure}
+				onRecoverOnFailure={setRecoverOnFailure}
+				maxRecoveries={maxRecoveries}
+				onMaxRecoveries={setMaxRecoveries}
+				disabled={saving}
+				recoveryCount={step.recoveryCount}
+			/>
 
 			<div className={styles.actions}>
 				<button

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import type { StepNote, StepNoteTheme } from "../api/types.ts";
-import { authorLabel, isEdited, noteTimeLabel, orderNotesForTimeline } from "../lib/stepTimeline.ts";
+import { authorLabel, isEdited, isRecoveryNote, noteTimeLabel, orderNotesForTimeline } from "../lib/stepTimeline.ts";
 import styles from "./StepTimeline.module.css";
 
 function markerClass(theme: StepNoteTheme): string {
@@ -44,6 +44,15 @@ export function StepTimeline({
 							<span className={styles.author} data-note-author>
 								{authorLabel(note.source)}
 							</span>
+							{isRecoveryNote(note) && (
+								<span
+									className={styles.recovery}
+									title="Written by Failure recovery: a plan change (before → after) with its reason, or the recovery's outcome."
+									data-note-recovery
+								>
+									Failure recovery
+								</span>
+							)}
 							{isEdited(note) && (
 								<span className={styles.edited} data-note-edited>
 									Edited

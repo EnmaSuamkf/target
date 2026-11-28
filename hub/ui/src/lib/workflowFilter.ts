@@ -11,11 +11,13 @@ import { filterBySchedule, type ScheduleFilter } from "./scheduleView.ts";
 // until the operator does something, so it's what they need to find first.
 export const STATUS_ORDER: Record<WorkflowStatus, number> = {
 	waiting: 0,
-	running: 1,
-	paused: 2,
-	draft: 3,
-	failed: 4,
-	completed: 5,
+	// A Failure recovery is fixing a failed step's plan: active work, listed with `running`.
+	recovering: 1,
+	running: 2,
+	paused: 3,
+	draft: 4,
+	failed: 5,
+	completed: 6,
 };
 
 export type StatusFilter = "all" | WorkflowStatus;

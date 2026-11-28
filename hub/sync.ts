@@ -26,6 +26,7 @@ import { recordScheduleNotice, setScheduleNoticeListener } from "./scheduler.ts"
 import {
 	clearAppliedSyncCommands,
 	deleteSyncStepMap,
+	getAgentModelSettings,
 	getAppliedSyncCommand,
 	getArmedInstance,
 	getOrCreateInstanceId,
@@ -49,6 +50,7 @@ import {
 	type ScheduleNotice,
 	type Workflow,
 } from "./db.ts";
+import { enabledModels, validModelId } from "./model-catalog.ts";
 import { normalizeResourceSelections } from "./rci-selection.ts";
 import {
 	applyTemplateResourcesToWorkflow,
@@ -273,6 +275,50 @@ function parseSandbox(sandbox: unknown): PublishableSandbox | undefined {
 	const value = sandbox.trim();
 	if (value === "host" || value === "docker") return value;
 	throw new WorkflowError(`unknown sandbox '${value}'`);
+}
+
+/**
+ * The Failure recovery fields of a remote step payload (`step.add`, `step.edit`,
+ * the steps of `workflow.create_with_steps`): `recover_on_failure` (boolean) and
+ * `max_recoveries` (integer ≥ 0). An absent (or null) field comes back
+ * undefined, so `addStep` applies the step defaults (off, 1) and `editStep`
+ * keeps the stored value. A field of the wrong type is refused, like the
+ * hub's own step routes refuse it.
+ */
+function remoteRecoveryFields(payload: Record<string, unknown>): { recoverOnFailure?: boolean; maxRecoveries?: number } {
+	const fields: { recoverOnFailure?: boolean; maxRecoveries?: number } = {};
+	const toggle = payload.recover_on_failure;
+	if (toggle !== undefined && toggle !== null) {
+		if (typeof toggle !== "boolean") throw new WorkflowError("recover_on_failure must be a boolean");
+		fields.recoverOnFailure = toggle;
+	}
+	const budget = payload.max_recoveries;
+	if (budget !== undefined && budget !== null) {
+		if (typeof budget !== "number" || !Number.isInteger(budget) || budget < 0) {
+			throw new WorkflowError("max_recoveries must be an integer ≥ 0");
+		}
+		fields.maxRecoveries = budget;
+	}
+	return fields;
+}
+
+/**
+ * The `recovery_model` of a remote `workflow.create` (Failure recovery's model):
+ * absent, null or empty = none (the CLI default). A value must be a model id
+ * enabled for the workflow's runner in Settings > Agent models, exactly what the
+ * hub's own create route accepts, so the server can never invent one.
+ */
+function parseRemoteRecoveryModel(raw: unknown, runner: PublishableRunner | undefined): string | undefined {
+	if (raw === undefined || raw === null) return undefined;
+	if (typeof raw !== "string") throw new WorkflowError("recovery_model must be a model id string or null");
+	const model = raw.trim();
+	if (model === "") return undefined;
+	if (!validModelId(model)) throw new WorkflowError("invalid recovery_model id");
+	const effectiveRunner = runner ?? "claude";
+	if (!enabledModels(effectiveRunner, getAgentModelSettings().runners).some((m) => m.id === model)) {
+		throw new WorkflowError(`recovery_model '${model}' is not enabled for ${effectiveRunner}`);
+	}
+	return model;
 }
 
 /** A server series' instance: the only kind whose schedule events reach the server. */
@@ -537,7 +583,7 @@ function osHostname(): string {
 }
 
 function clientAvailability(): "idle" | "busy" {
-	const busy = listWorkflows().some((w) => w.status === "running" || w.status === "waiting");
+	const busy = listWorkflows().some((w) => w.status === "running" || w.status === "waiting" || w.status === "recovering");
 	return busy ? "busy" : "idle";
 }
 
@@ -547,7 +593,7 @@ async function sendHeartbeat(
 	fetchImpl: FetchLike,
 ): Promise<void> {
 	const activeRemoteIds = listWorkflows()
-		.filter((w) => w.origin === "remote" && w.remoteId && (w.status === "running" || w.status === "waiting"))
+		.filter((w) => w.origin === "remote" && w.remoteId && (w.status === "running" || w.status === "waiting" || w.status === "recovering"))
 		.map((w) => w.remoteId as string);
 	const body = JSON.stringify({
 		status: clientAvailability(),
@@ -755,6 +801,9 @@ function instanceCreatedPayload(workflow: Workflow): Record<string, unknown> {
 			use_subagent: s.useSubagent,
 			max_retries: s.maxRetries,
 			retry_interval_seconds: s.retryIntervalSeconds,
+			// Failure recovery (contract with target-server): the toggle and its budget.
+			recover_on_failure: s.recoverOnFailure === true,
+			max_recoveries: s.maxRecoveries ?? 1,
 		}));
 	return {
 		series_id: workflow.seriesId,
@@ -928,12 +977,14 @@ function createRemoteWorkflow(
 	const sandbox = parseSandbox(payload.sandbox);
 	const conversationContext =
 		typeof payload.conversation_context === "string" ? payload.conversation_context : undefined;
+	const recoveryModel = parseRemoteRecoveryModel(payload.recovery_model, runner);
 
 	const workflow = createWorkflow(name, {
 		workdir,
 		runner,
 		sandbox,
 		conversationContext: conversationContext ?? null,
+		...(recoveryModel ? { recoveryModel } : {}),
 	});
 	const now = new Date().toISOString();
 	const updated = setWorkflowRemoteMeta(workflow.id, {
@@ -950,6 +1001,7 @@ function createRemoteWorkflow(
 			name: updated.name,
 			origin: "remote",
 			...(reportedWorkdir ? { workdir: reportedWorkdir } : {}),
+			recovery_model: updated.recoveryModel ?? null,
 		},
 	});
 	workflowStatusCache.set(updated.id, updated.status);
@@ -979,6 +1031,7 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 				maxRetries: typeof step.max_retries === "number" ? step.max_retries : 0,
 				retryIntervalSeconds:
 					typeof step.retry_interval_seconds === "number" ? step.retry_interval_seconds : 0,
+				...remoteRecoveryFields(step),
 			});
 			setSyncStepKey(remoteId, stepKey, added.id);
 			if (typeof step.order_index === "number") {
@@ -1003,6 +1056,8 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 				useSubagent: step.useSubagent,
 				maxRetries: step.maxRetries,
 				retryIntervalSeconds: step.retryIntervalSeconds,
+				recoverOnFailure: step.recoverOnFailure,
+				maxRecoveries: step.maxRecoveries,
 				templateNotes: step.notes,
 			});
 		}
@@ -1110,6 +1165,8 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 			maxRetries: typeof payload.max_retries === "number" ? payload.max_retries : 0,
 			retryIntervalSeconds:
 				typeof payload.retry_interval_seconds === "number" ? payload.retry_interval_seconds : 0,
+			// Failure recovery: absent = the step defaults (off, a budget of 1).
+			...remoteRecoveryFields(payload),
 			templateNotes: Array.isArray(payload.notes) ? normalizeTemplateStepNotes(payload.notes) : undefined,
 			...(isCommand
 				? {
@@ -1144,6 +1201,9 @@ const COMMAND_HANDLERS: Record<SyncCommandType, CommandHandler> = {
 			maxRetries: typeof payload.max_retries === "number" ? payload.max_retries : undefined,
 			retryIntervalSeconds:
 				typeof payload.retry_interval_seconds === "number" ? payload.retry_interval_seconds : undefined,
+			// Failure recovery: only when the server sent them, so an edit that omits
+			// them keeps the stored toggle and budget.
+			...remoteRecoveryFields(payload),
 			// Branch agents of a command step: only when the server sent them.
 			...(existing.kind === "command" && "on_success_task" in payload
 				? { onSuccessTask: typeof payload.on_success_task === "string" ? payload.on_success_task : null }

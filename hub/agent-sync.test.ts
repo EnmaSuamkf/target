@@ -41,15 +41,99 @@ process.env.PATH = `${mockBin}${path.delimiter}${process.env.PATH ?? ""}`;
 
 const { syncSkills, syncMcp, TARGET_SKILL_VERSION } = await import("./agent-sync.ts");
 
-test("syncSkills writes skill files for installed runners", () => {
+test("syncSkills writes skill files for installed runners (Cursor under ~/.cursor/skills, not the managed skills-cursor)", () => {
 	const actions = syncSkills({ homeDir: tmpHome, repoDir: repoRoot(), force: true });
 	assert.ok(actions.some((a) => a.harness === "cursor" && a.action === "synced"));
-	const workflowsPath = path.join(tmpHome, ".cursor/skills-cursor/target-workflows/SKILL.md");
-	const createPath = path.join(tmpHome, ".cursor/skills-cursor/create-workflow/SKILL.md");
+	const workflowsPath = path.join(tmpHome, ".cursor/skills/target-workflows/SKILL.md");
+	const createPath = path.join(tmpHome, ".cursor/skills/create-workflow/SKILL.md");
 	assert.ok(fs.existsSync(workflowsPath));
 	assert.ok(fs.existsSync(createPath));
 	assert.match(fs.readFileSync(workflowsPath, "utf8"), new RegExp(`TARGET_SKILL_VERSION: "${TARGET_SKILL_VERSION}"`));
 	assert.match(fs.readFileSync(createPath, "utf8"), /name: create-workflow/);
+	assert.ok(!fs.existsSync(path.join(tmpHome, ".cursor/skills-cursor/target-workflows/SKILL.md")), "nothing written to Cursor's managed folder");
+	for (const runner of ["cursor", "claude", "copilot", "free-code"]) {
+		assert.ok(
+			actions.some((a) => a.harness === runner && a.action === "synced" && a.path.endsWith(path.join("create-workflow", "SKILL.md"))),
+			`${runner} got create-workflow`,
+		);
+	}
+});
+
+test("skill version: the bundled skills and agent-sync agree on TARGET_SKILL_VERSION 7", () => {
+	assert.equal(TARGET_SKILL_VERSION, "7");
+	for (const name of ["create-workflow", "target-workflows"]) {
+		const source = fs.readFileSync(path.join(repoRoot(), "skills", name, "SKILL.md"), "utf8");
+		assert.match(source, /^TARGET_SKILL_VERSION: "7"$/m, `${name} carries the same stamp`);
+		assert.match(source, /Failure recovery/, `${name} documents Failure recovery`);
+	}
+});
+
+test("syncSkills rewrites an installed version 6 copy, then reports it unchanged", () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "target-agent-sync-v6-"));
+	try {
+		const dests = [".claude/skills", ".cursor/skills", ".copilot/skills"].map((dir) => path.join(home, dir, "create-workflow", "SKILL.md"));
+		for (const dest of dests) {
+			fs.mkdirSync(path.dirname(dest), { recursive: true });
+			fs.writeFileSync(dest, '---\nTARGET_SKILL_VERSION: "6"\nname: create-workflow\n---\nold copy\n');
+		}
+		const first = syncSkills({ homeDir: home, repoDir: repoRoot() });
+		for (const dest of dests) {
+			assert.ok(first.some((a) => a.path === dest && a.action === "synced"), `${dest} rewritten`);
+			const content = fs.readFileSync(dest, "utf8");
+			assert.match(content, /^TARGET_SKILL_VERSION: "7"$/m);
+			assert.ok(!content.includes("old copy"));
+			assert.match(content, /Failure recovery/);
+		}
+		const second = syncSkills({ homeDir: home, repoDir: repoRoot() });
+		for (const dest of dests) {
+			assert.ok(second.some((a) => a.path === dest && a.action === "unchanged"), `${dest} unchanged on the second run`);
+		}
+		assert.ok(!second.some((a) => a.action === "synced" || a.action === "removed"), "a second run changes nothing");
+	} finally {
+		fs.rmSync(home, { recursive: true, force: true });
+	}
+});
+
+test("syncSkills removes Target's old copies from ~/.cursor/skills-cursor and nothing else there", () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "target-agent-sync-legacy-"));
+	try {
+		const legacy = path.join(home, ".cursor/skills-cursor");
+		const stamped = path.join(legacy, "create-workflow", "SKILL.md");
+		const stampedWithExtra = path.join(legacy, "target-workflows", "SKILL.md");
+		const extra = path.join(legacy, "target-workflows", "notes.txt");
+		const cursorOwn = path.join(legacy, "cursor-builtin", "SKILL.md");
+		fs.mkdirSync(path.dirname(stamped), { recursive: true });
+		fs.writeFileSync(stamped, '---\nTARGET_SKILL_VERSION: "6"\nname: create-workflow\n---\n');
+		fs.mkdirSync(path.dirname(stampedWithExtra), { recursive: true });
+		fs.writeFileSync(stampedWithExtra, '---\nTARGET_SKILL_VERSION: "5";\nname: target-workflows\n---\n');
+		fs.writeFileSync(extra, "not Target's");
+		fs.mkdirSync(path.dirname(cursorOwn), { recursive: true });
+		fs.writeFileSync(cursorOwn, "---\nname: cursor-builtin\n---\nCursor's own skill\n");
+
+		// A dry run reports the removal and touches nothing.
+		const dry = syncSkills({ homeDir: home, repoDir: repoRoot(), dryRun: true });
+		assert.ok(dry.some((a) => a.action === "removed" && a.path === stamped));
+		assert.ok(fs.existsSync(stamped));
+
+		const actions = syncSkills({ homeDir: home, repoDir: repoRoot() });
+		assert.ok(actions.some((a) => a.harness === "cursor" && a.action === "removed" && a.path === stamped));
+		assert.ok(actions.some((a) => a.harness === "cursor" && a.action === "removed" && a.path === stampedWithExtra));
+		assert.ok(!fs.existsSync(path.dirname(stamped)), "an emptied skill folder goes too");
+		assert.ok(!fs.existsSync(stampedWithExtra));
+		assert.ok(fs.existsSync(extra), "a file Target did not write stays");
+		assert.ok(fs.existsSync(cursorOwn), "Cursor's own skills are never touched");
+		assert.ok(fs.existsSync(path.join(home, ".cursor/skills/create-workflow/SKILL.md")), "the copy now lives in ~/.cursor/skills");
+
+		// A same-named skill WITHOUT Target's stamp is not Target's: it stays.
+		const unstamped = path.join(legacy, "create-workflow", "SKILL.md");
+		fs.mkdirSync(path.dirname(unstamped), { recursive: true });
+		fs.writeFileSync(unstamped, "---\nname: create-workflow\n---\nsomeone else's\n");
+		const again = syncSkills({ homeDir: home, repoDir: repoRoot() });
+		assert.ok(!again.some((a) => a.action === "removed"));
+		assert.ok(fs.existsSync(unstamped));
+	} finally {
+		fs.rmSync(home, { recursive: true, force: true });
+	}
 });
 
 test("syncSkills installs skills for copilot under ~/.copilot/skills", () => {

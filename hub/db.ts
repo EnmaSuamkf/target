@@ -31,8 +31,13 @@ import type { ScheduleSpec } from "./schedule.ts";
  * and passed its judge, but carries the per-step "Manual review" gate, so the
  * engine stopped there instead of advancing. It is not terminal and not an
  * error — only a human pressing Continue (or a restart) moves it on.
+ *
+ * `recovering` is Failure recovery: a step with "Recover on failure" failed for
+ * good and the hub dispatched a recovery agent to fix the plan. Nothing else is
+ * dispatched on the workflow meanwhile; the recovery ends by relaunching it
+ * (`running`) or by giving up (`failed`). See recovery.ts.
  */
-export type WorkflowStatus = "draft" | "running" | "paused" | "waiting" | "completed" | "failed";
+export type WorkflowStatus = "draft" | "running" | "paused" | "waiting" | "recovering" | "completed" | "failed";
 /** `waiting`: the step's work is done and verified, but its manual-review gate is holding it (see WorkflowStatus). */
 export type StepStatus = "pending" | "queued" | "running" | "waiting" | "done" | "failed";
 /**
@@ -201,6 +206,12 @@ export interface Workflow {
 	statusManual: boolean;
 	/** When that override was made; null when the status is the engine's own. */
 	statusManualAt: string | null;
+	/**
+	 * The model the Failure recovery agent runs with (a model id enabled for the
+	 * workflow's runner), or null for the CLI's default. Applied to the
+	 * workflow's second awb hook, `<agentName>-recovery` (see recovery.ts).
+	 */
+	recoveryModel: string | null;
 	/** `local` for operator-created workflows; `remote` when created by the sync agent from a server command. */
 	origin: WorkflowOrigin;
 	/** Server-side workflow id when `origin === "remote"`. */
@@ -394,6 +405,18 @@ export interface Step {
 	statusManual: boolean;
 	/** When that override was made; null when the status came from a run. */
 	statusManualAt: string | null;
+	/**
+	 * Failure recovery ("Recover on failure"): when this step fails for good (a
+	 * final judge rejection, a command step's final failure, a timeout with no
+	 * retries left), the hub dispatches a recovery agent that fixes the plan and
+	 * relaunches the workflow instead of stopping it. Off by default, so a step
+	 * that never touches the toggle fails exactly as before.
+	 */
+	recoverOnFailure: boolean;
+	/** How many recoveries this step may use (integer ≥ 0, default 1). */
+	maxRecoveries: number;
+	/** Recoveries already started for this step. Hub-owned; kept by "reopen step", reset by restart. */
+	recoveryCount: number;
 }
 
 /** Theme colours for a step sticky note — warning (amber), success (green), neutral (grey). */
@@ -453,6 +476,10 @@ export interface TemplateStep {
 	useSubagent: boolean;
 	maxRetries: number;
 	retryIntervalSeconds: number;
+	/** Seeds `Step.recoverOnFailure` (Failure recovery); absent (a template from before it existed) reads as false. */
+	recoverOnFailure: boolean;
+	/** Seeds `Step.maxRecoveries`; absent reads as 1, the step default. */
+	maxRecoveries: number;
 	/** Optional sticky notes copied onto workflow steps when this template is used. */
 	notes?: TemplateStepNote[];
 }
@@ -791,6 +818,11 @@ export function open(): DatabaseSync {
 	// no agent, which is what every command step was before these existed.
 	addColumn("on_success_task", "on_success_task TEXT");
 	addColumn("on_failure_task", "on_failure_task TEXT");
+	// Failure recovery (recovery.ts). DEFAULT 0 / 1 / 0: an upgraded row is a step
+	// with the toggle off — it fails exactly as before — and an unused budget.
+	addColumn("recover_on_failure", "recover_on_failure INTEGER NOT NULL DEFAULT 0");
+	addColumn("max_recoveries", "max_recoveries INTEGER NOT NULL DEFAULT 1");
+	addColumn("recovery_count", "recovery_count INTEGER NOT NULL DEFAULT 0");
 	// `step_notes` existed before `source` did, and the CREATE TABLE above skips an
 	// existing table. DEFAULT 'operator': every note written before agents could add
 	// one was written by the operator, so an upgraded row keeps saying that and keeps
@@ -810,6 +842,8 @@ export function open(): DatabaseSync {
 		if (!existingWorkflowColumns.has(name)) database.exec(`ALTER TABLE workflows ADD COLUMN ${ddl};`);
 	};
 	addWorkflowColumn("conversation_context", "conversation_context TEXT");
+	// Failure recovery's model. NULL = the CLI's default model.
+	addWorkflowColumn("recovery_model", "recovery_model TEXT");
 	// Nullable with no default: an existing DB upgrades to "this workflow adopted
 	// no conversation", which is what every workflow created before this existed
 	// did.
@@ -908,6 +942,32 @@ export function open(): DatabaseSync {
 		);
 		CREATE INDEX IF NOT EXISTS idx_schedule_notices_open ON schedule_notices(acknowledged_at, created_at);
 	`);
+	// Failure recovery attempts (recovery.ts). One row per attempt, kept as
+	// history. `token_hash` is the SHA-256 of the recovery token handed to the
+	// recovery agent; only a `running` row's token is accepted, so the token dies
+	// with the attempt. `callback_token` authenticates awb's started/result
+	// callbacks for the recovery run.
+	database.exec(`
+		CREATE TABLE IF NOT EXISTS recoveries (
+			id             TEXT PRIMARY KEY,
+			workflow_id    TEXT NOT NULL,
+			step_id        TEXT NOT NULL,
+			status         TEXT NOT NULL DEFAULT 'running',
+			failure_kind   TEXT NOT NULL,
+			reason         TEXT NOT NULL,
+			token_hash     TEXT NOT NULL,
+			callback_token TEXT NOT NULL,
+			changes        TEXT NOT NULL DEFAULT '[]',
+			outcome_reason TEXT,
+			result         TEXT,
+			session_id     TEXT,
+			notification   TEXT,
+			started_at     TEXT NOT NULL,
+			run_started_at TEXT,
+			finished_at    TEXT
+		);
+		CREATE INDEX IF NOT EXISTS idx_recoveries_workflow ON recoveries(workflow_id, started_at);
+	`);
 	const existingTemplateColumns = new Set(
 		(database.prepare("PRAGMA table_info(templates)").all() as Record<string, unknown>[]).map((c) => String(c.name)),
 	);
@@ -972,6 +1032,7 @@ function rowToWorkflow(row: Record<string, unknown>): Workflow {
 		compactionHandledAt: row.compaction_handled_at == null ? null : String(row.compaction_handled_at),
 		statusManual: Number(row.status_manual ?? 0) === 1,
 		statusManualAt: row.status_manual_at == null ? null : String(row.status_manual_at),
+		recoveryModel: nullableString(row.recovery_model),
 		origin: row.origin === "remote" ? "remote" : "local",
 		remoteId: row.remote_id == null ? null : String(row.remote_id),
 		remoteSyncedAt: row.remote_synced_at == null ? null : String(row.remote_synced_at),
@@ -1066,6 +1127,7 @@ export function insertWorkflow(input: {
 		compactionHandledAt: null,
 		statusManual: false,
 		statusManualAt: null,
+		recoveryModel: null,
 		origin,
 		remoteId,
 		remoteSyncedAt,
@@ -1734,6 +1796,7 @@ export function deleteWorkflow(id: string): boolean {
 	const database = open();
 	database.prepare("DELETE FROM step_notes WHERE workflow_id = ?").run(id);
 	database.prepare("DELETE FROM steps WHERE workflow_id = ?").run(id);
+	database.prepare("DELETE FROM recoveries WHERE workflow_id = ?").run(id);
 	return database.prepare("DELETE FROM workflows WHERE id = ?").run(id).changes > 0;
 }
 
@@ -1794,6 +1857,9 @@ function rowToStep(row: Record<string, unknown>): Step {
 		selected: Number(row.selected ?? 1) === 1,
 		statusManual: Number(row.status_manual ?? 0) === 1,
 		statusManualAt: row.status_manual_at == null ? null : String(row.status_manual_at),
+		recoverOnFailure: Number(row.recover_on_failure ?? 0) === 1,
+		maxRecoveries: Number(row.max_recoveries ?? 1),
+		recoveryCount: Number(row.recovery_count ?? 0),
 	};
 }
 
@@ -1842,6 +1908,10 @@ export function insertStep(
 		 * engine must not pick the step up on the next dispatch decision.
 		 */
 		selected?: boolean;
+		/** Failure recovery toggle. Omitted = off. */
+		recoverOnFailure?: boolean;
+		/** Failure recovery budget. Omitted = 1. */
+		maxRecoveries?: number;
 	} = {},
 ): Step {
 	const database = open();
@@ -1916,11 +1986,14 @@ export function insertStep(
 		selected: options.selected !== false,
 		statusManual: false,
 		statusManualAt: null,
+		recoverOnFailure: kind !== "context" && options.recoverOnFailure === true,
+		maxRecoveries: Math.max(0, Math.floor(options.maxRecoveries ?? 1)),
+		recoveryCount: 0,
 	};
 	database
 		.prepare(
-			`INSERT INTO steps (id, workflow_id, kind, order_index, description, status, callback_token, created_at, acceptance_criteria, manual_review, use_subagent, max_retries, retry_interval_seconds, selected, pipeline_id, pipeline_inputs, on_success_task, on_failure_task)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO steps (id, workflow_id, kind, order_index, description, status, callback_token, created_at, acceptance_criteria, manual_review, use_subagent, max_retries, retry_interval_seconds, selected, pipeline_id, pipeline_inputs, on_success_task, on_failure_task, recover_on_failure, max_recoveries)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		.run(
 			step.id,
@@ -1941,6 +2014,8 @@ export function insertStep(
 			step.pipelineInputs == null ? null : JSON.stringify(step.pipelineInputs),
 			step.onSuccessTask,
 			step.onFailureTask,
+			step.recoverOnFailure ? 1 : 0,
+			step.maxRecoveries,
 		);
 	registerSecret(step.callbackToken);
 	return step;
@@ -2098,6 +2173,214 @@ export function updateStepConfig(
 			Math.max(0, Math.floor(config.retryIntervalSeconds)),
 			id,
 		);
+}
+
+/** Updates a step's Failure recovery settings. Only the fields given change. */
+export function updateStepRecoveryConfig(
+	id: string,
+	config: { recoverOnFailure?: boolean; maxRecoveries?: number },
+): void {
+	const database = open();
+	if (config.recoverOnFailure !== undefined) {
+		database.prepare("UPDATE steps SET recover_on_failure = ? WHERE id = ?").run(config.recoverOnFailure ? 1 : 0, id);
+	}
+	if (config.maxRecoveries !== undefined) {
+		database
+			.prepare("UPDATE steps SET max_recoveries = ? WHERE id = ?")
+			.run(Math.max(0, Math.floor(config.maxRecoveries)), id);
+	}
+}
+
+/** Consumes one recovery of a step's budget (a recovery attempt is starting). */
+export function incrementRecoveryCount(id: string): void {
+	open().prepare("UPDATE steps SET recovery_count = recovery_count + 1 WHERE id = ?").run(id);
+}
+
+/**
+ * "Reopen step": puts a FAILED step back to `pending` with a fresh retry budget
+ * (`retry_count` 0), keeping `recovery_count` — unlike the manual status
+ * override, which keeps `retry_count` (so a reopened step would fail on its
+ * first rejection). The step's result stays for reference; the error, timings
+ * and the manual-status marker are cleared, as the next run re-authors them.
+ * Returns whether a failed row was reopened.
+ */
+export function reopenStepRow(id: string): boolean {
+	return (
+		open()
+			.prepare(
+				`UPDATE steps SET status = 'pending', error = NULL, started_at = NULL, queued_at = NULL, finished_at = NULL,
+				 is_manual_run = 0, phase = 'exec', retry_count = 0, retry_at = NULL,
+				 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL,
+				 status_manual = 0, status_manual_at = NULL
+				 WHERE id = ? AND status = 'failed'`,
+			)
+			.run(id).changes > 0
+	);
+}
+
+/**
+ * Puts a step a recovery reopened (but never relaunched) back to `failed` with
+ * its original error, so a give-up leaves the step failed as it found it.
+ * Only acts on a `pending` row. Returns whether it did.
+ */
+export function failReopenedStep(id: string, error: string): boolean {
+	return (
+		open()
+			.prepare("UPDATE steps SET status = 'failed', error = ?, finished_at = ?, retry_at = NULL WHERE id = ? AND status = 'pending'")
+			.run(error, new Date().toISOString(), id).changes > 0
+	);
+}
+
+/** Sets (null clears) a workflow's Failure recovery model. */
+export function setWorkflowRecoveryModel(id: string, model: string | null): void {
+	open()
+		.prepare("UPDATE workflows SET recovery_model = ?, updated_at = ? WHERE id = ?")
+		.run(model, new Date().toISOString(), id);
+}
+
+// --- Failure recovery attempts (recovery.ts) ---------------------------------
+
+export type RecoveryStatus = "running" | "relaunched" | "gave_up";
+/** Why the step failed for good: the three triggers of Failure recovery. */
+export type RecoveryFailureKind = "judge_rejected" | "command_failed" | "timeout";
+
+export interface Recovery {
+	id: string;
+	workflowId: string;
+	stepId: string;
+	status: RecoveryStatus;
+	failureKind: RecoveryFailureKind;
+	/** Why the step failed (the error the hub recorded). */
+	reason: string;
+	tokenHash: string;
+	callbackToken: string;
+	/** Every change the recovery made to the plan, one "field: before → after" line each. */
+	changes: string[];
+	/** Why it gave up, or the relaunch summary. Null while running. */
+	outcomeReason: string | null;
+	/** The recovery agent's final answer, when its turn ended. */
+	result: string | null;
+	sessionId: string | null;
+	/** The notifier's outcome for the relaunch / give-up notification (`sent`, or the skip reason). */
+	notification: string | null;
+	startedAt: string;
+	runStartedAt: string | null;
+	finishedAt: string | null;
+}
+
+function rowToRecovery(row: Record<string, unknown>): Recovery {
+	let changes: string[] = [];
+	try {
+		const parsed = JSON.parse(String(row.changes ?? "[]")) as unknown;
+		if (Array.isArray(parsed)) changes = parsed.map((c) => String(c));
+	} catch {
+		changes = [];
+	}
+	return {
+		id: String(row.id),
+		workflowId: String(row.workflow_id),
+		stepId: String(row.step_id),
+		status: (row.status as RecoveryStatus) ?? "running",
+		failureKind: row.failure_kind as RecoveryFailureKind,
+		reason: String(row.reason ?? ""),
+		tokenHash: String(row.token_hash),
+		callbackToken: String(row.callback_token),
+		changes,
+		outcomeReason: nullableString(row.outcome_reason),
+		result: nullableString(row.result),
+		sessionId: nullableString(row.session_id),
+		notification: nullableString(row.notification),
+		startedAt: String(row.started_at),
+		runStartedAt: nullableString(row.run_started_at),
+		finishedAt: nullableString(row.finished_at),
+	};
+}
+
+export function insertRecovery(input: {
+	workflowId: string;
+	stepId: string;
+	failureKind: RecoveryFailureKind;
+	reason: string;
+	tokenHash: string;
+}): Recovery {
+	const id = crypto.randomUUID();
+	const callbackToken = crypto.randomBytes(24).toString("hex");
+	registerSecret(callbackToken);
+	open()
+		.prepare(
+			`INSERT INTO recoveries (id, workflow_id, step_id, status, failure_kind, reason, token_hash, callback_token, changes, started_at)
+			 VALUES (?, ?, ?, 'running', ?, ?, ?, ?, '[]', ?)`,
+		)
+		.run(id, input.workflowId, input.stepId, input.failureKind, input.reason, input.tokenHash, callbackToken, new Date().toISOString());
+	return getRecovery(id) as Recovery;
+}
+
+export function getRecovery(id: string): Recovery | null {
+	const row = open().prepare("SELECT * FROM recoveries WHERE id = ?").get(id);
+	return row ? rowToRecovery(row as Record<string, unknown>) : null;
+}
+
+/** The workflow's recovery in progress, if any (at most one runs at a time). */
+export function getRunningRecovery(workflowId: string): Recovery | null {
+	const row = open()
+		.prepare("SELECT * FROM recoveries WHERE workflow_id = ? AND status = 'running' ORDER BY started_at DESC, rowid DESC LIMIT 1")
+		.get(workflowId);
+	return row ? rowToRecovery(row as Record<string, unknown>) : null;
+}
+
+/** Every recovery still running, on any workflow (the watchdog's view). */
+export function listRunningRecoveries(): Recovery[] {
+	const rows = open().prepare("SELECT * FROM recoveries WHERE status = 'running'").all() as Record<string, unknown>[];
+	return rows.map(rowToRecovery);
+}
+
+/** Every recovery attempt of a workflow, oldest first. */
+export function listRecoveries(workflowId: string): Recovery[] {
+	const rows = open()
+		.prepare("SELECT * FROM recoveries WHERE workflow_id = ? ORDER BY started_at ASC, rowid ASC")
+		.all(workflowId) as Record<string, unknown>[];
+	return rows.map(rowToRecovery);
+}
+
+/** Appends one change line to a running recovery. */
+export function appendRecoveryChange(id: string, change: string): void {
+	const current = getRecovery(id);
+	if (!current) return;
+	open()
+		.prepare("UPDATE recoveries SET changes = ? WHERE id = ?")
+		.run(JSON.stringify([...current.changes, change]), id);
+}
+
+export function markRecoveryRunStarted(id: string): boolean {
+	return (
+		open()
+			.prepare("UPDATE recoveries SET run_started_at = COALESCE(run_started_at, ?) WHERE id = ? AND status = 'running'")
+			.run(new Date().toISOString(), id).changes > 0
+	);
+}
+
+/** Records the recovery agent's final answer (whether or not the attempt already settled). */
+export function recordRecoveryResult(id: string, result: string | null, sessionId: string | null): void {
+	open()
+		.prepare("UPDATE recoveries SET result = ?, session_id = COALESCE(?, session_id) WHERE id = ?")
+		.run(result, sessionId, id);
+}
+
+/**
+ * Settles a running recovery (relaunched or gave up). Only a `running` row
+ * settles, so two settles racing each other (the relaunch route and the result
+ * callback, an abort and the callback) cannot both win. Returns whether it did.
+ */
+export function finishRecovery(id: string, status: Exclude<RecoveryStatus, "running">, outcomeReason: string): boolean {
+	return (
+		open()
+			.prepare("UPDATE recoveries SET status = ?, outcome_reason = ?, finished_at = ? WHERE id = ? AND status = 'running'")
+			.run(status, outcomeReason, new Date().toISOString(), id).changes > 0
+	);
+}
+
+export function setRecoveryNotification(id: string, notification: string): void {
+	open().prepare("UPDATE recoveries SET notification = ? WHERE id = ?").run(notification, id);
 }
 
 export function deleteStep(id: string): boolean {
@@ -2863,7 +3146,7 @@ export function resetSteps(workflowId: string): void {
 			`UPDATE steps SET status = 'pending', result = NULL, error = NULL, session_id = NULL,
 			 started_at = NULL, finished_at = NULL, is_manual_run = 0, phase = 'exec', retry_count = 0,
 			 last_progress_at = NULL, last_progress_kind = NULL, last_progress_token = NULL,
-			 status_manual = 0, status_manual_at = NULL, retry_at = NULL
+			 status_manual = 0, status_manual_at = NULL, retry_at = NULL, recovery_count = 0
 			 WHERE workflow_id = ? AND selected = 1`,
 		)
 		.run(workflowId);
@@ -2929,6 +3212,17 @@ function normalizeStepInputs(value: unknown): Record<string, string> {
 	return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, String(v ?? "")]));
 }
 
+/**
+ * A stored Failure recovery budget: an integer ≥ 0, with 1 (the step default)
+ * for anything absent or unreadable. Used by templates and bundles, which read
+ * foreign data and coerce rather than refuse (the API routes validate strictly).
+ */
+export function normalizeMaxRecoveries(value: unknown): number {
+	if (value === undefined || value === null || value === "") return 1;
+	const n = Math.floor(Number(value));
+	return Number.isFinite(n) ? Math.max(0, n) : 1;
+}
+
 function normalizeTemplateSteps(steps: unknown): TemplateStep[] {
 	if (!Array.isArray(steps)) return [];
 	return steps
@@ -2947,6 +3241,10 @@ function normalizeTemplateSteps(steps: unknown): TemplateStep[] {
 			const useSubagent = obj.useSubagent !== false;
 			const maxRetries = Math.max(0, Math.floor(Number(obj.maxRetries ?? 0)) || 0);
 			const retryIntervalSeconds = Math.max(0, Math.floor(Number(obj.retryIntervalSeconds ?? 0)) || 0);
+			// Failure recovery, with the step defaults when a template (or a bundle)
+			// from before it existed omits them: off, and a budget of one.
+			const recoverOnFailure = obj.recoverOnFailure === true;
+			const maxRecoveries = normalizeMaxRecoveries(obj.maxRecoveries);
 			const notes = normalizeTemplateStepNotes(obj.notes);
 			// A template step is an agent step unless it says `command`. Only a
 			// command step keeps a pipeline and inputs; for any other kind they are
@@ -2977,6 +3275,8 @@ function normalizeTemplateSteps(steps: unknown): TemplateStep[] {
 				useSubagent: kind === "command" ? false : useSubagent,
 				maxRetries,
 				retryIntervalSeconds,
+				recoverOnFailure,
+				maxRecoveries,
 				...(notes.length > 0 ? { notes } : {}),
 			};
 		})

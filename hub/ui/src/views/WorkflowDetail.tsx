@@ -21,6 +21,8 @@ import { ArchivedBadge, Badge, ScheduleBadge } from "../components/Badge.tsx";
 import { MissedOnceActions } from "../components/MissedOnceActions.tsx";
 import { CollapsibleSection } from "../components/CollapsibleSection.tsx";
 import { WorkflowModelFact } from "../components/WorkflowModelFact.tsx";
+import { RecoveryFields } from "../components/RecoveryFields.tsx";
+import { parseMaxRecoveries } from "../lib/recovery.ts";
 import { DockerMountEditor } from "../components/DockerMountEditor.tsx";
 import { CopyTooltip } from "../components/CopyTooltip.tsx";
 import { useToast } from "../components/Toast.tsx";
@@ -144,6 +146,8 @@ export function WorkflowDetail({
 	onSaveResources,
 	onSaveDockerMounts,
 	onSaveModel,
+	onSaveRecoveryModel,
+	onAbortRecovery,
 	onAttachImages,
 	onRemoveAttachment,
 	onOpenTerminal,
@@ -204,6 +208,10 @@ export function WorkflowDetail({
 	onSaveDockerMounts: (mounts: string[]) => Promise<boolean>;
 	/** Resolves true when the server stored the model (empty = CLI default). */
 	onSaveModel: (model: string) => Promise<boolean>;
+	/** Saves the Failure recovery model (empty string = CLI default) through the recovery-model route. */
+	onSaveRecoveryModel: (model: string) => Promise<boolean>;
+	/** Stops the running Failure recovery; the hub settles it as gave up. */
+	onAbortRecovery: () => void;
 	/**
 	 * Pins images to one of this workflow's text inputs. `stepId` is null for the
 	 * conversation context and the step's id for its description / criteria.
@@ -401,6 +409,16 @@ export function WorkflowDetail({
 	// The server refuses a workflow override while a step still has a callback
 	// coming — that callback would write a status over it seconds later.
 	const stepInFlight = steps.some((s) => s.status === "running" || s.status === "queued");
+	// A Failure recovery is fixing the plan: nothing runs and no step can be
+	// changed until it relaunches or gives up (the hub answers 409 meanwhile).
+	const recovering = workflow.status === "recovering";
+	const recoveryStepId = recovering ? (workflow.recovery?.stepId ?? null) : null;
+	const recoveringStep = recoveryStepId ? steps.find((s) => s.id === recoveryStepId) : undefined;
+	const stepRecoveryLock: false | true | { stepId: string } = recovering
+		? recoveryStepId
+			? { stepId: recoveryStepId }
+			: true
+		: false;
 	const selectedCount = selection.size;
 	const allSelected = taskSteps.length > 0 && selectedCount === taskSteps.length;
 	const stepsFullyLoaded =
@@ -587,6 +605,19 @@ export function WorkflowDetail({
 					onSave={onSaveModel}
 				/>
 
+				<WorkflowModelFact
+					className={styles.modelBlock}
+					kind="recovery"
+					workflow={workflow}
+					locked={
+						workflow.status === "recovering" ||
+						steps.some((step) => step.status === "running" || step.status === "queued")
+					}
+					disabled={busy || !canManage}
+					disabledTitle={canManage ? undefined : requires("client.workflows.manage")}
+					onSave={onSaveRecoveryModel}
+				/>
+
 				{workflow.sandbox === "docker" && (
 					<CollapsibleSection
 						title="Docker bind mounts"
@@ -667,6 +698,45 @@ export function WorkflowDetail({
 					</div>
 				)}
 
+				{recovering && (
+					<div className={`msg ${styles.recoveryBanner}`} role="status" data-workflow-recovering>
+						<p>
+							<strong>Failure recovery running.</strong>{" "}
+							{recoveringStep ? `Step ${recoveringStep.orderIndex + 1} failed for good; ` : "A step failed for good; "}
+							an agent{workflow.recoveryModel ? ` (${workflow.recoveryModel})` : ""} is fixing the plan and will relaunch
+							the workflow, or give up. Steps can&rsquo;t be changed or run meanwhile.
+						</p>
+						{workflow.recovery?.reason && (
+							<p className={styles.recoveryReason}>
+								<span className={styles.recoveryReasonLabel}>Why it failed:</span> {workflow.recovery.reason}
+							</p>
+						)}
+						{workflow.recovery && workflow.recovery.changes.length > 0 && (
+							<ul className={styles.recoveryChanges} aria-label="Plan changes so far">
+								{workflow.recovery.changes.map((change, i) => (
+									<li key={i}>{change}</li>
+								))}
+							</ul>
+						)}
+						<div className={styles.recoveryActions}>
+							<button
+								type="button"
+								className="btn btn--sm btn--danger"
+								onClick={onAbortRecovery}
+								disabled={busy || !canExecute}
+								title={
+									canExecute
+										? "Stop the recovery agent. The recovery ends as gave up: the step stays failed and the workflow failed."
+										: requires("client.workflows.execute")
+								}
+								data-abort-recovery
+							>
+								Stop recovery
+							</button>
+						</div>
+					</div>
+				)}
+
 				<div className={styles.progressRow}>
 					<ProgressBar progress={workflow.progress} running={running} />
 					<span className={styles.progressText}>
@@ -696,7 +766,9 @@ export function WorkflowDetail({
 									: !startAction
 									? workflow.status === "waiting"
 										? "A step is waiting for your review — Continue it to carry on, or Abort it to stop here."
-										: "Already running."
+										: recovering
+											? "A Failure recovery is fixing the plan. It relaunches the workflow itself, or gives up."
+											: "Already running."
 									: !stepsFullyLoaded
 										? "Loading steps — wait until every step is listed before starting."
 										: selectedCount === 0
@@ -777,12 +849,14 @@ export function WorkflowDetail({
 					<select
 						className={`select ${styles.statusSelect}`}
 						value=""
-						disabled={busy || stepInFlight || !canManage}
+						disabled={busy || stepInFlight || recovering || !canManage}
 						aria-label="Set this workflow's status by hand"
 						title={
 							!canManage
 								? requires("client.workflows.manage")
-								: stepInFlight
+								: recovering
+									? "A Failure recovery is running — stop it first, or wait until it relaunches or gives up."
+									: stepInFlight
 									? "A step is still in flight — stop or abort it first."
 									: "Correct the status by hand when a step really succeeded but was recorded as failed. Nothing is run."
 						}
@@ -918,7 +992,12 @@ export function WorkflowDetail({
 					    I act on?" to be worked out every time. Only the list is an editor,
 					    which is why the add-step form goes with it. */}
 					{stepsView === "canvas" ? (
-						<WorkflowCanvas steps={steps} selectedIds={selection} onOpenStep={openStepInList} />
+						<WorkflowCanvas
+							steps={steps}
+							selectedIds={selection}
+							onOpenStep={openStepInList}
+							recoveringStepId={recoveryStepId}
+						/>
 					) : (
 						<>
 						{/* Pinned above the numbered list, not inside it: it runs before step 1
@@ -953,6 +1032,7 @@ export function WorkflowDetail({
 									onSelectWorkflow={onSelectWorkflow}
 									archived={archived}
 									scheduledArmed={scheduledArmed}
+									workflowRecovering={stepRecoveryLock}
 									busy={busy}
 								/>
 							</ul>
@@ -994,6 +1074,7 @@ export function WorkflowDetail({
 										onSelectWorkflow={onSelectWorkflow}
 										archived={archived}
 										scheduledArmed={scheduledArmed}
+										workflowRecovering={stepRecoveryLock}
 										busy={busy}
 									/>
 								))}
@@ -1005,6 +1086,7 @@ export function WorkflowDetail({
 							onAdd={onAddStep}
 							onAddFromTemplate={onAddStepsFromTemplate}
 							sandboxed={workflow.sandbox === "docker"}
+							locked={recovering}
 						/>
 						</>
 					)}
@@ -1084,12 +1166,15 @@ function AddStepForm({
 	onAdd,
 	onAddFromTemplate,
 	sandboxed,
+	locked = false,
 }: {
 	templates: Template[];
 	onAdd: (input: StepConfigInput, staged?: StagedStepImages) => Promise<void>;
 	onAddFromTemplate: (templateId: string) => Promise<void>;
 	/** A docker-sandboxed workflow cannot run command steps in this version (docs/pipelines.md, "Where a pipeline runs"). */
 	sandboxed: boolean;
+	/** A Failure recovery is running: the hub refuses new steps from the operator until it ends. */
+	locked?: boolean;
 }): React.JSX.Element {
 	// Images picked before the step exists; uploaded by the caller once it does.
 	const staged = useStagedImages("new-step");
@@ -1101,6 +1186,9 @@ function AddStepForm({
 	const [useSubagent, setUseSubagent] = useState(true);
 	const [maxRetries, setMaxRetries] = useState("0");
 	const [interval, setInterval] = useState("0");
+	// Failure recovery: off by default, with a budget of one recovery once on.
+	const [recoverOnFailure, setRecoverOnFailure] = useState(false);
+	const [maxRecoveries, setMaxRecoveries] = useState("1");
 	const [templateId, setTemplateId] = useState("");
 	const [saving, setSaving] = useState(false);
 	// Agent or command. A command step runs a pipeline on the host; it has no
@@ -1129,6 +1217,8 @@ function AddStepForm({
 		setUseSubagent(true);
 		setMaxRetries("0");
 		setInterval("0");
+		setRecoverOnFailure(false);
+		setMaxRecoveries("1");
 		staged.reset();
 	};
 
@@ -1145,6 +1235,8 @@ function AddStepForm({
 		try {
 			const retries = Math.max(0, parseInt(maxRetries, 10) || 0);
 			const retryInterval = intervalEnabled ? Math.max(0, parseInt(interval, 10) || 0) : 0;
+			// Always sent (agent and command steps alike), like the other toggles.
+			const recovery = { recoverOnFailure, maxRecoveries: parseMaxRecoveries(maxRecoveries) };
 			await onAdd(
 				isCommand
 					? {
@@ -1161,6 +1253,7 @@ function AddStepForm({
 							useSubagent: false,
 							maxRetries: retries,
 							retryIntervalSeconds: retryInterval,
+							...recovery,
 						}
 					: {
 							description: trimmed,
@@ -1169,6 +1262,7 @@ function AddStepForm({
 							useSubagent,
 							maxRetries: retries,
 							retryIntervalSeconds: retryInterval,
+							...recovery,
 						},
 				staged.staged,
 			);
@@ -1195,8 +1289,14 @@ function AddStepForm({
 				type="button"
 				className={styles.addTrigger}
 				onClick={() => setOpen(true)}
-				disabled={!canAdd}
-				title={canAdd ? undefined : requires("client.workflows.steps.add")}
+				disabled={!canAdd || locked}
+				title={
+					!canAdd
+						? requires("client.workflows.steps.add")
+						: locked
+							? "A Failure recovery is running. Add steps once it relaunches the workflow or gives up."
+							: undefined
+				}
 			>
 				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
 					<path d="M12 5v14M5 12h14" />
@@ -1368,11 +1468,21 @@ function AddStepForm({
 					</div>
 				</div>
 
+				<RecoveryFields
+					recoverOnFailure={recoverOnFailure}
+					onRecoverOnFailure={setRecoverOnFailure}
+					maxRecoveries={maxRecoveries}
+					onMaxRecoveries={setMaxRecoveries}
+					disabled={saving}
+				/>
+
 				<div className={styles.addActions}>
 					<button
 						type="submit"
 						className="btn btn--primary btn--sm"
-						disabled={saving || !canAdd || (isCommand ? !pipelineId || !commandReady : description.trim() === "")}
+						disabled={
+							saving || !canAdd || locked || (isCommand ? !pipelineId || !commandReady : description.trim() === "")
+						}
 						title={canAdd ? undefined : requires("client.workflows.steps.add")}
 					>
 						{saving ? "Adding…" : "Add step"}

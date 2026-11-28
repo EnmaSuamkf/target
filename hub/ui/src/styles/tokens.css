@@ -62,6 +62,15 @@
 	--info-500: #3b82f6;
 	--info-700: #1d4ed8;
 
+	/* Recovery — a Failure recovery agent is fixing the plan of a step that
+	   failed for good. Violet, its own hue: it is neither the engine running
+	   (info blue) nor a stop that waits on a person (attention orange), and it
+	   must not read as the failure it is trying to undo (danger red). */
+	--recovery-50: #f5f3ff;
+	--recovery-200: #ddd6fe;
+	--recovery-500: #8b5cf6;
+	--recovery-700: #6d28d9;
+
 	/* Semantic surface roles — components reference these, not raw greys, so
 	   the palette can move without touching every component. */
 	--bg: var(--gray-50);

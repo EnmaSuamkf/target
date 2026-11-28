@@ -12,7 +12,37 @@
  * not terminal and not an error — only the step's Continue button moves it on,
  * which is why it's rendered in the same warning orange as `paused`.
  */
-export type WorkflowStatus = "draft" | "running" | "paused" | "waiting" | "completed" | "failed";
+export type WorkflowStatus = "draft" | "running" | "paused" | "waiting" | "recovering" | "completed" | "failed";
+
+/**
+ * Failure recovery. `recovering` (above) is the workflow status while a recovery
+ * agent works on the plan of a step that failed for good: nothing else is
+ * dispatched on the workflow and step editing is refused until it relaunches the
+ * workflow or gives up.
+ */
+export type RecoveryStatus = "running" | "relaunched" | "gave_up";
+/** Why the step failed for good: the judge's last rejection, the command step's last failure, or a timeout. */
+export type RecoveryFailureKind = "judge_rejected" | "command_failed" | "timeout";
+
+/** One Failure recovery as the hub serialises it (`publicRecovery`). */
+export interface Recovery {
+	id: string;
+	stepId: string;
+	status: RecoveryStatus;
+	failureKind: RecoveryFailureKind;
+	/** Why the step failed (the error the hub recorded). */
+	reason: string;
+	/** The plan changes it made so far, one "field: before → after" line each. */
+	changes: string[];
+	/** Its relaunch summary or give-up reason; null while it runs. */
+	outcomeReason: string | null;
+	result: string | null;
+	sessionId: string | null;
+	notification: string | null;
+	startedAt: string;
+	runStartedAt: string | null;
+	finishedAt: string | null;
+}
 export type StepStatus = "pending" | "queued" | "running" | "waiting" | "done" | "failed";
 
 /** Why a step sits at `queued` — present on queued steps only (derived on read). */
@@ -280,6 +310,10 @@ export interface Workflow {
 	permissionMode: string | null;
 	/** Model its hook spawns with; null means the CLI's own default. */
 	model: string | null;
+	/** Model the Failure recovery agent runs with (its `<agentName>-recovery` hook); null = the CLI's default. Absent on an older hub. */
+	recoveryModel?: string | null;
+	/** The Failure recovery running right now (status `recovering`), or null. */
+	recovery?: Recovery | null;
 	progress: Progress;
 	conversationContext: string | null;
 	contextInjected: boolean;
@@ -476,6 +510,12 @@ export interface Step {
 	maxRetries: number;
 	retryIntervalSeconds: number;
 	retryCount: number;
+	/** Failure recovery: when on, a step that fails for good gets a recovery agent that fixes the plan and relaunches the workflow. Absent on an older hub. */
+	recoverOnFailure?: boolean;
+	/** How many recoveries this step may use (default 1). */
+	maxRecoveries?: number;
+	/** How many it has used (hub-owned; reset by a restart). */
+	recoveryCount?: number;
 	/** When the next attempt of a retry wait is due (ISO-8601 UTC). Only meaningful while `pending`; null or absent otherwise. */
 	retryAt?: string | null;
 	phase: StepPhase;
@@ -534,6 +574,9 @@ export interface TemplateStep {
 	useSubagent: boolean;
 	maxRetries: number;
 	retryIntervalSeconds: number;
+	/** Seeds Failure recovery on the steps this template creates (absent = off / 1). */
+	recoverOnFailure?: boolean;
+	maxRecoveries?: number;
 	/** Sticky notes copied onto workflow steps when this template is used. */
 	notes?: TemplateStepNote[];
 	/** A template step is an agent step unless this says `command` (see `StepKind`). */
@@ -1132,6 +1175,8 @@ export interface CreateWorkflowInput {
 	permissionMode?: PermissionMode;
 	/** Model id enabled for the runner (Settings > Agent models); omitted means the CLI default. */
 	model?: string;
+	/** Failure recovery's model (enabled for the runner); omitted means the CLI default. */
+	recoveryModel?: string;
 	/** Which CLI the workflow's hook spawns; the server defaults to "claude". */
 	runner?: Runner;
 	/** Where that CLI runs; the server defaults to "host" (and writes no sandbox block at all). */
@@ -1178,6 +1223,8 @@ export interface CloneWorkflowInput {
 	runner: Runner;
 	/** Omitted keeps the source's model (same runner only); empty means the CLI default. */
 	model?: string;
+	/** Omitted keeps the source's Failure recovery model; empty means the CLI default. */
+	recoveryModel?: string;
 	sandbox: Sandbox;
 	/** Empty means the runner's default image. Only read for a docker sandbox. */
 	image: string;
@@ -1218,6 +1265,10 @@ export interface StepConfigInput {
 	useSubagent?: boolean;
 	maxRetries?: number;
 	retryIntervalSeconds?: number;
+	/** Failure recovery toggle; omitted leaves it as stored. The forms always send it. */
+	recoverOnFailure?: boolean;
+	/** Integer ≥ 0; omitted leaves it as stored. */
+	maxRecoveries?: number;
 }
 
 export interface TemplateInput {

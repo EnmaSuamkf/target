@@ -157,7 +157,8 @@ test("WorkflowDetail offers Archive/Unarchive and blocks runs on archived workfl
 	// Step Retry (POST .../run) is gated too.
 	assert.match(detail, /archived=\{archived\}/);
 	const stepItem = read("src/views/StepItem.tsx");
-	assert.match(stepItem, /disabled=\{busy \|\| !canExecute \|\| archived\}/);
+	// (and while a Failure recovery runs on the workflow: `recoveryLock`)
+	assert.match(stepItem, /disabled=\{busy \|\| !canExecute \|\| archived \|\| recoveryLock\}/);
 	const app = read("src/App.tsx");
 	assert.match(app, /api\.archiveWorkflow\(workflow\.id\)/);
 	assert.match(app, /api\.unarchiveWorkflow\(workflow\.id\)/);

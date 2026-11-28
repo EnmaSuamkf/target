@@ -10,6 +10,7 @@ import type {
 	TemplateStepNote,
 } from "../api/types.ts";
 import { CatalogCopyBadges } from "../components/Badge.tsx";
+import { RecoveryFields } from "../components/RecoveryFields.tsx";
 import { StepNotes } from "../components/StepNotes.tsx";
 import { BranchAgentFields, CommandStepFields } from "./CommandStepFields.tsx";
 import { ResourceSelectionEditor } from "./ResourceSelectionEditor.tsx";
@@ -22,6 +23,7 @@ import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { usePermissions, requires } from "../hooks/usePermissions.ts";
 import { type CatalogOriginFilter, isServerCopy, matchesOriginFilter } from "../lib/catalogCopy.ts";
 import { relativeTime } from "../lib/format.ts";
+import { parseMaxRecoveries } from "../lib/recovery.ts";
 import styles from "./TemplatesView.module.css";
 
 /**
@@ -676,6 +678,16 @@ function TemplateForm({
 								/>
 							</div>
 
+							{/* Failure recovery travels with the template too: the steps it
+							    creates keep the toggle and the budget. */}
+							<RecoveryFields
+								recoverOnFailure={step.recoverOnFailure === true}
+								onRecoverOnFailure={(next) => updateStep(index, { recoverOnFailure: next })}
+								maxRecoveries={String(step.maxRecoveries ?? 1)}
+								onMaxRecoveries={(text) => updateStep(index, { maxRecoveries: parseMaxRecoveries(text) })}
+								disabled={readOnly}
+							/>
+
 							{step.kind !== "command" && (
 							<>
 							{/* Carried onto every step this template creates too: whether the
@@ -728,6 +740,8 @@ function TemplateForm({
 								useSubagent: true,
 								maxRetries: 0,
 								retryIntervalSeconds: 0,
+								recoverOnFailure: false,
+								maxRecoveries: 1,
 							},
 						])
 					}

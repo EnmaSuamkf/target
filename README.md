@@ -654,6 +654,24 @@ decision, on its own action row:
   next, instead of running last (`POST /api/workflows/:id/steps` with
   `afterStepId`).
 
+### Failure recovery
+
+A step with **Recover on failure** (`recoverOnFailure`) does not stop the
+workflow when it fails for good — its judge rejects it, its pipeline fails, or
+it times out, with no retries left. The workflow goes `recovering` and the hub
+sends a **recovery agent**, running with the workflow's **Recovery model**
+(`recoveryModel`; same runner, sandbox, workdir and permissions), through a
+second awb hook `<agentName>-recovery`. The agent fixes the **plan, never the
+code**: it can rewrite the failed step and the pending ones, add, delete and
+move pending steps, then reopen the step and relaunch the workflow in its own
+conversation — or give up, which leaves the workflow `failed`. Each step gets at
+most `maxRecoveries` recoveries (default 1). Infrastructure failures (hook down,
+usage limit, untrusted pipeline, an unreadable verdict, an abort) never trigger
+it. Every change leaves a "Recovery: before → after" note on the step, and a
+notification goes out when it relaunches or gives up. The agent talks to the hub
+through a token-scoped recovery API, valid only for that workflow while the
+recovery runs. Full description: [`docs/failure-recovery.md`](docs/failure-recovery.md).
+
 ### Stuck steps
 
 A step whose dispatch never calls back (a hung exec or judge) stays

@@ -230,7 +230,12 @@ export function scheduleAvailability(
 			reason: "This is a past run of a schedule. Change the schedule on its upcoming run, or clone this one.",
 		};
 	}
-	if (workflow.status === "running" || workflow.status === "waiting" || workflow.status === "paused") {
+	if (
+		workflow.status === "running" ||
+		workflow.status === "waiting" ||
+		workflow.status === "paused" ||
+		workflow.status === "recovering"
+	) {
 		return { mode: "disabled", reason: `This workflow is ${workflow.status} — it can be scheduled once it stops.` };
 	}
 	return { mode: hasLiveSchedule(workflow) ? "edit" : "create" };

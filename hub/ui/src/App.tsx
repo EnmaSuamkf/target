@@ -651,6 +651,19 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		void act("Could not stop the workflow", () => api.runWorkflowAction(selectedId, "pause"), refreshCurrent);
 	};
 
+	/** Stops the running Failure recovery; the hub settles it as gave up (step failed, workflow failed). */
+	const handleAbortRecovery = (): void => {
+		if (!selectedId) return;
+		void act(
+			"Could not stop the recovery",
+			async () => {
+				await api.abortRecovery(selectedId);
+				toast.success("Recovery stopped. The step stays failed.");
+			},
+			refreshCurrent,
+		);
+	};
+
 	/**
 	 * Clone opens the create dialog seeded from this workflow rather than copying
 	 * it on the spot: a clone is a new workflow, and the things you decide when
@@ -1642,6 +1655,15 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 		});
 	};
 
+	const handleSaveWorkflowRecoveryModel = async (model: string): Promise<boolean> => {
+		if (!selectedWorkflow) return false;
+		return await act("Could not save the recovery model", async () => {
+			const workflow = await api.updateWorkflowRecoveryModel(selectedWorkflow.id, model);
+			setWorkflows((current) => current.map((w) => (w.id === workflow.id ? workflow : w)));
+			toast.success(model === "" ? "Recovery model set to the CLI default." : "Recovery model saved.");
+		});
+	};
+
 	const handleSaveWorkflowDockerMounts = async (mounts: string[]): Promise<boolean> => {
 		if (!selectedWorkflow) return false;
 		return await act("Could not save docker bind mounts", async () => {
@@ -1717,6 +1739,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								{...(isMobile ? { onBack: () => setSelectedId(null) } : {})}
 								onStart={handleStart}
 								onStop={handleStop}
+								onAbortRecovery={handleAbortRecovery}
 								onClone={handleClone}
 								onRename={handleRename}
 								onDelete={() => void handleDelete()}
@@ -1732,6 +1755,7 @@ function Shell({ account, onLogout }: { account: Account; onLogout: () => void }
 								onSaveResources={handleSaveResources}
 								onSaveDockerMounts={handleSaveWorkflowDockerMounts}
 								onSaveModel={handleSaveWorkflowModel}
+								onSaveRecoveryModel={handleSaveWorkflowRecoveryModel}
 								onAttachImages={handleAttachImages}
 								onRemoveAttachment={(id) => void handleRemoveAttachment(id)}
 								onOpenTerminal={handleOpenTerminal}

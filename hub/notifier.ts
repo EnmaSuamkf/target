@@ -681,6 +681,47 @@ export function sendScheduleNoticeNotification(notice: ScheduleNoticeNotificatio
 	return deliver(() => scheduleNoticeMessage(notice));
 }
 
+/**
+ * What a Failure recovery reports when it ends: it relaunched the workflow with
+ * a corrected plan, or it gave up and the workflow stays failed. Same "plain
+ * strings only" rule as the other notices.
+ */
+export interface RecoveryNotice {
+	outcome: "relaunched" | "gave_up";
+	workflowName: string;
+	/** 1-based, matching the UI. */
+	stepNumber: number;
+	stepDescription: string;
+	/** Why the step failed (relaunched) or why the recovery gave up. */
+	reason: string;
+	/** Short before → after summary of what the recovery changed; may be empty. */
+	changes: string;
+}
+
+export function recoveryMessage(notice: RecoveryNotice): string {
+	const lines =
+		notice.outcome === "relaunched"
+			? [
+					`:wrench: *Failure recovery relaunched* — workflow *${notice.workflowName}* is running again.`,
+					"",
+					`*Step ${notice.stepNumber}:* ${notice.stepDescription}`,
+					`*Why it failed:* ${notice.reason}`,
+				]
+			: [
+					`:x: *Failure recovery gave up* — workflow *${notice.workflowName}* stays failed.`,
+					"",
+					`*Step ${notice.stepNumber}:* ${notice.stepDescription}`,
+					`*Why:* ${notice.reason}`,
+				];
+	lines.push(`*Changes:* ${notice.changes === "" ? "_(none)_" : notice.changes}`);
+	return lines.join("\n");
+}
+
+/** Attempts to tell the user a Failure recovery relaunched or gave up. Same `deliver` policy as every other notification. */
+export function sendRecoveryNotification(notice: RecoveryNotice): Promise<NotificationResult> {
+	return deliver(() => recoveryMessage(notice));
+}
+
 /** Fixed copy for Settings → Notifications → Test connection — no workflow payload. */
 const TEST_CONNECTION_MESSAGE = "Target hub: Slack connection test succeeded.";
 

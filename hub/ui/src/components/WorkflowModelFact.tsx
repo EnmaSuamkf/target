@@ -12,9 +12,15 @@ import styles from "./WorkflowModelFact.module.css";
  *
  * The catalog is not fetched with the workflow. "List models" loads it: that
  * request reads each CLI's config and used to stall the hub on every open.
+ *
+ * `kind="recovery"` is the same picker for the "Recovery model": the model the
+ * Failure recovery agent runs with (its own `<agentName>-recovery` hook, same
+ * runner). Same options, same source; it is saved through the recovery-model
+ * route by the caller's `onSave`.
  */
 export function WorkflowModelFact({
 	className,
+	kind = "model",
 	workflow,
 	locked,
 	disabled,
@@ -22,6 +28,8 @@ export function WorkflowModelFact({
 	onSave,
 }: {
 	className?: string | undefined;
+	/** Which of the workflow's two models this edits. */
+	kind?: "model" | "recovery";
 	workflow: Workflow;
 	/** A step is running or about to be dispatched: the model can't change right now. */
 	locked: boolean;
@@ -29,7 +37,10 @@ export function WorkflowModelFact({
 	disabledTitle?: string | undefined;
 	onSave: (model: string) => Promise<boolean>;
 }): React.JSX.Element {
-	const stored = workflow.model ?? "";
+	const isRecovery = kind === "recovery";
+	const stored = (isRecovery ? workflow.recoveryModel : workflow.model) ?? "";
+	const label = isRecovery ? "Recovery model" : "Model";
+	const selectId = `${isRecovery ? "recovery-model" : "model"}-${workflow.id}`;
 	const [enabled, setEnabled] = useState<RunnerModel[]>([]);
 	// Until the list lands, the stored id is shown plainly rather than as "not enabled".
 	const [loaded, setLoaded] = useState(false);
@@ -85,13 +96,22 @@ export function WorkflowModelFact({
 	const dirty = draft !== stored;
 
 	return (
-		<div className={`${styles.block} ${className ?? ""}`} data-workflow-model>
-			<label className={styles.label} htmlFor={`model-${workflow.id}`}>
-				Model
+		<div
+			className={`${styles.block} ${className ?? ""}`}
+			{...(isRecovery ? { "data-workflow-recovery-model": true } : { "data-workflow-model": true })}
+		>
+			<label className={styles.label} htmlFor={selectId}>
+				{label}
 			</label>
+			{isRecovery && (
+				<p className="hint">
+					Used by Failure recovery: when a step with &ldquo;Recover on failure&rdquo; fails for good, an agent with this
+					model fixes the plan and relaunches the workflow.
+				</p>
+			)}
 			<div className={styles.row}>
 				<select
-					id={`model-${workflow.id}`}
+					id={selectId}
 					className="select"
 					value={draft}
 					disabled={disabled || locked || saving}
@@ -114,7 +134,7 @@ export function WorkflowModelFact({
 					disabled={disabled || listing}
 					title={disabledTitle}
 					aria-busy={listing}
-					aria-label={listing ? "Loading models" : undefined}
+					aria-label={listing ? "Loading models" : isRecovery ? "List models for the recovery model" : undefined}
 					onClick={listModels}
 				>
 					{listing ? <span className="spinner" aria-hidden="true" /> : "List models"}
@@ -124,6 +144,7 @@ export function WorkflowModelFact({
 					className="btn btn--sm btn--primary"
 					disabled={disabled || locked || saving || !dirty}
 					title={disabledTitle}
+					aria-label={isRecovery ? "Save recovery model" : undefined}
 					onClick={() => {
 						void (async () => {
 							setSaving(true);
@@ -146,8 +167,14 @@ export function WorkflowModelFact({
 			{!loaded && !listError && (
 				<p className="hint">List models to choose one enabled in Settings. Until then this stays on the saved value.</p>
 			)}
-			{locked && <p className="hint">A step is running. Change the model once it finishes.</p>}
-			{workflow.lastSessionId && (
+			{locked && (
+				<p className="hint">
+					{isRecovery
+						? "A recovery or a step is running. Change the recovery model once it finishes."
+						: "A step is running. Change the model once it finishes."}
+				</p>
+			)}
+			{!isRecovery && workflow.lastSessionId && (
 				<p className="msg msg--warn" role="note" data-model-session-warning>
 					This workflow already has a session. The next step will request this model, but some CLIs keep the
 					session&rsquo;s original model when they resume.

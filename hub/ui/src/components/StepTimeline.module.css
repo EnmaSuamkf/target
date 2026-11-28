@@ -98,3 +98,13 @@
 	overflow-wrap: anywhere;
 	color: var(--text);
 }
+
+/* Tags a note Failure recovery wrote (see isRecoveryNote), in the recovery violet. */
+.recovery {
+	padding: 0 var(--space-1);
+	border: 1px solid var(--recovery-200);
+	border-radius: var(--radius-full);
+	background: var(--recovery-50);
+	color: var(--recovery-700);
+	font-weight: 600;
+}

@@ -55,6 +55,12 @@
  *   POST   /api/schedule-notices/:id/ack               → acknowledge a notice (admin token)
  *   POST   /api/schedule/preview                       → the next 3 runs of {spec, timezone}: ISO + local "YYYY-MM-DD HH:mm" (admin token; 400 invalid_schedule)
  *   POST   /api/steps/:id/result                       → awb's result callback (?token=<per-step token>)
+ *   PATCH  /api/workflows/:id/recovery-model           → set (or clear with null/"") the Failure recovery model; creates/updates the <agentName>-recovery hook (admin token)
+ *   GET    /api/workflows/:id/recoveries               → Failure recovery history (admin token)
+ *   POST   /api/workflows/:id/recovery/abort           → stop a running Failure recovery; it settles as gave up (admin token)
+ *   POST   /api/workflows/:id/steps/:stepId/reopen     → put a failed step back to pending, retryCount 0, recoveryCount kept (admin token)
+ *   POST   /api/recoveries/:id/started|result          → awb's callbacks for a recovery run (?token=<per-recovery callback token>)
+ *   *      /api/recovery/:workflowId/...               → the Failure recovery API (Bearer <recovery token> ONLY; see recovery.ts)
  *   GET    /api/templates                              → list templates (optional ?q= filters by name/tag)
  *   POST   /api/catalog/sync                            → pull the linked server's catalog (operator + a client.*.sync permission; 409 if not linked; 502 if the server is too old)
  *   GET    /api/catalog/sync/status                     → last catalog pull time and per-domain summary
@@ -293,6 +299,18 @@ import {
 } from "./copilot-token.ts";
 import { canReadTokenUsage, readTokenUsage } from "./transcript.ts";
 import {
+	authenticateRecovery,
+	RecoveryApiError,
+	recoveryAddNote,
+	recoveryAddStep,
+	recoveryDeleteStep,
+	recoveryEditStep,
+	recoveryMoveStep,
+	recoveryReopenStep,
+	recoveryView,
+} from "./recovery.ts";
+import { getRecovery, getRunningRecovery, listRecoveries, type Recovery } from "./db.ts";
+import {
 	abortStep,
 	addStep,
 	archiveWorkflow,
@@ -321,6 +339,14 @@ import {
 	unarchiveWorkflow,
 	updateWorkflowDockerMounts,
 	updateWorkflowModel,
+	updateWorkflowRecoveryModel,
+	reopenStep,
+	abortRecovery,
+	relaunchFromRecovery,
+	settleRecoveryGaveUp,
+	onRecoveryResult,
+	onRecoveryStarted,
+	WorkflowRecoveringError,
 	WorkflowArchivedError,
 	WorkflowScheduledArmedError,
 	cancelSchedule,
@@ -718,7 +744,7 @@ function sendScheduleError(res: http.ServerResponse, err: unknown): void {
 	} else if (err instanceof WorkflowArchivedError) {
 		sendJson(res, 409, { error: "archived", message: err.message });
 	} else {
-		sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+		sendWorkflowError(res, err);
 	}
 }
 
@@ -780,6 +806,13 @@ function publicWorkflow(workflow: Workflow): Record<string, unknown> {
 		permissionMode: runtime.permissionMode,
 		// The model this workflow's hook spawns with; null = the CLI's default.
 		model: runtime.model,
+		// Failure recovery's model (its `<agentName>-recovery` hook); null = the CLI's default.
+		recoveryModel: workflow.recoveryModel,
+		// The Failure recovery running right now, or null.
+		recovery: (() => {
+			const running = workflow.status === "recovering" ? getRunningRecovery(workflow.id) : null;
+			return running ? publicRecovery(running) : null;
+		})(),
 		// "host" rather than null when there's no sandbox block: the UI shows a
 		// containment badge, and "unknown" would read as a warning where the
 		// honest answer is "the default, on this machine".
@@ -886,6 +919,10 @@ function publicStep(step: Step, cfg: HubConfig): Record<string, unknown> {
 		maxRetries: step.maxRetries,
 		retryIntervalSeconds: step.retryIntervalSeconds,
 		retryCount: step.retryCount,
+		// Failure recovery ("Recover on failure"), its budget and the recoveries used.
+		recoverOnFailure: step.recoverOnFailure,
+		maxRecoveries: step.maxRecoveries,
+		recoveryCount: step.recoveryCount,
 		// When the next attempt of a retry wait is due (ISO-8601 UTC), or null. Only
 		// meaningful while the step is `pending`; the UI counts down to it.
 		retryAt: step.retryAt,
@@ -1175,6 +1212,8 @@ function readStepConfig(body: Record<string, unknown>): {
 	useSubagent?: boolean;
 	maxRetries?: number;
 	retryIntervalSeconds?: number;
+	recoverOnFailure?: boolean;
+	maxRecoveries?: number;
 } {
 	const config: {
 		acceptanceCriteria?: string | null;
@@ -1182,7 +1221,22 @@ function readStepConfig(body: Record<string, unknown>): {
 		useSubagent?: boolean;
 		maxRetries?: number;
 		retryIntervalSeconds?: number;
+		recoverOnFailure?: boolean;
+		maxRecoveries?: number;
 	} = {};
+	// Failure recovery. Strict, unlike the older fields: a value that isn't what
+	// it says is a 400, never silently coerced. Omitted = unchanged on an edit.
+	if ("recoverOnFailure" in body && body.recoverOnFailure !== undefined) {
+		if (typeof body.recoverOnFailure !== "boolean") throw new WorkflowError("recoverOnFailure must be a boolean");
+		config.recoverOnFailure = body.recoverOnFailure;
+	}
+	if ("maxRecoveries" in body && body.maxRecoveries !== undefined) {
+		const value = body.maxRecoveries;
+		if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+			throw new WorkflowError("maxRecoveries must be an integer ≥ 0");
+		}
+		config.maxRecoveries = value;
+	}
 	if ("acceptanceCriteria" in body) {
 		config.acceptanceCriteria = typeof body.acceptanceCriteria === "string" ? body.acceptanceCriteria : null;
 	}
@@ -1211,6 +1265,10 @@ function readStepConfig(body: Record<string, unknown>): {
  * else 500.
  */
 function sendRunError(res: http.ServerResponse, err: unknown): void {
+	if (err instanceof WorkflowRecoveringError) {
+		sendJson(res, 409, { error: "recovering", message: err.message });
+		return;
+	}
 	if (err instanceof WorkflowArchivedError) {
 		sendJson(res, 409, { error: "archived", message: err.message });
 		return;
@@ -1219,7 +1277,52 @@ function sendRunError(res: http.ServerResponse, err: unknown): void {
 		sendJson(res, 409, { error: "scheduled_armed", message: err.message });
 		return;
 	}
+	sendWorkflowError(res, err);
+}
+
+/**
+ * The generic answer to an engine refusal: 409 `{"error":"recovering"}` while a
+ * Failure recovery owns the workflow, any other `WorkflowError` a 400, anything
+ * else a 500.
+ */
+function sendWorkflowError(res: http.ServerResponse, err: unknown): void {
+	if (err instanceof WorkflowRecoveringError) {
+		sendJson(res, 409, { error: "recovering", message: err.message });
+		return;
+	}
 	sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+}
+
+/** A recovery attempt as the operator API shows it — never its token hash or callback token. */
+function publicRecovery(recovery: Recovery): Record<string, unknown> {
+	return {
+		id: recovery.id,
+		stepId: recovery.stepId,
+		status: recovery.status,
+		failureKind: recovery.failureKind,
+		reason: recovery.reason,
+		changes: recovery.changes,
+		outcomeReason: recovery.outcomeReason,
+		result: recovery.result,
+		sessionId: recovery.sessionId,
+		notification: recovery.notification,
+		startedAt: recovery.startedAt,
+		runStartedAt: recovery.runStartedAt,
+		finishedAt: recovery.finishedAt,
+	};
+}
+
+/** Answers a recovery API refusal (or anything unexpected) for the recovery routes. */
+function sendRecoveryError(res: http.ServerResponse, err: unknown): void {
+	if (err instanceof RecoveryApiError) {
+		sendJson(res, err.status, { error: err.code, message: err.message });
+		return;
+	}
+	if (err instanceof WorkflowError) {
+		sendJson(res, 400, { error: "refused", message: err.message });
+		return;
+	}
+	sendJson(res, 500, { error: String((err as Error).message ?? err) });
 }
 
 /** Wire shape of the auto-archive setting (snake_case key, as the API documents it). */
@@ -1366,6 +1469,19 @@ async function parseCloneOverrides(body: Record<string, unknown>, res: http.Serv
 			return null;
 		}
 		overrides.model = raw === "" ? null : raw;
+	}
+	// Failure recovery's model, by the same rule: empty/null = CLI default, absent = inherit.
+	if ("recoveryModel" in body) {
+		if (body.recoveryModel !== null && typeof body.recoveryModel !== "string") {
+			sendJson(res, 400, { error: "invalid recoveryModel (expected a model id string, or empty for the CLI default)" });
+			return null;
+		}
+		const raw = typeof body.recoveryModel === "string" ? body.recoveryModel.trim() : "";
+		if (raw !== "" && !validModelId(raw)) {
+			sendJson(res, 400, { error: "invalid recoveryModel id" });
+			return null;
+		}
+		overrides.recoveryModel = raw === "" ? null : raw;
 	}
 	if ("sandbox" in body) {
 		const raw = typeof body.sandbox === "string" ? body.sandbox : "";
@@ -1814,6 +1930,154 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			log(`step ${step.id} ${ok ? "done" : `failed (${error})`}`);
 			sendJson(res, 200, { ok: true });
 		});
+		return;
+	}
+
+	// --- /api/recoveries/:id/started|result (awb callbacks of a Failure recovery run) ---
+	//
+	// Same shape as the step callbacks above, authenticated by the recovery's own
+	// callback token (minted with the recovery, never shown to the agent). The
+	// result callback settles a recovery that has not relaunched as "gave up".
+
+	if (parts[1] === "recoveries" && parts[2] && (parts[3] === "started" || parts[3] === "result") && !parts[4] && req.method === "POST") {
+		const recovery = getRecovery(parts[2]);
+		const token = url.searchParams.get("token") ?? "";
+		if (!recovery || !token || !timingSafeEqualStr(token, recovery.callbackToken)) {
+			sendJson(res, 401, { error: "unauthorized" });
+			return;
+		}
+		if (parts[3] === "started") {
+			const promoted = onRecoveryStarted(recovery.id);
+			sendJson(res, 200, { ok: true, promoted });
+			return;
+		}
+		readJsonBody(req, res, 4 * 1024 * 1024, (body) => {
+			const ok = body.ok === true;
+			const result =
+				body.result == null ? undefined : typeof body.result === "string" ? body.result : JSON.stringify(body.result);
+			const error = ok
+				? undefined
+				: explainRunError(String(body.error ?? (body.exitCode != null ? `exit ${body.exitCode}` : "run failed")));
+			void onRecoveryResult(
+				recovery.id,
+				{ ok, result, error, sessionId: typeof body.session_id === "string" ? body.session_id : undefined },
+				log,
+			);
+			log(`recovery ${recovery.id} turn ended (${ok ? "ok" : `failed: ${error}`})`);
+			sendJson(res, 200, { ok: true });
+		});
+		return;
+	}
+
+	// --- /api/recovery/:workflowId/... (the Failure recovery API) ---
+	//
+	// Above the operator gate because its only caller is the recovery agent,
+	// which holds no session and must never be handed the admin token. It
+	// authenticates with `Authorization: Bearer <recovery token>` — valid for this
+	// workflow and only while its recovery runs — and with nothing else: the
+	// admin token is refused here like any other wrong token (see recovery.ts).
+	//
+	//   GET    /api/recovery/:wf                         → the workflow, its steps and the failed step's details
+	//   PATCH  /api/recovery/:wf/steps/:stepId           → edit the failed step or a pending step {reason, ...fields}
+	//   POST   /api/recovery/:wf/steps                   → add a step {reason, description, ..., afterStepId?}
+	//   DELETE /api/recovery/:wf/steps/:stepId           → delete a pending step {reason}
+	//   POST   /api/recovery/:wf/steps/:stepId/move      → move a pending step {direction, reason}
+	//   POST   /api/recovery/:wf/steps/:stepId/notes     → add a note {content}
+	//   POST   /api/recovery/:wf/steps/:stepId/reopen    → reopen the failed step {reason}
+	//   POST   /api/recovery/:wf/relaunch                → relaunch the workflow {summary}
+	//   POST   /api/recovery/:wf/give-up                 → give up {reason}
+	if (parts[1] === "recovery" && parts[2]) {
+		const recoveryWorkflowId = parts[2];
+		let recovery: Recovery;
+		try {
+			recovery = authenticateRecovery(recoveryWorkflowId, req.headers);
+		} catch (err) {
+			sendRecoveryError(res, err);
+			req.resume();
+			return;
+		}
+		const sub = parts[3];
+		const stepId = sub === "steps" ? parts[4] : undefined;
+		const action = sub === "steps" ? parts[5] : undefined;
+		const tooDeep = sub === "steps" ? parts.length > 6 : parts.length > 4;
+		if (tooDeep) {
+			sendJson(res, 404, { error: "not_found" });
+			req.resume();
+			return;
+		}
+		if (!sub && req.method === "GET") {
+			try {
+				sendJson(res, 200, recoveryView(recovery));
+			} catch (err) {
+				sendRecoveryError(res, err);
+			}
+			return;
+		}
+		const withBody = (handler: (body: Record<string, unknown>) => unknown): void => {
+			// A DELETE may come without a body; it then reads as {} (and fails on the missing reason).
+			if (req.method === "DELETE" && !req.headers["content-type"]) {
+				try {
+					const out = handler({});
+					if (out instanceof Promise) out.catch((err: unknown) => sendRecoveryError(res, err));
+				} catch (err) {
+					sendRecoveryError(res, err);
+				}
+				req.resume();
+				return;
+			}
+			readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+				try {
+					const out = handler(body);
+					if (out instanceof Promise) out.catch((err: unknown) => sendRecoveryError(res, err));
+				} catch (err) {
+					sendRecoveryError(res, err);
+				}
+			});
+		};
+		if (sub === "steps" && !stepId && req.method === "POST") {
+			withBody((body) => sendJson(res, 200, recoveryAddStep(recovery, body)));
+			return;
+		}
+		if (sub === "steps" && stepId && !action && req.method === "PATCH") {
+			withBody((body) => sendJson(res, 200, recoveryEditStep(recovery, stepId, body)));
+			return;
+		}
+		if (sub === "steps" && stepId && !action && req.method === "DELETE") {
+			withBody((body) => sendJson(res, 200, recoveryDeleteStep(recovery, stepId, body)));
+			return;
+		}
+		if (sub === "steps" && stepId && action === "move" && req.method === "POST") {
+			withBody((body) => sendJson(res, 200, recoveryMoveStep(recovery, stepId, body)));
+			return;
+		}
+		if (sub === "steps" && stepId && action === "notes" && req.method === "POST") {
+			withBody((body) => sendJson(res, 200, recoveryAddNote(recovery, stepId, body)));
+			return;
+		}
+		if (sub === "steps" && stepId && action === "reopen" && req.method === "POST") {
+			withBody((body) => sendJson(res, 200, recoveryReopenStep(recovery, stepId, body, log)));
+			return;
+		}
+		if (sub === "relaunch" && req.method === "POST") {
+			withBody(async (body) => {
+				const summary = typeof body.summary === "string" ? body.summary : "";
+				const outcome = await relaunchFromRecovery(recovery.id, summary, cfg, log);
+				sendJson(res, 200, { ok: true, workflowStatus: outcome.workflow.status, changes: outcome.changes });
+			});
+			return;
+		}
+		if (sub === "give-up" && req.method === "POST") {
+			withBody(async (body) => {
+				const reason = typeof body.reason === "string" && body.reason.trim() !== "" ? body.reason.trim() : "";
+				if (!reason) throw new RecoveryApiError(400, "reason_required", "say why the recovery gives up in \"reason\"");
+				const settled = await settleRecoveryGaveUp(recovery.id, `the recovery agent gave up: ${reason}`, log);
+				if (!settled) throw new RecoveryApiError(403, "invalid_recovery_token", "this recovery has ended");
+				sendJson(res, 200, { ok: true, workflowStatus: getWorkflow(recoveryWorkflowId)?.status ?? null });
+			});
+			return;
+		}
+		sendJson(res, 404, { error: "not_found" });
+		req.resume();
 		return;
 	}
 
@@ -3937,6 +4201,20 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						return;
 					}
 				}
+				// Optional: the Failure recovery model. Same rules as `model`, checked
+				// against the final runner just before creation.
+				let recoveryModel: string | undefined;
+				if (body.recoveryModel !== undefined && body.recoveryModel !== null && typeof body.recoveryModel !== "string") {
+					sendJson(res, 400, { error: "invalid recoveryModel (expected a model id string)" });
+					return;
+				}
+				if (typeof body.recoveryModel === "string" && body.recoveryModel.trim() !== "") {
+					recoveryModel = body.recoveryModel.trim();
+					if (!validModelId(recoveryModel)) {
+						sendJson(res, 400, { error: "invalid recoveryModel id" });
+						return;
+					}
+				}
 				// Optional: create the workflow to RUN ON an existing conversation of
 				// the operator's. The named transcript is resolved here and its session
 				// id becomes the workflow's `adoptedSessionId`, which seeds
@@ -4098,6 +4376,13 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						return;
 					}
 				}
+				if (recoveryModel) {
+					const rejection = modelRejection(runner ?? "claude", recoveryModel);
+					if (rejection) {
+						sendJson(res, 400, { error: `recoveryModel: ${rejection}` });
+						return;
+					}
+				}
 				try {
 					if (template) assertTemplateCommandSteps(template.steps, sandbox === "docker");
 					const workflow = createWorkflow(name, {
@@ -4110,6 +4395,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						...(dockerMounts !== undefined ? { dockerMounts } : {}),
 						conversationContext,
 						adoptedSessionId,
+						...(recoveryModel ? { recoveryModel } : {}),
 					});
 					if (template) {
 						for (const step of template.steps) {
@@ -4119,6 +4405,8 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 								useSubagent: step.useSubagent,
 								maxRetries: step.maxRetries,
 								retryIntervalSeconds: step.retryIntervalSeconds,
+								recoverOnFailure: step.recoverOnFailure,
+								maxRecoveries: step.maxRecoveries,
 								templateNotes: step.notes,
 								kind: step.kind,
 								pipelineId: step.pipelineId,
@@ -4134,7 +4422,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					log(`workflow '${workflow.name}' (${workflow.id}) created — agent '${workflow.agentName}'`);
 					sendJson(res, 200, { workflow: publicWorkflow(workflow) });
 				} catch (err) {
-					sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+					sendWorkflowError(res, err);
 				}
 			});
 			return;
@@ -4163,7 +4451,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			log(`workflow ${workflowId} deleted`);
 			sendJson(res, 200, { ok: true });
 		} catch (err) {
-			sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			sendWorkflowError(res, err);
 		}
 		return;
 	}
@@ -4208,6 +4496,15 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					return;
 				}
 			}
+			if (overrides.recoveryModel) {
+				const sourceHarness = hookRuntime(getWorkflow(workflowId)!.hookUrl).harness;
+				const sourceRunner = PUBLISHABLE_RUNNERS.includes(sourceHarness as PublishableRunner) ? sourceHarness : "claude";
+				const rejection = modelRejection(overrides.runner ?? sourceRunner ?? "claude", overrides.recoveryModel);
+				if (rejection) {
+					sendJson(res, 400, { error: `recoveryModel: ${rejection}` });
+					return;
+				}
+			}
 			try {
 				const clone = cloneWorkflow(workflowId, overrides);
 				log(`workflow ${workflowId} cloned as '${clone.name}' (${clone.id}) — agent '${clone.agentName}'`);
@@ -4216,7 +4513,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					steps: listSteps(clone.id).map((s) => publicStep(s, cfg)),
 				});
 			} catch (err) {
-				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				sendWorkflowError(res, err);
 			}
 		});
 		return;
@@ -4243,7 +4540,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				log(`workflow ${workflowId} renamed to '${workflow.name}'`);
 				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
 			} catch (err) {
-				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				sendWorkflowError(res, err);
 			}
 		});
 		return;
@@ -4289,9 +4586,99 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				log(`workflow ${workflowId} model set to ${model === "" ? "CLI default" : model}`);
 				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
 			} catch (err) {
-				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				sendWorkflowError(res, err);
 			}
 		});
+		return;
+	}
+
+	// --- /api/workflows/:id/recovery-model ---
+	//
+	// Sets (or clears with null / "") the model the workflow's Failure recovery
+	// runs with, and creates or refreshes its `<agentName>-recovery` awb hook (a
+	// copy of the workflow's hook with that model). Same validation as the
+	// workflow model: the id must be enabled for the runner, except the one it
+	// already has.
+
+	if (workflowId && parts[3] === "recovery-model" && !parts[4] && (req.method === "PATCH" || req.method === "PUT")) {
+		if (!requirePermission(cfg, req, res, "client.workflows.manage")) {
+			return;
+		}
+		const existing = getWorkflow(workflowId);
+		if (!existing) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			const raw = "recoveryModel" in body ? body.recoveryModel : body.model;
+			if (raw !== undefined && raw !== null && typeof raw !== "string") {
+				sendJson(res, 400, { error: "invalid recoveryModel (expected a model id string, or null/empty for the CLI default)" });
+				return;
+			}
+			const model = typeof raw === "string" ? raw.trim() : "";
+			if (model !== "") {
+				if (!validModelId(model)) {
+					sendJson(res, 400, { error: "invalid model id" });
+					return;
+				}
+				const runtime = hookRuntime(existing.hookUrl);
+				const runner = PUBLISHABLE_RUNNERS.includes(runtime.harness as PublishableRunner) ? (runtime.harness as string) : "claude";
+				const rejection = model === existing.recoveryModel ? null : modelRejection(runner, model);
+				if (rejection) {
+					sendJson(res, 400, { error: rejection });
+					return;
+				}
+			}
+			try {
+				const workflow = updateWorkflowRecoveryModel(workflowId, model === "" ? null : model);
+				log(`workflow ${workflowId} recovery model set to ${model === "" ? "CLI default" : model}`);
+				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
+			} catch (err) {
+				sendWorkflowError(res, err);
+			}
+		});
+		return;
+	}
+
+	// --- /api/workflows/:id/recoveries (Failure recovery history) ---
+
+	if (workflowId && parts[3] === "recoveries" && !parts[4] && req.method === "GET") {
+		if (!getWorkflow(workflowId)) {
+			sendJson(res, 404, { error: "unknown_workflow" });
+			return;
+		}
+		sendJson(res, 200, { recoveries: listRecoveries(workflowId).map(publicRecovery) });
+		return;
+	}
+
+	// --- /api/workflows/:id/recovery/abort (stop a running recovery; it settles as gave up) ---
+
+	if (workflowId && parts[3] === "recovery" && parts[4] === "abort" && !parts[5] && req.method === "POST") {
+		if (!requirePermission(cfg, req, res, "client.workflows.execute")) {
+			return;
+		}
+		void abortRecovery(workflowId, log)
+			.then((workflow) => sendJson(res, 200, { workflow: publicWorkflow(workflow) }))
+			.catch((err: unknown) => sendWorkflowError(res, err));
+		return;
+	}
+
+	// --- /api/workflows/:id/steps/:stepId/reopen ---
+	//
+	// Puts a failed step back to pending with its retries reset (retryCount 0),
+	// keeping its recovery count. Unlike forcing the status to pending, the step
+	// gets its whole retry budget back.
+
+	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "reopen" && !parts[6] && req.method === "POST") {
+		if (!requirePermission(cfg, req, res, "client.workflows.steps.edit")) {
+			return;
+		}
+		try {
+			const step = reopenStep(workflowId, parts[4], log);
+			sendJson(res, 200, { step: publicStep(step, cfg), workflow: publicWorkflow(getWorkflow(workflowId) as Workflow) });
+		} catch (err) {
+			sendWorkflowError(res, err);
+		}
 		return;
 	}
 
@@ -4316,7 +4703,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					sendJson(res, 400, { error: err.message });
 					return;
 				}
-				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				sendWorkflowError(res, err);
 			}
 		});
 		return;
@@ -4435,7 +4822,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				log(`workflow ${workflowId} conversation context updated`);
 				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
 			} catch (err) {
-				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				sendWorkflowError(res, err);
 			}
 		});
 		return;
@@ -4653,7 +5040,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				const step = addStep(workflowId, description, { ...readStepConfig(body), ...readCommandFields(body), afterStepId });
 				sendJson(res, 200, { step: publicStep(step, cfg) });
 			} catch (err) {
-				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				sendWorkflowError(res, err);
 			}
 		});
 		return;
@@ -4703,6 +5090,8 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 						useSubagent: step.useSubagent,
 						maxRetries: step.maxRetries,
 						retryIntervalSeconds: step.retryIntervalSeconds,
+						recoverOnFailure: step.recoverOnFailure,
+						maxRecoveries: step.maxRecoveries,
 						templateNotes: step.notes,
 						kind: step.kind,
 						pipelineId: step.pipelineId,
@@ -4720,7 +5109,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 					added,
 				});
 			} catch (err) {
-				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				sendWorkflowError(res, err);
 			}
 		});
 		return;
@@ -4794,7 +5183,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				const step = editStep(workflowId, parts[4], description, { ...readStepConfig(body), ...readCommandFields(body) });
 				sendJson(res, 200, { step: publicStep(step, cfg) });
 			} catch (err) {
-				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				sendWorkflowError(res, err);
 			}
 		});
 		return;
@@ -4808,7 +5197,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 			removeStep(workflowId, parts[4]);
 			sendJson(res, 200, { ok: true });
 		} catch (err) {
-			sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			sendWorkflowError(res, err);
 		}
 		return;
 	}
@@ -4855,7 +5244,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				log(`workflow ${workflowId} step ${parts[4]} continued past its manual review`);
 				sendJson(res, 200, { step: publicStep(step, cfg) });
 			} catch (err) {
-				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				sendWorkflowError(res, err);
 			}
 		})();
 		return;
@@ -4886,7 +5275,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				log(`workflow ${workflowId} step ${parts[4]} aborted`);
 				sendJson(res, 200, { workflow: publicWorkflow(workflow), abort });
 			} catch (err) {
-				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				sendWorkflowError(res, err);
 			}
 		})();
 		return;
@@ -4969,7 +5358,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				const step = forceStepStatus(workflowId, stepId, status, log);
 				sendJson(res, 200, { step: publicStep(step, cfg) });
 			} catch (err) {
-				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				sendWorkflowError(res, err);
 			}
 		});
 		return;
@@ -4998,7 +5387,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				moveStep(workflowId, stepId, direction);
 				sendJson(res, 200, { steps: listSteps(workflowId).map((s) => publicStep(s, cfg)) });
 			} catch (err) {
-				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				sendWorkflowError(res, err);
 			}
 		});
 		return;
@@ -5026,7 +5415,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				const workflow = forceWorkflowStatus(workflowId, status, log);
 				sendJson(res, 200, { workflow: publicWorkflow(workflow) });
 			} catch (err) {
-				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				sendWorkflowError(res, err);
 			}
 		});
 		return;
@@ -5054,7 +5443,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				const steps = setWorkflowStepSelection(workflowId, stepIds, { allowShrink });
 				sendJson(res, 200, { steps: steps.map((s) => publicStep(s, cfg)) });
 			} catch (err) {
-				sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+				sendWorkflowError(res, err);
 			}
 		});
 		return;
@@ -5121,7 +5510,7 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendJson(res, 409, { error: "not_archivable", message: err.message });
 				return;
 			}
-			sendJson(res, err instanceof WorkflowError ? 400 : 500, { error: String((err as Error).message ?? err) });
+			sendWorkflowError(res, err);
 		}
 		return;
 	}

@@ -79,7 +79,7 @@ export const OWNER_SNAPSHOT_MAX_AGE_MS = 7 * DAY_MS;
 export const FIRE_PERMISSION = "client.workflows.execute";
 
 /** Instances in these statuses are "the previous run is still going" (D9). */
-const BUSY_STATUSES: readonly WorkflowStatus[] = ["running", "waiting", "paused"];
+const BUSY_STATUSES: readonly WorkflowStatus[] = ["running", "waiting", "paused", "recovering"];
 
 // --- permission gate (D10) -------------------------------------------------
 

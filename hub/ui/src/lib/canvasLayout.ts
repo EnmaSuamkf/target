@@ -70,6 +70,12 @@ export interface CanvasStep {
 	/** A command step's branch-agent tasks (docs/pipelines.md, "Branch agents"). */
 	onSuccessTask?: string | null;
 	onFailureTask?: string | null;
+	/**
+	 * The failed step a Failure recovery is working on right now (the workflow is
+	 * `recovering`). Not a stored status: the step is still `failed`; this only
+	 * draws its card as `recovering` while the recovery runs.
+	 */
+	recovering?: boolean;
 }
 
 /**
@@ -86,7 +92,16 @@ export type CanvasNodeKind = "context" | "step" | "judge" | "subagent" | "branch
  * instead of "running") and the canvas makes in shape: the work is done and the
  * circle is deciding whether it counts.
  */
-export type CanvasNodeState = "pending" | "queued" | "running" | "judging" | "waiting" | "retrying" | "done" | "failed";
+export type CanvasNodeState =
+	| "pending"
+	| "queued"
+	| "running"
+	| "judging"
+	| "waiting"
+	| "retrying"
+	| "recovering"
+	| "done"
+	| "failed";
 
 /** How far along the flow an arrow is: already travelled, being travelled, or not yet. */
 export type CanvasEdgeState = "done" | "active" | "pending";
@@ -201,6 +216,7 @@ const CARD_STATES = new Set<string>(["pending", "queued", "running", "waiting", 
 
 /** The card's own state: the step's status, except that judging is its own word. */
 function cardState(step: CanvasStep): CanvasNodeState {
+	if (step.recovering && step.status === "failed") return "recovering";
 	if (step.status === "running" && step.phase === "judge") return "judging";
 	// A step in its retry wait is still `pending` in the database. The wait is what
 	// makes it `retrying` on the canvas: a step in any other status keeps its own state.
@@ -228,7 +244,14 @@ function judgeState(step: CanvasStep): CanvasNodeState {
  * arrow into it. It does not count as `running` — nothing is in flight yet.
  */
 function isLive(state: CanvasNodeState): boolean {
-	return state === "running" || state === "queued" || state === "judging" || state === "waiting" || state === "retrying";
+	return (
+		state === "running" ||
+		state === "queued" ||
+		state === "judging" ||
+		state === "waiting" ||
+		state === "retrying" ||
+		state === "recovering"
+	);
 }
 
 /** The success agent's state: lit only while it is the step's live phase, then the step's outcome. */
@@ -559,7 +582,12 @@ export function focusNodeId(nodes: readonly CanvasNode[]): string | null {
 	const byState = (...states: CanvasNodeState[]): CanvasNode | undefined =>
 		cards.find((n) => states.includes(n.state));
 	const node =
-		byState("running", "judging") ?? byState("queued") ?? byState("waiting") ?? byState("pending") ?? null;
+		byState("running", "judging") ??
+		byState("recovering") ??
+		byState("queued") ??
+		byState("waiting") ??
+		byState("pending") ??
+		null;
 	return node?.id ?? null;
 }
 

@@ -15,7 +15,7 @@ import { loadConfig, targetDir, type HubConfig } from "./config.ts";
 import { expandUserPath, readJsonFile, repoRoot, writeJsonFile } from "./repo-paths.ts";
 import { TARGET_VERSION } from "./version.ts";
 
-export const TARGET_SKILL_VERSION = "6";
+export const TARGET_SKILL_VERSION = "7";
 export const TARGET_MCP_MANAGED_STAMP = "managedBy";
 export const TARGET_MCP_MANAGED_VALUE = "target";
 
@@ -68,12 +68,21 @@ function skillsRoot(repoDir: string): string {
 // Copilot's home is fixed at `~/.copilot` here: it honours COPILOT_HOME, but
 // neither this table nor the manifest's `dest` supports a per-harness home
 // override, so an operator who relocates it must sync by hand.
+//
+// Cursor reads user skills from `~/.cursor/skills`. `~/.cursor/skills-cursor` is
+// a folder Cursor manages itself (its built-in skills) and wipes on update, so a
+// copy written there never reached Cursor for long: Target used to write there,
+// and `syncSkills` now removes the copies it left behind (see
+// `removeLegacyCursorCopies`).
 const SKILL_DEST_DIR: Record<PublishableRunner, string> = {
-	cursor: ".cursor/skills-cursor",
+	cursor: ".cursor/skills",
 	claude: ".claude/skills",
 	"free-code": ".free-code/skills",
 	copilot: ".copilot/skills",
 };
+
+/** Where Target used to install Cursor skills (a Cursor-managed folder). */
+export const LEGACY_CURSOR_SKILL_DIR = ".cursor/skills-cursor";
 
 export interface BundledSkill {
 	name: string;
@@ -106,6 +115,40 @@ function readSkillVersion(content: string): string | null {
 	return m?.[1] ?? null;
 }
 
+/**
+ * Removes the copies of Target's own skills an older Target left in
+ * `~/.cursor/skills-cursor/<skill>/SKILL.md`. A copy is Target's only when it
+ * carries a `TARGET_SKILL_VERSION` stamp; anything else in that folder (Cursor's
+ * own skills, a same-named skill without the stamp, other files beside a
+ * stamped SKILL.md) is never touched. The skill folder itself goes only when it
+ * is empty once the copy is gone.
+ */
+function removeLegacyCursorCopies(home: string, skills: readonly BundledSkill[], dryRun: boolean): SyncAction[] {
+	const actions: SyncAction[] = [];
+	const legacyDir = path.join(home, LEGACY_CURSOR_SKILL_DIR);
+	for (const skill of skills) {
+		const legacy = path.join(legacyDir, skill.name, "SKILL.md");
+		let content: string;
+		try {
+			if (!fs.statSync(legacy).isFile()) continue;
+			content = fs.readFileSync(legacy, "utf8");
+		} catch {
+			continue;
+		}
+		if (readSkillVersion(content) === null) continue;
+		if (!dryRun) {
+			fs.rmSync(legacy, { force: true });
+			try {
+				if (fs.readdirSync(path.dirname(legacy)).length === 0) fs.rmdirSync(path.dirname(legacy));
+			} catch {
+				// The folder is left as it is.
+			}
+		}
+		actions.push({ harness: "cursor", action: "removed", path: legacy, detail: "legacy_cursor_skills_dir" });
+	}
+	return actions;
+}
+
 function stampSkillContent(content: string): string {
 	if (content.includes("TARGET_SKILL_VERSION:")) return content;
 	return content.replace(/^---\n/m, `---\nTARGET_SKILL_VERSION: "${TARGET_SKILL_VERSION}"\n`);
@@ -118,7 +161,9 @@ export function syncSkills(options: SyncOptions = {}): SyncAction[] {
 	if (skills.length === 0) {
 		throw new Error(`missing_skill_source:${skillsRoot(repoDir)}`);
 	}
-	const actions: SyncAction[] = [];
+	// Whatever the sync does next (write, keep, or `remove`), a Target copy left
+	// in Cursor's managed folder is stale: it goes first.
+	const actions: SyncAction[] = removeLegacyCursorCopies(home, skills, options.dryRun === true);
 
 	for (const runner of PUBLISHABLE_RUNNERS) {
 		const destDir = path.join(home, SKILL_DEST_DIR[runner]);
