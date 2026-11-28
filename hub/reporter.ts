@@ -196,10 +196,36 @@ function idsFrom(value: unknown): string[] {
 }
 
 /**
+ * Most events one flush pass sends. The daemon flushes every 30 s, so a large
+ * backlog drains in steady slices instead of one long burst against the server.
+ */
+export const MAX_EVENTS_PER_PASS = 1_000;
+
+type FlushSummary = { delivered: number; retried: number; dropped: number };
+
+/** The pass in progress, if any (see flush). */
+let inFlight: Promise<FlushSummary> | null = null;
+
+/**
  * Drain and deliver the queue. Returns a small summary (handy for tests/logs).
  * Safe to call when disabled — it just returns zeros without touching the DB.
+ *
+ * One pass at a time: a call made while a pass is still running (the daemon's
+ * 30 s interval during a long backlog) returns zeros without sending anything.
+ * Overlapping passes would read the same pending rows and upload them in parallel.
  */
-export async function flush(options: FlushOptions = {}): Promise<{ delivered: number; retried: number; dropped: number }> {
+export async function flush(options: FlushOptions = {}): Promise<FlushSummary> {
+	if (inFlight) return { delivered: 0, retried: 0, dropped: 0 };
+	const pass = flushPass(options);
+	inFlight = pass;
+	try {
+		return await pass;
+	} finally {
+		inFlight = null;
+	}
+}
+
+async function flushPass(options: FlushOptions): Promise<FlushSummary> {
 	const config = options.config ?? loadEffectiveReportConfig();
 	const summary = { delivered: 0, retried: 0, dropped: 0 };
 	if (!config.enabled) return summary;
@@ -214,8 +240,10 @@ export async function flush(options: FlushOptions = {}): Promise<{ delivered: nu
 	let batchLimit = MAX_BATCH_EVENTS;
 	let contentRefusals = 0;
 	let negotiated = false;
+	let sent = 0;
 	for (;;) {
-		const batch = pendingReportEvents(batchLimit);
+		if (sent >= MAX_EVENTS_PER_PASS) break;
+		const batch = pendingReportEvents(Math.min(batchLimit, MAX_EVENTS_PER_PASS - sent));
 		if (batch.length === 0) break;
 		const ids = batch.map((e) => e.id);
 		const batchId = crypto.randomUUID();
@@ -249,6 +277,7 @@ export async function flush(options: FlushOptions = {}): Promise<{ delivered: nu
 			break;
 		}
 
+		sent += batch.length;
 		const status = res.status;
 		// Error answers that the branches below inspect; the body is read once here.
 		const errorBody = status === 400 || status === 401 || status === 403 || status === 422 ? await errorObject(res) : null;
