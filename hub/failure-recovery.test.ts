@@ -732,3 +732,110 @@ test("recovery history route hides the token hash and callback token", async () 
 	await api("POST", `/api/workflows/${workflow.id}/recovery/abort`);
 	assert.equal(((await api("GET", `/api/workflows/${workflow.id}`)).json.workflow as Record<string, unknown>).recovery, null);
 });
+
+// --- an on-success agent fails its own attempt (fail_attempt) ------------------
+
+/** A command step whose pipeline passes and whose on-success agent then judges the run. */
+function passingCommandWorkflow(options: { maxRetries: number; recoverOnFailure: boolean }) {
+	const workflow = createWorkflow(`fail-attempt ${++seq}`, { workdir: freshWorkdir(), runner: "claude" });
+	const pipeline = insertPipeline({ source: `name: passing-${seq}\nsteps:\n  - run: echo qa\n`, approve: true });
+	const step = addStep(workflow.id, "", {
+		kind: "command",
+		pipelineId: pipeline.id,
+		pipelineInputs: {},
+		onSuccessTask: "Check the QA output; if a case failed, call fail_attempt.",
+		maxRetries: options.maxRetries,
+		recoverOnFailure: options.recoverOnFailure,
+	});
+	return { workflow, step };
+}
+
+async function untilOnSuccessAgent(stepId: string, attempt: number): Promise<void> {
+	await until(() => {
+		const s = getStep(stepId);
+		return s?.status === "running" && s.phase === "on_success" && s.retryCount === attempt;
+	}, 15_000);
+}
+
+test("fail_attempt: refused unless the step's on-success agent is running", async () => {
+	const { workflow, step } = passingCommandWorkflow({ maxRetries: 0, recoverOnFailure: true });
+	const before = await api("POST", `/api/workflows/${workflow.id}/steps/${step.id}/fail-attempt`, { reason: "too early" });
+	assert.equal(before.status, 400);
+	assert.match(String(before.json.error), /on-success agent/);
+	const judged = judgedWorkflow();
+	const agentStep = await api("POST", `/api/workflows/${judged.workflow.id}/steps/${judged.step.id}/fail-attempt`, { reason: "x" });
+	assert.equal(agentStep.status, 400);
+	await startWorkflow(workflow.id, cfg, log, [step.id]);
+	await untilOnSuccessAgent(step.id, 0);
+	const empty = await api("POST", `/api/workflows/${workflow.id}/steps/${step.id}/fail-attempt`, { reason: "  " });
+	assert.equal(empty.status, 400);
+	assert.match(String(empty.json.error), /reason is required/);
+	// Without a request the turn ends as it always did: the step is done.
+	await onStepResult(step.id, { ok: true, result: "all cases passed", sessionId: "s-ok" }, cfg, log);
+	assert.equal(getStep(step.id)?.status, "done");
+});
+
+test("fail_attempt on the last attempt starts Failure recovery (command_failed) with the agent's reason", async () => {
+	const { workflow, step } = passingCommandWorkflow({ maxRetries: 0, recoverOnFailure: true });
+	await startWorkflow(workflow.id, cfg, log, [step.id]);
+	await untilOnSuccessAgent(step.id, 0);
+	const res = await api("POST", `/api/workflows/${workflow.id}/steps/${step.id}/fail-attempt`, { reason: "S6 failed at 390 px" });
+	assert.equal(res.status, 200);
+	// Nothing settles until the agent's turn ends.
+	assert.equal(getStep(step.id)?.status, "running");
+	await onStepResult(step.id, { ok: true, result: "QA failed: S6", sessionId: "s-qa" }, cfg, log);
+	assert.equal(getWorkflow(workflow.id)?.status, "recovering");
+	const recovery = getRunningRecovery(workflow.id)!;
+	assert.equal(recovery.failureKind, "command_failed");
+	assert.match(recovery.reason, /on-success agent failed the attempt: S6 failed at 390 px/);
+	const failed = getStep(step.id)!;
+	assert.equal(failed.status, "failed");
+	assert.equal(failed.recoveryCount, 1);
+	assert.match(failed.result ?? "", /QA failed: S6/);
+	await api("POST", `/api/workflows/${workflow.id}/recovery/abort`);
+});
+
+test("fail_attempt with retries left re-runs the pipeline; a later clean turn completes the step", async () => {
+	const { workflow, step } = passingCommandWorkflow({ maxRetries: 1, recoverOnFailure: true });
+	await startWorkflow(workflow.id, cfg, log, [step.id]);
+	await untilOnSuccessAgent(step.id, 0);
+	await api("POST", `/api/workflows/${workflow.id}/steps/${step.id}/fail-attempt`, { reason: "C3 failed" });
+	await onStepResult(step.id, { ok: true, result: "QA failed: C3", sessionId: "s-1" }, cfg, log);
+	// The retry runs the pipeline again, then the on-success agent again.
+	await untilOnSuccessAgent(step.id, 1);
+	assert.equal(getRunningRecovery(workflow.id), null);
+	await onStepResult(step.id, { ok: true, result: "all cases passed", sessionId: "s-2" }, cfg, log);
+	assert.equal(getStep(step.id)?.status, "done");
+	assert.equal(getStep(step.id)?.recoveryCount, 0);
+});
+
+test("fail_attempt with the toggle off fails the workflow, no recovery", async () => {
+	const { workflow, step } = passingCommandWorkflow({ maxRetries: 0, recoverOnFailure: false });
+	await startWorkflow(workflow.id, cfg, log, [step.id]);
+	await untilOnSuccessAgent(step.id, 0);
+	await api("POST", `/api/workflows/${workflow.id}/steps/${step.id}/fail-attempt`, { reason: "S1 failed" });
+	await onStepResult(step.id, { ok: true, result: "QA failed: S1", sessionId: "s-off" }, cfg, log);
+	assert.equal(getWorkflow(workflow.id)?.status, "failed");
+	assert.equal(getStep(step.id)?.status, "failed");
+	assert.equal(recoveryEvents(workflow.id).length, 0);
+});
+
+test("hub-written notes are reported as step.note.added: the fail request and the recovery trace", async () => {
+	const { workflow, step } = passingCommandWorkflow({ maxRetries: 0, recoverOnFailure: true });
+	await startWorkflow(workflow.id, cfg, log, [step.id]);
+	await untilOnSuccessAgent(step.id, 0);
+	await api("POST", `/api/workflows/${workflow.id}/steps/${step.id}/fail-attempt`, { reason: "S7 failed" });
+	await onStepResult(step.id, { ok: true, result: "QA failed: S7", sessionId: "s-n" }, cfg, log);
+	await until(() => dispatchesTo(`${workflow.agentName}-recovery`).length === 1);
+	const token = tokenFromPrompt(dispatchesTo(`${workflow.agentName}-recovery`)[0]!.body.input!);
+	const edit = await api("PATCH", `/api/recovery/${workflow.id}/steps/${step.id}`, { reason: "give it one more try", maxRetries: 1 }, bearer(token));
+	assert.equal(edit.status, 200);
+	const relaunch = await api("POST", `/api/recovery/${workflow.id}/relaunch`, { summary: "one more retry" }, bearer(token));
+	assert.equal(relaunch.status, 200);
+	const noteEvents = events(workflow.id, "step.note.added");
+	const contents = noteEvents.map((e) => String(e.content));
+	assert.ok(contents.some((c) => c.startsWith("On-success agent failed this attempt: S7 failed")), "the fail request's note is reported");
+	assert.ok(contents.some((c) => c.startsWith("Recovery: maxRetries: 0 → 1")), "the recovery's before → after note is reported");
+	assert.ok(contents.some((c) => c.startsWith("Recovery relaunched the workflow")), "the relaunch note is reported");
+	assert.ok(noteEvents.every((e) => e.step_id === step.id && e.source === "agent"));
+});

@@ -417,6 +417,7 @@ export function StepItem({
 
 			{(step.acceptanceCriteria ||
 				(step.kind === "command" && step.maxRetries > 0) ||
+				(!isContext && step.recoverOnFailure === true) ||
 				elapsed ||
 				step.manualRun ||
 				step.manualReview ||
@@ -461,6 +462,21 @@ export function StepItem({
 					{step.kind === "command" && step.maxRetries > 0 && (
 						<span className={styles.metaItem} data-command-retries>
 							retry {step.retryCount}/{step.maxRetries}
+						</span>
+					)}
+					{/* Failure recovery's budget sits next to the retry budget, so this row
+					    answers "what happens if this step fails" in one place. */}
+					{!isContext && step.recoverOnFailure === true && (
+						<span
+							className={styles.metaItem}
+							title={`Recover on failure is on: if this step fails for good, an agent fixes the plan and relaunches the workflow (${step.recoveryCount ?? 0} of ${step.maxRecoveries ?? 1} used).`}
+							data-meta-recovery
+						>
+							<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+								<path d="M3 12a9 9 0 1 0 3-6.7" />
+								<path d="M3 4v5h5" />
+							</svg>
+							recovery {step.recoveryCount ?? 0}/{step.maxRecoveries ?? 1}
 						</span>
 					)}
 					{/* Flagged for a human sign-off, so the gate is visible before the

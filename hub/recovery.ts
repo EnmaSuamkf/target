@@ -29,7 +29,6 @@ import {
 	getRunningRecovery,
 	getStep,
 	getWorkflow,
-	insertStepNote,
 	listStepNotes,
 	listSteps,
 	type Recovery,
@@ -37,6 +36,7 @@ import {
 } from "./db.ts";
 import { getPipeline, pipelineSpec } from "./pipeline-store.ts";
 import { transcriptPath } from "./transcript.ts";
+import { recordHubNote } from "./step-notes.ts";
 import { addStep, editStep, moveStep, recordRecoveryChange, removeStep, reopenStep, WorkflowError } from "./workflow.ts";
 import type { Logger } from "./runner.ts";
 import type { PublishableRunner } from "./awb.ts";
@@ -128,7 +128,7 @@ export function showValue(value: unknown): string {
 function traceChanges(recovery: Recovery, step: Step, lines: string[], reason: string): void {
 	if (lines.length === 0) return;
 	const content = `${lines.map((l) => `Recovery: ${l}`).join("\n")}\nReason: ${reason}`;
-	insertStepNote(step.id, step.workflowId, content, "neutral", "agent");
+	recordHubNote(step.id, step.workflowId, content, "neutral", "agent");
 	for (const line of lines) recordRecoveryChange(recovery.id, `step ${step.orderIndex + 1} ${line}`);
 }
 
@@ -430,7 +430,7 @@ export function recoveryAddStep(recovery: Recovery, body: Record<string, unknown
 		}),
 	);
 	const line = `added step ${step.orderIndex + 1}: (none) → ${showValue(step.description)}`;
-	insertStepNote(step.id, step.workflowId, `Recovery: ${line}\nReason: ${reason}`, "neutral", "agent");
+	recordHubNote(step.id, step.workflowId, `Recovery: ${line}\nReason: ${reason}`, "neutral", "agent");
 	recordRecoveryChange(live.id, line);
 	return { ok: true, step: stepView(getStep(step.id) ?? step, live), changes: [line] };
 }
@@ -445,7 +445,7 @@ export function recoveryDeleteStep(recovery: Recovery, stepId: string, body: Rec
 	engine(() => removeStep(live.workflowId, stepId, { actor: "recovery" }));
 	const line = `deleted step ${step.orderIndex + 1}: ${showValue(step.description)} → (none)`;
 	// The deleted step's own notes go with it, so the trace lives on the failed step.
-	if (getStep(live.stepId)) insertStepNote(live.stepId, live.workflowId, `Recovery: ${line}\nReason: ${reason}`, "neutral", "agent");
+	if (getStep(live.stepId)) recordHubNote(live.stepId, live.workflowId, `Recovery: ${line}\nReason: ${reason}`, "neutral", "agent");
 	recordRecoveryChange(live.id, line);
 	return { ok: true, deletedStepId: stepId, changes: [line] };
 }
@@ -470,7 +470,7 @@ export function recoveryAddNote(recovery: Recovery, stepId: string, body: Record
 	const content = typeof body.content === "string" ? body.content.trim() : "";
 	if (content === "") throw new RecoveryApiError(400, "invalid_field", "content must be a non-empty string");
 	const step = stepOf(live, stepId);
-	const note = insertStepNote(step.id, step.workflowId, `Recovery note: ${content}`, "neutral", "agent");
+	const note = recordHubNote(step.id, step.workflowId, `Recovery note: ${content}`, "neutral", "agent");
 	return { ok: true, note: { id: note.id, content: note.content } };
 }
 

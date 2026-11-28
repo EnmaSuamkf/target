@@ -7,7 +7,7 @@ description: >-
   workflow, use the create-workflow skill. Requires the Target hub running
   (npm start) and auth via TARGET MCP tools or curl with the admin token from
   ~/.target/config.json.
-TARGET_SKILL_VERSION: "7"
+TARGET_SKILL_VERSION: "8"
 managedBy: target
 ---
 
@@ -56,7 +56,7 @@ Omit `useSubagent` / `manualReview` / `recoverOnFailure` / `maxRecoveries` only 
 
 ## Failure recovery
 
-A step with **Recover on failure** does not stop the workflow when it fails for good (its judge rejects it with no retries left, its pipeline fails with no retries left, or it times out with no retries left). Instead the workflow goes to status **`recovering`** and the hub sends a **recovery agent** that fixes the **plan, never the code**, then reopens the step and relaunches the workflow in its own conversation — or gives up, which leaves the step and the workflow `failed`. Infrastructure failures (hook down, usage limit, untrusted/revoked pipeline, a judge that could not run or answered unreadably, an operator abort) never trigger it.
+A step with **Recover on failure** does not stop the workflow when it fails for good (its judge rejects it with no retries left, its pipeline fails with no retries left, its on-success agent fails the attempt with `fail_attempt` and no retries are left, or it times out with no retries left). Instead the workflow goes to status **`recovering`** and the hub sends a **recovery agent** that fixes the **plan, never the code**, then reopens the step and relaunches the workflow in its own conversation — or gives up, which leaves the step and the workflow `failed`. Infrastructure failures (hook down, usage limit, untrusted/revoked pipeline, a judge that could not run or answered unreadably, an operator abort) never trigger it.
 
 | Field | Where | Meaning |
 |-------|-------|---------|
@@ -71,6 +71,9 @@ Tools:
 - `reopen_step` `{ workflowId, stepId }` — puts a **failed** step back to `pending` with its retries reset (`retryCount` 0), keeping `recoveryCount`; then `start_workflow` runs it again. Route: `POST /api/workflows/:id/steps/:stepId/reopen`.
 - `set_workflow_model` `{ workflowId, model }` — the workflow's own model (`null` = CLI default). Route: `PATCH /api/workflows/:id/model`.
 - `set_recovery_model` `{ workflowId, model }` — the recovery model (`null` = CLI default). Route: `PATCH /api/workflows/:id/recovery-model`.
+- `fail_attempt` `{ workflowId, stepId, reason }` — **only for a command step's own on-success agent**, while it runs: its checks show the step must not pass (for example QA cases failed). Call it, then end the turn. The attempt then settles as a failed pipeline run: the pipeline re-runs while retries are left, then Failure recovery runs if the step has it on, otherwise the workflow fails. Route: `POST /api/workflows/:id/steps/:stepId/fail-attempt`.
+
+**`fail_attempt` vs `abort_step` vs `set_step_status failed`.** Abort and a manual `failed` are operator decisions: they never retry and never start Failure recovery (and `set_step_status` is refused while the step's own job runs). When an on-success agent finds the step's work failed and a retry or a recovery could fix it, it uses `fail_attempt`. Keep `abort_step` for problems a retry or a recovery cannot fix: the environment is down (a server, the hub or the database is unreachable) or a dependency is missing (a contract gap).
 
 While a workflow is **`recovering`**, its steps cannot be added, edited, moved, deleted or reopened, and start/restart/run are refused (409 `{"error":"recovering"}`): only the recovery agent changes the plan. To stop a recovery, `POST /api/workflows/:id/recovery/abort` (it settles as gave up). The history is `GET /api/workflows/:id/recoveries`. Every change the recovery made is a "Recovery: <field>: before → after" note on the changed step. The recovery agent itself does **not** use this MCP: it uses a separate recovery API with a token valid only for that workflow and that recovery.
 
@@ -103,6 +106,7 @@ While a workflow is **`recovering`**, its steps cannot be added, edited, moved, 
 | Workflow model | PATCH | `/api/workflows/:id/model` body `{ "model" }` or MCP `set_workflow_model` |
 | Recovery model | PATCH | `/api/workflows/:id/recovery-model` body `{ "recoveryModel" }` or MCP `set_recovery_model` |
 | Abort a recovery | POST | `/api/workflows/:id/recovery/abort` |
+| Fail an attempt (on-success agent) | POST | `/api/workflows/:id/steps/:stepId/fail-attempt` body `{ "reason" }` or MCP `fail_attempt` |
 | Start | POST | `/api/workflows/:id/start` |
 | Archive | POST | `/api/workflows/:id/archive` (completed/failed only; 409 `not_archivable`) or MCP `archive_workflow` |
 | Unarchive | POST | `/api/workflows/:id/unarchive` or MCP `unarchive_workflow` |

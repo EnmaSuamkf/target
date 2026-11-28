@@ -8,7 +8,7 @@ description: >-
   self-contained conversation context and complete steps (acceptance criteria,
   at least 2 retries). Use when the user asks to create a new Target workflow,
   start a new workflow, or open the new-workflow form.
-TARGET_SKILL_VERSION: "7"
+TARGET_SKILL_VERSION: "8"
 managedBy: target
 ---
 
@@ -66,10 +66,11 @@ Recovery model: offer the same list as the workflow model — **CLI default** pl
 Explain it to the operator before asking, in about these words:
 
 - Normally, when a step uses up its retries, the workflow stops (`failed`).
-- With **Recover on failure** on, a step that fails for good — its judge rejects it with no retries left, its pipeline fails with no retries left, or it times out with no retries left — sends the workflow to `recovering` instead. A **recovery agent** (same agent CLI, sandbox, workdir and permissions as the workflow; only the model is the **Recovery model**) reads why it failed and **fixes the plan, never the code**: it may rewrite the failed step's description or acceptance criteria, change retries, a command step's pipeline inputs, and add, delete or move pending steps. Then it reopens the step and **relaunches** the workflow in the same conversation; the step's own agent writes the code when it runs again.
+- With **Recover on failure** on, a step that fails for good — its judge rejects it with no retries left, its pipeline fails with no retries left, its on-success agent fails the attempt (`fail_attempt`) with no retries left, or it times out with no retries left — sends the workflow to `recovering` instead. A **recovery agent** (same agent CLI, sandbox, workdir and permissions as the workflow; only the model is the **Recovery model**) reads why it failed and **fixes the plan, never the code**: it may rewrite the failed step's description or acceptance criteria, change retries, a command step's pipeline inputs, and add, delete or move pending steps. Then it reopens the step and **relaunches** the workflow in the same conversation; the step's own agent writes the code when it runs again.
 - Every change leaves a "Recovery: … before → after" note on the step, and the operator is notified when it relaunches or gives up.
 - It **gives up** when it cannot fix the plan, and a step gets at most **Max recoveries** recoveries (default `1`); after that it fails as before.
 - Infrastructure problems never trigger it: the hook or broker being down, a usage limit, an untrusted or revoked pipeline, a judge that could not run or gave an unreadable verdict, or an operator abort.
+- A command step whose **on-success agent** checks the result (a QA run, for example) should tell that agent to call `fail_attempt` (with a short reason) when the check fails and a retry or a recovery could fix it, never `abort_step` or `set_step_status failed`: those are operator decisions and never retry or recover. `abort_step` is only for problems a retry cannot fix (an environment that is down, a missing dependency).
 - It does not replace good steps: acceptance criteria must still be **observable outcomes** a judge can check, and recovery is a safety net for plans that turn out wrong, not a reason to write vague ones.
 
 ## 3. Ask

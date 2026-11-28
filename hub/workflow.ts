@@ -39,6 +39,7 @@ import { parseJudgeVerdict } from "./judge-verdict.ts";
 import { loadReportConfig, targetDir, type HubConfig } from "./config.ts";
 import { readConversationPreview, type ConversationSummary } from "./conversations.ts";
 import { emit as reportEmit } from "./reporter.ts";
+import { recordHubNote } from "./step-notes.ts";
 import { loadEffectiveReportConfig } from "./remote-config.ts";
 import { listWorkflowResourceSelections, setWorkflowResourceSelections } from "./rci-store.ts";
 import { listWorkflowTcpSelections, setWorkflowTcpSelections } from "./tcp-store.ts";
@@ -120,7 +121,6 @@ import {
 	type TimeoutReason,
 	type Workflow,
 	type WorkflowStatus,
-	insertStepNote,
 	appendRecoveryChange,
 	failReopenedStep,
 	finishRecovery,
@@ -364,6 +364,7 @@ export function expireStale(cfg: HubConfig, log: Logger): void {
 			// A branch agent that timed out: the retry budget belongs to the pipeline,
 			// and re-dispatching this step would re-send its description to an agent.
 			branchJobSteps.delete(stepId);
+			branchFailRequests.delete(stepId);
 			if (recoverAfterTimeout(stepId, workflowId, error, cfg, log)) continue;
 			if (step.manualRun) settleManual(workflowId, log);
 			else failedWorkflowIds.add(workflowId);
@@ -2784,7 +2785,10 @@ async function executeCommandRun(
 // and no judge: the agent's turn ending is the branch ending. The step stays
 // `running` in the branch phase meanwhile, so nothing else is dispatched.
 //
-//  - on_success: the agent finishes → the step is done (manual review included).
+//  - on_success: the agent finishes → the step is done (manual review included),
+//    unless the agent called `requestCommandAttemptFailure` during its turn: then the
+//    attempt settles as a failed run (the pipeline re-runs while retries last,
+//    then Failure recovery or a failed workflow), exactly as a failing pipeline.
 //  - on_failure: the agent finishes → the failed attempt settles as it would
 //    without the agent: the pipeline re-runs while retries last, otherwise the
 //    step and the workflow fail. The agent runs on every failed run, the last
@@ -2796,6 +2800,37 @@ async function executeCommandRun(
 
 /** Job-step summaries of the run a branch agent follows, for the event the branch settles with. Kept in memory only. */
 const branchJobSteps = new Map<string, JobStepState[]>();
+
+/**
+ * On-success agents that asked to fail their attempt (`requestCommandAttemptFailure`),
+ * by step id → the reason. Read when the agent's turn ends. Kept in memory
+ * only, like `branchJobSteps`: a hub restart mid-turn forgets the request and
+ * the attempt settles as a success.
+ */
+const branchFailRequests = new Map<string, string>();
+
+/**
+ * Called by a command step's own on-success agent (MCP `fail_attempt`, route
+ * `POST /api/workflows/:id/steps/:stepId/fail-attempt`) when its checks show the
+ * step must not pass — a QA run whose cases failed, for example. It does not
+ * settle anything now: the agent finishes its turn, and the attempt then settles
+ * as a failed run that ran, so the pipeline re-runs while retries last and, on
+ * the last one, Failure recovery runs when the step has it on. Unlike an abort
+ * or a manual "failed" (operator decisions, never recovered), this is a failure
+ * of the step's own work.
+ */
+export function requestCommandAttemptFailure(workflowId: string, stepId: string, reason: string): Step {
+	const step = getStep(stepId);
+	if (!step || step.workflowId !== workflowId) throw new WorkflowError("unknown step");
+	if (step.kind !== "command" || step.status !== "running" || step.phase !== "on_success") {
+		throw new WorkflowError("only a command step's on-success agent can fail its attempt, while that agent runs");
+	}
+	const text = reason.trim();
+	if (text === "") throw new WorkflowError("reason is required");
+	branchFailRequests.set(stepId, text.slice(0, 4000));
+	recordHubNote(stepId, workflowId, `On-success agent failed this attempt: ${text}`, "warning", "agent");
+	return step;
+}
 
 async function startBranchAgent(
 	step: Step,
@@ -2809,6 +2844,8 @@ async function startBranchAgent(
 	if (!task || !workflow) return;
 	if (!markStepBranch(step.id, branch, { result: outcome.report, error: outcome.error })) return;
 	branchJobSteps.set(step.id, outcome.jobSteps);
+	// A request left by an earlier turn (aborted, timed out) never carries over.
+	branchFailRequests.delete(step.id);
 	const branching = getStep(step.id) ?? step;
 	reportStepEvent(branching, "step.started", {
 		phase: branch,
@@ -2824,6 +2861,7 @@ async function startBranchAgent(
 	if (after?.status === "failed") {
 		// The hook was down or refused the prompt: dispatchStep already failed the step.
 		branchJobSteps.delete(step.id);
+		branchFailRequests.delete(step.id);
 		if (after.manualRun) settleManual(step.workflowId, log);
 		else failWorkflowIfDispatchDied(step.id, step.workflowId, `${branch.replace("_", "-")} agent`, log);
 	}
@@ -2846,6 +2884,8 @@ async function onBranchResult(
 	const branch = step.phase === "on_success" ? "on_success" : "on_failure";
 	const jobSteps = branchJobSteps.get(step.id);
 	branchJobSteps.delete(step.id);
+	const failRequest = branchFailRequests.get(step.id);
+	branchFailRequests.delete(step.id);
 	// The agent's turn happened on the workflow's conversation: the next step resumes it.
 	chainSession(step.workflowId, outcome.sessionId);
 	const combined = branchResult(step, branch, outcome.ok ? outcome.result : undefined);
@@ -2874,6 +2914,15 @@ async function onBranchResult(
 		return;
 	}
 	if (outcome.sessionId) setBranchSession(step.id, outcome.sessionId);
+	if (branch === "on_success" && failRequest !== undefined) {
+		// The agent judged the run a failure: settle it as a failed run that ran.
+		await failCommandAttempt(getStep(step.id) ?? step, cfg, log, `on-success agent failed the attempt: ${failRequest}`, {
+			report: combined,
+			jobSteps,
+			ran: true,
+		});
+		return;
+	}
 	if (branch === "on_success") {
 		await settleCommandSuccess(getStep(step.id) ?? step, combined, cfg, log, jobSteps);
 		return;
@@ -3021,7 +3070,7 @@ async function abortCommandStep(
 		error: reportError(aborted, "exec", "aborted", "aborted by the operator"),
 	});
 	try {
-		insertStepNote(step.id, workflow.id, "Abort: pipeline run stopped", "warning");
+		recordHubNote(step.id, workflow.id, "Abort: pipeline run stopped", "warning", "operator");
 	} catch (err) {
 		// A note is a courtesy; it must never undo a settled abort.
 		log?.(`step ${step.id} abort note not saved: ${String((err as Error).message ?? err)}`, "warning");
@@ -4382,7 +4431,7 @@ export async function abortStep(workflowId: string, stepId: string, log?: Logger
 		reportUsageSnapshot(workflow, aborted);
 	}
 	try {
-		insertStepNote(stepId, workflowId, abortNoteText(outcome), outcome.confirmed ? "success" : "warning");
+		recordHubNote(stepId, workflowId, abortNoteText(outcome), outcome.confirmed ? "success" : "warning", "operator");
 	} catch (err) {
 		// A note is a courtesy; it must never undo a settled abort.
 		log?.(`step ${stepId} abort note not saved: ${String((err as Error).message ?? err)}`, "warning");
@@ -4583,7 +4632,7 @@ async function notifyRecovery(recovery: Recovery, outcome: "relaunched" | "gave_
 /** A recovery note on a step. Best-effort: a note must never undo a settled transition. */
 function recoveryNote(stepId: string, workflowId: string, content: string, theme: "warning" | "success" | "neutral", log?: Logger): void {
 	try {
-		if (getStep(stepId)) insertStepNote(stepId, workflowId, content, theme, "agent");
+		if (getStep(stepId)) recordHubNote(stepId, workflowId, content, theme, "agent");
 	} catch (err) {
 		log?.(`step ${stepId} recovery note not saved: ${String((err as Error).message ?? err)}`, "warning");
 	}
