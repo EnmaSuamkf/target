@@ -144,8 +144,9 @@ test("an older server that does not understand the encoding gets plain batches",
 });
 
 test("one refused event no longer holds back the queue: it is isolated and the rest is delivered", async () => {
-	const ids = seed(["one", "two", "POISON", "four", "five", "six", "seven"]);
-	const poison = ids[2];
+	seed(["one", "two", "POISON", "four", "five", "six", "seven"]);
+	// Look it up by content: events emitted in the same millisecond are ordered by id.
+	const poison = db.pendingReportEvents(1000).find((e) => JSON.parse(e.payload).text === "POISON")!.id;
 	let requests = 0;
 	const summary = await flush({
 		config: ENABLED,
