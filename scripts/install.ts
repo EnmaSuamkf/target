@@ -272,8 +272,8 @@ the UI:
 
   npm start
 
-The admin token is in ~/.target/config.json. Neither the hub log nor `npm start`
-prints the value; `npm start` points at that file. The UI is at http://127.0.0.1:8893.
+The admin token is in ~/.target/config.json. Neither the hub log nor \`npm start\`
+prints the value; \`npm start\` points at that file. The UI is at http://127.0.0.1:8893.
 `);
 }
 
