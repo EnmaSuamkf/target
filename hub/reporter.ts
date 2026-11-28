@@ -15,6 +15,7 @@
  * `fetch` is injectable so tests can drive every branch without a server.
  */
 import * as crypto from "node:crypto";
+import { gzipSync } from "node:zlib";
 import {
 	dropReportEvents,
 	enqueueReportEvent,
@@ -30,6 +31,7 @@ import { type ReportConfig } from "./config.ts";
 import { deviceHeaders, handleDeviceAuthResponse, remoteAuth } from "./device-auth.ts";
 import { getDeviceCredential } from "./device-link.ts";
 import { loadEffectiveReportConfig } from "./remote-config.ts";
+import { serverSupportsIngestEncoding } from "./server-capabilities.ts";
 import { TARGET_VERSION } from "./version.ts";
 
 /** Version of THIS wire contract (§7.1). Bump when the envelope/event shapes change. */
@@ -44,6 +46,27 @@ const REPORT_TIMEOUT_MS = 15_000;
 /** Backoff ceiling: 2^attempts seconds, capped at 5 minutes, plus jitter (§7.5). */
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_CAP_MS = 5 * 60 * 1_000;
+
+/**
+ * Encoded batches: `events_encoding` + `events_encoded` (base64 of gzip(JSON
+ * events[])) instead of `events`. The edge in front of a hosted server (Render /
+ * Cloudflare WAF) blocks plain bodies whose transcripts contain shell commands
+ * (`curl -s …`) with a 403 HTML page; encoded, the body is opaque to it and ~4x
+ * smaller. Used when the server advertises it (server_capabilities.ingest_encodings)
+ * or after a plain batch was edge-blocked; see target-server ingest-encoding.mjs.
+ */
+export const INGEST_ENCODING = "gzip+base64";
+
+/**
+ * A batch the server (or the edge in front of it) refuses for its CONTENT —
+ * 413, or a 403 without a JSON body (an edge firewall page, never our server) —
+ * is split in halves so one bad event cannot hold back the whole queue. A single
+ * event refused this many times is dropped (logged), like a server-side reject.
+ */
+export const POISON_MAX_ATTEMPTS = 5;
+
+/** Content refusals tolerated per flush pass before backing off (bounds the requests a bad queue costs). */
+const MAX_CONTENT_REFUSALS_PER_PASS = 40;
 
 /** Delivered events are kept this long (for debugging) then purged. */
 const DELIVERED_RETENTION_MS = 24 * 60 * 60 * 1_000;
@@ -97,22 +120,47 @@ export function backoffMs(attempts: number): number {
 	return base + Math.floor(Math.random() * Math.min(base, 1_000));
 }
 
-function toEnvelope(events: ReportEventRow[], instanceId: string, batchId: string): string {
+function toEnvelope(events: ReportEventRow[], instanceId: string, batchId: string, encode = false): string {
+	const wireEvents = events.map((e) => ({
+		id: e.id,
+		kind: e.kind,
+		workflow_id: e.workflowId,
+		session_id: e.sessionId,
+		created_at: e.createdAt,
+		data: parsePayload(e.payload),
+	}));
 	return JSON.stringify({
 		batch_id: batchId,
 		instance_id: instanceId,
 		version: TARGET_VERSION,
 		schema_version: REPORT_SCHEMA_VERSION,
 		sent_at: new Date().toISOString(),
-		events: events.map((e) => ({
-			id: e.id,
-			kind: e.kind,
-			workflow_id: e.workflowId,
-			session_id: e.sessionId,
-			created_at: e.createdAt,
-			data: parsePayload(e.payload),
-		})),
+		...(encode
+			? { events_encoding: INGEST_ENCODING, events_encoded: gzipSync(Buffer.from(JSON.stringify(wireEvents), "utf8")).toString("base64") }
+			: { events: wireEvents }),
 	});
+}
+
+/**
+ * What this process learned per ingest URL: true = send encoded (a plain batch
+ * was edge-blocked), false = send plain (the server did not understand the
+ * encoding). Unset = follow server_capabilities.
+ */
+const encodingByUrl = new Map<string, boolean>();
+
+function wantsEncoding(url: string): boolean {
+	return encodingByUrl.get(url) ?? serverSupportsIngestEncoding(INGEST_ENCODING);
+}
+
+/** Forget what was learned per URL (tests). */
+export function resetIngestEncodingMemory(): void {
+	encodingByUrl.clear();
+}
+
+/** The body of an error answer as a JSON object, or null (empty, HTML page, …). Reads the body. */
+async function errorObject(res: Response): Promise<{ error?: unknown } | null> {
+	const body = await safeJson(res);
+	return body && typeof body === "object" && !Array.isArray(body) ? (body as { error?: unknown }) : null;
 }
 
 /**
@@ -163,8 +211,11 @@ export async function flush(options: FlushOptions = {}): Promise<{ delivered: nu
 	const now = options.now ?? Date.now;
 
 	// Deliver in batches until the queue drains or a batch tells us to stop.
+	let batchLimit = MAX_BATCH_EVENTS;
+	let contentRefusals = 0;
+	let negotiated = false;
 	for (;;) {
-		const batch = pendingReportEvents(MAX_BATCH_EVENTS);
+		const batch = pendingReportEvents(batchLimit);
 		if (batch.length === 0) break;
 		const ids = batch.map((e) => e.id);
 		const batchId = crypto.randomUUID();
@@ -172,7 +223,8 @@ export async function flush(options: FlushOptions = {}): Promise<{ delivered: nu
 		if (auth.kind === "blocked") break;
 		const instanceId = resolveReportInstanceId(config);
 		if (!instanceId) break;
-		const body = toEnvelope(batch, instanceId, batchId);
+		const encode = wantsEncoding(config.url);
+		const body = toEnvelope(batch, instanceId, batchId, encode);
 		const signed = auth.kind === "device" ? deviceHeaders("POST", new URL(config.url).pathname, body) : null;
 		if (auth.kind === "device" && !signed) break;
 
@@ -198,7 +250,65 @@ export async function flush(options: FlushOptions = {}): Promise<{ delivered: nu
 		}
 
 		const status = res.status;
-		const authError = (status === 401 || status === 403 ? await safeJson(res) : null) as { error?: unknown } | null;
+		// Error answers that the branches below inspect; the body is read once here.
+		const errorBody = status === 400 || status === 401 || status === 403 || status === 422 ? await errorObject(res) : null;
+		// A 403 without a JSON body never comes from target-server: it is the edge
+		// (Render / Cloudflare WAF) refusing the request for its content. It says
+		// nothing about our credentials, so it must not reach the auth handling.
+		const edgeBlocked = status === 403 && errorBody === null;
+
+		// Encoding negotiation, at most one switch per pass.
+		if (edgeBlocked && !encode && !negotiated) {
+			negotiated = true;
+			encodingByUrl.set(config.url, true);
+			log("report flush: the edge in front of the server blocked a plain batch; sending encoded batches from now on", "warning");
+			continue;
+		}
+		if (encode && (status === 400 || status === 422) && errorBody !== null) {
+			const notUnderstood = status === 422 || errorBody.error === "unsupported_events_encoding";
+			if (notUnderstood && !negotiated) {
+				negotiated = true;
+				encodingByUrl.set(config.url, false);
+				log("report flush: the server does not accept encoded batches; sending plain batches", "warning");
+				continue;
+			}
+			markReportEventsRetry(ids, new Date(now() + BACKOFF_CAP_MS).toISOString());
+			summary.retried += ids.length;
+			log(`report flush: server ${status} (config/auth?); pausing this pass`, "error");
+			break;
+		}
+
+		// Refused for its content (edge firewall, or too large): isolate the bad
+		// event(s) instead of retrying the same batch forever, which would hold
+		// back every newer event behind it.
+		if (edgeBlocked || status === 413) {
+			if (status === 413) await res.text().catch(() => "");
+			contentRefusals++;
+			const why = edgeBlocked ? "blocked by the edge in front of the server (403)" : "too large for the server (413)";
+			if (contentRefusals > MAX_CONTENT_REFUSALS_PER_PASS) {
+				markReportEventsRetry(ids, new Date(now() + backoffMs(batch[0].attempts)).toISOString());
+				summary.retried += ids.length;
+				log(`report flush: ${ids.length} event(s) ${why}; too many refusals this pass, backing off`, "warning");
+				break;
+			}
+			if (batch.length > 1) {
+				batchLimit = Math.ceil(batch.length / 2);
+				continue;
+			}
+			const [event] = batch;
+			if (event.attempts + 1 >= POISON_MAX_ATTEMPTS) {
+				dropReportEvents([event.id]);
+				summary.dropped += 1;
+				log(`report flush: dropped event ${event.id} (${event.kind}): ${why} ${event.attempts + 1} times`, "warning");
+			} else {
+				markReportEventsRetry([event.id], new Date(now() + backoffMs(event.attempts)).toISOString());
+				summary.retried += 1;
+			}
+			batchLimit = MAX_BATCH_EVENTS;
+			continue;
+		}
+
+		const authError = status === 401 || status === 403 ? errorBody : null;
 		if (authError?.error === "device_identity_mismatch") {
 			// This means client and server disagree about the ingest contract, not
 			// that the device credential has been revoked. Keep the local link and
@@ -228,6 +338,8 @@ export async function flush(options: FlushOptions = {}): Promise<{ delivered: nu
 			summary.delivered += accepted.length;
 			summary.dropped += poisoned.length;
 			if (poisoned.length) log(`report flush: server rejected ${poisoned.length} event(s) as invalid`, "warning");
+			// After isolating a refused event, grow back to full batches.
+			batchLimit = Math.min(MAX_BATCH_EVENTS, batchLimit * 2);
 			// Loop again to drain any remaining queued events.
 			continue;
 		}
@@ -237,16 +349,6 @@ export async function flush(options: FlushOptions = {}): Promise<{ delivered: nu
 			markReportEventsDelivered(ids);
 			summary.delivered += ids.length;
 			continue;
-		}
-
-		if (status === 413) {
-			// Batch too big: shrink and retry soon. Halving the effective cap by
-			// retrying with backoff is enough here; the next pass reads fewer via
-			// natural draining once some deliver. Push a short retry.
-			markReportEventsRetry(ids, new Date(now() + BACKOFF_BASE_MS).toISOString());
-			summary.retried += ids.length;
-			log("report flush: 413 too large; will retry with a smaller batch", "warning");
-			break;
 		}
 
 		if (status === 429) {
