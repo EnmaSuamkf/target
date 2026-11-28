@@ -279,7 +279,7 @@ worked before.
 
 | Run conclusion | With a branch agent |
 | --- | --- |
-| `success` | The on-success agent runs. When its turn ends, the step is `done` (or `waiting`, with `manualReview`) and the workflow advances. |
+| `success` | The on-success agent runs. When its turn ends, the step is `done` (or `waiting`, with `manualReview`) and the workflow advances, unless the agent called `fail_attempt` (see below). |
 | `failure` | The on-failure agent runs. When its turn ends, the failed attempt settles as it would without the agent: the whole pipeline re-runs while `maxRetries` lasts, and otherwise the step and the workflow fail. |
 
 The flow for a step with `maxRetries: 2` and both agents:
@@ -293,6 +293,17 @@ run pipeline ─ success ─▶ on-success agent ─▶ done
 
 - The on-failure agent runs after **every** failed run, the last one included,
   so it can fix the cause before each re-run.
+- The on-success agent can **fail the attempt** when its own checks show the
+  step must not pass (a QA run whose cases failed, for example): it calls MCP
+  `fail_attempt` (`POST /api/workflows/:id/steps/:stepId/fail-attempt` with
+  `{"reason": …}`, admin token) and ends its turn. The attempt then settles as
+  a failed run that ran: the pipeline re-runs while `maxRetries` lasts, then
+  [Failure recovery](failure-recovery.md) runs when the step has it on,
+  otherwise the step and the workflow fail. The route answers 400 unless the
+  step's on-success agent is running. The request is kept in memory until the
+  turn ends; a hub restart in between forgets it, and the attempt then counts
+  as a success. Unlike `abort_step` and a manual `failed` (operator decisions,
+  never retried or recovered), this is the step's own failure.
 - A branch agent is dispatched on the workflow's conversation, like an agent
   step. Its prompt carries the pipeline report (see
   [Prepended to the next prompt](#prepended-to-the-next-prompt)), then the

@@ -42,6 +42,24 @@ function reportNoteEvent(
 	});
 }
 
+/**
+ * A note the hub itself writes (Failure recovery's "Recovery: …" trace, the
+ * abort notes): stored like any note and reported as `step.note.added`, so the
+ * report stream and target-server see it as they see an operator's or an
+ * agent's note. No validation: the callers build the content.
+ */
+export function recordHubNote(
+	stepId: string,
+	workflowId: string,
+	content: string,
+	theme: StepNoteTheme = "neutral",
+	source: StepNoteSource = "agent",
+): StepNote {
+	const note = insertStepNote(stepId, workflowId, content, normalizeStepNoteTheme(theme), source);
+	reportNoteEvent("step.note.added", note, { source: note.source });
+	return note;
+}
+
 export function notesForStep(stepId: string): StepNote[] {
 	return listStepNotes(stepId);
 }

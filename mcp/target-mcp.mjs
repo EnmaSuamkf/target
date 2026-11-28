@@ -815,6 +815,23 @@ const TOOLS = [
 		run: async (a) => hubJson("POST", `/api/workflows/${enc(a.workflowId)}/steps/${enc(a.stepId)}/abort`),
 	},
 	{
+		name: "fail_attempt",
+		description:
+			"For a command step's own on-success agent: fail this attempt because your checks show the step must not pass (for example QA cases failed). Call it, then end your turn. When the turn ends the attempt settles as a failed pipeline run: the pipeline re-runs while retries are left, then Failure recovery runs if the step has \"Recover on failure\" on, otherwise the workflow fails. Unlike abort_step or set_step_status failed (operator decisions, never recovered), this counts as the step's own failure. Refused unless the step's on-success agent is running.",
+		inputSchema: {
+			type: "object",
+			properties: {
+				workflowId: { type: "string" },
+				stepId: { type: "string" },
+				reason: { type: "string", description: "Why the attempt fails: what failed and what was changed, in one or two sentences." },
+			},
+			required: ["workflowId", "stepId", "reason"],
+			additionalProperties: false,
+		},
+		run: async (a) =>
+			hubJson("POST", `/api/workflows/${enc(a.workflowId)}/steps/${enc(a.stepId)}/fail-attempt`, { reason: a.reason }),
+	},
+	{
 		name: "set_step_status",
 		description: "Force a step status (pending, done, failed)",
 		inputSchema: {

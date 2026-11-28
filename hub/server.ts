@@ -31,6 +31,7 @@
  *   DELETE /api/workflows/:id/steps/:stepId             → remove a pending step (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/run         → run one step now, outside the sequential order (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/abort        → abort a step stuck running, or reject one waiting for its review (admin token)
+ *   POST   /api/workflows/:id/steps/:stepId/fail-attempt → a command step's on-success agent fails its own attempt {reason}: retries, then Failure recovery (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/open-terminal  → spawn a local terminal resuming THIS step's session (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/continue      → release a step waiting for its manual review (admin token)
  *   POST   /api/workflows/:id/steps/:stepId/status        → force a step's status by hand (admin token)
@@ -312,6 +313,7 @@ import {
 import { getRecovery, getRunningRecovery, listRecoveries, type Recovery } from "./db.ts";
 import {
 	abortStep,
+	requestCommandAttemptFailure,
 	addStep,
 	archiveWorkflow,
 	cloneWorkflow,
@@ -5278,6 +5280,32 @@ function handleRequest(cfg: HubConfig, log: Logger, req: http.IncomingMessage, r
 				sendWorkflowError(res, err);
 			}
 		})();
+		return;
+	}
+
+	// --- /api/workflows/:id/steps/:stepId/fail-attempt (an on-success agent fails its own run) ---
+	//
+	// A command step's on-success agent checks the pipeline's result (a QA run,
+	// say) and finds it must not pass. Abort and a manual "failed" are operator
+	// decisions and never start Failure recovery; this is the step's own verdict.
+	// The agent calls it, then ends its turn; the attempt then settles as a failed
+	// run (re-run while retries last, then recovery or a failed workflow).
+	// Only valid while that agent runs. Admin-gated (mutating).
+
+	if (workflowId && parts[3] === "steps" && parts[4] && parts[5] === "fail-attempt" && !parts[6] && req.method === "POST") {
+		if (!requirePermission(cfg, req, res, "client.workflows.execute")) {
+			return;
+		}
+		readJsonBody(req, res, cfg.maxInputBytes, (body) => {
+			try {
+				const reason = typeof body.reason === "string" ? body.reason : "";
+				const step = requestCommandAttemptFailure(workflowId, parts[4], reason);
+				log(`workflow ${workflowId} step ${parts[4]}: on-success agent failed the attempt`);
+				sendJson(res, 200, { ok: true, stepId: step.id, settles: "when the on-success agent's turn ends" });
+			} catch (err) {
+				sendWorkflowError(res, err);
+			}
+		});
 		return;
 	}
 

@@ -55,6 +55,10 @@ and only when it fails **for good**:
   whose rejection would fail the workflow);
 - its **pipeline fails** with no retries left (a command step, after its
   on-failure agent, if any) — the pipeline must actually have run;
+- its **on-success agent fails the attempt** with `fail_attempt` and no
+  retries are left (a command step whose agent checks the result, a QA run for
+  example; see [Branch agents](pipelines.md#branch-agents)) — the failure kind
+  is `command_failed` and the reason is the agent's;
 - it **times out** with no retries left.
 
 These never trigger it — they are not problems with the plan:
@@ -63,7 +67,8 @@ These never trigger it — they are not problems with the plan:
 - the model hit a usage limit (or the run failed for another runner error);
 - a pipeline refused before anything ran (untrusted, revoked or missing);
 - the judge's verdict could not be read, or the judge could not run;
-- an operator abort.
+- an operator abort, or a step marked `failed` by hand (`set_step_status`).
+  An agent that finds its step's work failed uses `fail_attempt` instead.
 
 Once `recoveryCount` has reached `maxRecoveries`, the step fails exactly as it
 would without the toggle. With the toggle off, nothing changes.
@@ -149,7 +154,9 @@ curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H 'content-type: application
 
 ## Notes, events and notifications
 
-- **Notes.** Every change writes a note on the changed step:
+- **Notes.** These notes are reported like any other note
+  (`step.note.added`), so the report stream and target-server receive them.
+  Every change writes a note on the changed step:
   `Recovery: <field>: <before> → <after>` followed by `Reason: …`. The relaunch
   and the give-up leave a note too ("Recovery relaunched the workflow: …",
   "Recovery gave up: …"). The UI tags them **Failure recovery**.

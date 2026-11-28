@@ -419,6 +419,22 @@ test("reopen_step reports the hub's refusal as a tool error", async () => {
 	assert.match(reply.result.content[0].text, /step_not_failed/);
 });
 
+test("fail_attempt is listed and posts the reason to the hub's fail-attempt route", async () => {
+	const tools = await listTools();
+	const tool = tools.find((t) => t.name === "fail_attempt");
+	assert.ok(tool, "fail_attempt is listed");
+	assert.deepEqual(tool.inputSchema.required, ["workflowId", "stepId", "reason"]);
+	const { captured, reply } = await callTool("fail_attempt", { workflowId: "wf 1", stepId: "s/2", reason: "S6 failed at 390 px" }, () => ({
+		payload: { ok: true, stepId: "s/2" },
+	}));
+	assert.equal(captured.length, 1);
+	assert.equal(captured[0].method, "POST");
+	assert.equal(captured[0].url, "/api/workflows/wf%201/steps/s%2F2/fail-attempt");
+	assert.equal(captured[0].auth, "Bearer test-admin-token");
+	assert.deepEqual(captured[0].body, { reason: "S6 failed at 390 px" });
+	assert.equal(JSON.parse(reply.result.content[0].text).ok, true);
+});
+
 test("set_workflow_model patches the model route; null clears it", async () => {
 	const set = await callTool("set_workflow_model", { workflowId: "wf 1", model: "claude-opus-5-5" });
 	assert.equal(set.captured[0].method, "PATCH");

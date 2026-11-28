@@ -59,11 +59,11 @@ test("syncSkills writes skill files for installed runners (Cursor under ~/.curso
 	}
 });
 
-test("skill version: the bundled skills and agent-sync agree on TARGET_SKILL_VERSION 7", () => {
-	assert.equal(TARGET_SKILL_VERSION, "7");
+test("skill version: the bundled skills and agent-sync agree on TARGET_SKILL_VERSION 8", () => {
+	assert.equal(TARGET_SKILL_VERSION, "8");
 	for (const name of ["create-workflow", "target-workflows"]) {
 		const source = fs.readFileSync(path.join(repoRoot(), "skills", name, "SKILL.md"), "utf8");
-		assert.match(source, /^TARGET_SKILL_VERSION: "7"$/m, `${name} carries the same stamp`);
+		assert.match(source, /^TARGET_SKILL_VERSION: "8"$/m, `${name} carries the same stamp`);
 		assert.match(source, /Failure recovery/, `${name} documents Failure recovery`);
 	}
 });
@@ -80,7 +80,7 @@ test("syncSkills rewrites an installed version 6 copy, then reports it unchanged
 		for (const dest of dests) {
 			assert.ok(first.some((a) => a.path === dest && a.action === "synced"), `${dest} rewritten`);
 			const content = fs.readFileSync(dest, "utf8");
-			assert.match(content, /^TARGET_SKILL_VERSION: "7"$/m);
+			assert.match(content, /^TARGET_SKILL_VERSION: "8"$/m);
 			assert.ok(!content.includes("old copy"));
 			assert.match(content, /Failure recovery/);
 		}
