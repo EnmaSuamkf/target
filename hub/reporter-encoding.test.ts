@@ -18,7 +18,7 @@ import { beforeEach, test } from "node:test";
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "target-reporter-encoding-test-"));
 process.env.TARGET_HOME = path.join(tmpHome, ".target");
 
-const { emit, flush, INGEST_ENCODING, POISON_MAX_ATTEMPTS, resetIngestEncodingMemory } = await import("./reporter.ts");
+const { emit, flush, INGEST_ENCODING, MAX_EVENTS_PER_PASS, POISON_MAX_ATTEMPTS, resetIngestEncodingMemory } = await import("./reporter.ts");
 const { clearServerCapabilities, recordServerCapabilities } = await import("./server-capabilities.ts");
 const db = await import("./db.ts");
 
@@ -199,4 +199,33 @@ test("a 403 with a JSON body is still treated as an auth/config answer, not as c
 	assert.equal(summary.retried, 1);
 	assert.equal(summary.dropped, 0);
 	assert.equal(db.pendingReportCount(), 1);
+});
+
+test("only one flush pass runs at a time: an overlapping call sends nothing", async () => {
+	seed(["one", "two", "three"]);
+	let requests = 0;
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => (release = resolve));
+	const fetchImpl = async (_url: string, init: RequestInit) => {
+		requests++;
+		await gate;
+		return ok(decode(String(init.body)).events);
+	};
+	const first = flush({ config: ENABLED, fetchImpl });
+	const second = await flush({ config: ENABLED, fetchImpl });
+	assert.deepEqual(second, { delivered: 0, retried: 0, dropped: 0 });
+	release();
+	assert.equal((await first).delivered, 3);
+	assert.equal(requests, 1);
+	// Once the pass is over, the next call runs normally.
+	seed(["four"]);
+	assert.equal((await flush({ config: ENABLED, fetchImpl })).delivered, 1);
+});
+
+test(`one pass sends at most ${MAX_EVENTS_PER_PASS} events; the rest waits for the next pass`, async () => {
+	for (let i = 0; i < MAX_EVENTS_PER_PASS + 150; i++) emit("step.done", { workflowId: "w1", data: { i } }, ENABLED);
+	const fetchImpl = async (_url: string, init: RequestInit) => ok(decode(String(init.body)).events);
+	assert.equal((await flush({ config: ENABLED, fetchImpl })).delivered, MAX_EVENTS_PER_PASS);
+	assert.equal(db.pendingReportCount(), 150);
+	assert.equal((await flush({ config: ENABLED, fetchImpl })).delivered, 150);
 });
