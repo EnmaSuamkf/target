@@ -11,18 +11,24 @@ import { clearServerCapabilitiesJson, getServerCapabilitiesJson, saveServerCapab
 
 let loaded = false;
 let events = new Set<string>();
+/** `server_capabilities.ingest_encodings`: how /ingest accepts encoded batches (e.g. "gzip+base64"). */
+let ingestEncodings = new Set<string>();
+
+function stringList(value: unknown): string[] {
+	return Array.isArray(value) ? [...new Set(value.filter((e): e is string => typeof e === "string" && e.length > 0))] : [];
+}
 
 function ensureLoaded(): void {
 	if (loaded) return;
 	loaded = true;
 	events = new Set();
+	ingestEncodings = new Set();
 	try {
 		const raw = getServerCapabilitiesJson();
 		if (!raw) return;
-		const parsed = JSON.parse(raw) as { events?: unknown };
-		if (Array.isArray(parsed.events)) {
-			events = new Set(parsed.events.filter((e): e is string => typeof e === "string" && e.length > 0));
-		}
+		const parsed = JSON.parse(raw) as { events?: unknown; ingest_encodings?: unknown };
+		events = new Set(stringList(parsed.events));
+		ingestEncodings = new Set(stringList(parsed.ingest_encodings));
 	} catch {
 		// Unreadable → advertise nothing: gated event types are simply not sent.
 	}
@@ -39,15 +45,14 @@ export function recordServerCapabilities(response: unknown): void {
 		response && typeof response === "object" && !Array.isArray(response)
 			? (response as { server_capabilities?: unknown }).server_capabilities
 			: undefined;
-	const rawEvents =
-		caps && typeof caps === "object" && !Array.isArray(caps) ? (caps as { events?: unknown }).events : undefined;
-	const list = Array.isArray(rawEvents)
-		? [...new Set(rawEvents.filter((e): e is string => typeof e === "string" && e.length > 0))]
-		: [];
+	const object = caps && typeof caps === "object" && !Array.isArray(caps) ? (caps as { events?: unknown; ingest_encodings?: unknown }) : null;
+	const list = stringList(object?.events);
+	const encodings = stringList(object?.ingest_encodings);
 	loaded = true;
 	events = new Set(list);
+	ingestEncodings = new Set(encodings);
 	try {
-		saveServerCapabilitiesJson(JSON.stringify({ events: list }));
+		saveServerCapabilitiesJson(JSON.stringify({ events: list, ingest_encodings: encodings }));
 	} catch {
 		// Persistence is best effort; the in-memory value still applies.
 	}
@@ -57,6 +62,15 @@ export function recordServerCapabilities(response: unknown): void {
 export function serverSupportsEvent(type: string): boolean {
 	ensureLoaded();
 	return events.has(type);
+}
+
+/**
+ * True when the server's last advertised `server_capabilities.ingest_encodings`
+ * lists `encoding`, i.e. POST /ingest accepts `events_encoding: encoding`.
+ */
+export function serverSupportsIngestEncoding(encoding: string): boolean {
+	ensureLoaded();
+	return ingestEncodings.has(encoding);
 }
 
 /** Last advertised event types (sorted copy). */
@@ -69,6 +83,7 @@ export function serverAdvertisedEvents(): string[] {
 export function clearServerCapabilities(): void {
 	loaded = true;
 	events = new Set();
+	ingestEncodings = new Set();
 	try {
 		clearServerCapabilitiesJson();
 	} catch {
@@ -80,4 +95,5 @@ export function clearServerCapabilities(): void {
 export function resetServerCapabilitiesCache(): void {
 	loaded = false;
 	events = new Set();
+	ingestEncodings = new Set();
 }
